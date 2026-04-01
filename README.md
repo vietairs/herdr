@@ -7,7 +7,7 @@
 <p align="center">herd your agents.</p>
 
 <p align="center">
-  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#usage">usage</a> · <a href="./CONFIGURATION.md">configuration</a> · <a href="./SKILL.md">agent skill</a> · <a href="./SOCKET_API.md">socket api</a>
+  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#usage">usage</a> · <a href="./INTEGRATIONS.md">integrations</a> · <a href="./CONFIGURATION.md">configuration</a> · <a href="./SKILL.md">agent skill</a> · <a href="./SOCKET_API.md">socket api</a>
 </p>
 
 ---
@@ -239,10 +239,42 @@ this means detection works with any supported agent, installed any way, with zer
 
 the heuristics are pattern-matched against each agent's actual terminal output: prompt boxes, spinners, waiting-for-input messages, tool execution indicators. detection runs on a separate async task per pane, polled every 300-500ms, decoupled from terminal rendering.
 
+## optional direct integrations
+
+herdr also supports optional direct integrations for tools that expose hooks or plugins:
+
+- [pi](./INTEGRATIONS.md#pi)
+- [claude code](./INTEGRATIONS.md#claude-code)
+- [codex](./INTEGRATIONS.md#codex)
+- [opencode](./INTEGRATIONS.md#opencode)
+
+install them with:
+
+```bash
+herdr integration install pi
+herdr integration install claude
+herdr integration install codex
+herdr integration install opencode
+```
+
+remove them with:
+
+```bash
+herdr integration uninstall pi
+herdr integration uninstall claude
+herdr integration uninstall codex
+herdr integration uninstall opencode
+```
+
+these integrations improve semantic state reporting, but they do not replace herdr's core process detection model. for setup details, file locations, caveats, and uninstall behavior, see [`INTEGRATIONS.md`](./INTEGRATIONS.md).
+
+known codex caveat: codex currently renders hook lifecycle lines in its own tui when hooks are enabled. that noise is upstream codex behavior, not herdr-specific.
+
 ## api and automation
 
 for direct integration details, use the docs instead of reverse-engineering the README:
 
+- [`INTEGRATIONS.md`](./INTEGRATIONS.md) — install and behavior notes for pi, claude code, codex, and opencode
 - [`SKILL.md`](./SKILL.md) — reusable agent skill for agents already running inside herdr
 - [`SOCKET_API.md`](./SOCKET_API.md) — canonical socket protocol + cli wrapper reference
 

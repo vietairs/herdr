@@ -195,7 +195,7 @@ fn main() -> io::Result<()> {
         println!("  workspace           workspace helpers over the socket api");
         println!("  pane                pane control helpers over the socket api");
         println!("  wait                blocking wait helpers over the socket api");
-        println!("  integration         install built-in agent integrations");
+        println!("  integration         manage built-in agent integrations");
         println!();
         println!("Options:");
         println!("  --no-session        Don't restore or save sessions");

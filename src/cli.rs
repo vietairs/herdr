@@ -99,6 +99,7 @@ fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "install" => integration_install(&args[1..]),
+        "uninstall" => integration_uninstall(&args[1..]),
         _ => {
             print_integration_help();
             Ok(2)
@@ -450,11 +451,11 @@ fn pane_run(args: &[String]) -> std::io::Result<i32> {
 
 fn integration_install(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first().map(|arg| arg.as_str()) else {
-        eprintln!("usage: herdr integration install <pi>");
+        eprintln!("usage: herdr integration install <pi|claude|codex|opencode>");
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr integration install <pi>");
+        eprintln!("usage: herdr integration install <pi|claude|codex|opencode>");
         return Ok(2);
     }
 
@@ -464,9 +465,135 @@ fn integration_install(args: &[String]) -> std::io::Result<i32> {
             println!("installed pi integration to {}", path.display());
             Ok(0)
         }
+        "claude" => {
+            let installed = crate::integration::install_claude()?;
+            println!(
+                "installed claude integration hook to {}",
+                installed.hook_path.display()
+            );
+            println!(
+                "ensured claude settings at {}",
+                installed.settings_path.display()
+            );
+            Ok(0)
+        }
+        "codex" => {
+            let installed = crate::integration::install_codex()?;
+            println!(
+                "installed codex integration hook to {}",
+                installed.hook_path.display()
+            );
+            println!("ensured codex hooks at {}", installed.hooks_path.display());
+            println!(
+                "ensured codex config at {}",
+                installed.config_path.display()
+            );
+            Ok(0)
+        }
+        "opencode" => {
+            let installed = crate::integration::install_opencode()?;
+            println!(
+                "installed opencode integration plugin to {}",
+                installed.plugin_path.display()
+            );
+            Ok(0)
+        }
         _ => {
             eprintln!("unknown integration target: {target}");
-            eprintln!("currently supported: pi");
+            eprintln!("currently supported: pi, claude, codex, opencode");
+            Ok(2)
+        }
+    }
+}
+
+fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first().map(|arg| arg.as_str()) else {
+        eprintln!("usage: herdr integration uninstall <pi|claude|codex|opencode>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr integration uninstall <pi|claude|codex|opencode>");
+        return Ok(2);
+    }
+
+    match target {
+        "pi" => {
+            let result = crate::integration::uninstall_pi()?;
+            if result.removed_extension {
+                println!(
+                    "removed pi integration extension at {}",
+                    result.extension_path.display()
+                );
+            } else {
+                println!(
+                    "no pi integration extension found at {}",
+                    result.extension_path.display()
+                );
+            }
+            Ok(0)
+        }
+        "claude" => {
+            let result = crate::integration::uninstall_claude()?;
+            if result.removed_hook_file {
+                println!("removed claude hook at {}", result.hook_path.display());
+            } else {
+                println!("no claude hook found at {}", result.hook_path.display());
+            }
+            if result.updated_settings {
+                println!(
+                    "removed herdr claude hook entries from {}",
+                    result.settings_path.display()
+                );
+            } else {
+                println!(
+                    "no herdr claude hook entries found in {}",
+                    result.settings_path.display()
+                );
+            }
+            Ok(0)
+        }
+        "codex" => {
+            let result = crate::integration::uninstall_codex()?;
+            if result.removed_hook_file {
+                println!("removed codex hook at {}", result.hook_path.display());
+            } else {
+                println!("no codex hook found at {}", result.hook_path.display());
+            }
+            if result.updated_hooks {
+                println!(
+                    "removed herdr codex hook entries from {}",
+                    result.hooks_path.display()
+                );
+            } else {
+                println!(
+                    "no herdr codex hook entries found in {}",
+                    result.hooks_path.display()
+                );
+            }
+            println!(
+                "left codex config unchanged at {}",
+                result.config_path.display()
+            );
+            Ok(0)
+        }
+        "opencode" => {
+            let result = crate::integration::uninstall_opencode()?;
+            if result.removed_plugin {
+                println!(
+                    "removed opencode integration plugin at {}",
+                    result.plugin_path.display()
+                );
+            } else {
+                println!(
+                    "no opencode integration plugin found at {}",
+                    result.plugin_path.display()
+                );
+            }
+            Ok(0)
+        }
+        _ => {
+            eprintln!("unknown integration target: {target}");
+            eprintln!("currently supported: pi, claude, codex, opencode");
             Ok(2)
         }
     }
@@ -786,6 +913,13 @@ fn print_wait_help() {
 fn print_integration_help() {
     eprintln!("herdr integration commands:");
     eprintln!("  herdr integration install pi");
+    eprintln!("  herdr integration install claude");
+    eprintln!("  herdr integration install codex");
+    eprintln!("  herdr integration install opencode");
+    eprintln!("  herdr integration uninstall pi");
+    eprintln!("  herdr integration uninstall claude");
+    eprintln!("  herdr integration uninstall codex");
+    eprintln!("  herdr integration uninstall opencode");
 }
 
 fn _print_json<T: Serialize>(value: &T) {
