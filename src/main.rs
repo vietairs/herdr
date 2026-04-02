@@ -98,7 +98,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 [keys]
 # Prefix key to enter navigate mode (default: "ctrl+b")
 # Examples: "ctrl+b", "f12", "esc", "-"
-# Accepted syntax: plain keys, ctrl/shift/alt modifiers, and special keys like enter/tab/esc
+# Accepted syntax: plain keys, ctrl/shift/alt modifiers, and special keys like enter/tab/esc/left/right/up/down
 # Most reliable bindings are plain keys, ctrl+letter, esc/tab/enter, and function keys.
 # alt+... and punctuation-with-modifiers may depend on your terminal/tmux setup.
 # prefix = "ctrl+b"
@@ -114,6 +114,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # previous_tab = ""       # optional, unset by default
 # next_tab = ""           # optional, unset by default
 # close_tab = ""          # optional, unset by default
+# focus_pane_left = ""    # optional, unset by default
+# focus_pane_down = ""    # optional, unset by default
+# focus_pane_up = ""      # optional, unset by default
+# focus_pane_right = ""   # optional, unset by default
 # split_vertical = "v"
 # split_horizontal = "-"
 # close_pane = "x"

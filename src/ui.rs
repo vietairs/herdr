@@ -1555,6 +1555,10 @@ fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
     }
 }
 
+fn optional_keybind_label(label: &Option<String>) -> String {
+    label.clone().unwrap_or_else(|| "unset".to_string())
+}
+
 fn keybind_help_groups(app: &AppState) -> Vec<(&'static str, Vec<(String, &'static str)>)> {
     let kb = &app.keybinds;
     let mut groups = Vec::new();
@@ -1583,72 +1587,59 @@ fn keybind_help_groups(app: &AppState) -> Vec<(&'static str, Vec<(String, &'stat
         ],
     ));
 
-    let mut workspace_tab = vec![
+    let workspace_tab = vec![
         (kb.new_workspace_label.clone(), "new workspace"),
         (kb.rename_workspace_label.clone(), "rename workspace"),
         (kb.close_workspace_label.clone(), "close workspace"),
+        (
+            optional_keybind_label(&kb.previous_workspace_label),
+            "previous workspace",
+        ),
+        (
+            optional_keybind_label(&kb.next_workspace_label),
+            "next workspace",
+        ),
         (kb.new_tab_label.clone(), "new tab"),
+        (optional_keybind_label(&kb.rename_tab_label), "rename tab"),
+        (
+            optional_keybind_label(&kb.previous_tab_label),
+            "previous tab",
+        ),
+        (optional_keybind_label(&kb.next_tab_label), "next tab"),
+        (optional_keybind_label(&kb.close_tab_label), "close tab"),
     ];
-    if let Some(label) = &kb.previous_workspace_label {
-        workspace_tab.push((label.clone(), "previous workspace"));
-    }
-    if let Some(label) = &kb.next_workspace_label {
-        workspace_tab.push((label.clone(), "next workspace"));
-    }
-    if let Some(label) = &kb.rename_tab_label {
-        workspace_tab.push((label.clone(), "rename tab"));
-    }
-    if let Some(label) = &kb.previous_tab_label {
-        workspace_tab.push((label.clone(), "previous tab"));
-    }
-    if let Some(label) = &kb.next_tab_label {
-        workspace_tab.push((label.clone(), "next tab"));
-    }
-    if let Some(label) = &kb.close_tab_label {
-        workspace_tab.push((label.clone(), "close tab"));
-    }
     groups.push(("workspaces / tabs", workspace_tab));
 
-    groups.push((
-        "panes",
-        vec![
-            (kb.split_vertical_label.clone(), "split vertical"),
-            (kb.split_horizontal_label.clone(), "split horizontal"),
-            (kb.close_pane_label.clone(), "close pane"),
-            (kb.fullscreen_label.clone(), "fullscreen"),
-            (kb.resize_mode_label.clone(), "resize mode"),
-            (kb.toggle_sidebar_label.clone(), "toggle sidebar"),
-        ],
-    ));
+    let panes = vec![
+        (kb.split_vertical_label.clone(), "split vertical"),
+        (kb.split_horizontal_label.clone(), "split horizontal"),
+        (kb.close_pane_label.clone(), "close pane"),
+        (kb.fullscreen_label.clone(), "fullscreen"),
+        (kb.resize_mode_label.clone(), "resize mode"),
+        (kb.toggle_sidebar_label.clone(), "toggle sidebar"),
+        (
+            optional_keybind_label(&kb.focus_pane_left_label),
+            "focus pane left",
+        ),
+        (
+            optional_keybind_label(&kb.focus_pane_down_label),
+            "focus pane down",
+        ),
+        (
+            optional_keybind_label(&kb.focus_pane_up_label),
+            "focus pane up",
+        ),
+        (
+            optional_keybind_label(&kb.focus_pane_right_label),
+            "focus pane right",
+        ),
+    ];
+    groups.push(("panes", panes));
 
     groups
 }
 
-pub(crate) fn keybind_help_close_button_rect(area: Rect) -> Rect {
-    action_button_row_rects(
-        area,
-        &[ActionButtonSpec {
-            hint: Some("esc"),
-            label: "close",
-        }],
-        0,
-        0,
-    )[0]
-}
-
-fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
-    let rect = app.keybind_help_rect();
-    let Some(inner) = render_panel_shell(frame, rect, app.palette.accent, app.palette.panel_bg)
-    else {
-        return;
-    };
-    if inner.width < 12 || inner.height < 6 {
-        return;
-    }
-
-    let title_style = Style::default()
-        .fg(app.palette.text)
-        .add_modifier(Modifier::BOLD);
+pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> {
     let heading_style = Style::default()
         .fg(app.palette.accent)
         .add_modifier(Modifier::BOLD);
@@ -1656,56 +1647,126 @@ fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         .fg(app.palette.mauve)
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(app.palette.text);
-    let header = Rect::new(inner.x, inner.y, inner.width, 1);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(" keybinds", title_style)])),
-        header,
-    );
-    render_action_button(
-        frame,
-        keybind_help_close_button_rect(header),
-        Some("esc"),
-        "close",
-        Style::default()
-            .fg(app.palette.text)
-            .bg(app.palette.surface0)
-            .add_modifier(Modifier::BOLD),
-    );
 
     let groups = keybind_help_groups(app);
     let key_width = groups
         .iter()
-        .flat_map(|(_, entries)| entries.iter().map(|(key, _)| key.chars().count() as u16))
+        .flat_map(|(_, entries)| entries.iter().map(|(key, _)| key.chars().count()))
         .max()
-        .unwrap_or(8)
-        .min(inner.width.saturating_sub(8));
+        .unwrap_or(8);
 
-    let mut y = inner.y + 2;
+    let mut lines = Vec::new();
+
     for (group, entries) in groups {
-        if y >= inner.y + inner.height {
-            break;
-        }
-        frame.render_widget(
-            Paragraph::new(Span::styled(format!(" {group}"), heading_style)),
-            Rect::new(inner.x, y, inner.width, 1),
-        );
-        y += 1;
+        lines.push((
+            group.len() + 1,
+            Line::from(vec![Span::styled(format!(" {group}"), heading_style)]),
+        ));
         for (key, label) in entries {
-            if y >= inner.y + inner.height {
-                break;
-            }
-            let padded_key = format!(" {:<width$} ", key, width = key_width as usize);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
+            let padded_key = format!(" {:<width$} ", key, width = key_width);
+            let width = padded_key.chars().count() + label.chars().count();
+            lines.push((
+                width,
+                Line::from(vec![
                     Span::styled(padded_key, key_style),
-                    Span::styled(label, label_style),
-                ])),
-                Rect::new(inner.x, y, inner.width, 1),
-            );
-            y += 1;
+                    Span::styled(label.to_string(), label_style),
+                ]),
+            ));
         }
-        y += 1;
+        lines.push((0, Line::raw("")));
     }
+
+    lines
+}
+
+fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
+    dim_background(frame, frame.area());
+
+    let Some(inner) = render_modal_shell(frame, frame.area(), 76, 22, &app.palette) else {
+        return;
+    };
+    if inner.height < 6 || inner.width < 20 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas::<4>(inner);
+
+    render_modal_header(frame, rows[0], "keybinds", &app.palette);
+    render_action_button(
+        frame,
+        release_notes_close_button_rect(rows[0]),
+        Some("esc"),
+        "close",
+        Style::default()
+            .fg(app.palette.panel_bg)
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_widget(
+        Paragraph::new(" available commands and configured shortcuts")
+            .style(Style::default().fg(app.palette.overlay1)),
+        rows[1],
+    );
+
+    let body_area = rows[2];
+    let metrics = crate::pane::ScrollMetrics {
+        offset_from_bottom: app
+            .keybind_help_max_scroll()
+            .saturating_sub(app.keybind_help.scroll) as usize,
+        max_offset_from_bottom: app.keybind_help_max_scroll() as usize,
+        viewport_rows: body_area.height.max(1) as usize,
+    };
+    let track = release_notes_scrollbar_rect(body_area, metrics);
+    let text_area = track
+        .map(|_| {
+            Rect::new(
+                body_area.x,
+                body_area.y,
+                body_area.width.saturating_sub(1),
+                body_area.height,
+            )
+        })
+        .unwrap_or(body_area);
+
+    let body = Paragraph::new(
+        keybind_help_lines(app)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>(),
+    )
+    .wrap(Wrap { trim: false })
+    .scroll((app.keybind_help.scroll, 0));
+    frame.render_widget(body, text_area);
+    if let Some(track) = track {
+        render_scrollbar(
+            frame,
+            metrics,
+            track,
+            app.palette.overlay0,
+            app.palette.overlay1,
+            "▐",
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" scroll ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("wheel ↑↓", Style::default().fg(app.palette.text)),
+            Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("jump", Style::default().fg(app.palette.overlay0)),
+            Span::styled(" pgup / pgdn ", Style::default().fg(app.palette.text)),
+            Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("close", Style::default().fg(app.palette.overlay0)),
+            Span::styled(" q / esc / enter ", Style::default().fg(app.palette.text)),
+        ])),
+        rows[3],
+    );
 }
 
 /// Floating overlay for resize mode.
@@ -2492,5 +2553,35 @@ mod tests {
         let grab = scrollbar_thumb_grab_offset(metrics, track, row).expect("grab");
 
         assert_eq!(scrollbar_offset_from_drag_row(metrics, track, row, grab), 7);
+    }
+
+    #[test]
+    fn keybind_help_shows_unset_for_optional_actions() {
+        let app = crate::app::state::AppState::test_new();
+        let groups = keybind_help_groups(&app);
+
+        let workspace_tab = groups
+            .iter()
+            .find(|(name, _)| *name == "workspaces / tabs")
+            .expect("workspace tab group")
+            .1
+            .clone();
+        let panes = groups
+            .iter()
+            .find(|(name, _)| *name == "panes")
+            .expect("panes group")
+            .1
+            .clone();
+
+        assert!(workspace_tab.contains(&("unset".to_string(), "previous workspace")));
+        assert!(workspace_tab.contains(&("unset".to_string(), "next workspace")));
+        assert!(workspace_tab.contains(&("unset".to_string(), "rename tab")));
+        assert!(workspace_tab.contains(&("unset".to_string(), "previous tab")));
+        assert!(workspace_tab.contains(&("unset".to_string(), "next tab")));
+        assert!(workspace_tab.contains(&("unset".to_string(), "close tab")));
+        assert!(panes.contains(&("unset".to_string(), "focus pane left")));
+        assert!(panes.contains(&("unset".to_string(), "focus pane down")));
+        assert!(panes.contains(&("unset".to_string(), "focus pane up")));
+        assert!(panes.contains(&("unset".to_string(), "focus pane right")));
     }
 }

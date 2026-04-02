@@ -161,6 +161,8 @@ common defaults:
 - `r` resize mode
 - `b` toggle sidebar
 
+optional direct bindings can also switch workspaces, tabs, or panes from terminal mode without going through the prefix first. for example, you can bind `focus_pane_left = "alt+h"` or `focus_pane_right = "alt+right"` in your config.
+
 full keybinding and config reference: [`CONFIGURATION.md`](./CONFIGURATION.md)
 
 ### sidebar

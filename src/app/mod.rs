@@ -197,6 +197,7 @@ impl App {
                 scroll: 0,
                 preview: notes.preview,
             }),
+            keybind_help: state::KeybindHelpState { scroll: 0 },
             view: state::ViewState {
                 sidebar_rect: Rect::default(),
                 tab_bar_rect: Rect::default(),

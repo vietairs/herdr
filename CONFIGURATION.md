@@ -36,7 +36,7 @@ keybindings live under `[keys]`.
 supported syntax:
 - plain keys: `n`, `x`, `-`, `` ` ``
 - modifiers: `ctrl+b`, `shift+n`, `alt+x`
-- special keys: `enter`, `esc`, `tab`, `backspace`
+- special keys: `enter`, `esc`, `tab`, `backspace`, `left`, `right`, `up`, `down`
 - function keys: `f1`, `f12`
 - uppercase letters also imply shift: `D` works like `shift+d`
 
@@ -59,6 +59,8 @@ close_pane = "x"
 fullscreen = "f"
 resize_mode = "r"
 toggle_sidebar = "b"
+focus_pane_left = "alt+h"
+focus_pane_right = "alt+right"
 ```
 
 ### key reference
@@ -69,6 +71,17 @@ toggle_sidebar = "b"
 | `new_workspace` | `n` | create a new workspace |
 | `rename_workspace` | `shift+n` | rename selected workspace |
 | `close_workspace` | `d` | close selected workspace |
+| `previous_workspace` | unset | switch to the previous workspace directly from terminal mode |
+| `next_workspace` | unset | switch to the next workspace directly from terminal mode |
+| `new_tab` | `c` | create a new tab |
+| `rename_tab` | unset | rename the active tab |
+| `previous_tab` | unset | switch to the previous tab directly from terminal mode |
+| `next_tab` | unset | switch to the next tab directly from terminal mode |
+| `close_tab` | unset | close the active tab |
+| `focus_pane_left` | unset | focus the pane to the left directly from terminal mode |
+| `focus_pane_down` | unset | focus the pane below directly from terminal mode |
+| `focus_pane_up` | unset | focus the pane above directly from terminal mode |
+| `focus_pane_right` | unset | focus the pane to the right directly from terminal mode |
 | `split_vertical` | `v` | split pane vertically (side by side) |
 | `split_horizontal` | `-` | split pane horizontally (stacked) |
 | `close_pane` | `x` | close focused pane |

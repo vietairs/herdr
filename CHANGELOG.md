@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added optional direct pane-focus keybindings for terminal mode, so you can switch panes with modifier shortcuts like `alt+h` or `alt+right` without entering navigate mode first.
+
 ## [0.2.4] - 2026-04-01
 
 ### Fixed

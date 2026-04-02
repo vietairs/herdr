@@ -461,6 +461,9 @@ pub(crate) enum DragTarget {
     ReleaseNotesScrollbar {
         grab_row_offset: u16,
     },
+    KeybindHelpScrollbar {
+        grab_row_offset: u16,
+    },
     SidebarDivider,
 }
 
@@ -520,6 +523,10 @@ pub struct ReleaseNotesState {
     pub preview: bool,
 }
 
+pub struct KeybindHelpState {
+    pub scroll: u16,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -535,6 +542,7 @@ pub struct AppState {
     pub onboarding_step: usize,
     pub onboarding_list: SelectionListState,
     pub release_notes: Option<ReleaseNotesState>,
+    pub keybind_help: KeybindHelpState,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
@@ -627,6 +635,7 @@ impl AppState {
             onboarding_step: 0,
             onboarding_list: SelectionListState::new(1),
             release_notes: None,
+            keybind_help: KeybindHelpState { scroll: 0 },
             view: ViewState {
                 sidebar_rect: Rect::default(),
                 tab_bar_rect: Rect::default(),
@@ -676,6 +685,14 @@ impl AppState {
                 next_tab_label: None,
                 close_tab: None,
                 close_tab_label: None,
+                focus_pane_left: None,
+                focus_pane_left_label: None,
+                focus_pane_down: None,
+                focus_pane_down_label: None,
+                focus_pane_up: None,
+                focus_pane_up_label: None,
+                focus_pane_right: None,
+                focus_pane_right_label: None,
                 split_vertical: (KeyCode::Char('v'), KeyModifiers::empty()),
                 split_vertical_label: "v".into(),
                 split_horizontal: (KeyCode::Char('-'), KeyModifiers::empty()),

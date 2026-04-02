@@ -96,6 +96,14 @@ pub struct KeysConfig {
     pub next_tab: String,
     /// Close the active tab. Unset by default.
     pub close_tab: String,
+    /// Focus the pane to the left in terminal mode. Unset by default.
+    pub focus_pane_left: String,
+    /// Focus the pane below in terminal mode. Unset by default.
+    pub focus_pane_down: String,
+    /// Focus the pane above in terminal mode. Unset by default.
+    pub focus_pane_up: String,
+    /// Focus the pane to the right in terminal mode. Unset by default.
+    pub focus_pane_right: String,
     /// Split pane vertically (side by side). Default: "v"
     pub split_vertical: String,
     /// Split pane horizontally (stacked). Default: "-"
@@ -207,6 +215,10 @@ impl Default for KeysConfig {
             previous_tab: "".into(),
             next_tab: "".into(),
             close_tab: "".into(),
+            focus_pane_left: "".into(),
+            focus_pane_down: "".into(),
+            focus_pane_up: "".into(),
+            focus_pane_right: "".into(),
             split_vertical: "v".into(),
             split_horizontal: "-".into(),
             close_pane: "x".into(),
@@ -479,6 +491,26 @@ impl Config {
             ),
             optional_binding("keys.next_tab", &self.keys.next_tab, &mut diagnostics),
             optional_binding("keys.close_tab", &self.keys.close_tab, &mut diagnostics),
+            optional_binding(
+                "keys.focus_pane_left",
+                &self.keys.focus_pane_left,
+                &mut diagnostics,
+            ),
+            optional_binding(
+                "keys.focus_pane_down",
+                &self.keys.focus_pane_down,
+                &mut diagnostics,
+            ),
+            optional_binding(
+                "keys.focus_pane_up",
+                &self.keys.focus_pane_up,
+                &mut diagnostics,
+            ),
+            optional_binding(
+                "keys.focus_pane_right",
+                &self.keys.focus_pane_right,
+                &mut diagnostics,
+            ),
         ];
 
         use std::collections::HashMap;
@@ -519,6 +551,14 @@ impl Config {
             next_tab_label: optional_bindings[4].1.clone(),
             close_tab: optional_bindings[5].0,
             close_tab_label: optional_bindings[5].1.clone(),
+            focus_pane_left: optional_bindings[6].0,
+            focus_pane_left_label: optional_bindings[6].1.clone(),
+            focus_pane_down: optional_bindings[7].0,
+            focus_pane_down_label: optional_bindings[7].1.clone(),
+            focus_pane_up: optional_bindings[8].0,
+            focus_pane_up_label: optional_bindings[8].1.clone(),
+            focus_pane_right: optional_bindings[9].0,
+            focus_pane_right_label: optional_bindings[9].1.clone(),
             split_vertical: bindings[4].value,
             split_vertical_label: bindings[4].label.clone(),
             split_horizontal: bindings[5].value,
@@ -560,6 +600,14 @@ pub struct Keybinds {
     pub next_tab_label: Option<String>,
     pub close_tab: Option<(KeyCode, KeyModifiers)>,
     pub close_tab_label: Option<String>,
+    pub focus_pane_left: Option<(KeyCode, KeyModifiers)>,
+    pub focus_pane_left_label: Option<String>,
+    pub focus_pane_down: Option<(KeyCode, KeyModifiers)>,
+    pub focus_pane_down_label: Option<String>,
+    pub focus_pane_up: Option<(KeyCode, KeyModifiers)>,
+    pub focus_pane_up_label: Option<String>,
+    pub focus_pane_right: Option<(KeyCode, KeyModifiers)>,
+    pub focus_pane_right_label: Option<String>,
     pub split_vertical: (KeyCode, KeyModifiers),
     pub split_vertical_label: String,
     pub split_horizontal: (KeyCode, KeyModifiers),
@@ -792,6 +840,10 @@ fn parse_key_combo(s: &str) -> Option<(KeyCode, KeyModifiers)> {
         "esc" | "escape" => KeyCode::Esc,
         "tab" => KeyCode::Tab,
         "backspace" | "bs" => KeyCode::Backspace,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
         s if s.len() == 1 => {
             let ch = key_str.chars().next().unwrap();
             if ch.is_ascii_uppercase() {
@@ -899,6 +951,14 @@ mod tests {
             parse_key_combo("esc"),
             Some((KeyCode::Esc, KeyModifiers::empty()))
         );
+        assert_eq!(
+            parse_key_combo("left"),
+            Some((KeyCode::Left, KeyModifiers::empty()))
+        );
+        assert_eq!(
+            parse_key_combo("alt+right"),
+            Some((KeyCode::Right, KeyModifiers::ALT))
+        );
     }
 
     #[test]
@@ -982,6 +1042,8 @@ close_pane = "ctrl+w"
 fullscreen = "z"
 resize_mode = "ctrl+r"
 toggle_sidebar = "tab"
+focus_pane_left = "alt+h"
+focus_pane_right = "alt+right"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         let (code, mods) = config.prefix_key();
@@ -1010,6 +1072,16 @@ toggle_sidebar = "tab"
         assert_eq!(kb.fullscreen.0, KeyCode::Char('z'));
         assert_eq!(kb.resize_mode, (KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert_eq!(kb.toggle_sidebar, (KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(
+            kb.focus_pane_left,
+            Some((KeyCode::Char('h'), KeyModifiers::ALT))
+        );
+        assert_eq!(
+            kb.focus_pane_right,
+            Some((KeyCode::Right, KeyModifiers::ALT))
+        );
+        assert_eq!(kb.focus_pane_down, None);
+        assert_eq!(kb.focus_pane_up, None);
     }
 
     #[test]
