@@ -78,6 +78,8 @@ impl App {
                     Mode::ConfirmClose => handle_confirm_close_key(&mut self.state, key),
                     Mode::ContextMenu => handle_context_menu_key(&mut self.state, key),
                     Mode::Settings => self.handle_settings_key(key),
+                    Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key),
+                    Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
                     Mode::Terminal => unreachable!(),
                 }
             }
@@ -306,6 +308,16 @@ enum SettingsAction {
     SaveToast(bool),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlobalMenuAction {
+    Keybinds,
+    Settings,
+}
+
+impl GlobalMenuAction {
+    const ALL: [Self; 2] = [Self::Keybinds, Self::Settings];
+}
+
 fn normalize_theme_name(name: &str) -> String {
     name.to_lowercase().replace([' ', '_'], "-")
 }
@@ -426,6 +438,49 @@ fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<Settings
     None
 }
 
+fn open_global_menu(state: &mut AppState) {
+    state.global_menu_selected = 0;
+    state.mode = Mode::GlobalMenu;
+}
+
+fn open_keybind_help(state: &mut AppState) {
+    state.mode = Mode::KeybindHelp;
+}
+
+fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuAction) {
+    match action {
+        GlobalMenuAction::Keybinds => open_keybind_help(state),
+        GlobalMenuAction::Settings => open_settings(state),
+    }
+}
+
+fn handle_global_menu_key(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => leave_modal(state),
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.global_menu_selected = state.global_menu_selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.global_menu_selected =
+                (state.global_menu_selected + 1).min(GlobalMenuAction::ALL.len() - 1);
+        }
+        KeyCode::Enter => {
+            let action = GlobalMenuAction::ALL[state.global_menu_selected];
+            apply_global_menu_action(state, action);
+        }
+        _ => {}
+    }
+}
+
+fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => {
+            leave_modal(state)
+        }
+        _ => {}
+    }
+}
+
 fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     state.update_dismissed = true;
 
@@ -457,6 +512,7 @@ fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Char('s') => {
             open_settings(state);
         }
+        KeyCode::Char('?') => open_keybind_help(state),
         KeyCode::Up => {
             if state.selected > 0 {
                 state.selected -= 1;
@@ -911,7 +967,7 @@ impl AppState {
             return false;
         }
         let button =
-            ratatui::layout::Rect::new(inner.x + inner.width.saturating_sub(11), inner.y, 9, 1);
+            crate::ui::release_notes_close_button_rect(Rect::new(inner.x, inner.y, inner.width, 1));
         col >= button.x
             && col < button.x + button.width
             && row >= button.y
@@ -1038,12 +1094,15 @@ impl AppState {
                 let Some(inner) = self.onboarding_modal_inner(64, 15) else {
                     return;
                 };
-                let footer_y = inner.y + 9;
-                let button_x = inner.x;
-                let button_w = 14;
-                if mouse.row == footer_y
-                    && mouse.column >= button_x
-                    && mouse.column < button_x + button_w
+                let button = crate::ui::onboarding_welcome_continue_rect(Rect::new(
+                    inner.x,
+                    inner.y + 9,
+                    inner.width,
+                    1,
+                ));
+                if mouse.row == button.y
+                    && mouse.column >= button.x
+                    && mouse.column < button.x + button.width
                 {
                     self.onboarding_step = 1;
                 }
@@ -1061,20 +1120,87 @@ impl AppState {
                     return;
                 }
 
-                let footer_y = inner.y + 6;
-                let back_x = inner.x;
-                let back_w = 10;
-                let save_x = inner.x + 12;
-                let save_w = 10;
-                if mouse.row == footer_y {
-                    if mouse.column >= back_x && mouse.column < back_x + back_w {
+                let (back, save) = crate::ui::onboarding_notification_button_rects(Rect::new(
+                    inner.x,
+                    inner.y + 6,
+                    inner.width,
+                    1,
+                ));
+                if mouse.row == back.y {
+                    if mouse.column >= back.x && mouse.column < back.x + back.width {
                         self.onboarding_step = 0;
-                    } else if mouse.column >= save_x && mouse.column < save_x + save_w {
+                    } else if mouse.column >= save.x && mouse.column < save.x + save.width {
                         self.request_complete_onboarding = true;
                     }
                 }
             }
         }
+    }
+
+    pub(crate) fn sidebar_footer_rect(&self) -> Rect {
+        let sidebar = self.view.sidebar_rect;
+        if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
+            return Rect::default();
+        }
+        let content = Rect::new(
+            sidebar.x,
+            sidebar.y,
+            sidebar.width.saturating_sub(1),
+            sidebar.height,
+        );
+        let total_h = content.height as usize;
+        let ws_h = (total_h + 1) / 2;
+        let ws_area = Rect::new(content.x, content.y, content.width, ws_h as u16);
+        let y = ws_area.y + ws_area.height.saturating_sub(1);
+        Rect::new(ws_area.x, y, ws_area.width, 1)
+    }
+
+    pub(crate) fn sidebar_new_button_rect(&self) -> Rect {
+        let footer = self.sidebar_footer_rect();
+        let width = 5u16.min(footer.width.max(1));
+        Rect::new(footer.x, footer.y, width, footer.height)
+    }
+
+    pub(crate) fn global_launcher_rect(&self) -> Rect {
+        let footer = self.sidebar_footer_rect();
+        let width = 6u16.min(footer.width.max(1));
+        let x = footer.x + footer.width.saturating_sub(width);
+        Rect::new(x, footer.y, width, footer.height)
+    }
+
+    pub(crate) fn global_menu_rect(&self) -> Rect {
+        let screen = self.screen_rect();
+        let launcher = self.global_launcher_rect();
+        let menu_w = 14u16.min(screen.width.max(1));
+        let menu_h = (GlobalMenuAction::ALL.len() as u16 + 2).min(screen.height.max(1));
+        let max_x = screen.x + screen.width.saturating_sub(menu_w);
+        let desired_x = launcher.x + launcher.width.saturating_sub(menu_w);
+        let x = desired_x.min(max_x);
+        let y = launcher.y.saturating_sub(menu_h);
+        Rect::new(x, y, menu_w, menu_h)
+    }
+
+    fn global_menu_item_at(&self, col: u16, row: u16) -> Option<GlobalMenuAction> {
+        let rect = self.global_menu_rect();
+        if col <= rect.x
+            || col >= rect.x + rect.width.saturating_sub(1)
+            || row <= rect.y
+            || row >= rect.y + rect.height.saturating_sub(1)
+        {
+            return None;
+        }
+        let idx = (row - rect.y - 1) as usize;
+        GlobalMenuAction::ALL.get(idx).copied()
+    }
+
+    pub(crate) fn keybind_help_rect(&self) -> Rect {
+        let area = self.screen_rect();
+        let launcher = self.global_launcher_rect();
+        let popup_w = 54u16.min(area.width.saturating_sub(2).max(1));
+        let popup_h = 24u16.min(area.height.saturating_sub(2).max(1));
+        let x = area.x + area.width.saturating_sub(popup_w);
+        let y = launcher.y.saturating_sub(popup_h);
+        Rect::new(x, y, popup_w, popup_h)
     }
 
     fn settings_popup_rect(&self) -> Rect {
@@ -1121,9 +1247,10 @@ impl AppState {
         Rect::new(inner.x, y, inner.width, inner.y + inner.height - y)
     }
 
-    fn settings_list_index_at(&self, row: u16) -> Option<usize> {
+    fn settings_list_index_at(&self, col: u16, row: u16) -> Option<usize> {
         let area = self.settings_content_rect();
-        if row < area.y || row >= area.y + area.height {
+        if row < area.y || row >= area.y + area.height || col < area.x || col >= area.x + area.width
+        {
             return None;
         }
 
@@ -1152,16 +1279,13 @@ impl AppState {
 
     fn settings_button_at(&self, col: u16, row: u16) -> Option<&'static str> {
         let inner = self.settings_inner_rect();
-        let footer_y = inner.y + inner.height.saturating_sub(1);
-        if row != footer_y {
+        let (apply, close) = crate::ui::settings_button_rects(inner);
+        if row != apply.y {
             return None;
         }
-        let total_w = 7u16 + 2 + 7u16;
-        let apply_x = inner.x + inner.width.saturating_sub(total_w) / 2;
-        let close_x = apply_x + 9;
-        if col >= apply_x && col < apply_x + 7 {
+        if col >= apply.x && col < apply.x + apply.width {
             Some("apply")
-        } else if col >= close_x && col < close_x + 7 {
+        } else if col >= close.x && col < close.x + close.width {
             Some("close")
         } else {
             None
@@ -1172,24 +1296,6 @@ impl AppState {
         use crate::app::state::SettingsSection;
 
         match mouse.kind {
-            MouseEventKind::Moved => {
-                if let Some(section) = self.settings_tab_at(mouse.column, mouse.row) {
-                    self.settings.section = section;
-                    self.settings.selected = match section {
-                        SettingsSection::Theme => current_theme_index(&self.theme_name),
-                        SettingsSection::Sound => usize::from(!self.sound_enabled()),
-                        SettingsSection::Toast => usize::from(!self.toast_config.enabled),
-                    };
-                    return None;
-                }
-                if let Some(idx) = self.settings_list_index_at(mouse.row) {
-                    self.settings.selected = idx;
-                    if self.settings.section == SettingsSection::Theme {
-                        preview_selected_theme(self);
-                    }
-                }
-                None
-            }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(section) = self.settings_tab_at(mouse.column, mouse.row) {
                     self.settings.section = section;
@@ -1200,7 +1306,7 @@ impl AppState {
                     };
                     return None;
                 }
-                if let Some(idx) = self.settings_list_index_at(mouse.row) {
+                if let Some(idx) = self.settings_list_index_at(mouse.column, mouse.row) {
                     self.settings.selected = idx;
                     return match self.settings.section {
                         SettingsSection::Theme => {
@@ -1243,6 +1349,66 @@ impl AppState {
 
         if self.mode == Mode::Settings {
             return self.handle_settings_mouse(mouse);
+        }
+
+        let launcher_enabled = !self.sidebar_collapsed
+            && matches!(
+                self.mode,
+                Mode::Terminal
+                    | Mode::Navigate
+                    | Mode::Resize
+                    | Mode::GlobalMenu
+                    | Mode::KeybindHelp
+            );
+        let launcher = self.global_launcher_rect();
+        let launcher_hit = launcher_enabled
+            && mouse.column >= launcher.x
+            && mouse.column < launcher.x + launcher.width
+            && mouse.row >= launcher.y
+            && mouse.row < launcher.y + launcher.height;
+
+        if matches!(mouse.kind, MouseEventKind::Moved) && self.mode == Mode::GlobalMenu {
+            if let Some(action) = self.global_menu_item_at(mouse.column, mouse.row) {
+                self.global_menu_selected = GlobalMenuAction::ALL
+                    .iter()
+                    .position(|item| *item == action)
+                    .unwrap_or(0);
+            }
+            return None;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && launcher_hit {
+            if self.mode == Mode::GlobalMenu {
+                leave_modal(self);
+            } else {
+                open_global_menu(self);
+            }
+            return None;
+        }
+
+        if self.mode == Mode::GlobalMenu {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(action) = self.global_menu_item_at(mouse.column, mouse.row) {
+                    apply_global_menu_action(self, action);
+                } else {
+                    leave_modal(self);
+                }
+            }
+            return None;
+        }
+
+        if self.mode == Mode::KeybindHelp {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let rect = self.keybind_help_rect();
+                let inside = mouse.column >= rect.x
+                    && mouse.column < rect.x + rect.width
+                    && mouse.row >= rect.y
+                    && mouse.row < rect.y + rect.height;
+                if !inside {
+                    leave_modal(self);
+                }
+            }
+            return None;
         }
 
         let sidebar = self.view.sidebar_rect;
@@ -1355,11 +1521,12 @@ impl AppState {
                         return None;
                     }
 
-                    let total_h = sidebar.height as usize;
-                    let ws_h = (total_h + 1) / 2;
-                    let ws_bottom = sidebar.y + ws_h as u16;
-                    let new_row = ws_bottom.saturating_sub(1);
-                    if mouse.row == new_row {
+                    let new_button = self.sidebar_new_button_rect();
+                    let on_new_button = mouse.row >= new_button.y
+                        && mouse.row < new_button.y + new_button.height
+                        && mouse.column >= new_button.x
+                        && mouse.column < new_button.x + new_button.width;
+                    if on_new_button {
                         self.request_new_workspace = true;
                         return None;
                     }
@@ -1584,17 +1751,16 @@ impl AppState {
     }
 
     fn workspace_at_row(&self, row: u16) -> Option<usize> {
-        let sidebar = self.view.sidebar_rect;
-        let total_h = sidebar.height as usize;
-        let ws_h = (total_h + 1) / 2;
-        let ws_bottom = sidebar.y + ws_h as u16;
-        let new_row = ws_bottom.saturating_sub(1);
-
-        if row < sidebar.y || row >= new_row {
+        let footer = self.sidebar_footer_rect();
+        if footer == Rect::default() {
             return None;
         }
 
-        let mut row_y = sidebar.y;
+        if row < self.view.sidebar_rect.y || row >= footer.y {
+            return None;
+        }
+
+        let mut row_y = self.view.sidebar_rect.y;
         for (i, ws) in self.workspaces.iter().enumerate() {
             let has_branch = ws.branch().is_some();
             let card_h: u16 = if has_branch { 2 } else { 1 };
@@ -1602,7 +1768,7 @@ impl AppState {
                 return Some(i);
             }
             row_y += card_h + 1; // +1 for gap
-            if row_y >= new_row {
+            if row_y >= footer.y {
                 break;
             }
         }
@@ -1652,18 +1818,13 @@ impl AppState {
             popup.width.saturating_sub(2),
             popup.height.saturating_sub(2),
         );
-        let confirm_w = 9u16;
-        let cancel_w = 8u16;
-        let gap = 2u16;
-        let total_w = confirm_w + gap + cancel_w;
-        let x = inner.x + inner.width.saturating_sub(total_w) / 2;
-        let y = inner.y + 2.min(inner.height.saturating_sub(1));
-        if row != y {
+        let (confirm, cancel) = crate::ui::confirm_close_button_rects(inner);
+        if row != confirm.y {
             return None;
         }
-        if col >= x && col < x + confirm_w {
+        if col >= confirm.x && col < confirm.x + confirm.width {
             Some(true)
-        } else if col >= x + confirm_w + gap && col < x + total_w {
+        } else if col >= cancel.x && col < cancel.x + cancel.width {
             Some(false)
         } else {
             None
@@ -2132,6 +2293,139 @@ mod tests {
         assert_eq!(action, Some(SettingsAction::SaveSound(true)));
         assert!(state.sound.enabled);
         assert_eq!(state.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn question_mark_opens_keybind_help_from_navigate() {
+        let mut state = state_with_workspaces(&["test"]);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
+        );
+
+        assert_eq!(state.mode, Mode::KeybindHelp);
+    }
+
+    #[test]
+    fn clicking_launcher_opens_global_menu() {
+        let mut app = app_for_mouse_test();
+        let rect = app.state.global_launcher_rect();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + rect.width.saturating_sub(1),
+            rect.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::GlobalMenu);
+    }
+
+    #[test]
+    fn clicking_keybinds_menu_item_opens_help() {
+        let mut app = app_for_mouse_test();
+        let launcher = app.state.global_launcher_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            launcher.x,
+            launcher.y,
+        ));
+
+        let menu = app.state.global_menu_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 1,
+        ));
+
+        assert_eq!(app.state.mode, Mode::KeybindHelp);
+    }
+
+    #[test]
+    fn clicking_settings_menu_item_opens_settings() {
+        let mut app = app_for_mouse_test();
+        let launcher = app.state.global_launcher_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            launcher.x,
+            launcher.y,
+        ));
+
+        let menu = app.state.global_menu_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 2,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn clicking_confirm_close_accepts_workspace_close() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        app.state.active = Some(0);
+        app.state.selected = 1;
+        app.state.mode = Mode::ConfirmClose;
+
+        let popup = app.state.confirm_close_rect();
+        let inner = Rect::new(
+            popup.x + 1,
+            popup.y + 1,
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        );
+        let (confirm, _) = crate::ui::confirm_close_button_rects(inner);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            confirm.x,
+            confirm.y,
+        ));
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn clicking_confirm_close_accepts_after_workspace_context_menu_close() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.state.context_menu = Some(ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 1 },
+            x: 2,
+            y: 2,
+            selected: 1,
+        });
+        app.state.mode = Mode::ContextMenu;
+        handle_context_menu_key(
+            &mut app.state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.selected, 1);
+
+        let popup = app.state.confirm_close_rect();
+        let inner = Rect::new(
+            popup.x + 1,
+            popup.y + 1,
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        );
+        let (confirm, _) = crate::ui::confirm_close_button_rects(inner);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            confirm.x + 1,
+            confirm.y,
+        ));
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].display_name(), "a");
     }
 
     #[test]

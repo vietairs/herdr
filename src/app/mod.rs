@@ -237,6 +237,7 @@ impl App {
                 original_palette: None,
                 original_theme: None,
             },
+            global_menu_selected: 0,
         };
 
         for ws in &mut state.workspaces {

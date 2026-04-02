@@ -344,6 +344,8 @@ pub enum Mode {
     ConfirmClose,
     ContextMenu,
     Settings,
+    GlobalMenu,
+    KeybindHelp,
 }
 
 // ---------------------------------------------------------------------------
@@ -512,6 +514,8 @@ pub struct AppState {
     pub theme_name: String,
     /// Settings panel state.
     pub settings: SettingsState,
+    /// Currently selected item in the bottom-right global launcher menu.
+    pub global_menu_selected: usize,
 }
 
 impl AppState {
@@ -609,13 +613,19 @@ impl AppState {
                 close_workspace: (KeyCode::Char('d'), KeyModifiers::empty()),
                 close_workspace_label: "d".into(),
                 previous_workspace: None,
+                previous_workspace_label: None,
                 next_workspace: None,
+                next_workspace_label: None,
                 new_tab: (KeyCode::Char('c'), KeyModifiers::empty()),
                 new_tab_label: "c".into(),
                 rename_tab: None,
+                rename_tab_label: None,
                 previous_tab: None,
+                previous_tab_label: None,
                 next_tab: None,
+                next_tab_label: None,
                 close_tab: None,
+                close_tab_label: None,
                 split_vertical: (KeyCode::Char('v'), KeyModifiers::empty()),
                 split_vertical_label: "v".into(),
                 split_horizontal: (KeyCode::Char('-'), KeyModifiers::empty()),
@@ -638,6 +648,7 @@ impl AppState {
                 original_palette: None,
                 original_theme: None,
             },
+            global_menu_selected: 0,
         }
     }
 }

@@ -370,9 +370,9 @@ impl Config {
             field: &'static str,
             configured_label: &str,
             diagnostics: &mut Vec<String>,
-        ) -> (Option<(KeyCode, KeyModifiers)>, String) {
+        ) -> (Option<(KeyCode, KeyModifiers)>, Option<String>) {
             if configured_label.trim().is_empty() {
-                return (None, String::new());
+                return (None, None);
             }
             let (value, diag) = parse_key_combo_with_diagnostic(
                 configured_label,
@@ -381,9 +381,9 @@ impl Config {
             );
             if let Some(diag) = diag {
                 diagnostics.push(diag);
-                (None, String::new())
+                (None, None)
             } else {
-                (Some(value), configured_label.to_string())
+                (Some(value), Some(configured_label.to_string()))
             }
         }
 
@@ -506,13 +506,19 @@ impl Config {
             close_workspace: bindings[2].value,
             close_workspace_label: bindings[2].label.clone(),
             previous_workspace: optional_bindings[0].0,
+            previous_workspace_label: optional_bindings[0].1.clone(),
             next_workspace: optional_bindings[1].0,
+            next_workspace_label: optional_bindings[1].1.clone(),
             new_tab: bindings[3].value,
             new_tab_label: bindings[3].label.clone(),
             rename_tab: optional_bindings[2].0,
+            rename_tab_label: optional_bindings[2].1.clone(),
             previous_tab: optional_bindings[3].0,
+            previous_tab_label: optional_bindings[3].1.clone(),
             next_tab: optional_bindings[4].0,
+            next_tab_label: optional_bindings[4].1.clone(),
             close_tab: optional_bindings[5].0,
+            close_tab_label: optional_bindings[5].1.clone(),
             split_vertical: bindings[4].value,
             split_vertical_label: bindings[4].label.clone(),
             split_horizontal: bindings[5].value,
@@ -541,13 +547,19 @@ pub struct Keybinds {
     pub close_workspace: (KeyCode, KeyModifiers),
     pub close_workspace_label: String,
     pub previous_workspace: Option<(KeyCode, KeyModifiers)>,
+    pub previous_workspace_label: Option<String>,
     pub next_workspace: Option<(KeyCode, KeyModifiers)>,
+    pub next_workspace_label: Option<String>,
     pub new_tab: (KeyCode, KeyModifiers),
     pub new_tab_label: String,
     pub rename_tab: Option<(KeyCode, KeyModifiers)>,
+    pub rename_tab_label: Option<String>,
     pub previous_tab: Option<(KeyCode, KeyModifiers)>,
+    pub previous_tab_label: Option<String>,
     pub next_tab: Option<(KeyCode, KeyModifiers)>,
+    pub next_tab_label: Option<String>,
     pub close_tab: Option<(KeyCode, KeyModifiers)>,
+    pub close_tab_label: Option<String>,
     pub split_vertical: (KeyCode, KeyModifiers),
     pub split_vertical_label: String,
     pub split_horizontal: (KeyCode, KeyModifiers),
@@ -794,6 +806,47 @@ fn parse_key_combo(s: &str) -> Option<(KeyCode, KeyModifiers)> {
     };
 
     Some((code, modifiers))
+}
+
+pub fn format_key_combo(binding: (KeyCode, KeyModifiers)) -> String {
+    let (code, modifiers) = binding;
+    let mut parts = Vec::new();
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("ctrl".to_string());
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        parts.push("alt".to_string());
+    }
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("shift".to_string());
+    }
+
+    let key = match code {
+        KeyCode::Char(' ') => "space".to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Enter => "enter".to_string(),
+        KeyCode::Esc => "esc".to_string(),
+        KeyCode::Tab => "tab".to_string(),
+        KeyCode::BackTab => "shift+tab".to_string(),
+        KeyCode::Backspace => "backspace".to_string(),
+        KeyCode::Left => "left".to_string(),
+        KeyCode::Right => "right".to_string(),
+        KeyCode::Up => "up".to_string(),
+        KeyCode::Down => "down".to_string(),
+        KeyCode::F(n) => format!("f{n}"),
+        _ => format!("{:?}", code).to_lowercase(),
+    };
+
+    if matches!(code, KeyCode::BackTab) {
+        return if parts.is_empty() {
+            key
+        } else {
+            format!("{}+tab", parts.join("+"))
+        };
+    }
+
+    parts.push(key);
+    parts.join("+")
 }
 
 fn parse_key_combo_with_diagnostic(

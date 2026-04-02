@@ -103,6 +103,8 @@ pub fn render(app: &AppState, frame: &mut Frame) {
         }
         Mode::Settings => render_settings_overlay(app, frame, frame.area()),
         Mode::RenameWorkspace | Mode::RenameTab => render_rename_overlay(app, frame, frame.area()),
+        Mode::GlobalMenu => render_global_launcher_menu(app, frame),
+        Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
         Mode::Terminal => {}
     }
 
@@ -320,6 +322,8 @@ fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
             | Mode::ConfirmClose
             | Mode::ContextMenu
             | Mode::Settings
+            | Mode::GlobalMenu
+            | Mode::KeybindHelp
     );
 
     let p = &app.palette;
@@ -387,6 +391,8 @@ fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
             | Mode::ConfirmClose
             | Mode::ContextMenu
             | Mode::Settings
+            | Mode::GlobalMenu
+            | Mode::KeybindHelp
     );
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
@@ -572,11 +578,19 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
         row_y += 1;
     }
 
-    // "new" at the bottom of workspace section
+    // Footer actions for workspace section
     if list_bottom > area.y {
+        let new_rect = app.sidebar_new_button_rect();
         frame.render_widget(
             Paragraph::new(Span::styled("new", Style::default().fg(p.overlay0))),
-            Rect::new(area.x, list_bottom, area.width, 1),
+            new_rect,
+        );
+
+        let menu_rect = app.global_launcher_rect();
+        frame.render_widget(
+            Paragraph::new(Span::styled("menu", Style::default().fg(p.overlay0)))
+                .alignment(Alignment::Right),
+            menu_rect,
         );
     }
 }
@@ -1123,16 +1137,15 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
             .style(Style::default().fg(app.palette.overlay1)),
         rows[1],
     );
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            " [ close ] ",
-            Style::default()
-                .fg(app.palette.panel_bg)
-                .bg(app.palette.accent)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .alignment(Alignment::Right),
-        rows[0],
+    render_action_button(
+        frame,
+        release_notes_close_button_rect(rows[0]),
+        Some("esc"),
+        "close",
+        Style::default()
+            .fg(app.palette.panel_bg)
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
     );
 
     let body_area = rows[3];
@@ -1219,6 +1232,33 @@ fn render_release_notes_lines<'a>(body: &'a str, p: &Palette) -> Vec<Line<'a>> {
     }
 
     lines
+}
+
+pub(crate) fn release_notes_close_button_rect(area: Rect) -> Rect {
+    let width = action_button_width(Some("esc"), "close");
+    Rect::new(area.x + area.width.saturating_sub(width), area.y, width, 1)
+}
+
+pub(crate) fn onboarding_welcome_continue_rect(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.y,
+        action_button_width(Some("↵"), "continue"),
+        1,
+    )
+}
+
+pub(crate) fn onboarding_notification_button_rects(area: Rect) -> (Rect, Rect) {
+    let rects = centered_button_row(
+        area,
+        &[
+            action_button_width(Some("esc"), "back"),
+            action_button_width(Some("↵"), "save"),
+        ],
+        2,
+        0,
+    );
+    (rects[0], rects[1])
 }
 
 fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -1308,21 +1348,26 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
         ])),
         rows[7],
     );
+    let continue_rect = onboarding_welcome_continue_rect(rows[9]);
+    render_action_button(
+        frame,
+        continue_rect,
+        Some("↵"),
+        "continue",
+        Style::default()
+            .fg(app.palette.panel_bg)
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "  continue  ",
-                Style::default()
-                    .fg(app.palette.panel_bg)
-                    .bg(app.palette.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "   readme has config and more",
-                Style::default().fg(app.palette.overlay0),
-            ),
-        ])),
-        rows[9],
+        Paragraph::new(" readme has config and more")
+            .style(Style::default().fg(app.palette.overlay0)),
+        Rect::new(
+            continue_rect.x + continue_rect.width + 2,
+            rows[9].y,
+            rows[9].width.saturating_sub(continue_rect.width + 2),
+            1,
+        ),
     );
 }
 
@@ -1376,19 +1421,26 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
         );
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" [ back ] ", Style::default().fg(app.palette.overlay0)),
-            Span::raw("  "),
-            Span::styled(
-                " [ save ] ",
-                Style::default()
-                    .fg(app.palette.panel_bg)
-                    .bg(app.palette.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        rows[6],
+    let (back_rect, save_rect) = onboarding_notification_button_rects(rows[6]);
+    render_action_button(
+        frame,
+        back_rect,
+        Some("esc"),
+        "back",
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0)
+            .add_modifier(Modifier::BOLD),
+    );
+    render_action_button(
+        frame,
+        save_rect,
+        Some("↵"),
+        "save",
+        Style::default()
+            .fg(app.palette.panel_bg)
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
     );
 }
 
@@ -1398,16 +1450,22 @@ fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         .fg(app.palette.accent)
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(app.palette.overlay0);
-    let label = Style::default().fg(app.palette.text);
+
+    let mode_style = Style::default()
+        .fg(app.palette.panel_bg)
+        .bg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
 
     let kb = &app.keybinds;
-    let line1 = Line::from(vec![
-        Span::styled(format!(" {}", kb.new_workspace_label), key),
-        Span::styled(" new ws  ", dim),
-        Span::styled(kb.rename_workspace_label.as_str(), key),
-        Span::styled(" rename ws  ", dim),
-        Span::styled(kb.close_workspace_label.as_str(), key),
-        Span::styled(" close ws  ", dim),
+    let line = Line::from(vec![
+        Span::styled(" NAVIGATE ", mode_style),
+        Span::raw(" "),
+        Span::styled("esc", key),
+        Span::styled(" back  ", dim),
+        Span::styled("↑↓", key),
+        Span::styled(" ws  ", dim),
+        Span::styled("⇥", key),
+        Span::styled(" pane  ", dim),
         Span::styled(kb.new_tab_label.as_str(), key),
         Span::styled(" new tab  ", dim),
         Span::styled(kb.split_vertical_label.as_str(), key),
@@ -1415,79 +1473,193 @@ fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         Span::styled(kb.split_horizontal_label.as_str(), key),
         Span::styled(" split─  ", dim),
         Span::styled(kb.close_pane_label.as_str(), key),
-        Span::styled(" close pane  ", dim),
+        Span::styled(" close  ", dim),
         Span::styled(kb.fullscreen_label.as_str(), key),
-        Span::styled(" fullscreen", dim),
-    ]);
-
-    let ws_name = app
-        .active
-        .and_then(|i| app.workspaces.get(i))
-        .map(|ws| ws.display_name())
-        .unwrap_or_else(|| "—".to_string());
-
-    let pane_info = app
-        .active
-        .and_then(|i| app.workspaces.get(i))
-        .filter(|ws| ws.layout.pane_count() > 1)
-        .map(|ws| {
-            let ids = ws.layout.pane_ids();
-            let pos = ids
-                .iter()
-                .position(|id| *id == ws.layout.focused())
-                .unwrap_or(0);
-            format!(" [{}/{}]", pos + 1, ids.len())
-        })
-        .unwrap_or_default();
-
-    let mode_style = Style::default()
-        .fg(app.palette.panel_bg)
-        .bg(app.palette.accent)
-        .add_modifier(Modifier::BOLD);
-
-    let line2 = Line::from(vec![
-        Span::styled(" NAVIGATE ", mode_style),
-        Span::raw(" "),
-        Span::styled(ws_name, label),
-        Span::styled(&pane_info, dim),
-        Span::raw("  "),
-        Span::styled("esc", key),
-        Span::styled(" back  ", dim),
-        Span::styled("↑↓", key),
-        Span::styled(" ws  ", dim),
-        Span::styled("⇥", key),
-        Span::styled(" pane  ", dim),
+        Span::styled(" full  ", dim),
         Span::styled(kb.resize_mode_label.as_str(), key),
         Span::styled(" resize  ", dim),
-        Span::styled(kb.toggle_sidebar_label.as_str(), key),
-        Span::styled(" sidebar  ", dim),
+        Span::styled("?", key),
+        Span::styled(" keybinds  ", dim),
         Span::styled("s", key),
-        Span::styled(" settings  ", dim),
-        Span::styled("⏎", key),
-        Span::styled(" open  ", dim),
-        Span::styled("q", key),
-        Span::styled(" quit", dim),
+        Span::styled(" settings", dim),
     ]);
 
-    let overlay_height = 2;
-    let overlay_y = area.y + area.height.saturating_sub(overlay_height);
-    let overlay_area = Rect::new(area.x, overlay_y, area.width, overlay_height);
+    let overlay_y = area.y + area.height.saturating_sub(1);
+    let overlay_area = Rect::new(area.x, overlay_y, area.width, 1);
 
-    // Clear the area behind the overlay
     frame.render_widget(Clear, overlay_area);
-
     let bg = Style::default().bg(app.palette.panel_bg);
     let buf = frame.buffer_mut();
-    for y in overlay_area.y..overlay_area.y + overlay_area.height {
-        for x in overlay_area.x..overlay_area.x + overlay_area.width {
-            buf[(x, y)].set_style(bg);
+    for x in overlay_area.x..overlay_area.x + overlay_area.width {
+        buf[(x, overlay_y)].set_style(bg);
+    }
+    frame.render_widget(Paragraph::new(line), overlay_area);
+}
+
+fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
+    let rect = app.global_menu_rect();
+    let Some(inner) = render_panel_shell(frame, rect, app.palette.accent, app.palette.panel_bg)
+    else {
+        return;
+    };
+
+    let items = ["keybinds", "settings"];
+    for (idx, item) in items.iter().enumerate() {
+        let y = inner.y + idx as u16;
+        if y >= inner.y + inner.height {
+            break;
         }
+        let selected = idx == app.global_menu_selected;
+        let style = if selected {
+            Style::default()
+                .fg(app.palette.panel_bg)
+                .bg(app.palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.palette.text)
+        };
+        frame.render_widget(
+            Paragraph::new(format!(" {item}"))
+                .style(style)
+                .alignment(Alignment::Left),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+    }
+}
+
+fn keybind_help_groups(app: &AppState) -> Vec<(&'static str, Vec<(String, &'static str)>)> {
+    let kb = &app.keybinds;
+    let mut groups = Vec::new();
+
+    groups.push((
+        "global",
+        vec![
+            (
+                crate::config::format_key_combo((app.prefix_code, app.prefix_mods)),
+                "navigate mode",
+            ),
+            ("prefix + ?".to_string(), "keybinds"),
+        ],
+    ));
+
+    groups.push((
+        "navigation",
+        vec![
+            ("esc".to_string(), "back"),
+            ("↑ / ↓".to_string(), "workspace list"),
+            ("h j k l / arrows".to_string(), "move focus"),
+            ("tab / shift+tab".to_string(), "cycle pane"),
+            ("enter".to_string(), "open workspace"),
+            ("s".to_string(), "settings"),
+            ("q".to_string(), "quit"),
+        ],
+    ));
+
+    let mut workspace_tab = vec![
+        (kb.new_workspace_label.clone(), "new workspace"),
+        (kb.rename_workspace_label.clone(), "rename workspace"),
+        (kb.close_workspace_label.clone(), "close workspace"),
+        (kb.new_tab_label.clone(), "new tab"),
+    ];
+    if let Some(label) = &kb.previous_workspace_label {
+        workspace_tab.push((label.clone(), "previous workspace"));
+    }
+    if let Some(label) = &kb.next_workspace_label {
+        workspace_tab.push((label.clone(), "next workspace"));
+    }
+    if let Some(label) = &kb.rename_tab_label {
+        workspace_tab.push((label.clone(), "rename tab"));
+    }
+    if let Some(label) = &kb.previous_tab_label {
+        workspace_tab.push((label.clone(), "previous tab"));
+    }
+    if let Some(label) = &kb.next_tab_label {
+        workspace_tab.push((label.clone(), "next tab"));
+    }
+    if let Some(label) = &kb.close_tab_label {
+        workspace_tab.push((label.clone(), "close tab"));
+    }
+    groups.push(("workspaces / tabs", workspace_tab));
+
+    groups.push((
+        "panes",
+        vec![
+            (kb.split_vertical_label.clone(), "split vertical"),
+            (kb.split_horizontal_label.clone(), "split horizontal"),
+            (kb.close_pane_label.clone(), "close pane"),
+            (kb.fullscreen_label.clone(), "fullscreen"),
+            (kb.resize_mode_label.clone(), "resize mode"),
+            (kb.toggle_sidebar_label.clone(), "toggle sidebar"),
+        ],
+    ));
+
+    groups
+}
+
+fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
+    let rect = app.keybind_help_rect();
+    let Some(inner) = render_panel_shell(frame, rect, app.palette.accent, app.palette.panel_bg)
+    else {
+        return;
+    };
+    if inner.width < 12 || inner.height < 6 {
+        return;
     }
 
-    let [row1, row2] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(overlay_area);
-    frame.render_widget(Paragraph::new(line1), row1);
-    frame.render_widget(Paragraph::new(line2), row2);
+    let title_style = Style::default()
+        .fg(app.palette.text)
+        .add_modifier(Modifier::BOLD);
+    let heading_style = Style::default()
+        .fg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(app.palette.mauve)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(app.palette.text);
+    let hint_style = Style::default().fg(app.palette.overlay0);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" keybinds", title_style),
+            Span::styled("  esc to close", hint_style),
+        ])),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let groups = keybind_help_groups(app);
+    let key_width = groups
+        .iter()
+        .flat_map(|(_, entries)| entries.iter().map(|(key, _)| key.chars().count() as u16))
+        .max()
+        .unwrap_or(8)
+        .min(inner.width.saturating_sub(8));
+
+    let mut y = inner.y + 2;
+    for (group, entries) in groups {
+        if y >= inner.y + inner.height {
+            break;
+        }
+        frame.render_widget(
+            Paragraph::new(Span::styled(format!(" {group}"), heading_style)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        y += 1;
+        for (key, label) in entries {
+            if y >= inner.y + inner.height {
+                break;
+            }
+            let padded_key = format!(" {:<width$} ", key, width = key_width as usize);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(padded_key, key_style),
+                    Span::styled(label, label_style),
+                ])),
+                Rect::new(inner.x, y, inner.width, 1),
+            );
+            y += 1;
+        }
+        y += 1;
+    }
 }
 
 /// Floating overlay for resize mode.
@@ -1527,18 +1699,17 @@ fn render_resize_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
 /// Centered popup confirmation dialog with dimmed background.
 pub(crate) fn rename_button_rects(inner: Rect) -> (Rect, Rect, Rect) {
-    let save_w = 10u16;
-    let clear_w = 11u16;
-    let cancel_w = 12u16;
-    let gap = 2u16;
-    let total_w = save_w + gap + clear_w + gap + cancel_w;
-    let x = inner.x + inner.width.saturating_sub(total_w) / 2;
-    let y = inner.y + 3;
-    (
-        Rect::new(x, y, save_w, 1),
-        Rect::new(x + save_w + gap, y, clear_w, 1),
-        Rect::new(x + save_w + gap + clear_w + gap, y, cancel_w, 1),
-    )
+    let rects = centered_button_row(
+        inner,
+        &[
+            action_button_width(Some("↵"), "save"),
+            action_button_width(Some("^c"), "clear"),
+            action_button_width(Some("esc"), "cancel"),
+        ],
+        2,
+        3,
+    );
+    (rects[0], rects[1], rects[2])
 }
 
 fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -1581,32 +1752,35 @@ fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
     let (save_rect, clear_rect, cancel_rect) = rename_button_rects(inner);
 
-    frame.render_widget(
-        Paragraph::new(" ↵ save ").style(
-            Style::default()
-                .fg(app.palette.panel_bg)
-                .bg(app.palette.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
+    render_action_button(
+        frame,
         save_rect,
+        Some("↵"),
+        "save",
+        Style::default()
+            .fg(app.palette.panel_bg)
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
     );
-    frame.render_widget(
-        Paragraph::new(" ^c clear ").style(
-            Style::default()
-                .fg(app.palette.text)
-                .bg(app.palette.surface0)
-                .add_modifier(Modifier::BOLD),
-        ),
+    render_action_button(
+        frame,
         clear_rect,
+        Some("^c"),
+        "clear",
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0)
+            .add_modifier(Modifier::BOLD),
     );
-    frame.render_widget(
-        Paragraph::new(" esc cancel ").style(
-            Style::default()
-                .fg(app.palette.text)
-                .bg(app.palette.surface0)
-                .add_modifier(Modifier::BOLD),
-        ),
+    render_action_button(
+        frame,
         cancel_rect,
+        Some("esc"),
+        "cancel",
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0)
+            .add_modifier(Modifier::BOLD),
     );
 }
 
@@ -1679,8 +1853,12 @@ fn render_confirm_close_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
         let (confirm_rect, cancel_rect) = confirm_close_button_rects(inner);
         let confirm_selected = app.confirm_close_selected_confirm;
-        frame.render_widget(
-            Paragraph::new(" confirm ").style(if confirm_selected {
+        render_action_button(
+            frame,
+            confirm_rect,
+            Some("↵"),
+            "confirm",
+            if confirm_selected {
                 Style::default()
                     .fg(app.palette.panel_bg)
                     .bg(app.palette.red)
@@ -1690,11 +1868,14 @@ fn render_confirm_close_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
                     .fg(app.palette.text)
                     .bg(app.palette.surface0)
                     .add_modifier(Modifier::BOLD)
-            }),
-            confirm_rect,
+            },
         );
-        frame.render_widget(
-            Paragraph::new(" cancel ").style(if confirm_selected {
+        render_action_button(
+            frame,
+            cancel_rect,
+            Some("esc"),
+            "cancel",
+            if confirm_selected {
                 Style::default()
                     .fg(app.palette.text)
                     .bg(app.palette.surface0)
@@ -1704,10 +1885,35 @@ fn render_confirm_close_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
                     .fg(app.palette.panel_bg)
                     .bg(app.palette.accent)
                     .add_modifier(Modifier::BOLD)
-            }),
-            cancel_rect,
+            },
         );
     }
+}
+
+pub(crate) fn action_button_text(hint: Option<&str>, label: &str) -> String {
+    match hint {
+        Some(hint) => format!(" {hint} {label} "),
+        None => format!(" {label} "),
+    }
+}
+
+pub(crate) fn action_button_width(hint: Option<&str>, label: &str) -> u16 {
+    action_button_text(hint, label).chars().count() as u16
+}
+
+fn render_action_button(
+    frame: &mut Frame,
+    rect: Rect,
+    hint: Option<&str>,
+    label: &str,
+    style: Style,
+) {
+    frame.render_widget(
+        Paragraph::new(action_button_text(hint, label))
+            .style(style)
+            .alignment(Alignment::Center),
+        rect,
+    );
 }
 
 fn centered_button_row(inner: Rect, widths: &[u16], gap: u16, row_offset: u16) -> Vec<Rect> {
@@ -1733,13 +1939,29 @@ fn centered_button_row(inner: Rect, widths: &[u16], gap: u16, row_offset: u16) -
         .collect()
 }
 
-fn confirm_close_button_rects(inner: Rect) -> (Rect, Rect) {
-    let rects = centered_button_row(inner, &[9, 8], 2, 2);
+pub(crate) fn confirm_close_button_rects(inner: Rect) -> (Rect, Rect) {
+    let rects = centered_button_row(
+        inner,
+        &[
+            action_button_width(Some("↵"), "confirm"),
+            action_button_width(Some("esc"), "cancel"),
+        ],
+        2,
+        2,
+    );
     (rects[0], rects[1])
 }
 
-fn settings_button_rects(inner: Rect) -> (Rect, Rect) {
-    let rects = centered_button_row(inner, &[7, 7], 2, inner.height.saturating_sub(1));
+pub(crate) fn settings_button_rects(inner: Rect) -> (Rect, Rect) {
+    let rects = centered_button_row(
+        inner,
+        &[
+            action_button_width(Some("↵"), "apply"),
+            action_button_width(Some("esc"), "close"),
+        ],
+        2,
+        inner.height.saturating_sub(1),
+    );
     (rects[0], rects[1])
 }
 
@@ -1850,23 +2072,25 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let footer_y = inner.y + inner.height - 1;
     if footer_y > y {
         let (apply_rect, close_rect) = settings_button_rects(inner);
-        frame.render_widget(
-            Paragraph::new(" apply ").style(
-                Style::default()
-                    .fg(p.panel_bg)
-                    .bg(p.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
+        render_action_button(
+            frame,
             apply_rect,
+            Some("↵"),
+            "apply",
+            Style::default()
+                .fg(p.panel_bg)
+                .bg(p.accent)
+                .add_modifier(Modifier::BOLD),
         );
-        frame.render_widget(
-            Paragraph::new(" close ").style(
-                Style::default()
-                    .fg(p.text)
-                    .bg(p.surface0)
-                    .add_modifier(Modifier::BOLD),
-            ),
+        render_action_button(
+            frame,
             close_rect,
+            Some("esc"),
+            "close",
+            Style::default()
+                .fg(p.text)
+                .bg(p.surface0)
+                .add_modifier(Modifier::BOLD),
         );
 
         let hint_area = Rect::new(inner.x, footer_y.saturating_sub(1), inner.width, 1);
