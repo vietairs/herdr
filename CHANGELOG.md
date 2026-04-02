@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.0] - 2026-04-03
+
 ### Major Changes
 - Added tabs within workspaces, so a single workspace can now hold multiple terminal tab contexts with their own pane layouts.
 - Added first-class tab support to the local socket API and CLI wrappers, including `herdr tab ...` commands and tab ids like `1:2` alongside workspace-scoped pane ids.
