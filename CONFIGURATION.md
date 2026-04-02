@@ -200,6 +200,7 @@ current v1 behavior:
 - one toast at a time
 - top-right placement
 - shown for background agent events like `needs attention` and `finished`
+- suppression is tab-aware: the active tab stays quiet, but background tabs in the same workspace can still notify
 - no keyboard action or temporary key semantics
 
 ## sound

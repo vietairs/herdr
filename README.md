@@ -56,7 +56,7 @@ this keeps workspaces lightweight. they are project contexts first, labels secon
 the sidebar is split into two layers:
 
 - **top:** workspaces, each with one aggregate state dot
-- **bottom:** agents inside the selected or active workspace
+- **bottom:** detected agents inside the selected or active workspace
 
 herdr automatically detects running agents by looking at the foreground process and reading terminal output. the top section compresses each workspace into one prioritized signal so you can scan the whole workspace list quickly; the bottom section shows which specific agent is causing it.
 
@@ -70,7 +70,9 @@ workspace and agent states map to:
 
 workspace rollups prefer the most urgent thing happening in that workspace: blocked first, then unseen finished work, then working, then idle.
 
-if you want more interruption than ambient sidebar awareness, herdr can also play sounds or show top-right toast notifications for background events.
+plain shells still contribute to workspace rollups, but the sidebar's agent section intentionally hides non-agent panes so the detail list stays focused on actual agents.
+
+if you want more interruption than ambient sidebar awareness, herdr can also play sounds or show top-right toast notifications for background events. notification suppression is tab-aware: the active tab stays quiet, but background tabs in the same workspace can still alert.
 
 ## agents can use herdr too
 
@@ -339,8 +341,7 @@ cargo build --release
 
 ```bash
 just test               # unit tests
-just test-integration   # LLM-based integration tests
-just test-all           # both
+just test-all           # full local test suite
 ```
 
 ## license

@@ -16,18 +16,12 @@ Terminal workspace manager for AI coding agents. Rust + ratatui.
 ```bash
 just check              # formatting + unit tests
 just test               # unit tests
-just test-integration   # LLM-based integration tests (needs pi + tmux)
-just test-all           # check + integration tests
-just clean-tests        # kill orphaned test tmux sessions
+just test-all           # full local test suite
 ```
 
 Default flow: run `just check` before committing.
 
-`just test-all` includes an experimental LLM-driven end-to-end test pass. Do not run it unless Can asks for it explicitly.
-
 Unit tests live next to the code (`#[cfg(test)] mod tests`). If you add behavior to `AppState` or `Workspace`, it should be testable with `AppState::test_new()` and `Workspace::test_new()` — no PTYs.
-
-Integration tests are markdown specs in `tests/integration/specs/`. A pi agent executes them against herdr in an isolated tmux server. See `tests/integration/system.md` for the test agent prompt.
 
 ## Conventions
 

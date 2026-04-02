@@ -23,7 +23,7 @@ if you need the raw protocol or full api reference, read [`SOCKET_API.md`](./SOC
 
 ## concepts
 
-**workspaces** are project contexts. each workspace has one or more tabs.
+**workspaces** are project contexts. each workspace has one or more tabs. unless manually renamed, a workspace's label follows the first tab's root pane — usually the repo name, otherwise the root pane's current folder name.
 
 **tabs** are subcontexts inside a workspace. each tab has one or more panes.
 
@@ -34,7 +34,9 @@ if you need the raw protocol or full api reference, read [`SOCKET_API.md`](./SOC
 - `idle` — agent finished and the state is calm
 - `working` — agent is actively working
 - `blocked` — agent needs input or approval
-- `unknown` — no recognized agent, or just a shell
+- `unknown` — no recognized agent
+
+plain shells still exist as panes, but herdr's sidebar agent section intentionally focuses on detected agents rather than listing every shell.
 
 **ids** — workspace ids look like `1`, `2`. tab ids look like `1:1`, `1:2`, `2:1`. pane ids look like `1-1`, `1-2`, `2-1`. these are compact public ids for the current live session.
 
@@ -259,6 +261,6 @@ herdr pane read 1-1 --source recent --lines 100
 - `workspace list`, `workspace create`, `tab list`, `tab create`, `tab get`, `tab focus`, `tab rename`, `tab close`, `pane list`, `pane get`, `pane split`, `wait output`, and `wait agent-state` print json on success.
 - `pane read` prints text, not json.
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success.
-- parse ids from `workspace create` and `pane split` responses when you need the new ids. do not guess.
-- `--no-focus` on split and workspace create keeps your current terminal context focused.
+- parse ids from `workspace create`, `tab create`, and `pane split` responses when you need new ids. do not guess.
+- `--no-focus` on split, tab create, and workspace create keeps your current terminal context focused.
 - if you are running inside herdr, the `HERDR_ENV` environment variable is set to `1`.

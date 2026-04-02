@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use ratatui::layout::Direction;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tracing::{error, info, warn};
 
 use tokio::sync::{mpsc, Notify};
@@ -32,7 +32,7 @@ pub struct SessionSnapshot {
     pub selected: usize,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub custom_name: Option<String>,
@@ -40,6 +40,41 @@ pub struct WorkspaceSnapshot {
     pub tabs: Vec<TabSnapshot>,
     #[serde(default)]
     pub active_tab: usize,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceSnapshotWire {
+    #[serde(default)]
+    custom_name: Option<String>,
+    #[serde(default)]
+    identity_cwd: Option<PathBuf>,
+    #[serde(default)]
+    tabs: Vec<TabSnapshot>,
+    #[serde(default)]
+    active_tab: usize,
+    #[serde(default)]
+    layout: Option<LayoutSnapshot>,
+    #[serde(default)]
+    panes: HashMap<u32, PaneSnapshot>,
+    #[serde(default)]
+    zoomed: Option<bool>,
+    #[serde(default)]
+    focused: Option<u32>,
+    #[serde(default)]
+    root_pane: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct LegacyWorkspaceSnapshot {
+    #[serde(default)]
+    custom_name: Option<String>,
+    layout: LayoutSnapshot,
+    panes: HashMap<u32, PaneSnapshot>,
+    zoomed: bool,
+    #[serde(default)]
+    focused: Option<u32>,
+    #[serde(default)]
+    root_pane: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -76,6 +111,95 @@ pub enum LayoutSnapshot {
 pub enum DirectionSnapshot {
     Horizontal,
     Vertical,
+}
+
+impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
+    fn from(snap: LegacyWorkspaceSnapshot) -> Self {
+        let identity_cwd = legacy_identity_cwd(&snap);
+        let tab = TabSnapshot {
+            custom_name: None,
+            layout: snap.layout,
+            panes: snap.panes,
+            zoomed: snap.zoomed,
+            focused: snap.focused,
+            root_pane: snap.root_pane,
+        };
+
+        Self {
+            custom_name: snap.custom_name,
+            identity_cwd,
+            tabs: vec![tab],
+            active_tab: 0,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkspaceSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let snap = WorkspaceSnapshotWire::deserialize(deserializer)?;
+
+        if let Some(identity_cwd) = snap.identity_cwd {
+            return Ok(Self {
+                custom_name: snap.custom_name,
+                identity_cwd,
+                tabs: snap.tabs,
+                active_tab: snap.active_tab,
+            });
+        }
+
+        if let Some(layout) = snap.layout {
+            // Backward-compat path for pre-tab session snapshots (<= v0.2.4).
+            // Remove this migration once we intentionally drop support for v2 sessions.
+            return Ok(LegacyWorkspaceSnapshot {
+                custom_name: snap.custom_name,
+                layout,
+                panes: snap.panes,
+                zoomed: snap.zoomed.unwrap_or(false),
+                focused: snap.focused,
+                root_pane: snap.root_pane,
+            }
+            .into());
+        }
+
+        Err(<D::Error as serde::de::Error>::custom(
+            "workspace snapshot is neither current nor legacy format",
+        ))
+    }
+}
+
+fn legacy_identity_cwd(snap: &LegacyWorkspaceSnapshot) -> PathBuf {
+    let root_pane = snap
+        .root_pane
+        .or_else(|| first_pane_id_in_layout(&snap.layout));
+
+    root_pane
+        .and_then(|pane_id| snap.panes.get(&pane_id))
+        .map(|pane| pane.cwd.clone())
+        .or_else(|| {
+            first_pane_id_in_layout(&snap.layout)
+                .and_then(|pane_id| snap.panes.get(&pane_id))
+                .map(|pane| pane.cwd.clone())
+        })
+        .or_else(|| {
+            snap.panes
+                .keys()
+                .min()
+                .and_then(|pane_id| snap.panes.get(pane_id))
+                .map(|pane| pane.cwd.clone())
+        })
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()))
+}
+
+fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
+    match layout {
+        LayoutSnapshot::Pane(id) => Some(*id),
+        LayoutSnapshot::Split { first, second, .. } => {
+            first_pane_id_in_layout(first).or_else(|| first_pane_id_in_layout(second))
+        }
+    }
 }
 
 // --- Capture ---
@@ -510,6 +634,38 @@ mod tests {
             restored.workspaces[0].tabs[0].panes[&0].cwd,
             PathBuf::from("/home/can/Projects/herdr")
         );
+    }
+
+    #[test]
+    fn legacy_workspace_snapshot_migrates_to_single_tab() {
+        let json = serde_json::json!({
+            "version": 2,
+            "workspaces": [{
+                "custom_name": "legacy",
+                "layout": LayoutSnapshot::Pane(0),
+                "panes": {
+                    "0": { "cwd": "/tmp/pion" }
+                },
+                "zoomed": false,
+                "focused": 0,
+                "root_pane": 0
+            }],
+            "active": 0,
+            "selected": 0
+        })
+        .to_string();
+
+        let snap: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let ws = &snap.workspaces[0];
+
+        assert_eq!(snap.workspaces.len(), 1);
+        assert_eq!(ws.custom_name.as_deref(), Some("legacy"));
+        assert_eq!(ws.identity_cwd, PathBuf::from("/tmp/pion"));
+        assert_eq!(ws.active_tab, 0);
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(ws.tabs[0].focused, Some(0));
+        assert_eq!(ws.tabs[0].root_pane, Some(0));
+        assert_eq!(ws.tabs[0].panes[&0].cwd, PathBuf::from("/tmp/pion"));
     }
 
     #[test]

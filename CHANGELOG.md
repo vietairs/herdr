@@ -2,19 +2,28 @@
 
 ## Unreleased
 
-### Added
+### Major Changes
 - Added tabs within workspaces, so a single workspace can now hold multiple terminal tab contexts with their own pane layouts.
-- Added optional direct pane-focus keybindings for terminal mode, so you can switch panes with modifier shortcuts like `alt+h` or `alt+right` without entering navigate mode first.
-- Added built-in direct integrations for pi, claude code, codex, and opencode, with install/uninstall commands under `herdr integration ...`.
-- Added authoritative hook-driven state reporting support, so pane state can be updated directly from agent integrations instead of relying only on heuristics.
+- Added first-class tab support to the local socket API and CLI wrappers, including `herdr tab ...` commands and tab ids like `1:2` alongside workspace-scoped pane ids.
+- Added built-in direct integrations for pi, claude code, codex, and opencode, plus authoritative hook-driven state reporting so supported agents can report semantic state directly instead of relying only on screen heuristics.
+- Added a post-update release-notes screen so herdr can explain what changed after an update is installed.
 
-### Changed
-- Refactored keybind discoverability so the in-app keybind help now shows all supported actions, including optional bindings that are currently unset.
+### UX and Controls
+- Added optional direct pane-focus keybindings for terminal mode, so you can switch panes with modifier shortcuts like `alt+h` or `alt+right` without entering navigate mode first.
+- Reworked keybind discoverability so the in-app keybind help now shows all supported actions, including optional bindings that are currently unset.
 - Keybind help now uses a centered scrollable modal with mouse and keyboard scrolling, matching the release-notes interaction model more closely.
-- Popups and action-button interactions were refactored to use more consistent modal geometry and button semantics across the ui.
+- Popups and action-button interactions now use more consistent modal geometry and button semantics across the UI.
+- Polished the sidebar agent section so it focuses on detected agents only and uses clearer two-line agent cards with more breathing room.
+
+### Behavior Fixes
+- Hook-driven agent state updates now stay correct in tabbed workspaces.
+- Modifier-only keypresses no longer leak into panes as stray input.
+- Multi-tab agent labels now include tab names when that extra context matters.
+- Workspace identity now follows the first tab's root pane again instead of stale creation-time cwd.
+- Background notification suppression is now tab-aware rather than workspace-wide, so background tabs in the current workspace can still alert correctly.
 
 ### Documentation
-- Updated the README, configuration guide, and socket api docs to reflect tabs, unset optional keybindings, direct terminal-mode navigation examples, and the current workspace-scoped pane id model.
+- Updated the README, configuration guide, integrations guide, skill, and socket API docs to reflect tabs, direct integrations, unset optional keybindings, direct terminal-mode navigation examples, workspace-scoped pane ids, and the current workspace identity/sidebar model.
 
 ## [0.2.4] - 2026-04-01
 

@@ -11,25 +11,12 @@ check:
     cargo test
     python3 -m unittest scripts.test_changelog
 
-# Run integration tests (LLM-based, requires pi + tmux)
-test-integration:
-    ./tests/integration/run_all.sh
-
-# Run all tests
-test-all: check test-integration
+# Run the full local test suite
+test-all: check
 
 # Build release binary
 build:
     cargo build --release
-
-# Kill any leftover test tmux sessions and clean results
-clean-tests:
-    @for sock in ${TMPDIR:-/tmp}/herdr-test-sockets/*/tmux.sock; do \
-        [ -S "$$sock" ] && tmux -S "$$sock" kill-server 2>/dev/null || true; \
-    done
-    @rm -rf ${TMPDIR:-/tmp}/herdr-test-sockets 2>/dev/null || true
-    @rm -f tests/integration/results/*.json tests/integration/results/*.txt 2>/dev/null || true
-    @echo "cleaned"
 
 # Finalize changelog, bump version, commit, tag, push, trigger release build (usage: just release 0.1.1)
 release version:
