@@ -710,7 +710,9 @@ impl App {
                     workspace_id: self.public_workspace_id(ws_idx),
                 },
             });
-            if let Some(tab_id) = self.public_tab_id(ws_idx, self.state.workspaces[ws_idx].active_tab) {
+            if let Some(tab_id) =
+                self.public_tab_id(ws_idx, self.state.workspaces[ws_idx].active_tab)
+            {
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::TabFocused,
                     data: crate::api::schema::EventData::TabFocused {
@@ -1402,7 +1404,12 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(tab_idx) = self.state.workspaces.get(ws_idx).and_then(|ws| ws.find_tab_index_for_pane(pane_id)) else {
+                let Some(tab_idx) = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.find_tab_index_for_pane(pane_id))
+                else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -1776,14 +1783,30 @@ impl App {
         });
     }
 
+    fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<std::path::PathBuf> {
+        self.state.workspaces.get(ws_idx)?.resolved_identity_cwd()
+    }
+
+    fn workspace_creation_source(&self) -> Option<usize> {
+        if self.state.mode == Mode::Navigate
+            && self.state.workspaces.get(self.state.selected).is_some()
+        {
+            return Some(self.state.selected);
+        }
+
+        self.state.active.or_else(|| {
+            self.state
+                .workspaces
+                .get(self.state.selected)
+                .map(|_| self.state.selected)
+        })
+    }
+
     /// Create a workspace with a real PTY (needs event_tx).
     fn create_workspace(&mut self) {
         let initial_cwd = self
-            .state
-            .active
-            .and_then(|i| self.state.workspaces.get(i))
-            .and_then(|ws| ws.focused_runtime())
-            .and_then(|rt| rt.cwd())
+            .workspace_creation_source()
+            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
         if let Err(e) = self.create_workspace_with_options(initial_cwd, true) {
@@ -1796,9 +1819,7 @@ impl App {
         let initial_cwd = self
             .state
             .active
-            .and_then(|i| self.state.workspaces.get(i))
-            .and_then(|ws| ws.focused_runtime())
-            .and_then(|rt| rt.cwd())
+            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
         if let Err(e) = self.create_tab_with_options(initial_cwd, true) {
@@ -1968,7 +1989,9 @@ impl App {
             focused: self.state.active == Some(index),
             pane_count: ws.public_pane_numbers.len(),
             tab_count: ws.tabs.len(),
-            active_tab_id: self.public_tab_id(index, ws.active_tab).unwrap_or_else(|| format!("{}:{}", index + 1, ws.active_tab + 1)),
+            active_tab_id: self
+                .public_tab_id(index, ws.active_tab)
+                .unwrap_or_else(|| format!("{}:{}", index + 1, ws.active_tab + 1)),
             agent_state: pane_agent_state(agg_state),
         }
     }
@@ -2061,6 +2084,20 @@ fn agent_name(agent: crate::detect::Agent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::workspace::Workspace;
+
+    fn test_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
 
     #[tokio::test]
     async fn raw_input_waits_when_reader_is_gone() {
@@ -2088,5 +2125,31 @@ mod tests {
 
         assert!(!api_request_changes_ui(&read_only));
         assert!(api_request_changes_ui(&mutating));
+    }
+
+    #[test]
+    fn workspace_creation_in_navigate_mode_uses_selected_workspace_seed_cwd() {
+        let mut app = test_app();
+        let mut first = Workspace::test_new("herdr");
+        let first_root = first.tabs[0].root_pane;
+        first.tabs[0]
+            .pane_cwds
+            .insert(first_root, std::path::PathBuf::from("/tmp/herdr"));
+        let mut second = Workspace::test_new("pion");
+        let second_root = second.tabs[0].root_pane;
+        second.tabs[0]
+            .pane_cwds
+            .insert(second_root, std::path::PathBuf::from("/tmp/pion"));
+
+        app.state.workspaces = vec![first, second];
+        app.state.active = Some(0);
+        app.state.selected = 1;
+        app.state.mode = Mode::Navigate;
+
+        let ws_idx = app.workspace_creation_source().unwrap();
+        let seed_cwd = app.seed_cwd_from_workspace(ws_idx).unwrap();
+
+        assert_eq!(ws_idx, 1);
+        assert_eq!(seed_cwd, std::path::PathBuf::from("/tmp/pion"));
     }
 }

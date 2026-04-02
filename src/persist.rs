@@ -97,7 +97,9 @@ pub fn capture(
 fn capture_workspace(ws: &Workspace) -> WorkspaceSnapshot {
     WorkspaceSnapshot {
         custom_name: ws.custom_name.clone(),
-        identity_cwd: ws.identity_cwd.clone(),
+        identity_cwd: ws
+            .resolved_identity_cwd()
+            .unwrap_or_else(|| ws.identity_cwd.clone()),
         tabs: ws.tabs.iter().map(capture_tab).collect(),
         active_tab: ws.active_tab,
     }
@@ -107,9 +109,7 @@ fn capture_tab(tab: &crate::workspace::Tab) -> TabSnapshot {
     let mut panes = HashMap::new();
     for id in tab.panes.keys() {
         let cwd = tab
-            .runtimes
-            .get(id)
-            .and_then(|rt| rt.cwd())
+            .cwd_for_pane(*id)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
         panes.insert(id.raw(), PaneSnapshot { cwd });
     }
@@ -233,6 +233,7 @@ fn restore_tab(
     let layout = TileLayout::from_saved(node, focus);
 
     let mut panes = HashMap::new();
+    let mut pane_cwds = HashMap::new();
     let mut runtimes = HashMap::new();
     for id in &pane_ids {
         let old_id = id_map
@@ -248,13 +249,14 @@ fn restore_tab(
             *id,
             rows,
             cols,
-            cwd,
+            cwd.clone(),
             events.clone(),
             render_notify.clone(),
             render_dirty.clone(),
         ) {
             Ok(runtime) => {
                 panes.insert(*id, PaneState::new());
+                pane_cwds.insert(*id, cwd.clone());
                 runtimes.insert(*id, runtime);
             }
             Err(e) => {
@@ -276,6 +278,7 @@ fn restore_tab(
         root_pane,
         layout,
         panes,
+        pane_cwds,
         runtimes,
         zoomed: snap.zoomed,
         events,

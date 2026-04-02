@@ -21,6 +21,8 @@ pub struct Tab {
     pub layout: TileLayout,
     /// Pane state — always present, testable without PTYs.
     pub panes: HashMap<PaneId, PaneState>,
+    /// Best-effort cwd cache per pane. Live runtime cwd wins when available.
+    pub pane_cwds: HashMap<PaneId, PathBuf>,
     /// Pane runtimes — only present in production (empty in tests).
     pub runtimes: HashMap<PaneId, PaneRuntime>,
     pub zoomed: bool,
@@ -53,7 +55,7 @@ impl Tab {
             root_id,
             rows,
             cols,
-            initial_cwd,
+            initial_cwd.clone(),
             events.clone(),
             render_notify.clone(),
             render_dirty.clone(),
@@ -61,6 +63,8 @@ impl Tab {
 
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new());
+        let mut pane_cwds = HashMap::new();
+        pane_cwds.insert(root_id, initial_cwd);
         let mut runtimes = HashMap::new();
         runtimes.insert(root_id, runtime);
 
@@ -70,6 +74,7 @@ impl Tab {
             root_pane: root_id,
             layout,
             panes,
+            pane_cwds,
             runtimes,
             zoomed: false,
             events,
@@ -102,12 +107,13 @@ impl Tab {
             new_id,
             rows,
             cols,
-            actual_cwd,
+            actual_cwd.clone(),
             self.events.clone(),
             self.render_notify.clone(),
             self.render_dirty.clone(),
         )?;
         self.panes.insert(new_id, PaneState::new());
+        self.pane_cwds.insert(new_id, actual_cwd);
         self.runtimes.insert(new_id, runtime);
         self.zoomed = false;
         Ok(new_id)
@@ -143,6 +149,7 @@ impl Tab {
         }
 
         self.panes.remove(&pane_id);
+        self.pane_cwds.remove(&pane_id);
         let runtime = self.runtimes.remove(&pane_id);
         self.zoomed = false;
         if let Some(next_root) = next_root {
@@ -160,6 +167,17 @@ impl Tab {
 
     pub fn focused_runtime(&self) -> Option<&PaneRuntime> {
         self.runtimes.get(&self.layout.focused())
+    }
+
+    pub fn cwd_for_pane(&self, pane_id: PaneId) -> Option<PathBuf> {
+        self.runtimes
+            .get(&pane_id)
+            .and_then(|rt| rt.cwd())
+            .or_else(|| self.pane_cwds.get(&pane_id).cloned())
+    }
+
+    pub fn root_cwd(&self) -> Option<PathBuf> {
+        self.cwd_for_pane(self.root_pane)
     }
 
     pub fn has_working_pane(&self) -> bool {
@@ -214,7 +232,7 @@ impl Tab {
 pub struct Workspace {
     /// User-provided override. If set, auto-derived identity stops updating.
     pub custom_name: Option<String>,
-    /// Fixed workspace identity source, seeded when the workspace is created.
+    /// Fallback workspace identity source for tests, old snapshots, or missing runtimes.
     pub identity_cwd: PathBuf,
     /// Cached ahead/behind counts for the workspace repo's current branch upstream.
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
@@ -412,16 +430,26 @@ impl Workspace {
         self.custom_name = Some(name);
     }
 
+    pub fn resolved_identity_cwd(&self) -> Option<PathBuf> {
+        self.tabs
+            .first()
+            .and_then(Tab::root_cwd)
+            .or_else(|| Some(self.identity_cwd.clone()))
+    }
+
     pub fn display_name(&self) -> String {
         if let Some(name) = &self.custom_name {
             return name.clone();
         }
 
-        derive_label_from_cwd(&self.identity_cwd)
+        self.resolved_identity_cwd()
+            .map(|cwd| derive_label_from_cwd(&cwd))
+            .unwrap_or_else(|| "workspace".into())
     }
 
     pub fn branch(&self) -> Option<String> {
-        git_branch(&self.identity_cwd)
+        self.resolved_identity_cwd()
+            .and_then(|cwd| git_branch(&cwd))
     }
 
     pub fn git_ahead_behind(&self) -> Option<(usize, usize)> {
@@ -429,7 +457,9 @@ impl Workspace {
     }
 
     pub fn refresh_git_ahead_behind(&mut self) {
-        self.cached_git_ahead_behind = git_ahead_behind(&self.identity_cwd);
+        self.cached_git_ahead_behind = self
+            .resolved_identity_cwd()
+            .and_then(|cwd| git_ahead_behind(&cwd));
     }
 
     pub fn aggregate_state(&self) -> (AgentState, bool) {
@@ -666,12 +696,15 @@ impl Workspace {
         let (layout, root_id) = TileLayout::new();
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new());
+        let mut pane_cwds = HashMap::new();
+        pane_cwds.insert(root_id, identity_cwd.clone());
         let tab = Tab {
             custom_name: None,
             number: 1,
             root_pane: root_id,
             layout,
             panes,
+            pane_cwds,
             runtimes: HashMap::new(),
             zoomed: false,
             events,
@@ -695,6 +728,8 @@ impl Workspace {
         let tab = self.active_tab_mut().expect("workspace must have tab");
         let new_id = tab.layout.split_focused(direction);
         tab.panes.insert(new_id, PaneState::new());
+        let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+        tab.pane_cwds.insert(new_id, cwd);
         self.register_new_pane(new_id);
         new_id
     }
@@ -706,12 +741,16 @@ impl Workspace {
         let (layout, root_id) = TileLayout::new();
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new());
+        let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+        let mut pane_cwds = HashMap::new();
+        pane_cwds.insert(root_id, cwd);
         let tab = Tab {
             custom_name: name.map(str::to_string),
             number: self.tabs.len() + 1,
             root_pane: root_id,
             layout,
             panes,
+            pane_cwds,
             runtimes: HashMap::new(),
             zoomed: false,
             events,
@@ -776,15 +815,24 @@ mod tests {
     }
 
     #[test]
+    fn workspace_identity_follows_first_tab_root_pane_cwd() {
+        let mut ws = Workspace::test_new("ignored");
+        ws.custom_name = None;
+        let root_pane = ws.tabs[0].root_pane;
+        ws.tabs[0]
+            .pane_cwds
+            .insert(root_pane, PathBuf::from("/tmp/pion"));
+
+        assert_eq!(ws.display_name(), "pion");
+        assert_eq!(ws.resolved_identity_cwd(), Some(PathBuf::from("/tmp/pion")));
+    }
+
+    #[test]
     fn pane_details_include_tab_context_when_workspace_has_multiple_tabs() {
         let mut ws = Workspace::test_new("test");
         ws.tabs[0].set_custom_name("main".into());
         let root_pane = ws.tabs[0].root_pane;
-        ws.tabs[0]
-            .panes
-            .get_mut(&root_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Pi);
+        ws.tabs[0].panes.get_mut(&root_pane).unwrap().detected_agent = Some(Agent::Pi);
 
         let tab_idx = ws.test_add_tab(Some("logs"));
         let second_root_pane = ws.tabs[tab_idx].root_pane;

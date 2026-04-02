@@ -223,7 +223,10 @@ fn tab_management_commands_work() {
     let listed_tabs = run_cli(&socket_path, &["tab", "list", "--workspace", "1"]);
     assert!(listed_tabs.status.success());
     let listed_tabs_json: serde_json::Value = serde_json::from_slice(&listed_tabs.stdout).unwrap();
-    assert_eq!(listed_tabs_json["result"]["tabs"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        listed_tabs_json["result"]["tabs"].as_array().unwrap().len(),
+        2
+    );
 
     let renamed_tab = run_cli(&socket_path, &["tab", "rename", "1:2", "logs"]);
     assert!(renamed_tab.status.success());

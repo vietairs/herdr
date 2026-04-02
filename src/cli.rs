@@ -8,8 +8,8 @@ use crate::api;
 use crate::api::schema::{
     EmptyParams, Method, OutputMatch, PaneAgentState, PaneListParams, PaneReadParams,
     PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneTarget, PaneWaitForOutputParams,
-    ReadSource, Request, SplitDirection, Subscription, TabCreateParams, TabListParams, TabRenameParams,
-    TabTarget, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
+    ReadSource, Request, SplitDirection, Subscription, TabCreateParams, TabListParams,
+    TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
 };
 
 pub enum CommandOutcome {

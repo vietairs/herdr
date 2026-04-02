@@ -383,7 +383,9 @@ impl App {
                 let protocol = crate::input::KeyboardProtocol::from_kitty_flags(flags);
                 let bytes = crate::input::encode_terminal_key(key, protocol);
                 if matches!(key_event.code, KeyCode::Esc)
-                    || key_event.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+                    || key_event
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::ALT)
                 {
                     debug!(
                         code = ?key_event.code,
@@ -1863,7 +1865,8 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, tab_idx, pane_id)) = self.agent_detail_target_at(mouse.row) {
+                    if let Some((ws_idx, tab_idx, pane_id)) = self.agent_detail_target_at(mouse.row)
+                    {
                         self.switch_workspace(ws_idx);
                         if let Some(ws) = self.workspaces.get_mut(ws_idx) {
                             ws.switch_tab(tab_idx);
@@ -2103,10 +2106,7 @@ impl AppState {
         None
     }
 
-    fn agent_detail_target_at(
-        &self,
-        row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+    fn agent_detail_target_at(&self, row: u16) -> Option<(usize, usize, crate::layout::PaneId)> {
         if self.sidebar_collapsed {
             return None;
         }
@@ -2129,7 +2129,10 @@ impl AppState {
             content.width,
             total_h.saturating_sub(ws_h) as u16,
         );
-        if detail_area.height < 4 || row < detail_area.y + 3 || row >= detail_area.y + detail_area.height {
+        if detail_area.height < 4
+            || row < detail_area.y + 3
+            || row >= detail_area.y + detail_area.height
+        {
             return None;
         }
 
@@ -2993,7 +2996,10 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 14));
 
         assert_eq!(app.state.workspaces[0].active_tab, 1);
-        assert_eq!(app.state.workspaces[0].tabs[1].layout.focused(), second_pane);
+        assert_eq!(
+            app.state.workspaces[0].tabs[1].layout.focused(),
+            second_pane
+        );
         assert_eq!(app.state.mode, Mode::Terminal);
     }
 

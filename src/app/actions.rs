@@ -11,7 +11,7 @@ use crate::pane::EffectiveStateChange;
 use super::state::{AppState, Mode, ToastKind, ToastNotification};
 
 fn notification_sound_for_state_change(
-    is_active_ws: bool,
+    is_active_tab: bool,
     prev_state: AgentState,
     new_state: AgentState,
 ) -> Option<crate::sound::Sound> {
@@ -21,7 +21,7 @@ fn notification_sound_for_state_change(
 
     match new_state {
         AgentState::Blocked => Some(crate::sound::Sound::Request),
-        AgentState::Idle if prev_state != AgentState::Idle && !is_active_ws => {
+        AgentState::Idle if prev_state != AgentState::Idle && !is_active_tab => {
             Some(crate::sound::Sound::Done)
         }
         _ => None,
@@ -29,11 +29,11 @@ fn notification_sound_for_state_change(
 }
 
 fn notification_toast_for_state_change(
-    is_active_ws: bool,
+    is_active_tab: bool,
     prev_state: AgentState,
     new_state: AgentState,
 ) -> Option<ToastKind> {
-    if is_active_ws || new_state == prev_state {
+    if is_active_tab || new_state == prev_state {
         return None;
     }
 
@@ -60,7 +60,11 @@ fn agent_label(agent: Agent) -> &'static str {
     }
 }
 
-fn notification_context(ws: &crate::workspace::Workspace, ws_idx: usize, pane_id: PaneId) -> String {
+fn notification_context(
+    ws: &crate::workspace::Workspace,
+    ws_idx: usize,
+    pane_id: PaneId,
+) -> String {
     let mut context = format!("{} · {}", ws.display_name(), ws_idx + 1);
     if ws.tabs.len() > 1 {
         if let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) {
@@ -86,6 +90,18 @@ pub struct PaneStateUpdate {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    fn pane_is_in_active_tab(&self, ws_idx: usize, pane_id: PaneId) -> bool {
+        let Some(active_ws_idx) = self.active else {
+            return false;
+        };
+        if active_ws_idx != ws_idx {
+            return false;
+        }
+        self.workspaces[ws_idx]
+            .find_tab_index_for_pane(pane_id)
+            .is_some_and(|tab_idx| tab_idx == self.workspaces[ws_idx].active_tab)
+    }
+
     pub fn switch_workspace(&mut self, idx: usize) {
         if idx < self.workspaces.len() {
             self.active = Some(idx);
@@ -380,7 +396,7 @@ impl AppState {
         pane_id: PaneId,
         change: EffectiveStateChange,
     ) {
-        let is_active_ws = self.active == Some(ws_idx);
+        let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let Some(pane) = self.workspaces[ws_idx]
             .tabs
             .iter_mut()
@@ -391,14 +407,14 @@ impl AppState {
 
         if change.state == AgentState::Idle
             && change.previous_state != AgentState::Idle
-            && !is_active_ws
+            && !is_active_tab
         {
             pane.seen = false;
         }
 
         if self.sound.allows(change.agent) {
             if let Some(sound) = notification_sound_for_state_change(
-                is_active_ws,
+                is_active_tab,
                 change.previous_state,
                 change.state,
             ) {
@@ -410,7 +426,7 @@ impl AppState {
             if let (Some(agent), Some(kind)) = (
                 change.agent,
                 notification_toast_for_state_change(
-                    is_active_ws,
+                    is_active_tab,
                     change.previous_state,
                     change.state,
                 ),
@@ -725,7 +741,28 @@ mod tests {
     }
 
     #[test]
-    fn active_workspace_does_not_set_toast() {
+    fn background_tab_in_active_workspace_still_sets_toast() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.toast_config.enabled = true;
+        state.workspaces[0].tabs[0].set_custom_name("main".into());
+        let second_tab = state.workspaces[0].test_add_tab(Some("logs"));
+        let bg_pane_id = state.workspaces[0].tabs[second_tab].root_pane;
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Blocked,
+        });
+
+        let toast = state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, ToastKind::NeedsAttention);
+        assert_eq!(toast.title, "pi needs attention");
+        assert_eq!(toast.context, "active · 1 · logs");
+    }
+
+    #[test]
+    fn active_workspace_active_tab_does_not_set_toast() {
         let mut state = app_with_workspaces(&["active"]);
         state.active = Some(0);
         state.toast_config.enabled = true;

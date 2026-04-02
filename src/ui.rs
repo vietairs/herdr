@@ -316,7 +316,8 @@ fn compute_sidebar_width(app: &AppState) -> u16 {
         .map(|detail| 3 + detail.label.len() + 1 + state_label(detail.state, detail.seen).len())
         .max()
         .unwrap_or(0);
-    ((max_workspace_line.max(max_agent_line) as u16) + 2).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+    ((max_workspace_line.max(max_agent_line) as u16) + 2)
+        .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
 }
 
 /// Collapsed sidebar: pure glance mode.
