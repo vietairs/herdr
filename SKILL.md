@@ -1,30 +1,33 @@
 ---
 name: herdr
-description: "Control herdr from inside it. Split panes, spawn agents, read output, wait for state changes, and manage workspaces — all via CLI commands that talk to the running herdr instance over a local unix socket. Use when running inside herdr (HERDR_ENV=1)."
+description: "Control herdr from inside it. Manage workspaces and tabs, split panes, spawn agents, read output, and wait for state changes — all via CLI commands that talk to the running herdr instance over a local unix socket. Use when running inside herdr (HERDR_ENV=1)."
 ---
 
 # herdr — agent skill
 
-you are running inside herdr, a terminal-native agent multiplexer. herdr gives you workspaces and panes — each pane is a real terminal with its own shell, agent, server, or log stream — and you can control all of it from the cli.
+you are running inside herdr, a terminal-native agent multiplexer. herdr gives you workspaces, tabs, and panes — each pane is a real terminal with its own shell, agent, server, or log stream — and you can control all of it from the cli.
 
 this means you can:
 
 - see what other panes and agents are doing
+- create tabs for separate subcontexts inside one workspace
 - split panes and run commands in them
 - start servers, watch logs, and run tests in sibling panes
 - wait for specific output before continuing
 - wait for another agent to finish
 - spawn more agent instances
 
-the `herdr` binary is available in your PATH. its workspace, pane, and wait commands talk to the running herdr instance over a local unix socket.
+the `herdr` binary is available in your PATH. its workspace, tab, pane, and wait commands talk to the running herdr instance over a local unix socket.
 
 if you need the raw protocol or full api reference, read [`SOCKET_API.md`](./SOCKET_API.md).
 
 ## concepts
 
-**workspaces** are project contexts. each workspace has one or more panes.
+**workspaces** are project contexts. each workspace has one or more tabs.
 
-**panes** are terminal splits inside a workspace. each pane runs its own process — a shell, an agent, a server, anything.
+**tabs** are subcontexts inside a workspace. each tab has one or more panes.
+
+**panes** are terminal splits inside a tab. each pane runs its own process — a shell, an agent, a server, anything.
 
 **agent state** is detected automatically by herdr. each pane can be:
 
@@ -33,9 +36,9 @@ if you need the raw protocol or full api reference, read [`SOCKET_API.md`](./SOC
 - `blocked` — agent needs input or approval
 - `unknown` — no recognized agent, or just a shell
 
-**ids** — workspace ids look like `1`, `2`. pane ids look like `1-1`, `1-2`, `2-1`. these are compact public ids for the current live session.
+**ids** — workspace ids look like `1`, `2`. tab ids look like `1:1`, `1:2`, `2:1`. pane ids look like `1-1`, `1-2`, `2-1`. these are compact public ids for the current live session.
 
-important: ids can compact when panes or workspaces are closed. do not treat them as durable ids.
+important: ids can compact when tabs, panes, or workspaces are closed. do not treat them as durable ids.
 
 ## discover yourself
 
@@ -51,6 +54,38 @@ list workspaces:
 
 ```bash
 herdr workspace list
+```
+
+## tab management
+
+list tabs in the current workspace:
+
+```bash
+herdr tab list --workspace 1
+```
+
+create a new tab:
+
+```bash
+herdr tab create --workspace 1
+```
+
+rename it:
+
+```bash
+herdr tab rename 1:2 "logs"
+```
+
+focus it:
+
+```bash
+herdr tab focus 1:2
+```
+
+close it:
+
+```bash
+herdr tab close 1:2
 ```
 
 ## read another pane
@@ -221,7 +256,7 @@ herdr pane read 1-1 --source recent --lines 100
 
 ## notes
 
-- `workspace list`, `pane list`, `workspace create`, `pane split`, `wait output`, and `wait agent-state` print json on success.
+- `workspace list`, `workspace create`, `tab list`, `tab create`, `tab get`, `tab focus`, `tab rename`, `tab close`, `pane list`, `pane get`, `pane split`, `wait output`, and `wait agent-state` print json on success.
 - `pane read` prints text, not json.
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success.
 - parse ids from `workspace create` and `pane split` responses when you need the new ids. do not guess.

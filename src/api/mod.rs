@@ -430,6 +430,22 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceFocused,
                 last_sequence: 0,
             })),
+            Subscription::TabCreated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::TabCreated,
+                last_sequence: 0,
+            })),
+            Subscription::TabClosed {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::TabClosed,
+                last_sequence: 0,
+            })),
+            Subscription::TabFocused {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::TabFocused,
+                last_sequence: 0,
+            })),
+            Subscription::TabRenamed {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::TabRenamed,
+                last_sequence: 0,
+            })),
             Subscription::PaneCreated {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::PaneCreated,
                 last_sequence: 0,

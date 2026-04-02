@@ -197,6 +197,7 @@ fn main() -> io::Result<()> {
         println!("Usage: herdr [options]");
         println!("       herdr update");
         println!("       herdr workspace <subcommand> ...");
+        println!("       herdr tab <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr wait <subcommand> ...");
         println!("       herdr integration <subcommand> ...");
@@ -204,6 +205,7 @@ fn main() -> io::Result<()> {
         println!("Commands:");
         println!("  update              Download and install the latest version");
         println!("  workspace           workspace helpers over the socket api");
+        println!("  tab                 tab helpers over the socket api");
         println!("  pane                pane control helpers over the socket api");
         println!("  wait                blocking wait helpers over the socket api");
         println!("  integration         manage built-in agent integrations");

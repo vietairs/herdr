@@ -24,6 +24,18 @@ pub enum Method {
     WorkspaceRename(WorkspaceRenameParams),
     #[serde(rename = "workspace.close")]
     WorkspaceClose(WorkspaceTarget),
+    #[serde(rename = "tab.create")]
+    TabCreate(TabCreateParams),
+    #[serde(rename = "tab.list")]
+    TabList(TabListParams),
+    #[serde(rename = "tab.get")]
+    TabGet(TabTarget),
+    #[serde(rename = "tab.focus")]
+    TabFocus(TabTarget),
+    #[serde(rename = "tab.rename")]
+    TabRename(TabRenameParams),
+    #[serde(rename = "tab.close")]
+    TabClose(TabTarget),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.list")]
@@ -69,6 +81,11 @@ pub struct PaneTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabTarget {
+    pub tab_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceCreateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -79,6 +96,28 @@ pub struct WorkspaceCreateParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRenameParams {
     pub workspace_id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabCreateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub focus: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TabListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabRenameParams {
+    pub tab_id: String,
     pub label: String,
 }
 
@@ -174,6 +213,14 @@ pub enum Subscription {
     WorkspaceClosed {},
     #[serde(rename = "workspace.focused")]
     WorkspaceFocused {},
+    #[serde(rename = "tab.created")]
+    TabCreated {},
+    #[serde(rename = "tab.closed")]
+    TabClosed {},
+    #[serde(rename = "tab.focused")]
+    TabFocused {},
+    #[serde(rename = "tab.renamed")]
+    TabRenamed {},
     #[serde(rename = "pane.created")]
     PaneCreated {},
     #[serde(rename = "pane.closed")]
@@ -247,6 +294,23 @@ pub enum EventMatch {
     WorkspaceFocused {
         workspace_id: String,
     },
+    TabCreated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+    },
+    TabClosed {
+        tab_id: String,
+    },
+    TabRenamed {
+        tab_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    TabFocused {
+        tab_id: String,
+    },
     PaneCreated {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane_id: Option<String>,
@@ -285,6 +349,10 @@ pub enum EventKind {
     WorkspaceClosed,
     WorkspaceRenamed,
     WorkspaceFocused,
+    TabCreated,
+    TabClosed,
+    TabRenamed,
+    TabFocused,
     PaneCreated,
     PaneClosed,
     PaneFocused,
@@ -324,6 +392,12 @@ pub enum ResponseResult {
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
     },
+    TabInfo {
+        tab: TabInfo,
+    },
+    TabList {
+        tabs: Vec<TabInfo>,
+    },
     PaneInfo {
         pane: PaneInfo,
     },
@@ -353,6 +427,19 @@ pub struct WorkspaceInfo {
     pub label: String,
     pub focused: bool,
     pub pane_count: usize,
+    pub tab_count: usize,
+    pub active_tab_id: String,
+    pub agent_state: PaneAgentState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabInfo {
+    pub tab_id: String,
+    pub workspace_id: String,
+    pub number: usize,
+    pub label: String,
+    pub focused: bool,
+    pub pane_count: usize,
     pub agent_state: PaneAgentState,
 }
 
@@ -360,6 +447,7 @@ pub struct WorkspaceInfo {
 pub struct PaneInfo {
     pub pane_id: String,
     pub workspace_id: String,
+    pub tab_id: String,
     pub focused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -373,6 +461,7 @@ pub struct PaneInfo {
 pub struct PaneReadResult {
     pub pane_id: String,
     pub workspace_id: String,
+    pub tab_id: String,
     pub source: ReadSource,
     pub text: String,
     pub revision: u64,
@@ -436,6 +525,22 @@ pub enum EventData {
         label: String,
     },
     WorkspaceFocused {
+        workspace_id: String,
+    },
+    TabCreated {
+        tab: TabInfo,
+    },
+    TabClosed {
+        tab_id: String,
+        workspace_id: String,
+    },
+    TabRenamed {
+        tab_id: String,
+        workspace_id: String,
+        label: String,
+    },
+    TabFocused {
+        tab_id: String,
         workspace_id: String,
     },
     PaneCreated {
@@ -682,6 +787,7 @@ mod tests {
                 read: PaneReadResult {
                     pane_id: "p_1_1".into(),
                     workspace_id: "w_1".into(),
+                    tab_id: "t_1_1".into(),
                     source: ReadSource::Recent,
                     text: "auth: received\n".into(),
                     revision: 0,

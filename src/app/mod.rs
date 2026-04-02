@@ -90,6 +90,10 @@ fn api_request_changes_ui(request: &crate::api::schema::Request) -> bool {
             | Method::WorkspaceFocus(_)
             | Method::WorkspaceRename(_)
             | Method::WorkspaceClose(_)
+            | Method::TabCreate(_)
+            | Method::TabFocus(_)
+            | Method::TabRename(_)
+            | Method::TabClose(_)
             | Method::PaneSplit(_)
             | Method::PaneReportAgent(_)
             | Method::PaneClearAgentAuthority(_)
@@ -706,6 +710,15 @@ impl App {
                     workspace_id: self.public_workspace_id(ws_idx),
                 },
             });
+            if let Some(tab_id) = self.public_tab_id(ws_idx, self.state.workspaces[ws_idx].active_tab) {
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::TabFocused,
+                    data: crate::api::schema::EventData::TabFocused {
+                        tab_id,
+                        workspace_id: self.public_workspace_id(ws_idx),
+                    },
+                });
+            }
             if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::PaneFocused,
@@ -735,6 +748,11 @@ impl App {
         (ws_idx + 1).to_string()
     }
 
+    fn public_tab_id(&self, ws_idx: usize, tab_idx: usize) -> Option<String> {
+        self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+        Some(format!("{}:{}", ws_idx + 1, tab_idx + 1))
+    }
+
     fn public_pane_id(&self, ws_idx: usize, pane_id: crate::layout::PaneId) -> Option<String> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_number = ws.public_pane_number(pane_id)?;
@@ -746,6 +764,22 @@ impl App {
             return raw.parse::<usize>().ok()?.checked_sub(1);
         }
         id.parse::<usize>().ok()?.checked_sub(1)
+    }
+
+    fn parse_tab_id(&self, id: &str) -> Option<(usize, usize)> {
+        if let Some(rest) = id.strip_prefix("t_") {
+            let (ws_raw, tab_raw) = rest.split_once('_')?;
+            let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
+            let tab_idx = tab_raw.parse::<usize>().ok()?.checked_sub(1)?;
+            self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+            return Some((ws_idx, tab_idx));
+        }
+
+        let (ws_raw, tab_raw) = id.split_once(':')?;
+        let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
+        let tab_idx = tab_raw.parse::<usize>().ok()?.checked_sub(1)?;
+        self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+        Some((ws_idx, tab_idx))
     }
 
     fn parse_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
@@ -777,7 +811,7 @@ impl App {
 
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, PaneListParams, PaneReadResult, ReadSource,
-            ResponseResult, SuccessResponse,
+            ResponseResult, SuccessResponse, TabListParams,
         };
 
         let response = match request.method {
@@ -836,6 +870,12 @@ impl App {
                                 workspace: workspace.clone(),
                             },
                         });
+                        if let Some(tab) = self.tab_info(index, 0) {
+                            self.emit_event(crate::api::schema::EventEnvelope {
+                                event: crate::api::schema::EventKind::TabCreated,
+                                data: crate::api::schema::EventData::TabCreated { tab },
+                            });
+                        }
                         if let Some(pane_id) = self.state.workspaces[index]
                             .layout
                             .pane_ids()
@@ -917,6 +957,13 @@ impl App {
                     .unwrap();
                 };
                 ws.set_custom_name(params.label.clone());
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::WorkspaceRenamed,
+                    data: crate::api::schema::EventData::WorkspaceRenamed {
+                        workspace_id: self.public_workspace_id(index),
+                        label: params.label,
+                    },
+                });
                 SuccessResponse {
                     id: request.id,
                     result: ResponseResult::WorkspaceInfo {
@@ -951,6 +998,278 @@ impl App {
                     event: crate::api::schema::EventKind::WorkspaceClosed,
                     data: crate::api::schema::EventData::WorkspaceClosed {
                         workspace_id: target.workspace_id,
+                    },
+                });
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
+            Method::TabList(TabListParams { workspace_id }) => {
+                let tabs = if let Some(workspace_id) = workspace_id {
+                    let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "workspace_not_found".into(),
+                                message: format!("workspace {} not found", workspace_id),
+                            },
+                        })
+                        .unwrap();
+                    };
+                    let Some(ws) = self.state.workspaces.get(ws_idx) else {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "workspace_not_found".into(),
+                                message: format!("workspace {} not found", workspace_id),
+                            },
+                        })
+                        .unwrap();
+                    };
+                    (0..ws.tabs.len())
+                        .filter_map(|tab_idx| self.tab_info(ws_idx, tab_idx))
+                        .collect()
+                } else {
+                    let mut tabs = Vec::new();
+                    for (ws_idx, ws) in self.state.workspaces.iter().enumerate() {
+                        for tab_idx in 0..ws.tabs.len() {
+                            if let Some(tab) = self.tab_info(ws_idx, tab_idx) {
+                                tabs.push(tab);
+                            }
+                        }
+                    }
+                    tabs
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::TabList { tabs },
+                }
+            }
+            Method::TabGet(target) => {
+                let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(tab) = self.tab_info(ws_idx, tab_idx) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::TabInfo { tab },
+                }
+            }
+            Method::TabCreate(params) => {
+                let ws_idx = if let Some(workspace_id) = params.workspace_id {
+                    let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "workspace_not_found".into(),
+                                message: format!("workspace {} not found", workspace_id),
+                            },
+                        })
+                        .unwrap();
+                    };
+                    ws_idx
+                } else if let Some(active) = self.state.active {
+                    active
+                } else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "workspace_not_found".into(),
+                            message: "no active workspace".into(),
+                        },
+                    })
+                    .unwrap();
+                };
+                let cwd = params
+                    .cwd
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| {
+                        self.state.workspaces.get(ws_idx).and_then(|ws| {
+                            ws.active_tab()
+                                .and_then(|tab| tab.focused_runtime())
+                                .and_then(|rt| rt.cwd())
+                        })
+                    })
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("/"));
+                let (rows, cols) = self.state.estimate_pane_size();
+                let result = self
+                    .state
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .ok_or_else(|| std::io::Error::other("workspace disappeared"))
+                    .and_then(|ws| ws.create_tab(rows, cols, cwd));
+                match result {
+                    Ok(tab_idx) => {
+                        if params.focus {
+                            self.state.switch_workspace(ws_idx);
+                            if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                                ws.switch_tab(tab_idx);
+                            }
+                            self.state.mode = Mode::Terminal;
+                        }
+                        let tab = self.tab_info(ws_idx, tab_idx).unwrap();
+                        if let Some(pane_id) = self.state.workspaces[ws_idx].tabs[tab_idx]
+                            .layout
+                            .pane_ids()
+                            .first()
+                            .copied()
+                        {
+                            self.emit_event(crate::api::schema::EventEnvelope {
+                                event: crate::api::schema::EventKind::TabCreated,
+                                data: crate::api::schema::EventData::TabCreated {
+                                    tab: tab.clone(),
+                                },
+                            });
+                            if let Some(pane) = self.pane_info(ws_idx, pane_id) {
+                                self.emit_event(crate::api::schema::EventEnvelope {
+                                    event: crate::api::schema::EventKind::PaneCreated,
+                                    data: crate::api::schema::EventData::PaneCreated { pane },
+                                });
+                            }
+                        }
+                        SuccessResponse {
+                            id: request.id,
+                            result: ResponseResult::TabInfo { tab },
+                        }
+                    }
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "tab_create_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
+                    }
+                }
+            }
+            Method::TabFocus(target) => {
+                let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                self.state.switch_workspace(ws_idx);
+                if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                    ws.switch_tab(tab_idx);
+                }
+                let tab = self.tab_info(ws_idx, tab_idx).unwrap();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::TabInfo { tab },
+                }
+            }
+            Method::TabRename(params) => {
+                let Some((ws_idx, tab_idx)) = self.parse_tab_id(&params.tab_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", params.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(tab) = self
+                    .state
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .and_then(|ws| ws.tabs.get_mut(tab_idx))
+                else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", params.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                tab.set_custom_name(params.label.clone());
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::TabRenamed,
+                    data: crate::api::schema::EventData::TabRenamed {
+                        tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
+                        workspace_id: self.public_workspace_id(ws_idx),
+                        label: params.label,
+                    },
+                });
+                let tab = self.tab_info(ws_idx, tab_idx).unwrap();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::TabInfo { tab },
+                }
+            }
+            Method::TabClose(target) => {
+                let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_not_found".into(),
+                            message: format!("tab {} not found", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                if ws.tabs.len() <= 1 {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_close_failed".into(),
+                            message: "cannot close the last tab in a workspace".into(),
+                        },
+                    })
+                    .unwrap();
+                }
+                if !ws.close_tab(tab_idx) {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "tab_close_failed".into(),
+                            message: format!("tab {} could not be closed", target.tab_id),
+                        },
+                    })
+                    .unwrap();
+                }
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::TabClosed,
+                    data: crate::api::schema::EventData::TabClosed {
+                        tab_id: target.tab_id,
+                        workspace_id: self.public_workspace_id(ws_idx),
                     },
                 });
                 SuccessResponse {
@@ -1083,6 +1402,16 @@ impl App {
                     })
                     .unwrap();
                 };
+                let Some(tab_idx) = self.state.workspaces.get(ws_idx).and_then(|ws| ws.find_tab_index_for_pane(pane_id)) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
                 let requested_lines = params.lines.unwrap_or(80).min(1000) as usize;
                 let text = match params.source {
                     ReadSource::Visible => pane.visible_text(),
@@ -1094,6 +1423,7 @@ impl App {
                         read: PaneReadResult {
                             pane_id: params.pane_id,
                             workspace_id,
+                            tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
                             source: params.source,
                             text,
                             revision: 0,
@@ -1557,6 +1887,26 @@ impl App {
         }
     }
 
+    fn tab_info(&self, ws_idx: usize, tab_idx: usize) -> Option<crate::api::schema::TabInfo> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let tab = ws.tabs.get(tab_idx)?;
+        let (agg_state, _) = tab
+            .panes
+            .values()
+            .map(|pane| (pane.state, pane.seen))
+            .max_by_key(|(state, seen)| tab_attention_priority(*state, *seen))
+            .unwrap_or((crate::detect::AgentState::Unknown, true));
+        Some(crate::api::schema::TabInfo {
+            tab_id: self.public_tab_id(ws_idx, tab_idx)?,
+            workspace_id: self.public_workspace_id(ws_idx),
+            number: tab_idx + 1,
+            label: tab.display_name(),
+            focused: self.state.active == Some(ws_idx) && ws.active_tab == tab_idx,
+            pane_count: tab.panes.len(),
+            agent_state: pane_agent_state(agg_state),
+        })
+    }
+
     fn pane_info(
         &self,
         ws_idx: usize,
@@ -1565,13 +1915,16 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane = ws.pane_state(pane_id)?;
         let runtime = ws.runtime(pane_id);
+        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
         let focused = self.state.active == Some(ws_idx)
+            && ws.active_tab == tab_idx
             && ws
                 .focused_pane_id()
                 .is_some_and(|focused| focused == pane_id);
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             workspace_id: self.public_workspace_id(ws_idx),
+            tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             focused,
             cwd: runtime
                 .and_then(|rt| rt.cwd())
@@ -1614,8 +1967,20 @@ impl App {
             label: ws.display_name(),
             focused: self.state.active == Some(index),
             pane_count: ws.public_pane_numbers.len(),
+            tab_count: ws.tabs.len(),
+            active_tab_id: self.public_tab_id(index, ws.active_tab).unwrap_or_else(|| format!("{}:{}", index + 1, ws.active_tab + 1)),
             agent_state: pane_agent_state(agg_state),
         }
+    }
+}
+
+fn tab_attention_priority(state: crate::detect::AgentState, seen: bool) -> u8 {
+    match (state, seen) {
+        (crate::detect::AgentState::Blocked, _) => 4,
+        (crate::detect::AgentState::Idle, false) => 3,
+        (crate::detect::AgentState::Working, _) => 2,
+        (crate::detect::AgentState::Idle, true) => 1,
+        (crate::detect::AgentState::Unknown, _) => 0,
     }
 }
 

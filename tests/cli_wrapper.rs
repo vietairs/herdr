@@ -200,6 +200,55 @@ fn workspace_and_pane_management_commands_work() {
 }
 
 #[test]
+fn tab_management_commands_work() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    assert!(created.status.success());
+
+    let created_tab = run_cli(&socket_path, &["tab", "create", "--workspace", "1"]);
+    assert!(created_tab.status.success());
+    let created_tab_json: serde_json::Value = serde_json::from_slice(&created_tab.stdout).unwrap();
+    assert_eq!(created_tab_json["result"]["tab"]["tab_id"], "1:2");
+
+    let listed_tabs = run_cli(&socket_path, &["tab", "list", "--workspace", "1"]);
+    assert!(listed_tabs.status.success());
+    let listed_tabs_json: serde_json::Value = serde_json::from_slice(&listed_tabs.stdout).unwrap();
+    assert_eq!(listed_tabs_json["result"]["tabs"].as_array().unwrap().len(), 2);
+
+    let renamed_tab = run_cli(&socket_path, &["tab", "rename", "1:2", "logs"]);
+    assert!(renamed_tab.status.success());
+    let renamed_tab_json: serde_json::Value = serde_json::from_slice(&renamed_tab.stdout).unwrap();
+    assert_eq!(renamed_tab_json["result"]["tab"]["label"], "logs");
+
+    let focused_tab = run_cli(&socket_path, &["tab", "focus", "1:1"]);
+    assert!(focused_tab.status.success());
+    let focused_tab_json: serde_json::Value = serde_json::from_slice(&focused_tab.stdout).unwrap();
+    assert_eq!(focused_tab_json["result"]["tab"]["tab_id"], "1:1");
+
+    let tab_get = run_cli(&socket_path, &["tab", "get", "1:2"]);
+    assert!(tab_get.status.success());
+    let tab_get_json: serde_json::Value = serde_json::from_slice(&tab_get.stdout).unwrap();
+    assert_eq!(tab_get_json["result"]["tab"]["tab_id"], "1:2");
+
+    let closed_tab = run_cli(&socket_path, &["tab", "close", "1:2"]);
+    assert!(closed_tab.status.success());
+    let closed_tab_json: serde_json::Value = serde_json::from_slice(&closed_tab.stdout).unwrap();
+    assert_eq!(closed_tab_json["result"]["type"], "ok");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn pane_run_read_and_wait_commands_work() {
     let base = unique_test_dir();
     let config_home = base.join("config");

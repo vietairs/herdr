@@ -79,11 +79,12 @@ herdr is not just a passive manager for humans watching agents. it gives agents 
 - [`SKILL.md`](./SKILL.md) — the reusable agent skill. use this if you want an agent inside herdr to learn the workflow quickly through the existing cli surface.
 - [`SOCKET_API.md`](./SOCKET_API.md) — the direct integration doc. use this if you want the low-level socket protocol, event subscriptions, or the cli wrapper reference that sits on top of it.
 
-those two paths meet at the same control surface. the built-in `herdr workspace ...`, `herdr pane ...`, and `herdr wait ...` commands all talk to the same local socket api.
+those two paths meet at the same control surface. the built-in `herdr workspace ...`, `herdr tab ...`, `herdr pane ...`, and `herdr wait ...` commands all talk to the same local socket api.
 
 that means agents running inside herdr can do useful orchestration work themselves:
 
 - create new workspaces for parallel tasks
+- create and focus tabs inside a workspace
 - split panes for servers, logs, tests, or scratch work
 - spawn other agents in sibling panes
 - read pane output or wait for output matches
@@ -243,6 +244,8 @@ for all keybindings, onboarding, notification, sound, ui options, and environmen
 
 herdr saves your workspaces, tabs, pane layouts, pane working directories, and focused tab/pane on exit. when you restart, everything is restored. sessions are stored at `~/.config/herdr/session.json`.
 
+through the socket api, tabs are first-class too now. raw integrations and cli wrappers can list/create/focus/rename/close tabs directly while pane ids stay workspace-scoped.
+
 use `--no-session` to start fresh.
 
 ## how agent detection works
@@ -296,7 +299,7 @@ for direct integration details, use the docs instead of reverse-engineering the 
 - [`SKILL.md`](./SKILL.md) — reusable agent skill for agents already running inside herdr
 - [`SOCKET_API.md`](./SOCKET_API.md) — canonical socket protocol + cli wrapper reference
 
-`SOCKET_API.md` now covers transport, request/response envelopes, workspace and pane methods, subscription behavior, and the `herdr workspace`, `herdr pane`, and `herdr wait` commands that wrap the same socket surface.
+`SOCKET_API.md` now covers transport, request/response envelopes, workspace, tab, and pane methods, subscription behavior, and the `herdr workspace`, `herdr tab`, `herdr pane`, and `herdr wait` commands that wrap the same socket surface.
 
 ## what's coming
 
@@ -315,12 +318,13 @@ there will be rough edges. if you hit one, [open an issue](https://github.com/og
 
 ## cli wrappers
 
-herdr's workspace, pane, and wait commands are documented in [`SOCKET_API.md`](./SOCKET_API.md) together with the socket methods they wrap.
+herdr's workspace, tab, pane, and wait commands are documented in [`SOCKET_API.md`](./SOCKET_API.md) together with the socket methods they wrap.
 
 workspace ids are compact public ids like `1`, `2`, `3`.
+tab ids are compact public ids like `1:1`, `1:2`, `2:1`.
 pane ids are compact public ids like `1-1`, `1-2`, `2-1`.
 
-even with tabs enabled, pane ids remain workspace-scoped public ids rather than `workspace-tab-pane` triples. they are positional within the current live session, so numbering compacts when workspaces or panes are closed.
+even with tabs enabled, pane ids remain workspace-scoped public ids rather than `workspace-tab-pane` triples. both tab ids and pane ids are positional within the current live session, so numbering compacts when tabs, workspaces, or panes are closed.
 
 ## building from source
 

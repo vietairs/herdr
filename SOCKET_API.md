@@ -9,7 +9,7 @@ if you are teaching an agent that is already running inside herdr, start with [`
 there are three practical ways to integrate with herdr:
 
 - **agent skill** — [`SKILL.md`](./SKILL.md). best when an agent inside herdr just needs to learn the workflow quickly.
-- **cli wrappers** — `herdr workspace ...`, `herdr pane ...`, `herdr wait ...`. best for shell scripts and simple orchestration.
+- **cli wrappers** — `herdr workspace ...`, `herdr tab ...`, `herdr pane ...`, `herdr wait ...`. best for shell scripts and simple orchestration.
 - **raw socket api** — best when you want direct request/response control or long-lived event subscriptions.
 
 these layers are intentionally stacked on top of the same control surface.
@@ -87,7 +87,12 @@ that means:
 
 these are compact public ids for the current live session. they are **not durable database ids**. if a workspace or pane closes, higher numbers compact down.
 
-herdr now supports tabs inside workspaces in the ui, but pane ids remain workspace-scoped public ids like `1-2` rather than `workspace-tab-pane` triples. tabs are not exposed as first-class socket api objects yet.
+tabs are first-class socket api objects now.
+
+- tab ids look like `1:1`, `1:2`, `2:1`
+- first number = workspace number
+- second number = tab number within that workspace
+- pane ids still stay workspace-scoped like `1-2` rather than becoming `workspace-tab-pane` triples
 
 ## core objects
 
@@ -100,6 +105,22 @@ herdr now supports tabs inside workspaces in the ui, but pane ids remain workspa
   "label": "herdr",
   "focused": true,
   "pane_count": 1,
+  "tab_count": 1,
+  "active_tab_id": "1:1",
+  "agent_state": "unknown"
+}
+```
+
+`tab_info` responses contain objects like:
+
+```json
+{
+  "tab_id": "1:1",
+  "workspace_id": "1",
+  "number": 1,
+  "label": "1",
+  "focused": true,
+  "pane_count": 1,
   "agent_state": "unknown"
 }
 ```
@@ -110,6 +131,7 @@ herdr now supports tabs inside workspaces in the ui, but pane ids remain workspa
 {
   "pane_id": "1-1",
   "workspace_id": "1",
+  "tab_id": "1:1",
   "focused": true,
   "cwd": "/home/can/Projects/herdr",
   "agent": "pi",
@@ -124,6 +146,7 @@ herdr now supports tabs inside workspaces in the ui, but pane ids remain workspa
 {
   "pane_id": "1-1",
   "workspace_id": "1",
+  "tab_id": "1:1",
   "source": "recent",
   "text": "...",
   "revision": 0,
@@ -149,6 +172,12 @@ agent states are:
 | `workspace.focus` | focus a workspace | `workspace_info` |
 | `workspace.rename` | rename a workspace | `workspace_info` |
 | `workspace.close` | close a workspace | `ok` |
+| `tab.list` | list tabs, optionally filtered by workspace | `tab_list` |
+| `tab.get` | inspect one tab | `tab_info` |
+| `tab.create` | create a tab in a workspace | `tab_info` |
+| `tab.focus` | focus a tab | `tab_info` |
+| `tab.rename` | rename a tab | `tab_info` |
+| `tab.close` | close a tab | `ok` |
 | `pane.list` | list panes, optionally filtered by workspace | `pane_list` |
 | `pane.get` | inspect one pane | `pane_info` |
 | `pane.read` | read pane output | `pane_read` |
@@ -218,6 +247,8 @@ example response:
       "label": "herdr",
       "focused": true,
       "pane_count": 1,
+      "tab_count": 1,
+      "active_tab_id": "1:1",
       "agent_state": "unknown"
     }
   }
@@ -269,6 +300,104 @@ returns:
   }
 }
 ```
+
+## tab methods
+
+### `tab.list`
+
+request with no filter:
+
+```json
+{
+  "id": "req_tabs",
+  "method": "tab.list",
+  "params": {}
+}
+```
+
+request filtered to one workspace:
+
+```json
+{
+  "id": "req_tabs_ws",
+  "method": "tab.list",
+  "params": {
+    "workspace_id": "1"
+  }
+}
+```
+
+returns `tab_list`.
+
+### `tab.get`
+
+params:
+
+```json
+{
+  "tab_id": "1:2"
+}
+```
+
+returns `tab_info`.
+
+### `tab.create`
+
+params:
+
+```json
+{
+  "workspace_id": "1",
+  "cwd": "/home/can/Projects/herdr",
+  "focus": true
+}
+```
+
+notes:
+
+- `workspace_id` is optional and defaults to the active workspace
+- `cwd` is optional; if omitted, herdr uses the focused pane cwd in that workspace when available
+- `focus` is optional in raw socket requests and defaults to `false`
+- the cli wrapper focuses by default unless you pass `--no-focus`
+
+returns `tab_info` for the new tab.
+
+### `tab.focus`
+
+params:
+
+```json
+{
+  "tab_id": "1:2"
+}
+```
+
+returns focused `tab_info`.
+
+### `tab.rename`
+
+params:
+
+```json
+{
+  "tab_id": "1:2",
+  "label": "logs"
+}
+```
+
+returns updated `tab_info`.
+
+### `tab.close`
+
+params:
+
+```json
+{
+  "tab_id": "1:2"
+}
+```
+
+returns `ok`. the last tab in a workspace cannot be closed.
 
 ## pane methods
 
@@ -345,6 +474,7 @@ example response:
     "read": {
       "pane_id": "1-1",
       "workspace_id": "1",
+      "tab_id": "1:1",
       "source": "recent",
       "text": "...",
       "revision": 0,
@@ -464,6 +594,7 @@ example success response:
     "read": {
       "pane_id": "1-1",
       "workspace_id": "1",
+      "tab_id": "1:1",
       "source": "recent",
       "text": "...server ready...",
       "revision": 0,
@@ -497,6 +628,10 @@ base lifecycle subscriptions:
 - `workspace.created`
 - `workspace.closed`
 - `workspace.focused`
+- `tab.created`
+- `tab.closed`
+- `tab.focused`
+- `tab.renamed`
 - `pane.created`
 - `pane.closed`
 - `pane.focused`
@@ -533,6 +668,10 @@ request:
     "subscriptions": [
       { "type": "workspace.created" },
       { "type": "workspace.focused" },
+      { "type": "tab.created" },
+      { "type": "tab.focused" },
+      { "type": "tab.renamed" },
+      { "type": "tab.closed" },
       { "type": "pane.created" },
       { "type": "pane.focused" },
       { "type": "pane.agent_detected" },
@@ -555,6 +694,8 @@ example pushed event:
       "label": "herdr",
       "focused": true,
       "pane_count": 1,
+      "tab_count": 1,
+      "active_tab_id": "1:1",
       "agent_state": "unknown"
     }
   }
@@ -604,6 +745,7 @@ example pushed `pane.output_matched` event:
     "read": {
       "pane_id": "1-1",
       "workspace_id": "1",
+      "tab_id": "1:1",
       "source": "recent",
       "text": "...server ready...",
       "revision": 0,
@@ -644,6 +786,17 @@ herdr workspace rename <workspace_id> <label>
 herdr workspace close <workspace_id>
 ```
 
+tab commands:
+
+```text
+herdr tab list [--workspace <workspace_id>]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--no-focus]
+herdr tab get <tab_id>
+herdr tab focus <tab_id>
+herdr tab rename <tab_id> <label>
+herdr tab close <tab_id>
+```
+
 pane commands:
 
 ```text
@@ -667,6 +820,7 @@ herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeo
 ### cli behavior notes
 
 - `workspace create` focuses by default; pass `--no-focus` to keep focus where it is
+- `tab create` focuses by default; pass `--no-focus` to keep focus where it is
 - `pane split` focuses the new pane by default; pass `--no-focus` to keep focus on the original pane
 - `pane read` prints **text**, not json
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success
