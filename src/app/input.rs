@@ -2458,7 +2458,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, workspace::Workspace};
+    use crate::{config::Config, detect::Agent, workspace::Workspace};
     use crossterm::event::{KeyModifiers, MouseEvent};
     use ratatui::layout::Rect;
 
@@ -2986,8 +2986,19 @@ mod tests {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         ws.tabs[0].set_custom_name("main".into());
+        let first_pane = ws.tabs[0].root_pane;
+        ws.tabs[0]
+            .panes
+            .get_mut(&first_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
         let second_tab = ws.test_add_tab(Some("logs"));
         let second_pane = ws.tabs[second_tab].root_pane;
+        ws.tabs[second_tab]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;

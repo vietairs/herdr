@@ -205,24 +205,22 @@ impl Tab {
         self.layout
             .pane_ids()
             .iter()
-            .map(|id| {
+            .filter_map(|id| {
                 let pane = self.panes.get(id);
-                let agent = pane.and_then(|p| p.detected_agent);
+                let agent = pane.and_then(|p| p.detected_agent)?;
                 let state = pane.map(|p| p.state).unwrap_or(AgentState::Unknown);
                 let seen = pane.map(|p| p.seen).unwrap_or(true);
-                let agent_label = agent
-                    .map(|a| agent_name(a).to_string())
-                    .unwrap_or_else(|| "shell".to_string());
-                PaneDetail {
+                let agent_label = agent_name(agent).to_string();
+                Some(PaneDetail {
                     pane_id: *id,
                     tab_idx: self.number.saturating_sub(1),
                     tab_label: self.display_name(),
                     label: agent_label.clone(),
                     agent_label,
-                    agent,
+                    agent: Some(agent),
                     state,
                     seen,
-                }
+                })
             })
             .collect()
     }
@@ -825,6 +823,18 @@ mod tests {
 
         assert_eq!(ws.display_name(), "pion");
         assert_eq!(ws.resolved_identity_cwd(), Some(PathBuf::from("/tmp/pion")));
+    }
+
+    #[test]
+    fn pane_details_hide_plain_shells() {
+        let mut ws = Workspace::test_new("test");
+        let root_pane = ws.tabs[0].root_pane;
+        ws.tabs[0].panes.get_mut(&root_pane).unwrap().detected_agent = Some(Agent::Pi);
+        ws.test_split(Direction::Horizontal);
+
+        let details = ws.pane_details();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].label, "pi");
     }
 
     #[test]
