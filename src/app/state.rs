@@ -500,7 +500,6 @@ pub struct AppState {
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
     pub confirm_close: bool,
-    pub confirm_close_selected_confirm: bool,
     #[allow(dead_code)] // kept for backward compat; palette.accent is the source of truth
     pub accent: Color,
     pub sound: SoundConfig,
@@ -598,7 +597,6 @@ impl AppState {
             sidebar_width_auto: true,
             sidebar_collapsed: false,
             confirm_close: true,
-            confirm_close_selected_confirm: true,
             accent: Color::Cyan,
             sound: SoundConfig {
                 enabled: false,

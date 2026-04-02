@@ -219,7 +219,6 @@ impl App {
             sidebar_width_auto: true,
             sidebar_collapsed: false,
             confirm_close: config.ui.confirm_close,
-            confirm_close_selected_confirm: true,
             accent: crate::config::parse_color(&config.ui.accent),
             sound: config.ui.sound.clone(),
             toast_config: config.ui.toast.clone(),

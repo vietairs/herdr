@@ -111,11 +111,14 @@ impl App {
     fn handle_onboarding_key(&mut self, key: KeyEvent) {
         match self.state.onboarding_step {
             0 => match key.code {
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                KeyCode::Right | KeyCode::Char('l') => {
                     self.state.onboarding_step = 1;
                 }
                 KeyCode::Char('q') => self.state.should_quit = true,
-                _ => {}
+                _ => match modal_action_from_key(&key, ONBOARDING_WELCOME_ACTIONS) {
+                    Some(ModalAction::Continue) => self.state.onboarding_step = 1,
+                    _ => {}
+                },
             },
             _ => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -128,22 +131,24 @@ impl App {
                         self.state.onboarding_selected += 1;
                     }
                 }
-                KeyCode::Left | KeyCode::Esc | KeyCode::Char('h') => {
+                KeyCode::Left | KeyCode::Char('h') => {
                     self.state.onboarding_step = 0;
                 }
                 KeyCode::Char(c) if ('1'..='4').contains(&c) => {
                     self.state.onboarding_selected = (c as usize) - ('1' as usize);
                 }
-                KeyCode::Enter => self.complete_onboarding(),
                 KeyCode::Char('q') => self.state.should_quit = true,
-                _ => {}
+                _ => match modal_action_from_key(&key, ONBOARDING_NOTIFICATION_ACTIONS) {
+                    Some(ModalAction::Back) => self.state.onboarding_step = 0,
+                    Some(ModalAction::Save) => self.complete_onboarding(),
+                    _ => {}
+                },
             },
         }
     }
 
     fn handle_release_notes_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.dismiss_release_notes(),
             KeyCode::Up | KeyCode::Char('k') => self.scroll_release_notes(-1),
             KeyCode::Down | KeyCode::Char('j') => self.scroll_release_notes(1),
             KeyCode::PageUp => self.scroll_release_notes(-8),
@@ -159,7 +164,10 @@ impl App {
                     notes.scroll = max_scroll;
                 }
             }
-            _ => {}
+            _ => match modal_action_from_key(&key, RELEASE_NOTES_ACTIONS) {
+                Some(ModalAction::Close) => self.dismiss_release_notes(),
+                _ => {}
+            },
         }
     }
 
@@ -309,6 +317,60 @@ enum SettingsAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModalAction {
+    Continue,
+    Back,
+    Save,
+    Clear,
+    Cancel,
+    Confirm,
+    Apply,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModalKeyBinding {
+    Enter,
+    Esc,
+    EscOrQ,
+    CtrlC,
+}
+
+impl ModalKeyBinding {
+    fn matches(self, key: &KeyEvent) -> bool {
+        match self {
+            Self::Enter => key.code == KeyCode::Enter,
+            Self::Esc => key.code == KeyCode::Esc,
+            Self::EscOrQ => key.code == KeyCode::Esc || key.code == KeyCode::Char('q'),
+            Self::CtrlC => {
+                key.code == KeyCode::Char('c')
+                    && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ModalActionSpec<A> {
+    action: A,
+    bindings: &'static [ModalKeyBinding],
+}
+
+fn modal_action_from_key<A: Copy>(key: &KeyEvent, specs: &[ModalActionSpec<A>]) -> Option<A> {
+    specs
+        .iter()
+        .find(|spec| spec.bindings.iter().any(|binding| binding.matches(key)))
+        .map(|spec| spec.action)
+}
+
+fn modal_action_from_buttons<A: Copy>(col: u16, row: u16, buttons: &[(Rect, A)]) -> Option<A> {
+    buttons.iter().find_map(|(rect, action)| {
+        (col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height)
+            .then_some(*action)
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GlobalMenuAction {
     Keybinds,
     Settings,
@@ -385,13 +447,15 @@ fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<Settings
                     preview_selected_theme(state);
                 }
             }
-            KeyCode::Enter => return apply_settings(state),
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 state.settings.section = SettingsSection::Sound;
                 state.settings.selected = usize::from(!state.sound_enabled());
             }
-            KeyCode::Esc | KeyCode::Char('q') => cancel_settings(state),
-            _ => {}
+            _ => match modal_action_from_key(&key, SETTINGS_ACTIONS) {
+                Some(ModalAction::Apply) => return apply_settings(state),
+                Some(ModalAction::Close) => cancel_settings(state),
+                _ => {}
+            },
         },
         SettingsSection::Sound => match key.code {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
@@ -410,8 +474,10 @@ fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<Settings
                 state.settings.section = SettingsSection::Theme;
                 state.settings.selected = current_theme_index(&state.theme_name);
             }
-            KeyCode::Esc | KeyCode::Char('q') => cancel_settings(state),
-            _ => {}
+            _ => match modal_action_from_key(&key, SETTINGS_ACTIONS) {
+                Some(ModalAction::Close) => cancel_settings(state),
+                _ => {}
+            },
         },
         SettingsSection::Toast => match key.code {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
@@ -430,8 +496,10 @@ fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Option<Settings
                 state.settings.section = SettingsSection::Theme;
                 state.settings.selected = current_theme_index(&state.theme_name);
             }
-            KeyCode::Esc | KeyCode::Char('q') => cancel_settings(state),
-            _ => {}
+            _ => match modal_action_from_key(&key, SETTINGS_ACTIONS) {
+                Some(ModalAction::Close) => cancel_settings(state),
+                _ => {}
+            },
         },
     }
 
@@ -718,6 +786,64 @@ fn leave_modal(state: &mut AppState) {
     }
 }
 
+const ONBOARDING_WELCOME_ACTIONS: &[ModalActionSpec<ModalAction>] = &[ModalActionSpec {
+    action: ModalAction::Continue,
+    bindings: &[ModalKeyBinding::Enter],
+}];
+
+const ONBOARDING_NOTIFICATION_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
+    ModalActionSpec {
+        action: ModalAction::Back,
+        bindings: &[ModalKeyBinding::Esc],
+    },
+    ModalActionSpec {
+        action: ModalAction::Save,
+        bindings: &[ModalKeyBinding::Enter],
+    },
+];
+
+const RELEASE_NOTES_ACTIONS: &[ModalActionSpec<ModalAction>] = &[ModalActionSpec {
+    action: ModalAction::Close,
+    bindings: &[ModalKeyBinding::Enter, ModalKeyBinding::EscOrQ],
+}];
+
+const RENAME_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
+    ModalActionSpec {
+        action: ModalAction::Save,
+        bindings: &[ModalKeyBinding::Enter],
+    },
+    ModalActionSpec {
+        action: ModalAction::Clear,
+        bindings: &[ModalKeyBinding::CtrlC],
+    },
+    ModalActionSpec {
+        action: ModalAction::Cancel,
+        bindings: &[ModalKeyBinding::EscOrQ],
+    },
+];
+
+const CONFIRM_CLOSE_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
+    ModalActionSpec {
+        action: ModalAction::Confirm,
+        bindings: &[ModalKeyBinding::Enter],
+    },
+    ModalActionSpec {
+        action: ModalAction::Cancel,
+        bindings: &[ModalKeyBinding::EscOrQ],
+    },
+];
+
+const SETTINGS_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
+    ModalActionSpec {
+        action: ModalAction::Apply,
+        bindings: &[ModalKeyBinding::Enter],
+    },
+    ModalActionSpec {
+        action: ModalAction::Close,
+        bindings: &[ModalKeyBinding::EscOrQ],
+    },
+];
+
 fn open_settings(state: &mut AppState) {
     use crate::app::state::SettingsSection;
 
@@ -729,9 +855,9 @@ fn open_settings(state: &mut AppState) {
     state.mode = Mode::Settings;
 }
 
-fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
-    match key.code {
-        KeyCode::Enter => {
+fn apply_rename_action(state: &mut AppState, action: ModalAction) {
+    match action {
+        ModalAction::Save => {
             let new_name = if state.name_input.trim().is_empty() {
                 state.name_input.clone()
             } else {
@@ -755,13 +881,22 @@ fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
             state.name_input.clear();
             state.mode = Mode::Navigate;
         }
-        KeyCode::Esc => {
+        ModalAction::Clear => state.name_input.clear(),
+        ModalAction::Cancel => {
             state.name_input.clear();
             state.mode = Mode::Navigate;
         }
-        KeyCode::Char('c') if key.modifiers == crossterm::event::KeyModifiers::CONTROL => {
-            state.name_input.clear();
-        }
+        _ => {}
+    }
+}
+
+fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
+    if let Some(action) = modal_action_from_key(&key, RENAME_ACTIONS) {
+        apply_rename_action(state, action);
+        return;
+    }
+
+    match key.code {
         KeyCode::Backspace => {
             state.name_input.pop();
         }
@@ -799,7 +934,6 @@ fn handle_resize_key(state: &mut AppState, key: KeyEvent) {
 }
 
 fn open_confirm_close(state: &mut AppState) {
-    state.confirm_close_selected_confirm = true;
     state.mode = Mode::ConfirmClose;
 }
 
@@ -817,17 +951,9 @@ fn confirm_close_cancel(state: &mut AppState) {
 }
 
 fn handle_confirm_close_key(state: &mut AppState, key: KeyEvent) {
-    match key.code {
-        KeyCode::Left | KeyCode::Char('h') => state.confirm_close_selected_confirm = true,
-        KeyCode::Right | KeyCode::Char('l') => state.confirm_close_selected_confirm = false,
-        KeyCode::Enter => {
-            if state.confirm_close_selected_confirm {
-                confirm_close_accept(state);
-            } else {
-                confirm_close_cancel(state);
-            }
-        }
-        KeyCode::Esc => confirm_close_cancel(state),
+    match modal_action_from_key(&key, CONFIRM_CLOSE_ACTIONS) {
+        Some(ModalAction::Confirm) => confirm_close_accept(state),
+        Some(ModalAction::Cancel) => confirm_close_cancel(state),
         _ => {}
     }
 }
@@ -978,26 +1104,6 @@ impl AppState {
         self.onboarding_modal_inner(56, 7)
     }
 
-    fn rename_button_at(&self, col: u16, row: u16) -> Option<&'static str> {
-        let inner = self.rename_modal_inner()?;
-        if inner.height < 4 || inner.width < 28 {
-            return None;
-        }
-        let (save, clear, cancel) = crate::ui::rename_button_rects(inner);
-        if row != save.y {
-            return None;
-        }
-        if col >= save.x && col < save.x + save.width {
-            Some("save")
-        } else if col >= clear.x && col < clear.x + clear.width {
-            Some("clear")
-        } else if col >= cancel.x && col < cancel.x + cancel.width {
-            Some("cancel")
-        } else {
-            None
-        }
-    }
-
     fn release_notes_body_rect(&self) -> Option<Rect> {
         let inner = self.release_notes_modal_inner()?;
         if inner.height < 8 || inner.width < 4 {
@@ -1100,9 +1206,12 @@ impl AppState {
                     inner.width,
                     1,
                 ));
-                if mouse.row == button.y
-                    && mouse.column >= button.x
-                    && mouse.column < button.x + button.width
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                    && modal_action_from_buttons(
+                        mouse.column,
+                        mouse.row,
+                        &[(button, ModalAction::Continue)],
+                    ) == Some(ModalAction::Continue)
                 {
                     self.onboarding_step = 1;
                 }
@@ -1114,9 +1223,6 @@ impl AppState {
                 let options_start_y = inner.y + 2;
                 if mouse.row >= options_start_y && mouse.row < options_start_y + 4 {
                     self.onboarding_selected = (mouse.row - options_start_y) as usize;
-                    if matches!(mouse.kind, MouseEventKind::Moved) {
-                        return;
-                    }
                     return;
                 }
 
@@ -1126,11 +1232,15 @@ impl AppState {
                     inner.width,
                     1,
                 ));
-                if mouse.row == back.y {
-                    if mouse.column >= back.x && mouse.column < back.x + back.width {
-                        self.onboarding_step = 0;
-                    } else if mouse.column >= save.x && mouse.column < save.x + save.width {
-                        self.request_complete_onboarding = true;
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    match modal_action_from_buttons(
+                        mouse.column,
+                        mouse.row,
+                        &[(back, ModalAction::Back), (save, ModalAction::Save)],
+                    ) {
+                        Some(ModalAction::Back) => self.onboarding_step = 0,
+                        Some(ModalAction::Save) => self.request_complete_onboarding = true,
+                        _ => {}
                     }
                 }
             }
@@ -1204,12 +1314,7 @@ impl AppState {
     }
 
     fn settings_popup_rect(&self) -> Rect {
-        let area = self.screen_rect();
-        let popup_w = 56u16.min(area.width.saturating_sub(4));
-        let popup_h = 20u16.min(area.height.saturating_sub(2));
-        let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-        let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-        Rect::new(popup_x, popup_y, popup_w, popup_h)
+        crate::ui::centered_popup_rect(self.screen_rect(), 56, 20).unwrap_or_default()
     }
 
     fn settings_inner_rect(&self) -> Rect {
@@ -1277,21 +1382,6 @@ impl AppState {
         }
     }
 
-    fn settings_button_at(&self, col: u16, row: u16) -> Option<&'static str> {
-        let inner = self.settings_inner_rect();
-        let (apply, close) = crate::ui::settings_button_rects(inner);
-        if row != apply.y {
-            return None;
-        }
-        if col >= apply.x && col < apply.x + apply.width {
-            Some("apply")
-        } else if col >= close.x && col < close.x + close.width {
-            Some("close")
-        } else {
-            None
-        }
-    }
-
     fn handle_settings_mouse(&mut self, mouse: MouseEvent) -> Option<SettingsAction> {
         use crate::app::state::SettingsSection;
 
@@ -1325,9 +1415,16 @@ impl AppState {
                         }
                     };
                 }
-                match self.settings_button_at(mouse.column, mouse.row) {
-                    Some("apply") => apply_settings(self),
-                    Some("close") => {
+
+                let inner = self.settings_inner_rect();
+                let (apply, close) = crate::ui::settings_button_rects(inner);
+                match modal_action_from_buttons(
+                    mouse.column,
+                    mouse.row,
+                    &[(apply, ModalAction::Apply), (close, ModalAction::Close)],
+                ) {
+                    Some(ModalAction::Apply) => apply_settings(self),
+                    Some(ModalAction::Close) => {
                         cancel_settings(self);
                         None
                     }
@@ -1422,24 +1519,46 @@ impl AppState {
                 self.selection = None;
 
                 if self.mode == Mode::ConfirmClose {
-                    match self.confirm_close_button_at(mouse.column, mouse.row) {
-                        Some(true) => confirm_close_accept(self),
-                        Some(false) => confirm_close_cancel(self),
-                        None => confirm_close_cancel(self),
+                    let popup = self.confirm_close_rect();
+                    let inner = Rect::new(
+                        popup.x + 1,
+                        popup.y + 1,
+                        popup.width.saturating_sub(2),
+                        popup.height.saturating_sub(2),
+                    );
+                    let (confirm, cancel) = crate::ui::confirm_close_button_rects(inner);
+                    match modal_action_from_buttons(
+                        mouse.column,
+                        mouse.row,
+                        &[
+                            (confirm, ModalAction::Confirm),
+                            (cancel, ModalAction::Cancel),
+                        ],
+                    ) {
+                        Some(ModalAction::Confirm) => confirm_close_accept(self),
+                        Some(ModalAction::Cancel) | None => confirm_close_cancel(self),
+                        _ => {}
                     }
                     return None;
                 }
 
                 if matches!(self.mode, Mode::RenameWorkspace | Mode::RenameTab) {
-                    match self.rename_button_at(mouse.column, mouse.row) {
-                        Some("save") => handle_rename_key(self, KeyEvent::from(KeyCode::Enter)),
-                        Some("clear") => self.name_input.clear(),
-                        Some("cancel") => handle_rename_key(self, KeyEvent::from(KeyCode::Esc)),
-                        None => {
-                            handle_rename_key(self, KeyEvent::from(KeyCode::Esc));
-                        }
-                        _ => {}
-                    }
+                    let action = self
+                        .rename_modal_inner()
+                        .map(crate::ui::rename_button_rects)
+                        .and_then(|(save, clear, cancel)| {
+                            modal_action_from_buttons(
+                                mouse.column,
+                                mouse.row,
+                                &[
+                                    (save, ModalAction::Save),
+                                    (clear, ModalAction::Clear),
+                                    (cancel, ModalAction::Cancel),
+                                ],
+                            )
+                        })
+                        .unwrap_or(ModalAction::Cancel);
+                    apply_rename_action(self, action);
                     return None;
                 }
 
@@ -1644,14 +1763,6 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::Moved if self.mode == Mode::ConfirmClose => {
-                if let Some(selected_confirm) =
-                    self.confirm_close_button_at(mouse.column, mouse.row)
-                {
-                    self.confirm_close_selected_confirm = selected_confirm;
-                }
-            }
-
             MouseEventKind::Moved if self.mode == Mode::ContextMenu => {
                 if let Some(idx) = self.context_menu_item_at(mouse.column, mouse.row) {
                     if let Some(menu) = &mut self.context_menu {
@@ -1802,33 +1913,7 @@ impl AppState {
     }
 
     pub(crate) fn confirm_close_rect(&self) -> Rect {
-        let area = self.view.terminal_area;
-        let popup_w = 44u16.min(area.width.saturating_sub(4));
-        let popup_h = 6u16.min(area.height.max(1));
-        let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-        let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-        Rect::new(popup_x, popup_y, popup_w, popup_h)
-    }
-
-    fn confirm_close_button_at(&self, col: u16, row: u16) -> Option<bool> {
-        let popup = self.confirm_close_rect();
-        let inner = Rect::new(
-            popup.x + 1,
-            popup.y + 1,
-            popup.width.saturating_sub(2),
-            popup.height.saturating_sub(2),
-        );
-        let (confirm, cancel) = crate::ui::confirm_close_button_rects(inner);
-        if row != confirm.y {
-            return None;
-        }
-        if col >= confirm.x && col < confirm.x + confirm.width {
-            Some(true)
-        } else if col >= cancel.x && col < cancel.x + cancel.width {
-            Some(false)
-        } else {
-            None
-        }
+        crate::ui::confirm_close_popup_rect(self.view.terminal_area).unwrap_or_default()
     }
 
     fn context_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
@@ -2305,6 +2390,57 @@ mod tests {
         );
 
         assert_eq!(state.mode, Mode::KeybindHelp);
+    }
+
+    #[test]
+    fn rename_modal_keyboard_and_mouse_share_actions() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        state.name_input = "hello".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(state.name_input.is_empty());
+
+        state.name_input = "renamed".into();
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::Navigate);
+        assert_eq!(state.workspaces[0].display_name(), "renamed");
+
+        state.view.sidebar_rect = Rect::new(0, 0, 26, 20);
+        state.view.terminal_area = Rect::new(26, 0, 80, 20);
+        state.mode = Mode::RenameWorkspace;
+        state.name_input = "mouse".into();
+        let inner = state.rename_modal_inner().unwrap();
+        let (save, _, _) = crate::ui::rename_button_rects(inner);
+        let action = modal_action_from_buttons(save.x, save.y, &[(save, ModalAction::Save)]);
+        assert_eq!(action, Some(ModalAction::Save));
+    }
+
+    #[test]
+    fn confirm_close_keyboard_actions_are_direct_not_focused() {
+        let mut state = state_with_workspaces(&["a", "b"]);
+        state.mode = Mode::ConfirmClose;
+        state.selected = 1;
+
+        handle_confirm_close_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::Navigate);
+        assert_eq!(state.workspaces.len(), 2);
+
+        state.mode = Mode::ConfirmClose;
+        handle_confirm_close_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(state.workspaces.len(), 1);
     }
 
     #[test]

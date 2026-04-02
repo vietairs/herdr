@@ -1070,13 +1070,7 @@ fn render_panel_shell(
     Some(inner)
 }
 
-fn render_modal_shell(
-    frame: &mut Frame,
-    area: Rect,
-    popup_w: u16,
-    popup_h: u16,
-    p: &Palette,
-) -> Option<Rect> {
+pub(crate) fn centered_popup_rect(area: Rect, popup_w: u16, popup_h: u16) -> Option<Rect> {
     let popup_w = popup_w.min(area.width.saturating_sub(4));
     let popup_h = popup_h.min(area.height.saturating_sub(2));
     if popup_w < 4 || popup_h < 4 {
@@ -1085,7 +1079,17 @@ fn render_modal_shell(
 
     let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
+    Some(Rect::new(popup_x, popup_y, popup_w, popup_h))
+}
+
+fn render_modal_shell(
+    frame: &mut Frame,
+    area: Rect,
+    popup_w: u16,
+    popup_h: u16,
+    p: &Palette,
+) -> Option<Rect> {
+    let popup = centered_popup_rect(area, popup_w, popup_h)?;
     render_panel_shell(frame, popup, p.accent, p.panel_bg)
 }
 
@@ -1248,12 +1252,36 @@ pub(crate) fn onboarding_welcome_continue_rect(area: Rect) -> Rect {
     )
 }
 
+pub(crate) struct ActionButtonSpec<'a> {
+    pub hint: Option<&'a str>,
+    pub label: &'a str,
+}
+
+pub(crate) fn action_button_row_rects(
+    area: Rect,
+    buttons: &[ActionButtonSpec<'_>],
+    gap: u16,
+    row_offset: u16,
+) -> Vec<Rect> {
+    let widths: Vec<u16> = buttons
+        .iter()
+        .map(|button| action_button_width(button.hint, button.label))
+        .collect();
+    centered_button_row(area, &widths, gap, row_offset)
+}
+
 pub(crate) fn onboarding_notification_button_rects(area: Rect) -> (Rect, Rect) {
-    let rects = centered_button_row(
+    let rects = action_button_row_rects(
         area,
         &[
-            action_button_width(Some("esc"), "back"),
-            action_button_width(Some("↵"), "save"),
+            ActionButtonSpec {
+                hint: Some("esc"),
+                label: "back",
+            },
+            ActionButtonSpec {
+                hint: Some("↵"),
+                label: "save",
+            },
         ],
         2,
         0,
@@ -1699,12 +1727,21 @@ fn render_resize_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
 
 /// Centered popup confirmation dialog with dimmed background.
 pub(crate) fn rename_button_rects(inner: Rect) -> (Rect, Rect, Rect) {
-    let rects = centered_button_row(
+    let rects = action_button_row_rects(
         inner,
         &[
-            action_button_width(Some("↵"), "save"),
-            action_button_width(Some("^c"), "clear"),
-            action_button_width(Some("esc"), "cancel"),
+            ActionButtonSpec {
+                hint: Some("↵"),
+                label: "save",
+            },
+            ActionButtonSpec {
+                hint: Some("^c"),
+                label: "clear",
+            },
+            ActionButtonSpec {
+                hint: Some("esc"),
+                label: "cancel",
+            },
         ],
         2,
         3,
@@ -1812,11 +1849,9 @@ fn render_confirm_close_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 
     // Centered popup
-    let popup_w = 44u16.min(area.width.saturating_sub(4));
-    let popup_h = 5u16;
-    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
+    let Some(popup) = confirm_close_popup_rect(area) else {
+        return;
+    };
 
     let warn = Style::default()
         .fg(app.palette.red)
@@ -1852,40 +1887,25 @@ fn render_confirm_close_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(detail_line), rows[1]);
 
         let (confirm_rect, cancel_rect) = confirm_close_button_rects(inner);
-        let confirm_selected = app.confirm_close_selected_confirm;
         render_action_button(
             frame,
             confirm_rect,
             Some("↵"),
             "confirm",
-            if confirm_selected {
-                Style::default()
-                    .fg(app.palette.panel_bg)
-                    .bg(app.palette.red)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(app.palette.text)
-                    .bg(app.palette.surface0)
-                    .add_modifier(Modifier::BOLD)
-            },
+            Style::default()
+                .fg(app.palette.panel_bg)
+                .bg(app.palette.red)
+                .add_modifier(Modifier::BOLD),
         );
         render_action_button(
             frame,
             cancel_rect,
             Some("esc"),
             "cancel",
-            if confirm_selected {
-                Style::default()
-                    .fg(app.palette.text)
-                    .bg(app.palette.surface0)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(app.palette.panel_bg)
-                    .bg(app.palette.accent)
-                    .add_modifier(Modifier::BOLD)
-            },
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.surface0)
+                .add_modifier(Modifier::BOLD),
         );
     }
 }
@@ -1939,12 +1959,22 @@ fn centered_button_row(inner: Rect, widths: &[u16], gap: u16, row_offset: u16) -
         .collect()
 }
 
+pub(crate) fn confirm_close_popup_rect(area: Rect) -> Option<Rect> {
+    centered_popup_rect(area, 44, 5)
+}
+
 pub(crate) fn confirm_close_button_rects(inner: Rect) -> (Rect, Rect) {
-    let rects = centered_button_row(
+    let rects = action_button_row_rects(
         inner,
         &[
-            action_button_width(Some("↵"), "confirm"),
-            action_button_width(Some("esc"), "cancel"),
+            ActionButtonSpec {
+                hint: Some("↵"),
+                label: "confirm",
+            },
+            ActionButtonSpec {
+                hint: Some("esc"),
+                label: "cancel",
+            },
         ],
         2,
         2,
@@ -1953,11 +1983,17 @@ pub(crate) fn confirm_close_button_rects(inner: Rect) -> (Rect, Rect) {
 }
 
 pub(crate) fn settings_button_rects(inner: Rect) -> (Rect, Rect) {
-    let rects = centered_button_row(
+    let rects = action_button_row_rects(
         inner,
         &[
-            action_button_width(Some("↵"), "apply"),
-            action_button_width(Some("esc"), "close"),
+            ActionButtonSpec {
+                hint: Some("↵"),
+                label: "apply",
+            },
+            ActionButtonSpec {
+                hint: Some("esc"),
+                label: "close",
+            },
         ],
         2,
         inner.height.saturating_sub(1),
@@ -1974,18 +2010,9 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     use crate::app::state::SettingsSection;
 
     let p = &app.palette;
-    let popup_w: u16 = 56;
-    let popup_h: u16 = 20;
-
-    let popup_w = popup_w.min(area.width.saturating_sub(4));
-    let popup_h = popup_h.min(area.height.saturating_sub(2));
-    if popup_w < 20 || popup_h < 10 {
+    let Some(popup) = centered_popup_rect(area, 56, 20) else {
         return;
-    }
-
-    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
+    };
 
     // Dim everything behind the modal
     dim_background(frame, area);
