@@ -145,23 +145,38 @@ on first run, herdr opens a short onboarding flow so you can choose your notific
 
 press `n` to create your first workspace. it opens immediately as a new terminal context in your current project context, and herdr labels it automatically from the root pane's repo or folder.
 
-press `ctrl+b` (the prefix key) to switch back to navigate mode. from there you can manage workspaces and panes.
+press `ctrl+b` (the prefix key) to switch back to navigate mode. from there you can manage workspaces, tabs, and panes.
 
 ### navigate mode (prefix: ctrl+b)
 
-navigate mode is the workspace control layer. movement actions stay in navigate mode; mutating actions like split, close, new workspace, and sidebar toggle return you to terminal mode.
+navigate mode is the workspace control layer. a workspace can contain multiple tabs, and each tab can contain multiple panes. movement actions stay in navigate mode; mutating actions like split, close, new workspace, new tab, and sidebar toggle return you to terminal mode.
 
 common defaults:
 - `n` new workspace
 - `shift+n` rename workspace
 - `d` close workspace
+- `c` new tab
 - `v` / `-` split pane
 - `x` close pane
 - `f` fullscreen
 - `r` resize mode
 - `b` toggle sidebar
 
-optional direct bindings can also switch workspaces, tabs, or panes from terminal mode without going through the prefix first. for example, you can bind `focus_pane_left = "alt+h"` or `focus_pane_right = "alt+right"` in your config.
+optional direct bindings are available but **unset by default**. you can bind workspace, tab, and pane switching directly in terminal mode without going through the prefix first.
+
+example:
+
+```toml
+[keys]
+previous_workspace = "ctrl+alt+["
+next_workspace = "ctrl+alt+]"
+previous_tab = "alt+["
+next_tab = "alt+]"
+focus_pane_left = "alt+h"
+focus_pane_down = "alt+j"
+focus_pane_up = "alt+k"
+focus_pane_right = "alt+l"
+```
 
 full keybinding and config reference: [`CONFIGURATION.md`](./CONFIGURATION.md)
 
@@ -187,6 +202,7 @@ this is the core loop of herdr: scan the workspace list, drop into the right con
 mouse support is built in. herdr is not keyboard-only.
 
 - click a workspace in the sidebar to switch
+- click tabs to switch within the active workspace
 - click a pane to focus it
 - drag split borders to resize
 - drag in a pane to select text; release to copy it to your system clipboard
@@ -225,7 +241,7 @@ for all keybindings, onboarding, notification, sound, ui options, and environmen
 
 ## session persistence
 
-herdr saves your workspace layout, pane working directories, and focused pane on exit. when you restart, everything is restored. sessions are stored at `~/.config/herdr/session.json`.
+herdr saves your workspaces, tabs, pane layouts, pane working directories, and focused tab/pane on exit. when you restart, everything is restored. sessions are stored at `~/.config/herdr/session.json`.
 
 use `--no-session` to start fresh.
 
@@ -304,7 +320,7 @@ herdr's workspace, pane, and wait commands are documented in [`SOCKET_API.md`](.
 workspace ids are compact public ids like `1`, `2`, `3`.
 pane ids are compact public ids like `1-1`, `1-2`, `2-1`.
 
-they are positional within the current live session, so numbering compacts when workspaces or panes are closed.
+even with tabs enabled, pane ids remain workspace-scoped public ids rather than `workspace-tab-pane` triples. they are positional within the current live session, so numbering compacts when workspaces or panes are closed.
 
 ## building from source
 

@@ -43,6 +43,7 @@ supported syntax:
 notes:
 - most reliable bindings are plain keys, `ctrl+letter`, `esc`/`tab`/`enter`, and function keys
 - `alt+...` and punctuation-with-modifiers may vary depending on terminal/tmux setup
+- bindings marked `unset` in the key reference are supported actions with no default key assigned
 - for navigate-mode actions, duplicate keybindings are treated as config errors; later conflicting bindings fall back to defaults
 
 example:
@@ -53,14 +54,21 @@ prefix = "ctrl+b"
 new_workspace = "n"
 rename_workspace = "shift+n"
 close_workspace = "d"
+new_tab = "c"
 split_vertical = "v"
 split_horizontal = "-"
 close_pane = "x"
 fullscreen = "f"
 resize_mode = "r"
 toggle_sidebar = "b"
+previous_workspace = "ctrl+alt+["
+next_workspace = "ctrl+alt+]"
+previous_tab = "alt+["
+next_tab = "alt+]"
 focus_pane_left = "alt+h"
-focus_pane_right = "alt+right"
+focus_pane_down = "alt+j"
+focus_pane_up = "alt+k"
+focus_pane_right = "alt+l"
 ```
 
 ### key reference

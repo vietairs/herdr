@@ -87,6 +87,8 @@ that means:
 
 these are compact public ids for the current live session. they are **not durable database ids**. if a workspace or pane closes, higher numbers compact down.
 
+herdr now supports tabs inside workspaces in the ui, but pane ids remain workspace-scoped public ids like `1-2` rather than `workspace-tab-pane` triples. tabs are not exposed as first-class socket api objects yet.
+
 ## core objects
 
 `workspace_info` responses contain objects like:

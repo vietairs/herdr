@@ -3,7 +3,18 @@
 ## Unreleased
 
 ### Added
+- Added tabs within workspaces, so a single workspace can now hold multiple terminal tab contexts with their own pane layouts.
 - Added optional direct pane-focus keybindings for terminal mode, so you can switch panes with modifier shortcuts like `alt+h` or `alt+right` without entering navigate mode first.
+- Added built-in direct integrations for pi, claude code, codex, and opencode, with install/uninstall commands under `herdr integration ...`.
+- Added authoritative hook-driven state reporting support, so pane state can be updated directly from agent integrations instead of relying only on heuristics.
+
+### Changed
+- Refactored keybind discoverability so the in-app keybind help now shows all supported actions, including optional bindings that are currently unset.
+- Keybind help now uses a centered scrollable modal with mouse and keyboard scrolling, matching the release-notes interaction model more closely.
+- Popups and action-button interactions were refactored to use more consistent modal geometry and button semantics across the ui.
+
+### Documentation
+- Updated the README, configuration guide, and socket api docs to reflect tabs, unset optional keybindings, direct terminal-mode navigation examples, and the current workspace-scoped pane id model.
 
 ## [0.2.4] - 2026-04-01
 
