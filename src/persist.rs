@@ -467,13 +467,7 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
 // --- File I/O ---
 
 fn session_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(dir).join("herdr/session.json")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config/herdr/session.json")
-    } else {
-        PathBuf::from("/tmp/herdr/session.json")
-    }
+    crate::config::config_dir().join("session.json")
 }
 
 pub fn save(snapshot: &SessionSnapshot) {

@@ -71,19 +71,17 @@ pub fn socket_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
+    let socket_name = if crate::config::app_dir_name() == "herdr" {
+        "herdr.sock"
+    } else {
+        "herdr-dev.sock"
+    };
+
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir).join("herdr.sock");
+        return PathBuf::from(dir).join(socket_name);
     }
 
-    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(dir).join("herdr/herdr.sock");
-    }
-
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".config/herdr/herdr.sock");
-    }
-
-    PathBuf::from("/tmp/herdr.sock")
+    crate::config::config_dir().join("herdr.sock")
 }
 
 pub struct ServerHandle {
@@ -141,6 +139,30 @@ pub fn start_server(
 fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+    }
+
+    if !path.exists() {
+        return Ok(());
+    }
+
+    match UnixStream::connect(path) {
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!(
+                    "herdr is already running (socket busy at {})",
+                    path.display()
+                ),
+            ));
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::TimedOut
+            ) => {}
+        Err(err) => return Err(err),
     }
 
     if let Err(err) = fs::remove_file(path) {

@@ -6,6 +6,24 @@ use serde::Deserialize;
 pub const CONFIG_PATH_ENV_VAR: &str = "HERDR_CONFIG_PATH";
 use tracing::warn;
 
+pub fn app_dir_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    }
+}
+
+pub fn config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(dir).join(app_dir_name())
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(format!(".config/{}", app_dir_name()))
+    } else {
+        PathBuf::from(format!("/tmp/{}", app_dir_name()))
+    }
+}
+
 use crate::detect::Agent;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -705,13 +723,7 @@ pub fn config_path() -> PathBuf {
     if let Ok(path) = std::env::var(CONFIG_PATH_ENV_VAR) {
         return PathBuf::from(path);
     }
-    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(dir).join("herdr/config.toml")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config/herdr/config.toml")
-    } else {
-        PathBuf::from("/tmp/herdr/config.toml")
-    }
+    config_dir().join("config.toml")
 }
 
 fn upsert_top_level_bool(content: &str, key: &str, value: bool) -> String {

@@ -43,13 +43,7 @@ fn init_logging() {
     use std::fs::{self, OpenOptions};
     use tracing_subscriber::EnvFilter;
 
-    let log_dir = if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-        std::path::PathBuf::from(dir).join("herdr")
-    } else if let Ok(home) = std::env::var("HOME") {
-        std::path::PathBuf::from(home).join(".config/herdr")
-    } else {
-        std::path::PathBuf::from("/tmp/herdr")
-    };
+    let log_dir = crate::config::config_dir();
     let _ = fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("herdr.log");
 
@@ -218,7 +212,10 @@ fn main() -> io::Result<()> {
         println!("  --help, -h          Show this help");
         println!();
         println!("Config: {}", config::config_path().display());
-        println!("Logs:   ~/.config/herdr/herdr.log");
+        println!(
+            "Logs:   {}",
+            config::config_dir().join("herdr.log").display()
+        );
         println!("Env:    HERDR_CONFIG_PATH overrides config file path");
         println!("Home:   https://herdr.dev");
         return Ok(());
@@ -272,7 +269,15 @@ fn main() -> io::Result<()> {
 
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
-    let _api_server = api::start_server(api_tx, event_hub.clone())?;
+    let _api_server = match api::start_server(api_tx, event_hub.clone()) {
+        Ok(server) => server,
+        Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+            eprintln!("error: herdr is already running");
+            eprintln!("socket: {}", api::socket_path().display());
+            std::process::exit(1);
+        }
+        Err(err) => return Err(err),
+    };
 
     let no_session = std::env::args().any(|a| a == "--no-session");
     let show_changelog = std::env::args().any(|a| a == "--show-changelog");
