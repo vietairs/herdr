@@ -35,6 +35,8 @@ pub struct SessionSnapshot {
 #[derive(Serialize)]
 pub struct WorkspaceSnapshot {
     #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
     pub custom_name: Option<String>,
     pub identity_cwd: PathBuf,
     pub tabs: Vec<TabSnapshot>,
@@ -44,6 +46,8 @@ pub struct WorkspaceSnapshot {
 
 #[derive(Deserialize)]
 struct WorkspaceSnapshotWire {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     custom_name: Option<String>,
     #[serde(default)]
@@ -126,6 +130,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
         };
 
         Self {
+            id: None,
             custom_name: snap.custom_name,
             identity_cwd,
             tabs: vec![tab],
@@ -143,6 +148,7 @@ impl<'de> Deserialize<'de> for WorkspaceSnapshot {
 
         if let Some(identity_cwd) = snap.identity_cwd {
             return Ok(Self {
+                id: snap.id,
                 custom_name: snap.custom_name,
                 identity_cwd,
                 tabs: snap.tabs,
@@ -220,6 +226,7 @@ pub fn capture(
 
 fn capture_workspace(ws: &Workspace) -> WorkspaceSnapshot {
     WorkspaceSnapshot {
+        id: Some(ws.id.clone()),
         custom_name: ws.custom_name.clone(),
         identity_cwd: ws
             .resolved_identity_cwd()
@@ -328,6 +335,10 @@ fn restore_workspace(
     }
 
     Some(Workspace {
+        id: snap
+            .id
+            .clone()
+            .unwrap_or_else(crate::workspace::generate_workspace_id),
         custom_name: snap.custom_name.clone(),
         identity_cwd: snap.identity_cwd.clone(),
         cached_git_ahead_behind: None,
@@ -592,6 +603,7 @@ mod tests {
 
         let snap = SessionSnapshot {
             workspaces: vec![WorkspaceSnapshot {
+                id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
                 identity_cwd: PathBuf::from("/home/can/Projects/herdr"),
                 tabs: vec![TabSnapshot {
@@ -618,6 +630,7 @@ mod tests {
         let restored: SessionSnapshot = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.workspaces.len(), 1);
+        assert_eq!(restored.workspaces[0].id.as_deref(), Some("wproj"));
         assert_eq!(
             restored.workspaces[0].custom_name.as_deref(),
             Some("pi-mono")

@@ -153,7 +153,10 @@ fn workspace_and_pane_management_commands_work() {
     );
     assert!(created.status.success());
     let created_json: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
-    assert_eq!(created_json["result"]["workspace"]["workspace_id"], "1");
+    let workspace_id = created_json["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let panes = run_cli(&socket_path, &["pane", "list", "--workspace", "1"]);
     assert!(panes.status.success());
@@ -182,15 +185,18 @@ fn workspace_and_pane_management_commands_work() {
     let closed_json: serde_json::Value = serde_json::from_slice(&closed.stdout).unwrap();
     assert_eq!(closed_json["result"]["type"], "ok");
 
-    let renamed = run_cli(&socket_path, &["workspace", "rename", "1", "demo"]);
+    let renamed = run_cli(
+        &socket_path,
+        &["workspace", "rename", &workspace_id, "demo"],
+    );
     assert!(renamed.status.success());
     let renamed_json: serde_json::Value = serde_json::from_slice(&renamed.stdout).unwrap();
     assert_eq!(renamed_json["result"]["workspace"]["label"], "demo");
 
-    let focused = run_cli(&socket_path, &["workspace", "focus", "1"]);
+    let focused = run_cli(&socket_path, &["workspace", "focus", &workspace_id]);
     assert!(focused.status.success());
 
-    let closed_workspace = run_cli(&socket_path, &["workspace", "close", "1"]);
+    let closed_workspace = run_cli(&socket_path, &["workspace", "close", &workspace_id]);
     assert!(closed_workspace.status.success());
     let closed_workspace_json: serde_json::Value =
         serde_json::from_slice(&closed_workspace.stdout).unwrap();
@@ -214,13 +220,29 @@ fn tab_management_commands_work() {
         &["workspace", "create", "--cwd", base.to_str().unwrap()],
     );
     assert!(created.status.success());
+    let created_json: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let workspace_id = created_json["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first_tab_id = created_json["result"]["workspace"]["active_tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
-    let created_tab = run_cli(&socket_path, &["tab", "create", "--workspace", "1"]);
+    let created_tab = run_cli(
+        &socket_path,
+        &["tab", "create", "--workspace", &workspace_id],
+    );
     assert!(created_tab.status.success());
     let created_tab_json: serde_json::Value = serde_json::from_slice(&created_tab.stdout).unwrap();
-    assert_eq!(created_tab_json["result"]["tab"]["tab_id"], "1:2");
+    let second_tab_id = created_tab_json["result"]["tab"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(second_tab_id, format!("{workspace_id}:2"));
 
-    let listed_tabs = run_cli(&socket_path, &["tab", "list", "--workspace", "1"]);
+    let listed_tabs = run_cli(&socket_path, &["tab", "list", "--workspace", &workspace_id]);
     assert!(listed_tabs.status.success());
     let listed_tabs_json: serde_json::Value = serde_json::from_slice(&listed_tabs.stdout).unwrap();
     assert_eq!(
@@ -228,22 +250,22 @@ fn tab_management_commands_work() {
         2
     );
 
-    let renamed_tab = run_cli(&socket_path, &["tab", "rename", "1:2", "logs"]);
+    let renamed_tab = run_cli(&socket_path, &["tab", "rename", &second_tab_id, "logs"]);
     assert!(renamed_tab.status.success());
     let renamed_tab_json: serde_json::Value = serde_json::from_slice(&renamed_tab.stdout).unwrap();
     assert_eq!(renamed_tab_json["result"]["tab"]["label"], "logs");
 
-    let focused_tab = run_cli(&socket_path, &["tab", "focus", "1:1"]);
+    let focused_tab = run_cli(&socket_path, &["tab", "focus", &first_tab_id]);
     assert!(focused_tab.status.success());
     let focused_tab_json: serde_json::Value = serde_json::from_slice(&focused_tab.stdout).unwrap();
-    assert_eq!(focused_tab_json["result"]["tab"]["tab_id"], "1:1");
+    assert_eq!(focused_tab_json["result"]["tab"]["tab_id"], first_tab_id);
 
-    let tab_get = run_cli(&socket_path, &["tab", "get", "1:2"]);
+    let tab_get = run_cli(&socket_path, &["tab", "get", &second_tab_id]);
     assert!(tab_get.status.success());
     let tab_get_json: serde_json::Value = serde_json::from_slice(&tab_get.stdout).unwrap();
-    assert_eq!(tab_get_json["result"]["tab"]["tab_id"], "1:2");
+    assert_eq!(tab_get_json["result"]["tab"]["tab_id"], second_tab_id);
 
-    let closed_tab = run_cli(&socket_path, &["tab", "close", "1:2"]);
+    let closed_tab = run_cli(&socket_path, &["tab", "close", &second_tab_id]);
     assert!(closed_tab.status.success());
     let closed_tab_json: serde_json::Value = serde_json::from_slice(&closed_tab.stdout).unwrap();
     assert_eq!(closed_tab_json["result"]["type"], "ok");
@@ -268,7 +290,7 @@ fn pane_run_read_and_wait_commands_work() {
             base.display()
         ),
     );
-    assert_eq!(created["result"]["workspace"]["workspace_id"], "1");
+    assert!(created["result"]["workspace"]["workspace_id"].is_string());
 
     let create = run_cli(
         &socket_path,
@@ -436,7 +458,7 @@ fn closing_workspace_terminates_processes_inside_it() {
 }
 
 #[test]
-fn ids_are_compact_and_positional() {
+fn workspace_ids_are_stable_and_pane_numbers_stay_compact() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
@@ -450,45 +472,68 @@ fn ids_are_compact_and_positional() {
         &["workspace", "create", "--cwd", base.to_str().unwrap()],
     );
     assert!(ws1.status.success());
+    let ws1_json: serde_json::Value = serde_json::from_slice(&ws1.stdout).unwrap();
+    let ws1_id = ws1_json["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let split_12 = run_cli(
         &socket_path,
         &["pane", "split", "1-1", "--direction", "right", "--no-focus"],
     );
     let split_12_json: serde_json::Value = serde_json::from_slice(&split_12.stdout).unwrap();
-    assert_eq!(split_12_json["result"]["pane"]["pane_id"], "1-2");
+    assert_eq!(
+        split_12_json["result"]["pane"]["pane_id"],
+        format!("{ws1_id}-2")
+    );
 
     let split_13 = run_cli(
         &socket_path,
         &["pane", "split", "1-1", "--direction", "down", "--no-focus"],
     );
     let split_13_json: serde_json::Value = serde_json::from_slice(&split_13.stdout).unwrap();
-    assert_eq!(split_13_json["result"]["pane"]["pane_id"], "1-3");
+    assert_eq!(
+        split_13_json["result"]["pane"]["pane_id"],
+        format!("{ws1_id}-3")
+    );
 
     let ws2 = run_cli(
         &socket_path,
         &["workspace", "create", "--cwd", "/tmp", "--no-focus"],
     );
     let ws2_json: serde_json::Value = serde_json::from_slice(&ws2.stdout).unwrap();
-    assert_eq!(ws2_json["result"]["workspace"]["workspace_id"], "2");
+    let ws2_id = ws2_json["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(ws2_id, ws1_id);
 
-    let ws2_focus = run_cli(&socket_path, &["workspace", "focus", "2"]);
+    let ws2_focus = run_cli(&socket_path, &["workspace", "focus", &ws2_id]);
     assert!(ws2_focus.status.success());
     let ws2_split = run_cli(
         &socket_path,
         &["pane", "split", "2-1", "--direction", "right", "--no-focus"],
     );
     let ws2_split_json: serde_json::Value = serde_json::from_slice(&ws2_split.stdout).unwrap();
-    assert_eq!(ws2_split_json["result"]["pane"]["pane_id"], "2-2");
+    assert_eq!(
+        ws2_split_json["result"]["pane"]["pane_id"],
+        format!("{ws2_id}-2")
+    );
 
     let ws3 = run_cli(
         &socket_path,
         &["workspace", "create", "--cwd", "/", "--no-focus"],
     );
     let ws3_json: serde_json::Value = serde_json::from_slice(&ws3.stdout).unwrap();
-    assert_eq!(ws3_json["result"]["workspace"]["workspace_id"], "3");
+    let ws3_id = ws3_json["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(ws3_id, ws1_id);
+    assert_ne!(ws3_id, ws2_id);
 
-    let close_ws2 = run_cli(&socket_path, &["workspace", "close", "2"]);
+    let close_ws2 = run_cli(&socket_path, &["workspace", "close", &ws2_id]);
     assert!(close_ws2.status.success());
 
     let workspaces = run_cli(&socket_path, &["workspace", "list"]);
@@ -499,22 +544,31 @@ fn ids_are_compact_and_positional() {
         .iter()
         .map(|ws| ws["workspace_id"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(ids, vec!["1".to_string(), "2".to_string()]);
+    assert_eq!(ids, vec![ws1_id.clone(), ws3_id.clone()]);
 
     let new_ws = run_cli(
         &socket_path,
         &["workspace", "create", "--cwd", "/var/tmp", "--no-focus"],
     );
     let new_ws_json: serde_json::Value = serde_json::from_slice(&new_ws.stdout).unwrap();
-    assert_eq!(new_ws_json["result"]["workspace"]["workspace_id"], "3");
+    let new_ws_id = new_ws_json["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(new_ws_id, ws1_id);
+    assert_ne!(new_ws_id, ws2_id);
+    assert_ne!(new_ws_id, ws3_id);
 
-    let ws3_panes = run_cli(&socket_path, &["pane", "list", "--workspace", "3"]);
+    let ws3_panes = run_cli(&socket_path, &["pane", "list", "--workspace", &ws3_id]);
     let ws3_panes_json: serde_json::Value = serde_json::from_slice(&ws3_panes.stdout).unwrap();
-    assert_eq!(ws3_panes_json["result"]["panes"][0]["pane_id"], "3-1");
+    assert_eq!(
+        ws3_panes_json["result"]["panes"][0]["pane_id"],
+        format!("{ws3_id}-1")
+    );
 
-    let close_middle = run_cli(&socket_path, &["pane", "close", "1-2"]);
+    let close_middle = run_cli(&socket_path, &["pane", "close", &format!("{ws1_id}-2")]);
     assert!(close_middle.status.success());
-    let ws1_panes = run_cli(&socket_path, &["pane", "list", "--workspace", "1"]);
+    let ws1_panes = run_cli(&socket_path, &["pane", "list", "--workspace", &ws1_id]);
     let ws1_panes_json: serde_json::Value = serde_json::from_slice(&ws1_panes.stdout).unwrap();
     let pane_ids: Vec<String> = ws1_panes_json["result"]["panes"]
         .as_array()
@@ -522,7 +576,7 @@ fn ids_are_compact_and_positional() {
         .iter()
         .map(|pane| pane["pane_id"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(pane_ids, vec!["1-1".to_string(), "1-2".to_string()]);
+    assert_eq!(pane_ids, vec![format!("{ws1_id}-1"), format!("{ws1_id}-2")]);
 
     cleanup_spawned_herdr(herdr, base);
 }
@@ -544,7 +598,7 @@ fn pane_shell_gets_herdr_socket_and_pane_env() {
             base.display()
         ),
     );
-    assert_eq!(created["result"]["workspace"]["workspace_id"], "1");
+    assert!(created["result"]["workspace"]["workspace_id"].is_string());
 
     let env_capture = base.join("pane-env.txt");
     let ran = run_cli(
@@ -643,7 +697,7 @@ fn wait_agent_state_exits_when_state_matches() {
             base.display()
         ),
     );
-    assert_eq!(created["result"]["workspace"]["workspace_id"], "1");
+    assert!(created["result"]["workspace"]["workspace_id"].is_string());
 
     let start_pi = run_cli(&socket_path, &["pane", "run", "1-1", "pi"]);
     assert!(start_pi.status.success());

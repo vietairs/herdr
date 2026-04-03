@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
@@ -12,6 +13,17 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::{PaneId, TileLayout};
 use crate::pane::{PaneRuntime, PaneState};
+
+static NEXT_WORKSPACE_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn generate_workspace_id() -> String {
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros())
+        .unwrap_or(0);
+    let counter = NEXT_WORKSPACE_ID.fetch_add(1, Ordering::Relaxed);
+    format!("w{micros:x}{counter:x}")
+}
 
 pub struct Tab {
     pub custom_name: Option<String>,
@@ -228,6 +240,8 @@ impl Tab {
 
 /// A named workspace containing tabs.
 pub struct Workspace {
+    /// Stable public workspace identity, independent of display order.
+    pub id: String,
     /// User-provided override. If set, auto-derived identity stops updating.
     pub custom_name: Option<String>,
     /// Fallback workspace identity source for tests, old snapshots, or missing runtimes.
@@ -280,6 +294,7 @@ impl Workspace {
         public_pane_numbers.insert(tab.root_pane, 1);
         info!(root_pane = tab.root_pane.raw(), "workspace created");
         Ok(Self {
+            id: generate_workspace_id(),
             custom_name: None,
             identity_cwd: initial_cwd,
             cached_git_ahead_behind: None,
@@ -712,6 +727,7 @@ impl Workspace {
         let mut public_pane_numbers = HashMap::new();
         public_pane_numbers.insert(tab.root_pane, 1);
         Self {
+            id: generate_workspace_id(),
             custom_name: Some(name.to_string()),
             identity_cwd,
             cached_git_ahead_behind: None,

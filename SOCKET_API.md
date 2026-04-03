@@ -69,30 +69,32 @@ errors look like:
 
 ## ids and numbering
 
-workspace ids look like:
+workspace ids are opaque, stable ids like:
 
-- `1`
-- `2`
+- `w64e95948145ed1`
+- `w64e95948146a82`
 
-pane ids look like:
+pane ids are workspace-scoped and stable across workspace reorder:
 
-- `1-1`
-- `1-2`
-- `2-1`
+- `w64e95948145ed1-1`
+- `w64e95948145ed1-2`
+- `w64e95948146a82-1`
 
 that means:
 
-- first number = current workspace number
-- second number = current pane number within that workspace
+- workspace id = stable workspace identity
+- pane number = compact pane number within that workspace
 
-these are compact public ids for the current live session. they are **not durable database ids**. if a workspace or pane closes, higher numbers compact down.
+workspace ids are durable for the life of the workspace and survive display reordering. pane numbers are still compact public numbers, so if a pane closes, higher pane numbers in that same workspace compact down.
 
 tabs are first-class socket api objects now.
 
-- tab ids look like `1:1`, `1:2`, `2:1`
-- first number = workspace number
-- second number = tab number within that workspace
-- pane ids still stay workspace-scoped like `1-2` rather than becoming `workspace-tab-pane` triples
+- tab ids look like `w64e95948145ed1:1`, `w64e95948145ed1:2`
+- workspace id = stable workspace identity
+- tab number = tab number within that workspace
+- pane ids still stay workspace-scoped like `w64e95948145ed1-2` rather than becoming `workspace-tab-pane` triples
+
+for backward compatibility, requests also accept the older positional forms like `1`, `1:2`, and `1-2` as shorthand for the current session order. responses use the stable ids.
 
 ## core objects
 
@@ -100,13 +102,13 @@ tabs are first-class socket api objects now.
 
 ```json
 {
-  "workspace_id": "1",
+  "workspace_id": "w64e95948145ed1",
   "number": 1,
   "label": "herdr",
   "focused": true,
   "pane_count": 1,
   "tab_count": 1,
-  "active_tab_id": "1:1",
+  "active_tab_id": "w64e95948145ed1:1",
   "agent_state": "unknown"
 }
 ```
@@ -115,8 +117,8 @@ tabs are first-class socket api objects now.
 
 ```json
 {
-  "tab_id": "1:1",
-  "workspace_id": "1",
+  "tab_id": "w64e95948145ed1:1",
+  "workspace_id": "w64e95948145ed1",
   "number": 1,
   "label": "1",
   "focused": true,
@@ -129,9 +131,9 @@ tabs are first-class socket api objects now.
 
 ```json
 {
-  "pane_id": "1-1",
-  "workspace_id": "1",
-  "tab_id": "1:1",
+  "pane_id": "w64e95948145ed1-1",
+  "workspace_id": "w64e95948145ed1",
+  "tab_id": "w64e95948145ed1:1",
   "focused": true,
   "cwd": "/home/can/Projects/herdr",
   "agent": "pi",
@@ -144,9 +146,9 @@ tabs are first-class socket api objects now.
 
 ```json
 {
-  "pane_id": "1-1",
-  "workspace_id": "1",
-  "tab_id": "1:1",
+  "pane_id": "w64e95948145ed1-1",
+  "workspace_id": "w64e95948145ed1",
+  "tab_id": "w64e95948145ed1:1",
   "source": "recent",
   "text": "...",
   "revision": 0,

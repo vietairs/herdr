@@ -780,38 +780,41 @@ impl App {
     }
 
     fn public_workspace_id(&self, ws_idx: usize) -> String {
-        (ws_idx + 1).to_string()
+        self.state.workspaces[ws_idx].id.clone()
     }
 
     fn public_tab_id(&self, ws_idx: usize, tab_idx: usize) -> Option<String> {
-        self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
-        Some(format!("{}:{}", ws_idx + 1, tab_idx + 1))
+        let ws = self.state.workspaces.get(ws_idx)?;
+        ws.tabs.get(tab_idx)?;
+        Some(format!("{}:{}", ws.id, tab_idx + 1))
     }
 
     fn public_pane_id(&self, ws_idx: usize, pane_id: crate::layout::PaneId) -> Option<String> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_number = ws.public_pane_number(pane_id)?;
-        Some(format!("{}-{pane_number}", ws_idx + 1))
+        Some(format!("{}-{pane_number}", ws.id))
     }
 
     fn parse_workspace_id(&self, id: &str) -> Option<usize> {
-        if let Some(raw) = id.strip_prefix("w_") {
-            return raw.parse::<usize>().ok()?.checked_sub(1);
-        }
-        id.parse::<usize>().ok()?.checked_sub(1)
+        self.state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == id)
+            .or_else(|| id.strip_prefix("w_")?.parse::<usize>().ok()?.checked_sub(1))
+            .or_else(|| id.parse::<usize>().ok()?.checked_sub(1))
     }
 
     fn parse_tab_id(&self, id: &str) -> Option<(usize, usize)> {
         if let Some(rest) = id.strip_prefix("t_") {
-            let (ws_raw, tab_raw) = rest.split_once('_')?;
-            let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
+            let (ws_raw, tab_raw) = rest.rsplit_once('_')?;
+            let ws_idx = self.parse_workspace_id(ws_raw)?;
             let tab_idx = tab_raw.parse::<usize>().ok()?.checked_sub(1)?;
             self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
             return Some((ws_idx, tab_idx));
         }
 
-        let (ws_raw, tab_raw) = id.split_once(':')?;
-        let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
+        let (ws_raw, tab_raw) = id.rsplit_once(':')?;
+        let ws_idx = self.parse_workspace_id(ws_raw)?;
         let tab_idx = tab_raw.parse::<usize>().ok()?.checked_sub(1)?;
         self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
         Some((ws_idx, tab_idx))
@@ -819,8 +822,8 @@ impl App {
 
     fn parse_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
         if let Some(rest) = id.strip_prefix("p_") {
-            if let Some((ws_raw, pane_raw)) = rest.split_once('_') {
-                let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
+            if let Some((ws_raw, pane_raw)) = rest.rsplit_once('_') {
+                let ws_idx = self.parse_workspace_id(ws_raw)?;
                 let pane_id = crate::layout::PaneId::from_raw(pane_raw.parse::<u32>().ok()?);
                 return Some((ws_idx, pane_id));
             }
@@ -829,8 +832,8 @@ impl App {
             return self.find_pane(pane_id).map(|(ws_idx, _)| (ws_idx, pane_id));
         }
 
-        let (ws_raw, pane_number_raw) = id.split_once('-')?;
-        let ws_idx = ws_raw.parse::<usize>().ok()?.checked_sub(1)?;
+        let (ws_raw, pane_number_raw) = id.rsplit_once('-')?;
+        let ws_idx = self.parse_workspace_id(ws_raw)?;
         let pane_number = pane_number_raw.parse::<usize>().ok()?;
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_id = ws
@@ -1603,6 +1606,7 @@ impl App {
                     })
                     .unwrap();
                 };
+                let workspace_id = self.state.workspaces[ws_idx].id.clone();
                 let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
@@ -1613,7 +1617,6 @@ impl App {
                     })
                     .unwrap();
                 };
-                let workspace_id = format!("w_{}", ws_idx + 1);
                 let pane_count = ws.layout.pane_count();
                 if pane_count <= 1 {
                     self.state.selected = ws_idx;
@@ -2039,7 +2042,7 @@ impl App {
             tab_count: ws.tabs.len(),
             active_tab_id: self
                 .public_tab_id(index, ws.active_tab)
-                .unwrap_or_else(|| format!("{}:{}", index + 1, ws.active_tab + 1)),
+                .unwrap_or_else(|| format!("{}:{}", ws.id, ws.active_tab + 1)),
             agent_state: pane_agent_state(agg_state),
         }
     }
