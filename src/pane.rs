@@ -39,6 +39,31 @@ fn active_pending_release(
     }
 }
 
+async fn publish_state_changed_event(
+    state_events: mpsc::Sender<AppEvent>,
+    pane_id: PaneId,
+    agent: Option<Agent>,
+    state: AgentState,
+) {
+    // This runs on the async detector task, not the PTY reader thread.
+    // Waiting for queue space here preserves correctness-critical state transitions
+    // without blocking pane I/O.
+    if let Err(e) = state_events
+        .send(AppEvent::StateChanged {
+            pane_id,
+            agent,
+            state,
+        })
+        .await
+    {
+        warn!(
+            pane = pane_id.raw(),
+            err = %e,
+            "failed to deliver StateChanged event"
+        );
+    }
+}
+
 fn stabilize_agent_state(
     agent: Option<Agent>,
     previous: AgentState,
@@ -637,17 +662,13 @@ impl PaneRuntime {
                             "state changed"
                         );
                         state = new_state;
-                        if let Err(e) = state_events.try_send(AppEvent::StateChanged {
+                        publish_state_changed_event(
+                            state_events.clone(),
                             pane_id,
                             agent,
-                            state: new_state,
-                        }) {
-                            warn!(
-                                pane = pane_id.raw(),
-                                err = %e,
-                                "dropped StateChanged event"
-                            );
-                        }
+                            new_state,
+                        )
+                        .await;
                     }
                 }
             });
@@ -986,5 +1007,54 @@ mod tests {
         assert_eq!(pane.detected_agent, None);
         assert_eq!(pane.fallback_state, AgentState::Unknown);
         assert_eq!(pane.state, AgentState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn state_changed_event_waits_for_queue_space_instead_of_dropping() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let pane_id = PaneId::from_raw(42);
+
+        tx.try_send(AppEvent::UpdateReady {
+            version: "9.9.9".into(),
+        })
+        .unwrap();
+
+        let publish =
+            publish_state_changed_event(tx.clone(), pane_id, Some(Agent::Pi), AgentState::Idle);
+        tokio::pin!(publish);
+
+        let blocked = tokio::time::timeout(std::time::Duration::from_millis(20), async {
+            (&mut publish).await;
+        })
+        .await;
+        assert!(
+            blocked.is_err(),
+            "publisher should wait for queue space instead of dropping StateChanged"
+        );
+
+        let first = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("queue should yield first event")
+            .expect("sender still alive");
+        assert!(matches!(first, AppEvent::UpdateReady { .. }));
+
+        tokio::time::timeout(std::time::Duration::from_millis(50), async {
+            (&mut publish).await;
+        })
+        .await
+        .expect("publisher should complete once queue space is available");
+
+        let second = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("queue should yield second event")
+            .expect("sender still alive");
+        assert!(matches!(
+            second,
+            AppEvent::StateChanged {
+                pane_id: delivered_pane,
+                agent: Some(Agent::Pi),
+                state: AgentState::Idle,
+            } if delivered_pane == pane_id
+        ));
     }
 }

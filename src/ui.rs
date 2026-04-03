@@ -1188,10 +1188,12 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         })
         .unwrap_or(body_area);
 
-    let body = Paragraph::new(render_release_notes_lines(
-        notes.body.as_str(),
-        &app.palette,
-    ))
+    let body = Paragraph::new(
+        release_notes_lines(notes.body.as_str(), &app.palette)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>(),
+    )
     .wrap(Wrap { trim: false })
     .scroll((notes.scroll, 0));
     frame.render_widget(body, text_area);
@@ -1218,39 +1220,52 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn render_release_notes_lines<'a>(body: &'a str, p: &Palette) -> Vec<Line<'a>> {
+pub(crate) fn release_notes_lines<'a>(body: &'a str, p: &Palette) -> Vec<(usize, Line<'a>)> {
     let mut lines = Vec::new();
 
     for raw in body.lines() {
         let trimmed = raw.trim_end();
         if trimmed.is_empty() {
-            lines.push(Line::raw(""));
+            lines.push((0, Line::raw("")));
             continue;
         }
 
         if let Some(rest) = trimmed.strip_prefix("### ") {
-            lines.push(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(
-                    rest.to_lowercase(),
-                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-                ),
-            ]));
+            let text = rest.to_lowercase();
+            let width = 1 + text.chars().count();
+            lines.push((
+                width,
+                Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(
+                        text,
+                        Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+            ));
             continue;
         }
 
         if let Some(rest) = trimmed.strip_prefix("- ") {
-            lines.push(Line::from(vec![
-                Span::styled(" • ", Style::default().fg(p.accent)),
-                Span::styled(rest.to_string(), Style::default().fg(p.text)),
-            ]));
+            let width = 3 + rest.chars().count();
+            lines.push((
+                width,
+                Line::from(vec![
+                    Span::styled(" • ", Style::default().fg(p.accent)),
+                    Span::styled(rest.to_string(), Style::default().fg(p.text)),
+                ]),
+            ));
             continue;
         }
 
-        lines.push(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(trimmed.to_string(), Style::default().fg(p.text)),
-        ]));
+        let width = 1 + trimmed.chars().count();
+        lines.push((
+            width,
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(trimmed.to_string(), Style::default().fg(p.text)),
+            ]),
+        ));
     }
 
     lines
@@ -1298,7 +1313,7 @@ pub(crate) fn onboarding_notification_button_rects(area: Rect) -> (Rect, Rect) {
             },
             ActionButtonSpec {
                 hint: Some("↵"),
-                label: "save",
+                label: "start",
             },
         ],
         2,
@@ -1308,14 +1323,15 @@ pub(crate) fn onboarding_notification_button_rects(area: Rect) -> (Rect, Rect) {
 }
 
 fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
-    let Some(inner) = render_modal_shell(frame, area, 64, 15, &app.palette) else {
+    let Some(inner) = render_modal_shell(frame, area, 64, 16, &app.palette) else {
         return;
     };
-    if inner.height < 10 {
+    if inner.height < 11 {
         return;
     }
 
     let rows = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -1328,7 +1344,7 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
         Constraint::Length(1),
         Constraint::Min(0),
     ])
-    .areas::<11>(inner);
+    .areas::<12>(inner);
 
     frame.render_widget(
         Paragraph::new("  herdr").style(
@@ -1339,62 +1355,53 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
         rows[1],
     );
     frame.render_widget(
-        Paragraph::new("  workspace manager for coding agents")
+        Paragraph::new("  terminal workspace manager for coding agents")
             .style(Style::default().fg(app.palette.overlay0)),
         rows[2],
     );
 
-    let line1 = Line::from(vec![
-        Span::styled(
-            format!("  {}", ONBOARDING_PREFIX_LABEL),
-            Style::default()
-                .fg(app.palette.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" navigate ", Style::default().fg(app.palette.overlay1)),
-        Span::styled("·", Style::default().fg(app.palette.overlay0)),
-        Span::styled(" click sidebar ", Style::default().fg(app.palette.overlay1)),
-        Span::styled("·", Style::default().fg(app.palette.overlay0)),
-        Span::styled(" scroll panes", Style::default().fg(app.palette.overlay1)),
-    ]);
-    frame.render_widget(Paragraph::new(line1), rows[4]);
+    frame.render_widget(
+        Paragraph::new("  this is a mouse-first terminal.")
+            .style(Style::default().fg(app.palette.overlay1)),
+        rows[4],
+    );
+    frame.render_widget(
+        Paragraph::new("  click the sidebar to switch workspaces, drag pane")
+            .style(Style::default().fg(app.palette.overlay1)),
+        rows[5],
+    );
+    frame.render_widget(
+        Paragraph::new("  borders to resize, right-click for context menus.")
+            .style(Style::default().fg(app.palette.overlay1)),
+        rows[6],
+    );
 
-    let line2 = Line::from(vec![
+    let key_line = Line::from(vec![
+        Span::styled("  ", Style::default()),
         Span::styled(
-            "  ↑↓",
+            ONBOARDING_PREFIX_LABEL,
             Style::default()
                 .fg(app.palette.accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " switch workspace ",
+            " enters navigate mode · ",
             Style::default().fg(app.palette.overlay1),
         ),
-        Span::styled("·", Style::default().fg(app.palette.overlay0)),
-        Span::styled(" drag borders ", Style::default().fg(app.palette.overlay1)),
-        Span::styled("·", Style::default().fg(app.palette.overlay0)),
         Span::styled(
-            " ⇥",
+            "?",
             Style::default()
                 .fg(app.palette.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" pane", Style::default().fg(app.palette.overlay1)),
+        Span::styled(
+            " shows keybinds and settings",
+            Style::default().fg(app.palette.overlay1),
+        ),
     ]);
-    frame.render_widget(Paragraph::new(line2), rows[5]);
+    frame.render_widget(Paragraph::new(key_line), rows[8]);
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("  ● ", Style::default().fg(app.palette.red)),
-            Span::styled("needs you    ", Style::default().fg(app.palette.overlay1)),
-            Span::styled("○ ", Style::default().fg(app.palette.yellow)),
-            Span::styled("working    ", Style::default().fg(app.palette.overlay1)),
-            Span::styled("◌ ", Style::default().fg(app.palette.overlay0)),
-            Span::styled("no agent", Style::default().fg(app.palette.overlay1)),
-        ])),
-        rows[7],
-    );
-    let continue_rect = onboarding_welcome_continue_rect(rows[9]);
+    let continue_rect = onboarding_welcome_continue_rect(rows[10]);
     render_action_button(
         frame,
         continue_rect,
@@ -1405,24 +1412,14 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
-    frame.render_widget(
-        Paragraph::new(" readme has config and more")
-            .style(Style::default().fg(app.palette.overlay0)),
-        Rect::new(
-            continue_rect.x + continue_rect.width + 2,
-            rows[9].y,
-            rows[9].width.saturating_sub(continue_rect.width + 2),
-            1,
-        ),
-    );
 }
 
 fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect) {
-    let Some(inner) = render_modal_shell(frame, area, 52, 10, &app.palette) else {
+    let Some(inner) = render_modal_shell(frame, area, 56, 14, &app.palette) else {
         return;
     };
 
-    if inner.height < 7 {
+    if inner.height < 11 {
         return;
     }
 
@@ -1434,21 +1431,31 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
     ])
-    .areas::<7>(inner);
+    .areas::<12>(inner);
 
-    render_modal_header(frame, rows[0], "choose notification style", &app.palette);
+    render_modal_header(frame, rows[0], "notification style", &app.palette);
     frame.render_widget(
-        Paragraph::new(" herdr can alert you when background work needs attention or finishes.")
+        Paragraph::new(" herdr watches background panes and can alert you")
             .style(Style::default().fg(app.palette.overlay1)),
-        rows[1],
+        rows[2],
+    );
+    frame.render_widget(
+        Paragraph::new(" when agents finish or need attention.")
+            .style(Style::default().fg(app.palette.overlay1)),
+        rows[3],
     );
 
     let options = [
-        "quiet        no sound, no visual toasts",
-        "visual only  top-right toasts, no sound",
-        "sound only   sound alerts, no toasts",
-        "both         sound and visual toasts",
+        "quiet        no interruptions",
+        "visual only  top-right toasts",
+        "sound only   sound alerts",
+        "both         sound and toasts",
     ];
 
     for (idx, option) in options.iter().enumerate() {
@@ -1463,11 +1470,11 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
         };
         frame.render_widget(
             Paragraph::new(format!(" {prefix} {}. {option}", idx + 1)).style(style),
-            rows[idx + 2],
+            rows[idx + 5],
         );
     }
 
-    let (back_rect, save_rect) = onboarding_notification_button_rects(rows[6]);
+    let (back_rect, save_rect) = onboarding_notification_button_rects(rows[10]);
     render_action_button(
         frame,
         back_rect,
@@ -1482,7 +1489,7 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
         frame,
         save_rect,
         Some("↵"),
-        "save",
+        "start",
         Style::default()
             .fg(app.palette.panel_bg)
             .bg(app.palette.accent)

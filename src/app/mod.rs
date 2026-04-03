@@ -2085,6 +2085,7 @@ fn agent_name(agent: crate::detect::Agent) -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
 
     fn test_app() -> App {
@@ -2151,5 +2152,65 @@ mod tests {
 
         assert_eq!(ws_idx, 1);
         assert_eq!(seed_cwd, std::path::PathBuf::from("/tmp/pion"));
+    }
+
+    #[tokio::test]
+    async fn full_internal_event_queue_eventually_applies_working_to_idle_transition() {
+        let mut app = test_app();
+        let ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.handle_internal_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Working,
+        });
+        assert_eq!(
+            app.state.workspaces[0].pane_state(pane_id).unwrap().state,
+            AgentState::Working
+        );
+
+        for i in 0..64 {
+            app.event_tx
+                .try_send(AppEvent::UpdateReady {
+                    version: format!("9.9.{i}"),
+                })
+                .unwrap();
+        }
+
+        let tx = app.event_tx.clone();
+        let send = tx.send(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+        });
+        tokio::pin!(send);
+
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(20), async { (&mut send).await }).await;
+        assert!(
+            blocked.is_err(),
+            "state change sender should wait for queue space instead of failing"
+        );
+
+        app.drain_internal_events();
+
+        tokio::time::timeout(Duration::from_millis(50), async { (&mut send).await })
+            .await
+            .expect("state change should enqueue once queue space is available")
+            .expect("app event receiver should still be alive");
+
+        app.drain_internal_events();
+
+        assert_eq!(
+            app.state.workspaces[0].pane_state(pane_id).unwrap().state,
+            AgentState::Idle,
+            "Working→Idle should still apply after temporary queue pressure"
+        );
     }
 }

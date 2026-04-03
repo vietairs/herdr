@@ -1249,12 +1249,24 @@ impl AppState {
         let notes = self.release_notes.as_ref()?;
         let body = self.release_notes_body_rect()?;
         let viewport_rows = body.height.max(1) as usize;
-        let wrap_width = body.width.max(1) as usize;
-        let total_rows = notes
-            .body
-            .lines()
-            .map(|line| line.chars().count().max(1).div_ceil(wrap_width))
-            .sum::<usize>();
+        let lines = crate::ui::release_notes_lines(&notes.body, &self.palette);
+
+        let rows_for_width = |wrap_width: usize| {
+            lines
+                .iter()
+                .map(|(width, _)| width.max(&1).div_ceil(wrap_width.max(1)))
+                .sum::<usize>()
+        };
+
+        let full_width = body.width.max(1) as usize;
+        let mut total_rows = rows_for_width(full_width);
+        let wrap_width = if total_rows > viewport_rows && full_width > 1 {
+            body.width.saturating_sub(1).max(1) as usize
+        } else {
+            full_width
+        };
+        total_rows = rows_for_width(wrap_width);
+
         let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
         Some(crate::pane::ScrollMetrics {
             offset_from_bottom: max_offset_from_bottom.saturating_sub(notes.scroll as usize),
@@ -1319,12 +1331,12 @@ impl AppState {
 
         match self.onboarding_step {
             0 => {
-                let Some(inner) = self.onboarding_modal_inner(64, 15) else {
+                let Some(inner) = self.onboarding_modal_inner(64, 16) else {
                     return;
                 };
                 let button = crate::ui::onboarding_welcome_continue_rect(Rect::new(
                     inner.x,
-                    inner.y + 9,
+                    inner.y + 10,
                     inner.width,
                     1,
                 ));
@@ -1339,10 +1351,10 @@ impl AppState {
                 }
             }
             _ => {
-                let Some(inner) = self.onboarding_modal_inner(52, 10) else {
+                let Some(inner) = self.onboarding_modal_inner(56, 14) else {
                     return;
                 };
-                let options_start_y = inner.y + 2;
+                let options_start_y = inner.y + 5;
                 if mouse.row >= options_start_y && mouse.row < options_start_y + 4 {
                     self.onboarding_list
                         .select((mouse.row - options_start_y) as usize);
@@ -1351,7 +1363,7 @@ impl AppState {
 
                 let (back, save) = crate::ui::onboarding_notification_button_rects(Rect::new(
                     inner.x,
-                    inner.y + 6,
+                    inner.y + 10,
                     inner.width,
                     1,
                 ));
@@ -2884,8 +2896,8 @@ mod tests {
         app.state.onboarding_step = 1;
         app.state.onboarding_list.select(1);
 
-        let inner = app.state.onboarding_modal_inner(52, 10).unwrap();
-        app.handle_mouse(mouse(MouseEventKind::Moved, inner.x + 2, inner.y + 4));
+        let inner = app.state.onboarding_modal_inner(56, 14).unwrap();
+        app.handle_mouse(mouse(MouseEventKind::Moved, inner.x + 2, inner.y + 7));
 
         assert_eq!(app.state.onboarding_list.selected, 1);
     }
@@ -2897,11 +2909,11 @@ mod tests {
         app.state.onboarding_step = 1;
         app.state.onboarding_list.select(0);
 
-        let inner = app.state.onboarding_modal_inner(52, 10).unwrap();
+        let inner = app.state.onboarding_modal_inner(56, 14).unwrap();
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             inner.x + 2,
-            inner.y + 4,
+            inner.y + 7,
         ));
 
         assert_eq!(app.state.onboarding_list.selected, 2);
