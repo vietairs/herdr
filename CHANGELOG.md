@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.1] - 2026-04-03
+
 ### Added
 - New tabs now open directly into the rename flow, with the default tab name prefilled and replaced on first type so you can name tabs as you create them.
 
