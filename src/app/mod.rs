@@ -173,6 +173,8 @@ impl App {
             (Vec::new(), None, 0)
         };
 
+        let latest_release_notes_available = crate::release_notes::load_latest().is_some();
+
         let mode = if config.should_show_onboarding() {
             state::Mode::Onboarding
         } else if startup_release_notes.is_some() {
@@ -216,6 +218,7 @@ impl App {
             selection: None,
             context_menu: None,
             update_available: None,
+            latest_release_notes_available,
             update_dismissed: false,
             config_diagnostic,
             toast: None,
@@ -1692,9 +1695,9 @@ impl App {
 
         self.state.release_notes = None;
         if !preview {
-            if let Err(err) = crate::release_notes::clear_pending() {
+            if let Err(err) = crate::release_notes::mark_current_version_seen() {
                 self.state.config_diagnostic =
-                    Some(format!("failed to clear release notes: {err}"));
+                    Some(format!("failed to update release notes status: {err}"));
                 self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(5));
             }
         }

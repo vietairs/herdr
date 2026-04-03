@@ -379,7 +379,7 @@ fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
         );
     }
 
-    render_sidebar_toggle(frame, area, true, p);
+    render_sidebar_toggle(app, frame, area, true, p);
 }
 
 fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -431,7 +431,7 @@ fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
     }
 
-    render_sidebar_toggle(frame, area, false, p);
+    render_sidebar_toggle(app, frame, area, false, p);
 }
 
 /// Render the workspace list in the top section of the sidebar.
@@ -578,9 +578,19 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
         );
 
         let menu_rect = app.global_launcher_rect();
+        let menu_line = if app.update_available.is_some() {
+            Line::from(vec![
+                Span::styled("menu", Style::default().fg(p.overlay0)),
+                Span::styled(
+                    " ●",
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                ),
+            ])
+        } else {
+            Line::from(vec![Span::styled("menu", Style::default().fg(p.overlay0))])
+        };
         frame.render_widget(
-            Paragraph::new(Span::styled("menu", Style::default().fg(p.overlay0)))
-                .alignment(Alignment::Right),
+            Paragraph::new(menu_line).alignment(Alignment::Right),
             menu_rect,
         );
     }
@@ -668,7 +678,13 @@ fn render_agent_detail(
     }
 }
 
-fn render_sidebar_toggle(frame: &mut Frame, area: Rect, collapsed: bool, p: &Palette) {
+fn render_sidebar_toggle(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    collapsed: bool,
+    p: &Palette,
+) {
     // Toggle button not needed when sidebar has content — skip for now
     // to avoid conflicting with the agent detail panel at the bottom.
     if !collapsed {
@@ -679,13 +695,14 @@ fn render_sidebar_toggle(frame: &mut Frame, area: Rect, collapsed: bool, p: &Pal
     if content_w == 0 || area.height == 0 {
         return;
     }
-    let icon = "»";
+    let icon_style = if app.update_available.is_some() {
+        Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.overlay0)
+    };
     let x = area.x + content_w / 2;
     let toggle_area = Rect::new(x, bottom_y, 1, 1);
-    frame.render_widget(
-        Paragraph::new(Span::styled(icon, Style::default().fg(p.overlay0))),
-        toggle_area,
-    );
+    frame.render_widget(Paragraph::new(Span::styled("»", icon_style)), toggle_area);
 }
 
 fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -1579,6 +1596,27 @@ fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         buf[(x, overlay_y)].set_style(bg);
     }
     frame.render_widget(Paragraph::new(line), overlay_area);
+
+    if app.update_available.is_some() {
+        let status = Line::from(vec![Span::styled(
+            " update ready",
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )]);
+        let width = 13u16.min(overlay_area.width);
+        let status_area = Rect::new(
+            overlay_area.x + overlay_area.width.saturating_sub(width),
+            overlay_area.y,
+            width,
+            overlay_area.height,
+        );
+        frame.render_widget(Clear, status_area);
+        frame.render_widget(
+            Paragraph::new(status).alignment(Alignment::Right),
+            status_area,
+        );
+    }
 }
 
 fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
@@ -1588,7 +1626,7 @@ fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
 
-    let items = ["keybinds", "settings"];
+    let items = app.global_menu_labels();
     for (idx, item) in items.iter().enumerate() {
         let y = inner.y + idx as u16;
         if y >= inner.y + inner.height {
@@ -1604,7 +1642,7 @@ fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
             Style::default().fg(app.palette.text)
         };
         frame.render_widget(
-            Paragraph::new(format!(" {item}"))
+            Paragraph::new(format!(" {item} "))
                 .style(style)
                 .alignment(Alignment::Left),
             Rect::new(inner.x, y, inner.width, 1),

@@ -321,6 +321,7 @@ impl AppState {
             }
             AppEvent::UpdateReady { version } => {
                 self.update_available = Some(version.clone());
+                self.latest_release_notes_available = true;
                 self.update_dismissed = true;
                 self.toast = Some(ToastNotification {
                     kind: ToastKind::UpdateInstalled,

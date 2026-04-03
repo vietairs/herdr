@@ -551,6 +551,7 @@ pub struct AppState {
     pub context_menu: Option<ContextMenuState>,
     // Notifications
     pub update_available: Option<String>,
+    pub latest_release_notes_available: bool,
     pub update_dismissed: bool,
     pub config_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
@@ -651,6 +652,7 @@ impl AppState {
             selection: None,
             context_menu: None,
             update_available: None,
+            latest_release_notes_available: false,
             update_dismissed: false,
             config_diagnostic: None,
             toast: None,

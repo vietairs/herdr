@@ -484,12 +484,21 @@ fn modal_action_from_buttons<A: Copy>(col: u16, row: u16, buttons: &[(Rect, A)])
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GlobalMenuAction {
+    ApplyUpdate,
+    WhatsNew,
     Keybinds,
     Settings,
 }
 
-impl GlobalMenuAction {
-    const ALL: [Self; 2] = [Self::Keybinds, Self::Settings];
+fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
+    let mut actions = vec![GlobalMenuAction::Settings, GlobalMenuAction::Keybinds];
+    if state.latest_release_notes_available || state.update_available.is_some() {
+        actions.push(GlobalMenuAction::WhatsNew);
+    }
+    if state.update_available.is_some() {
+        actions.push(GlobalMenuAction::ApplyUpdate);
+    }
+    actions
 }
 
 fn normalize_theme_name(name: &str) -> String {
@@ -633,23 +642,39 @@ fn open_keybind_help(state: &mut AppState) {
     state.mode = Mode::KeybindHelp;
 }
 
+fn open_update_release_notes(state: &mut AppState) {
+    let Some(notes) = crate::release_notes::load_latest() else {
+        return;
+    };
+
+    state.release_notes = Some(crate::app::state::ReleaseNotesState {
+        version: notes.version,
+        body: notes.body,
+        scroll: 0,
+        preview: notes.preview,
+    });
+    state.mode = Mode::ReleaseNotes;
+}
+
 fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuAction) {
     match action {
+        GlobalMenuAction::ApplyUpdate => state.should_quit = true,
+        GlobalMenuAction::WhatsNew => open_update_release_notes(state),
         GlobalMenuAction::Keybinds => open_keybind_help(state),
         GlobalMenuAction::Settings => open_settings(state),
     }
 }
 
 fn handle_global_menu_key(state: &mut AppState, key: KeyEvent) {
+    let actions = global_menu_actions(state);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => leave_modal(state),
         KeyCode::Up | KeyCode::Char('k') => state.global_menu.move_prev(),
-        KeyCode::Down | KeyCode::Char('j') => {
-            state.global_menu.move_next(GlobalMenuAction::ALL.len())
-        }
+        KeyCode::Down | KeyCode::Char('j') => state.global_menu.move_next(actions.len()),
         KeyCode::Enter => {
-            let action = GlobalMenuAction::ALL[state.global_menu.highlighted];
-            apply_global_menu_action(state, action);
+            if let Some(action) = actions.get(state.global_menu.highlighted).copied() {
+                apply_global_menu_action(state, action);
+            }
         }
         _ => {}
     }
@@ -1411,16 +1436,39 @@ impl AppState {
 
     pub(crate) fn global_launcher_rect(&self) -> Rect {
         let footer = self.sidebar_footer_rect();
-        let width = 6u16.min(footer.width.max(1));
+        let width = if self.update_available.is_some() {
+            8
+        } else {
+            6
+        }
+        .min(footer.width.max(1));
         let x = footer.x + footer.width.saturating_sub(width);
         Rect::new(x, footer.y, width, footer.height)
+    }
+
+    pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
+        let mut labels = vec!["settings", "keybinds"];
+        if self.latest_release_notes_available || self.update_available.is_some() {
+            labels.push("what's new");
+        }
+        if self.update_available.is_some() {
+            labels.push("quit to apply update");
+        }
+        labels
     }
 
     pub(crate) fn global_menu_rect(&self) -> Rect {
         let screen = self.screen_rect();
         let launcher = self.global_launcher_rect();
-        let menu_w = 14u16.min(screen.width.max(1));
-        let menu_h = (GlobalMenuAction::ALL.len() as u16 + 2).min(screen.height.max(1));
+        let labels = self.global_menu_labels();
+        let content_width = labels
+            .iter()
+            .map(|label| label.chars().count() as u16)
+            .max()
+            .unwrap_or(8)
+            .saturating_add(2);
+        let menu_w = content_width.saturating_add(2).min(screen.width.max(1));
+        let menu_h = (labels.len() as u16 + 2).min(screen.height.max(1));
         let max_x = screen.x + screen.width.saturating_sub(menu_w);
         let desired_x = launcher.x + launcher.width.saturating_sub(menu_w);
         let x = desired_x.min(max_x);
@@ -1438,7 +1486,7 @@ impl AppState {
             return None;
         }
         let idx = (row - rect.y - 1) as usize;
-        GlobalMenuAction::ALL.get(idx).copied()
+        global_menu_actions(self).get(idx).copied()
     }
 
     pub(crate) fn keybind_help_popup_rect(&self) -> Rect {
@@ -1689,13 +1737,10 @@ impl AppState {
             && mouse.row < launcher.y + launcher.height;
 
         if matches!(mouse.kind, MouseEventKind::Moved) && self.mode == Mode::GlobalMenu {
+            let actions = global_menu_actions(self);
             let hovered = self
                 .global_menu_item_at(mouse.column, mouse.row)
-                .and_then(|action| {
-                    GlobalMenuAction::ALL
-                        .iter()
-                        .position(|item| *item == action)
-                });
+                .and_then(|action| actions.iter().position(|item| *item == action));
             self.global_menu.hover(hovered);
             return None;
         }
@@ -2496,6 +2541,8 @@ mod tests {
             crate::api::EventHub::default(),
         );
         app.state.mode = Mode::Terminal;
+        app.state.update_available = None;
+        app.state.latest_release_notes_available = false;
         app.state.view.sidebar_rect = Rect::new(0, 0, 26, 20);
         app.state.view.terminal_area = Rect::new(26, 0, 80, 20);
         app
@@ -2867,7 +2914,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 1,
+            menu.y + 2,
         ));
 
         assert_eq!(app.state.mode, Mode::KeybindHelp);
@@ -2887,10 +2934,49 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 2,
+            menu.y + 1,
         ));
 
         assert_eq!(app.state.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn update_pending_menu_surfaces_apply_update_action() {
+        let mut app = app_for_mouse_test();
+        app.state.update_available = Some("0.3.2".into());
+        app.state.latest_release_notes_available = true;
+
+        let launcher = app.state.global_launcher_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            launcher.x,
+            launcher.y,
+        ));
+
+        assert_eq!(
+            app.state.global_menu_labels(),
+            vec!["settings", "keybinds", "what's new", "quit to apply update"]
+        );
+
+        let menu = app.state.global_menu_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 4,
+        ));
+
+        assert!(app.state.should_quit);
+    }
+
+    #[test]
+    fn whats_new_remains_in_menu_for_latest_installed_release_notes() {
+        let mut app = app_for_mouse_test();
+        app.state.latest_release_notes_available = true;
+
+        assert_eq!(
+            app.state.global_menu_labels(),
+            vec!["settings", "keybinds", "what's new"]
+        );
     }
 
     #[test]
