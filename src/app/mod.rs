@@ -8,6 +8,7 @@ mod actions;
 mod input;
 pub mod state;
 
+use std::collections::HashSet;
 use std::future::pending;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +53,7 @@ pub struct App {
     next_animation_tick: Option<Instant>,
     next_auto_update_check: Option<Instant>,
     last_render_at: Option<Instant>,
+    suppressed_repeat_keys: HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
 }
@@ -79,6 +81,12 @@ async fn sleep_until_or_pending(deadline: Option<Instant>) {
         Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
         None => pending().await,
     }
+}
+
+fn repeat_key_identity(
+    key: &crate::input::TerminalKey,
+) -> (crossterm::event::KeyCode, crossterm::event::KeyModifiers) {
+    (key.code, key.modifiers)
 }
 
 fn api_request_changes_ui(request: &crate::api::schema::Request) -> bool {
@@ -282,6 +290,7 @@ impl App {
             next_auto_update_check: (!no_session)
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             last_render_at: None,
+            suppressed_repeat_keys: HashSet::new(),
             api_rx,
             event_hub,
             last_focus,
@@ -448,11 +457,31 @@ impl App {
     async fn handle_raw_input_event(&mut self, event: crate::raw_input::RawInputEvent) -> bool {
         match event {
             crate::raw_input::RawInputEvent::Key(key) => {
-                if key.kind == crossterm::event::KeyEventKind::Press {
-                    self.handle_key(key).await;
-                    true
-                } else {
-                    false
+                let key_id = repeat_key_identity(&key);
+                match key.kind {
+                    crossterm::event::KeyEventKind::Press => {
+                        if self.state.mode == Mode::Terminal {
+                            self.suppressed_repeat_keys.remove(&key_id);
+                        } else {
+                            self.suppressed_repeat_keys.insert(key_id);
+                        }
+                        self.handle_key(key).await;
+                        true
+                    }
+                    crossterm::event::KeyEventKind::Repeat => {
+                        if self.state.mode == Mode::Terminal
+                            && !self.suppressed_repeat_keys.contains(&key_id)
+                        {
+                            self.handle_key(key).await;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    crossterm::event::KeyEventKind::Release => {
+                        self.suppressed_repeat_keys.remove(&key_id);
+                        false
+                    }
                 }
             }
             crate::raw_input::RawInputEvent::Paste(text) => {
@@ -2106,6 +2135,26 @@ mod tests {
     use crate::config::Config;
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    fn raw_key(
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        kind: KeyEventKind,
+    ) -> crate::raw_input::RawInputEvent {
+        crate::raw_input::RawInputEvent::Key(
+            crate::input::TerminalKey::new(code, modifiers).with_kind(kind),
+        )
+    }
+
+    fn release_notes_state() -> state::ReleaseNotesState {
+        state::ReleaseNotesState {
+            version: "0.1.0".into(),
+            body: "notes".into(),
+            scroll: 0,
+            preview: true,
+        }
+    }
 
     fn test_app() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2124,6 +2173,89 @@ mod tests {
         let result =
             tokio::time::timeout(Duration::from_millis(20), recv_raw_input_or_pending(None)).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_mode_handles_repeat_key_events() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Backspace,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+
+        assert!(handled);
+    }
+
+    #[tokio::test]
+    async fn repeat_key_events_are_ignored_outside_terminal_mode() {
+        let mut app = test_app();
+        app.state.mode = Mode::ReleaseNotes;
+        app.state.release_notes = Some(release_notes_state());
+
+        let handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+
+        assert!(!handled);
+        assert_eq!(app.state.mode, Mode::ReleaseNotes);
+        assert!(app.state.release_notes.is_some());
+    }
+
+    #[tokio::test]
+    async fn modal_press_does_not_leak_repeat_into_terminal_mode() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::ReleaseNotes;
+        app.state.release_notes = Some(release_notes_state());
+
+        let press_handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            ))
+            .await;
+        let repeat_handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+                KeyEventKind::Repeat,
+            ))
+            .await;
+        let release_handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+                KeyEventKind::Release,
+            ))
+            .await;
+        let next_press_handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            ))
+            .await;
+
+        assert!(press_handled);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(!repeat_handled);
+        assert!(!release_handled);
+        assert!(next_press_handled);
     }
 
     #[test]
