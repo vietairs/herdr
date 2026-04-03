@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use serde::Deserialize;
@@ -162,6 +162,15 @@ pub struct AdvancedConfig {
 #[serde(default)]
 pub struct SoundConfig {
     pub enabled: bool,
+    /// Optional mp3 file path used for all notification sounds.
+    /// Relative paths are resolved from the config file's directory.
+    pub path: Option<PathBuf>,
+    /// Optional mp3 file path for "done" notifications.
+    /// Relative paths are resolved from the config file's directory.
+    pub done_path: Option<PathBuf>,
+    /// Optional mp3 file path for "request" notifications.
+    /// Relative paths are resolved from the config file's directory.
+    pub request_path: Option<PathBuf>,
     pub agents: AgentSoundOverrides,
 }
 
@@ -197,6 +206,57 @@ impl SoundConfig {
         }
 
         !matches!(self.agents.for_agent(agent), AgentSoundSetting::Off)
+    }
+
+    pub fn path_for(&self, sound: crate::sound::Sound) -> Option<PathBuf> {
+        let path = match sound {
+            crate::sound::Sound::Done => self.done_path.as_ref().or(self.path.as_ref()),
+            crate::sound::Sound::Request => self.request_path.as_ref().or(self.path.as_ref()),
+        }?;
+
+        Some(resolve_config_relative_path(path))
+    }
+
+    pub fn diagnostics(&self) -> Vec<String> {
+        let mut diagnostics = Vec::new();
+        for (field, path) in [
+            ("ui.sound.path", self.path.as_ref()),
+            ("ui.sound.done_path", self.done_path.as_ref()),
+            ("ui.sound.request_path", self.request_path.as_ref()),
+        ] {
+            let Some(path) = path else {
+                continue;
+            };
+
+            let resolved = resolve_config_relative_path(path);
+            if resolved
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_none_or(|ext| !ext.eq_ignore_ascii_case("mp3"))
+            {
+                diagnostics.push(format!(
+                    "unsupported sound file format: {field} = {} resolves to {}; expected an mp3 file; using default sound",
+                    path.display(),
+                    resolved.display()
+                ));
+                continue;
+            }
+
+            if !resolved.exists() {
+                diagnostics.push(format!(
+                    "missing sound file: {field} = {} resolves to {}; using default sound",
+                    path.display(),
+                    resolved.display()
+                ));
+            } else if !resolved.is_file() {
+                diagnostics.push(format!(
+                    "invalid sound file: {field} = {} resolves to {}; using default sound",
+                    path.display(),
+                    resolved.display()
+                ));
+            }
+        }
+        diagnostics
     }
 }
 
@@ -269,6 +329,9 @@ impl Default for SoundConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            path: None,
+            done_path: None,
+            request_path: None,
             agents: AgentSoundOverrides::default(),
         }
     }
@@ -343,9 +406,26 @@ impl Config {
 
     pub fn collect_diagnostics(&self) -> Vec<String> {
         let (prefix_diag, _, keybind_diags, _) = self.validated_keybinds();
-        prefix_diag.into_iter().chain(keybind_diags).collect()
+        prefix_diag
+            .into_iter()
+            .chain(keybind_diags)
+            .chain(self.ui.sound.diagnostics())
+            .collect()
+    }
+}
+
+fn resolve_config_relative_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
     }
 
+    config_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(path)
+}
+
+impl Config {
     fn validated_keybinds(
         &self,
     ) -> (
@@ -1197,6 +1277,9 @@ rename_workspace = "g"
         let toml = r#"
 [ui.sound]
 enabled = true
+path = "sounds/all.mp3"
+done_path = "sounds/done.mp3"
+request_path = "/tmp/request.mp3"
 
 [ui.sound.agents]
 droid = "off"
@@ -1204,9 +1287,72 @@ claude = "on"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.ui.sound.enabled);
+        assert_eq!(config.ui.sound.path, Some(PathBuf::from("sounds/all.mp3")));
+        assert_eq!(
+            config.ui.sound.done_path,
+            Some(PathBuf::from("sounds/done.mp3"))
+        );
+        assert_eq!(
+            config.ui.sound.request_path,
+            Some(PathBuf::from("/tmp/request.mp3"))
+        );
         assert_eq!(config.ui.sound.agents.droid, AgentSoundSetting::Off);
         assert_eq!(config.ui.sound.agents.claude, AgentSoundSetting::On);
         assert_eq!(config.ui.sound.agents.pi, AgentSoundSetting::Default);
+    }
+
+    #[test]
+    fn sound_path_resolution_prefers_specific_over_global() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.sound]
+path = "sounds/all.mp3"
+done_path = "sounds/done.mp3"
+"#,
+        )
+        .unwrap();
+
+        let config_root = config_path().parent().unwrap().to_path_buf();
+        assert_eq!(
+            config.ui.sound.path_for(crate::sound::Sound::Done),
+            Some(config_root.join("sounds/done.mp3"))
+        );
+        assert_eq!(
+            config.ui.sound.path_for(crate::sound::Sound::Request),
+            Some(config_root.join("sounds/all.mp3"))
+        );
+    }
+
+    #[test]
+    fn missing_sound_file_produces_diagnostic() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.sound]
+done_path = "sounds/missing.mp3"
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = config.collect_diagnostics();
+        assert!(diagnostics.iter().any(
+            |diag| diag.contains("ui.sound.done_path") && diag.contains("using default sound")
+        ));
+    }
+
+    #[test]
+    fn non_mp3_sound_file_produces_diagnostic() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.sound]
+path = "sounds/notification.wav"
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = config.collect_diagnostics();
+        assert!(diagnostics.iter().any(|diag| {
+            diag.contains("ui.sound.path") && diag.contains("expected an mp3 file")
+        }));
     }
 
     #[test]

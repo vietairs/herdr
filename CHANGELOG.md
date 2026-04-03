@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added configurable custom mp3 notification sound paths under `[ui.sound]`, with support for one shared file or separate files for finished vs needs-attention alerts. Relative paths are resolved from the config file's directory, and missing/unsupported custom files fall back to the built-in sounds.
+
 ## [0.3.2] - 2026-04-03
 
 ### Changed

@@ -445,7 +445,7 @@ impl AppState {
                 change.previous_state,
                 change.state,
             ) {
-                crate::sound::play(sound);
+                crate::sound::play(sound, &self.sound);
             }
         }
 

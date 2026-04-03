@@ -137,6 +137,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Play sounds when agents change state in background workspaces
 [ui.sound]
 # enabled = true
+# Optional custom mp3 sound files. Relative paths are resolved from this config file's directory.
+# path = "sounds/notification.mp3"   # one mp3 file for all sound notifications
+# done_path = "sounds/done.mp3"      # overrides only finished notifications
+# request_path = "sounds/request.mp3" # overrides only needs-attention notifications
 
 # Per-agent overrides: default | on | off
 # By default, droid is muted.
