@@ -215,6 +215,7 @@ impl App {
             keybind_help: state::KeybindHelpState { scroll: 0 },
             view: state::ViewState {
                 sidebar_rect: Rect::default(),
+                workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 new_tab_hit_area: Rect::default(),
@@ -223,6 +224,7 @@ impl App {
                 split_borders: Vec::new(),
             },
             drag: None,
+            workspace_press: None,
             selection: None,
             context_menu: None,
             update_available: None,

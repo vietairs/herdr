@@ -320,10 +320,17 @@ impl Palette {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkspaceCardArea {
+    pub ws_idx: usize,
+    pub rect: Rect,
+}
+
 /// Computed view geometry — derived from AppState + terminal size.
 /// Updated before each render, consumed by render and mouse handling.
 pub struct ViewState {
     pub sidebar_rect: Rect,
+    pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub new_tab_hit_area: Rect,
@@ -449,6 +456,10 @@ pub struct SettingsState {
 }
 
 pub(crate) enum DragTarget {
+    WorkspaceReorder {
+        source_ws_idx: usize,
+        insert_idx: Option<usize>,
+    },
     PaneSplit {
         path: Vec<bool>,
         direction: Direction,
@@ -470,6 +481,12 @@ pub(crate) enum DragTarget {
 /// Active mouse drag on a split border or sidebar divider.
 pub(crate) struct DragState {
     pub target: DragTarget,
+}
+
+pub(crate) struct WorkspacePressState {
+    pub ws_idx: usize,
+    pub start_col: u16,
+    pub start_row: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -547,6 +564,7 @@ pub struct AppState {
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
+    pub(crate) workspace_press: Option<WorkspacePressState>,
     pub selection: Option<Selection>,
     pub context_menu: Option<ContextMenuState>,
     // Notifications
@@ -641,6 +659,7 @@ impl AppState {
             keybind_help: KeybindHelpState { scroll: 0 },
             view: ViewState {
                 sidebar_rect: Rect::default(),
+                workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 new_tab_hit_area: Rect::default(),
@@ -649,6 +668,7 @@ impl AppState {
                 split_borders: Vec::new(),
             },
             drag: None,
+            workspace_press: None,
             selection: None,
             context_menu: None,
             update_available: None,

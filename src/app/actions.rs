@@ -138,6 +138,32 @@ impl AppState {
         }
     }
 
+    pub fn move_workspace(&mut self, source_idx: usize, insert_idx: usize) {
+        if source_idx >= self.workspaces.len() || insert_idx > self.workspaces.len() {
+            return;
+        }
+
+        let active_id = self.active.map(|idx| self.workspaces[idx].id.clone());
+        let selected_id = self
+            .workspaces
+            .get(self.selected)
+            .map(|workspace| workspace.id.clone());
+
+        let workspace = self.workspaces.remove(source_idx);
+        let target_idx = if source_idx < insert_idx {
+            insert_idx.saturating_sub(1)
+        } else {
+            insert_idx
+        }
+        .min(self.workspaces.len());
+        self.workspaces.insert(target_idx, workspace);
+
+        self.active = active_id.and_then(|id| self.workspaces.iter().position(|ws| ws.id == id));
+        self.selected = selected_id
+            .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
+            .unwrap_or(0);
+    }
+
     pub fn next_tab(&mut self) {
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
             if !ws.tabs.is_empty() {
@@ -533,6 +559,42 @@ mod tests {
         let mut state = app_with_workspaces(&["a"]);
         state.switch_workspace(5);
         assert_eq!(state.active, Some(0));
+    }
+
+    #[test]
+    fn move_workspace_reorders_without_changing_logical_selection() {
+        let mut state = app_with_workspaces(&["a", "b", "c"]);
+        let active_id = state.workspaces[1].id.clone();
+        let selected_id = state.workspaces[2].id.clone();
+        state.active = Some(1);
+        state.selected = 2;
+
+        state.move_workspace(1, 0);
+
+        let names: Vec<_> = state
+            .workspaces
+            .iter()
+            .map(|ws| ws.display_name())
+            .collect();
+        assert_eq!(names, vec!["b", "a", "c"]);
+        assert_eq!(state.active, Some(0));
+        assert_eq!(state.selected, 2);
+        assert_eq!(state.workspaces[state.active.unwrap()].id, active_id);
+        assert_eq!(state.workspaces[state.selected].id, selected_id);
+    }
+
+    #[test]
+    fn move_workspace_accepts_insert_at_end() {
+        let mut state = app_with_workspaces(&["a", "b", "c"]);
+
+        state.move_workspace(0, state.workspaces.len());
+
+        let names: Vec<_> = state
+            .workspaces
+            .iter()
+            .map(|ws| ws.display_name())
+            .collect();
+        assert_eq!(names, vec!["b", "c", "a"]);
     }
 
     #[test]

@@ -23,9 +23,11 @@ enum WheelRouting {
     AlternateScroll,
 }
 
+const WORKSPACE_DRAG_THRESHOLD: u16 = 1;
+
 use super::state::{
     key_matches, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, MenuListState,
-    Mode,
+    Mode, WorkspacePressState,
 };
 use super::App;
 
@@ -1410,7 +1412,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn sidebar_footer_rect(&self) -> Rect {
+    fn workspace_list_rect(&self) -> Rect {
         let sidebar = self.view.sidebar_rect;
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
@@ -1423,7 +1425,14 @@ impl AppState {
         );
         let total_h = content.height as usize;
         let ws_h = (total_h + 1) / 2;
-        let ws_area = Rect::new(content.x, content.y, content.width, ws_h as u16);
+        Rect::new(content.x, content.y, content.width, ws_h as u16)
+    }
+
+    pub(crate) fn sidebar_footer_rect(&self) -> Rect {
+        let ws_area = self.workspace_list_rect();
+        if ws_area == Rect::default() {
+            return Rect::default();
+        }
         let y = ws_area.y + ws_area.height.saturating_sub(1);
         Rect::new(ws_area.x, y, ws_area.width, 1)
     }
@@ -1778,6 +1787,7 @@ impl AppState {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
+                self.workspace_press = None;
 
                 if self.mode == Mode::ConfirmClose {
                     let popup = self.confirm_close_rect();
@@ -1912,8 +1922,11 @@ impl AppState {
                     }
 
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
-                        self.switch_workspace(idx);
-                        self.mode = Mode::Terminal;
+                        self.workspace_press = Some(WorkspacePressState {
+                            ws_idx: idx,
+                            start_col: mouse.column,
+                            start_row: mouse.row,
+                        });
                         return None;
                     }
 
@@ -1961,8 +1974,30 @@ impl AppState {
             }
 
             MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some(drag) = &self.drag {
+                let workspace_drop_index = self.workspace_drop_index_at_row(mouse.row);
+                if self.drag.is_none() {
+                    if let Some(press) = &self.workspace_press {
+                        let delta_col = mouse.column.abs_diff(press.start_col);
+                        let delta_row = mouse.row.abs_diff(press.start_row);
+                        if delta_col.max(delta_row) >= WORKSPACE_DRAG_THRESHOLD {
+                            self.drag = Some(DragState {
+                                target: DragTarget::WorkspaceReorder {
+                                    source_ws_idx: press.ws_idx,
+                                    insert_idx: workspace_drop_index,
+                                },
+                            });
+                        }
+                    }
+                }
+
+                if let Some(DragState {
+                    target: DragTarget::WorkspaceReorder { insert_idx, .. },
+                }) = &mut self.drag
+                {
+                    *insert_idx = workspace_drop_index;
+                } else if let Some(drag) = &self.drag {
                     match &drag.target {
+                        DragTarget::WorkspaceReorder { .. } => {}
                         DragTarget::PaneSplit {
                             path,
                             direction,
@@ -2009,13 +2044,30 @@ impl AppState {
             }
 
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.drag.take().is_some() {
-                } else {
-                    let was_click = self.selection.as_ref().is_some_and(|s| s.was_just_click());
-                    if was_click {
-                        self.selection = None;
-                    } else {
-                        self.copy_selection();
+                let workspace_press = self.workspace_press.take();
+                match self.drag.take() {
+                    Some(DragState {
+                        target:
+                            DragTarget::WorkspaceReorder {
+                                source_ws_idx,
+                                insert_idx: Some(insert_idx),
+                            },
+                    }) => {
+                        self.move_workspace(source_ws_idx, insert_idx);
+                    }
+                    Some(_) => {}
+                    None => {
+                        if let Some(press) = workspace_press {
+                            self.switch_workspace(press.ws_idx);
+                            self.mode = Mode::Terminal;
+                            return None;
+                        }
+                        let was_click = self.selection.as_ref().is_some_and(|s| s.was_just_click());
+                        if was_click {
+                            self.selection = None;
+                        } else {
+                            self.copy_selection();
+                        }
                     }
                 }
             }
@@ -2139,23 +2191,49 @@ impl AppState {
             return None;
         }
 
-        if row < self.view.sidebar_rect.y || row >= footer.y {
+        let cards = if self.view.workspace_card_areas.is_empty() {
+            crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
+        } else {
+            self.view.workspace_card_areas.clone()
+        };
+
+        cards.iter().find_map(|card| {
+            (row >= card.rect.y && row < card.rect.y + card.rect.height).then_some(card.ws_idx)
+        })
+    }
+
+    fn workspace_drop_index_at_row(&self, row: u16) -> Option<usize> {
+        let area = self.workspace_list_rect();
+        let footer = self.sidebar_footer_rect();
+        if area == Rect::default() || row < area.y || row >= footer.y {
             return None;
         }
 
-        let mut row_y = self.view.sidebar_rect.y;
-        for (i, ws) in self.workspaces.iter().enumerate() {
-            let has_branch = ws.branch().is_some();
-            let card_h: u16 = if has_branch { 2 } else { 1 };
-            if row >= row_y && row < row_y + card_h {
-                return Some(i);
-            }
-            row_y += card_h + 1; // +1 for gap
-            if row_y >= footer.y {
-                break;
+        let cards = if self.view.workspace_card_areas.is_empty() {
+            crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
+        } else {
+            self.view.workspace_card_areas.clone()
+        };
+        if cards.is_empty() {
+            return Some(0);
+        }
+
+        let mut best: Option<(usize, u16)> = None;
+        for insert_idx in 0..=cards.len() {
+            let Some(slot_row) = crate::ui::workspace_drop_indicator_row(&cards, area, insert_idx)
+            else {
+                continue;
+            };
+            let distance = row.abs_diff(slot_row);
+            match best {
+                Some((best_idx, best_distance))
+                    if distance > best_distance
+                        || (distance == best_distance && insert_idx < best_idx) => {}
+                _ => best = Some((insert_idx, distance)),
             }
         }
-        None
+
+        best.map(|(insert_idx, _)| insert_idx)
     }
 
     fn agent_detail_target_at(&self, row: u16) -> Option<(usize, usize, crate::layout::PaneId)> {
@@ -3161,6 +3239,69 @@ mod tests {
             second_pane
         );
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn clicking_workspace_switches_on_mouse_up() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+        assert_eq!(app.state.active, Some(0));
+        assert!(app.state.workspace_press.is_some());
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, 3));
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.selected, 1);
+        assert!(app.state.workspace_press.is_none());
+    }
+
+    #[test]
+    fn dragging_workspace_reorders_without_changing_identity() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("a"),
+            Workspace::test_new("b"),
+            Workspace::test_new("c"),
+        ];
+        let active_id = app.state.workspaces[1].id.clone();
+        let selected_id = app.state.workspaces[2].id.clone();
+        app.state.active = Some(1);
+        app.state.selected = 2;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 2, 0));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::WorkspaceReorder {
+                source_ws_idx: 1,
+                insert_idx: Some(0),
+            })
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, 0));
+
+        let names: Vec<_> = app
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.display_name())
+            .collect();
+        assert_eq!(names, vec!["b", "a", "c"]);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.selected, 2);
+        assert_eq!(app.state.workspaces[0].id, active_id);
+        assert_eq!(app.state.workspaces[2].id, selected_id);
+    }
+
+    #[test]
+    fn top_drop_slot_is_distinct_from_gap_below_first_workspace() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+
+        assert_eq!(app.state.workspace_drop_index_at_row(0), Some(0));
+        assert_eq!(app.state.workspace_drop_index_at_row(1), Some(1));
     }
 
     #[test]
