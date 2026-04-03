@@ -98,7 +98,6 @@ pub fn render(app: &AppState, frame: &mut Frame) {
         Mode::Resize => render_resize_overlay(app, frame, terminal_area),
         Mode::ConfirmClose => render_confirm_close_overlay(app, frame, terminal_area),
         Mode::ContextMenu => {
-            render_navigate_overlay(app, frame, terminal_area);
             render_context_menu(app, frame);
         }
         Mode::Settings => render_settings_overlay(app, frame, frame.area()),
@@ -326,17 +325,7 @@ fn compute_sidebar_width(app: &AppState) -> u16 {
 
 /// Collapsed sidebar: pure glance mode.
 fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
-    let is_navigating = matches!(
-        app.mode,
-        Mode::Navigate
-            | Mode::RenameWorkspace
-            | Mode::Resize
-            | Mode::ConfirmClose
-            | Mode::ContextMenu
-            | Mode::Settings
-            | Mode::GlobalMenu
-            | Mode::KeybindHelp
-    );
+    let is_navigating = matches!(app.mode, Mode::Navigate);
 
     let p = &app.palette;
     let sep_style = if is_navigating {
@@ -395,17 +384,7 @@ fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
 
 fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
-    let is_navigating = matches!(
-        app.mode,
-        Mode::Navigate
-            | Mode::RenameWorkspace
-            | Mode::Resize
-            | Mode::ConfirmClose
-            | Mode::ContextMenu
-            | Mode::Settings
-            | Mode::GlobalMenu
-            | Mode::KeybindHelp
-    );
+    let is_navigating = matches!(app.mode, Mode::Navigate);
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
     } else {

@@ -193,6 +193,7 @@ impl App {
             request_new_tab: false,
             request_complete_onboarding: false,
             name_input: String::new(),
+            name_input_replace_on_type: false,
             onboarding_step: 0,
             onboarding_list: state::SelectionListState::new(1),
             release_notes: startup_release_notes.map(|notes| state::ReleaseNotesState {
@@ -1822,8 +1823,23 @@ impl App {
             .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
-        if let Err(e) = self.create_tab_with_options(initial_cwd, true) {
-            error!(err = %e, "failed to create tab");
+        match self.create_tab_with_options(initial_cwd, true) {
+            Ok(_) => {
+                if let Some(ws) = self
+                    .state
+                    .active
+                    .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
+                {
+                    if let Some(name) = ws.active_tab_display_name() {
+                        self.state.name_input = name;
+                        self.state.name_input_replace_on_type = true;
+                        self.state.mode = Mode::RenameTab;
+                    }
+                }
+            }
+            Err(e) => {
+                error!(err = %e, "failed to create tab");
+            }
         }
     }
 

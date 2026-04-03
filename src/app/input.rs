@@ -825,8 +825,7 @@ fn execute_navigate_action(state: &mut AppState, action: NavigateAction) {
         }
         NavigateAction::RenameWorkspace => {
             if !state.workspaces.is_empty() {
-                state.name_input = state.workspaces[state.selected].display_name();
-                state.mode = Mode::RenameWorkspace;
+                open_rename_workspace(state, state.selected);
             }
         }
         NavigateAction::CloseWorkspace => {
@@ -851,14 +850,7 @@ fn execute_navigate_action(state: &mut AppState, action: NavigateAction) {
             state.request_new_tab = true;
             leave_navigate_mode(state);
         }
-        NavigateAction::RenameTab => {
-            if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
-                if let Some(name) = ws.active_tab_display_name() {
-                    state.name_input = name;
-                    state.mode = Mode::RenameTab;
-                }
-            }
-        }
+        NavigateAction::RenameTab => open_rename_active_tab(state, false),
         NavigateAction::PreviousTab => {
             state.previous_tab();
             leave_navigate_mode(state);
@@ -902,6 +894,23 @@ fn execute_navigate_action(state: &mut AppState, action: NavigateAction) {
 fn leave_navigate_mode(state: &mut AppState) {
     if state.active.is_some() {
         state.mode = Mode::Terminal;
+    }
+}
+
+fn open_rename_workspace(state: &mut AppState, ws_idx: usize) {
+    state.selected = ws_idx;
+    state.name_input = state.workspaces[ws_idx].display_name();
+    state.name_input_replace_on_type = false;
+    state.mode = Mode::RenameWorkspace;
+}
+
+fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool) {
+    if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
+        if let Some(name) = ws.active_tab_display_name() {
+            state.name_input = name;
+            state.name_input_replace_on_type = replace_on_type;
+            state.mode = Mode::RenameTab;
+        }
     }
 }
 
@@ -1008,12 +1017,17 @@ fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 }
             }
             state.name_input.clear();
-            state.mode = Mode::Navigate;
+            state.name_input_replace_on_type = false;
+            leave_modal(state);
         }
-        ModalAction::Clear => state.name_input.clear(),
+        ModalAction::Clear => {
+            state.name_input.clear();
+            state.name_input_replace_on_type = false;
+        }
         ModalAction::Cancel => {
             state.name_input.clear();
-            state.mode = Mode::Navigate;
+            state.name_input_replace_on_type = false;
+            leave_modal(state);
         }
         _ => {}
     }
@@ -1027,9 +1041,18 @@ fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
 
     match key.code {
         KeyCode::Backspace => {
-            state.name_input.pop();
+            if state.name_input_replace_on_type {
+                state.name_input.clear();
+                state.name_input_replace_on_type = false;
+            } else {
+                state.name_input.pop();
+            }
         }
         KeyCode::Char(c) => {
+            if state.name_input_replace_on_type {
+                state.name_input.clear();
+                state.name_input_replace_on_type = false;
+            }
             state.name_input.push(c);
         }
         _ => {}
@@ -1091,9 +1114,7 @@ fn apply_context_menu_action(state: &mut AppState, menu: ContextMenuState, idx: 
     let item = menu.items().get(idx).copied();
     match (menu.kind, item) {
         (ContextMenuKind::Workspace { ws_idx }, Some("Rename")) => {
-            state.selected = ws_idx;
-            state.name_input = state.workspaces[ws_idx].display_name();
-            state.mode = Mode::RenameWorkspace;
+            open_rename_workspace(state, ws_idx);
         }
         (ContextMenuKind::Workspace { ws_idx }, Some("Close")) => {
             state.selected = ws_idx;
@@ -1115,12 +1136,7 @@ fn apply_context_menu_action(state: &mut AppState, menu: ContextMenuState, idx: 
             state.selected = ws_idx;
             state.active = Some(ws_idx);
             state.switch_tab(tab_idx);
-            if let Some(ws) = state.workspaces.get(ws_idx) {
-                if let Some(name) = ws.active_tab_display_name() {
-                    state.name_input = name;
-                    state.mode = Mode::RenameTab;
-                }
-            }
+            open_rename_active_tab(state, false);
         }
         (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close")) => {
             state.selected = ws_idx;
@@ -2724,7 +2740,7 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
-        assert_eq!(state.mode, Mode::Navigate);
+        assert_eq!(state.mode, Mode::Terminal);
         assert_eq!(state.workspaces[0].display_name(), "renamed");
 
         state.view.sidebar_rect = Rect::new(0, 0, 26, 20);
@@ -2735,6 +2751,55 @@ mod tests {
         let (save, _, _) = crate::ui::rename_button_rects(inner);
         let action = modal_action_from_buttons(save.x, save.y, &[(save, ModalAction::Save)]);
         assert_eq!(action, Some(ModalAction::Save));
+    }
+
+    #[test]
+    fn rename_cancel_returns_to_terminal_when_workspace_is_active() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameTab;
+        state.name_input = "test".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(state.name_input.is_empty());
+    }
+
+    #[test]
+    fn rename_modal_replaces_prefilled_text_on_first_type() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameTab;
+        state.name_input = "2".into();
+        state.name_input_replace_on_type = true;
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "n");
+        assert!(!state.name_input_replace_on_type);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "ne");
+    }
+
+    #[test]
+    fn open_rename_active_tab_can_prefill_default_new_tab_name() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(None);
+        state.workspaces[0].switch_tab(1);
+
+        open_rename_active_tab(&mut state, true);
+
+        assert_eq!(state.mode, Mode::RenameTab);
+        assert_eq!(state.name_input, "2");
+        assert!(state.name_input_replace_on_type);
     }
 
     #[test]
