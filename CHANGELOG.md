@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.2] - 2026-04-03
+
 ### Changed
 - The global launcher now surfaces update-related actions more clearly: when release notes are available you can open **What's New**, and when an update has been downloaded you can **quit to apply update** directly from the menu.
 - Release notes are now retained as the latest available notes after you dismiss the startup modal, so you can reopen them later from the UI instead of only seeing them once.
