@@ -44,6 +44,7 @@ impl Default for PtyResponses {
     }
 }
 
+#[cfg_attr(feature = "ghostty-vt", allow(dead_code))]
 impl PtyResponses {
     pub fn new() -> Self {
         Self::default()

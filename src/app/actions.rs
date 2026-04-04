@@ -324,8 +324,7 @@ impl AppState {
             None => return,
         };
 
-        if let Ok(parser) = rt.parser.read() {
-            let text = crate::selection::extract_text(parser.screen(), sel);
+        if let Some(text) = rt.extract_selection(sel) {
             if !text.is_empty() {
                 crate::selection::write_osc52(&text);
                 info!(len = text.len(), "copied selection to clipboard");

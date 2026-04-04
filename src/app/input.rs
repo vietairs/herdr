@@ -17,6 +17,7 @@ enum ScrollbarClickTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 enum WheelRouting {
     HostScroll,
     MouseReport,
@@ -123,18 +124,7 @@ impl App {
         }
         if let Some(ws) = self.state.active.and_then(|i| self.state.workspaces.get(i)) {
             if let Some(rt) = ws.focused_runtime() {
-                let bracketed = rt
-                    .parser
-                    .read()
-                    .map(|p| p.screen().bracketed_paste())
-                    .unwrap_or(false);
-
-                let payload = if bracketed {
-                    format!("\x1b[200~{text}\x1b[201~")
-                } else {
-                    text
-                };
-                let _ = rt.sender.send(Bytes::from(payload)).await;
+                let _ = rt.send_paste(text).await;
             }
         }
     }
@@ -379,11 +369,8 @@ impl App {
         if let Some(ws) = self.state.active.and_then(|i| self.state.workspaces.get(i)) {
             if let Some(rt) = ws.focused_runtime() {
                 rt.scroll_reset();
-                let flags = rt
-                    .kitty_keyboard_flags
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let protocol = crate::input::KeyboardProtocol::from_kitty_flags(flags);
-                let bytes = crate::input::encode_terminal_key(key, protocol);
+                let protocol = rt.keyboard_protocol();
+                let bytes = rt.encode_terminal_key(key);
                 if matches!(key_event.code, KeyCode::Esc)
                     || key_event
                         .modifiers
@@ -416,7 +403,7 @@ impl App {
                         warn!(code = ?key_event.code, mods = ?key_event.modifiers, state = ?key_event.state, "key produced empty encoding");
                     }
                 } else {
-                    let _ = rt.sender.send(Bytes::from(bytes)).await;
+                    let _ = rt.send_bytes(Bytes::from(bytes)).await;
                 }
             }
         }
@@ -1941,6 +1928,11 @@ impl AppState {
                         return None;
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
+                    if self.forward_pane_mouse_button(&info, mouse) {
+                        self.selection = None;
+                        return None;
+                    }
+
                     let (row, col) = (
                         mouse.row - info.inner_rect.y,
                         mouse.column - info.inner_rect.x,
@@ -1974,6 +1966,13 @@ impl AppState {
             }
 
             MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                    if self.forward_pane_mouse_button(&info, mouse) {
+                        self.selection = None;
+                        return None;
+                    }
+                }
+
                 let workspace_drop_index = self.workspace_drop_index_at_row(mouse.row);
                 if self.drag.is_none() {
                     if let Some(press) = &self.workspace_press {
@@ -2044,6 +2043,15 @@ impl AppState {
             }
 
             MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                    if self.forward_pane_mouse_button(&info, mouse) {
+                        self.selection = None;
+                        self.workspace_press = None;
+                        self.drag = None;
+                        return None;
+                    }
+                }
+
                 let workspace_press = self.workspace_press.take();
                 match self.drag.take() {
                     Some(DragState {
@@ -2069,6 +2077,14 @@ impl AppState {
                             self.copy_selection();
                         }
                     }
+                }
+            }
+
+            MouseEventKind::Up(MouseButton::Middle) | MouseEventKind::Up(MouseButton::Right)
+            | MouseEventKind::Drag(MouseButton::Middle)
+            | MouseEventKind::Drag(MouseButton::Right) if !in_sidebar => {
+                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                    let _ = self.forward_pane_mouse_button(&info, mouse);
                 }
             }
 
@@ -2126,7 +2142,10 @@ impl AppState {
             }
 
             MouseEventKind::Down(MouseButton::Right) if !in_sidebar => {
-                if self.pane_at(mouse.column, mouse.row).is_some() {
+                if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
+                    if self.forward_pane_mouse_button(&info, mouse) {
+                        return None;
+                    }
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Pane,
                         x: mouse.column,
@@ -2370,6 +2389,10 @@ impl AppState {
         })
     }
 
+    fn pane_mouse_target(&self, col: u16, row: u16) -> Option<&PaneInfo> {
+        self.pane_at(col, row).or_else(|| self.pane_frame_at(col, row))
+    }
+
     fn pane_frame_at(&self, col: u16, row: u16) -> Option<&PaneInfo> {
         self.view.pane_infos.iter().find(|p| {
             col >= p.rect.x
@@ -2440,6 +2463,25 @@ impl AppState {
         }
     }
 
+    fn forward_pane_mouse_button(&self, info: &PaneInfo, mouse: MouseEvent) -> bool {
+        let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) else {
+            return false;
+        };
+        let Some(rt) = ws.runtimes.get(&info.id) else {
+            return false;
+        };
+        let column = mouse.column.saturating_sub(info.inner_rect.x);
+        let row = mouse.row.saturating_sub(info.inner_rect.y);
+        let Some(bytes) = rt.encode_mouse_button(mouse.kind, column, row, mouse.modifiers) else {
+            return false;
+        };
+        rt.scroll_reset();
+        if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
+            warn!(pane = info.id.raw(), err = %err, kind = ?mouse.kind, "failed to forward mouse button event");
+        }
+        true
+    }
+
     fn forward_pane_wheel(&self, info: &PaneInfo, mouse: MouseEvent) -> bool {
         let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) else {
             return false;
@@ -2447,40 +2489,28 @@ impl AppState {
         let Some(rt) = ws.runtimes.get(&info.id) else {
             return false;
         };
-        let Some(input_state) = rt.input_state() else {
-            return false;
-        };
-
-        match wheel_routing(input_state) {
-            WheelRouting::HostScroll => false,
-            WheelRouting::MouseReport => {
+        match rt.wheel_routing() {
+            Some(crate::pane::WheelRouting::HostScroll) | None => false,
+            Some(crate::pane::WheelRouting::MouseReport) => {
                 rt.scroll_reset();
                 let column = mouse.column.saturating_sub(info.inner_rect.x);
                 let row = mouse.row.saturating_sub(info.inner_rect.y);
-                let Some(bytes) = crate::input::encode_mouse_scroll(
-                    mouse.kind,
-                    column,
-                    row,
-                    mouse.modifiers,
-                    input_state.mouse_protocol_encoding,
-                ) else {
+                let Some(bytes) = rt.encode_mouse_wheel(mouse.kind, column, row, mouse.modifiers)
+                else {
                     warn!(pane = info.id.raw(), kind = ?mouse.kind, "failed to encode mouse wheel event");
                     return true;
                 };
-                if let Err(err) = rt.sender.try_send(Bytes::from(bytes)) {
+                if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
                     warn!(pane = info.id.raw(), err = %err, "failed to forward mouse wheel event");
                 }
                 true
             }
-            WheelRouting::AlternateScroll => {
+            Some(crate::pane::WheelRouting::AlternateScroll) => {
                 rt.scroll_reset();
-                let key = match mouse.kind {
-                    MouseEventKind::ScrollUp => KeyCode::Up,
-                    MouseEventKind::ScrollDown => KeyCode::Down,
-                    _ => return true,
+                let Some(bytes) = rt.encode_alternate_scroll(mouse.kind) else {
+                    return true;
                 };
-                let bytes = crate::input::encode_cursor_key(key, input_state.application_cursor);
-                if let Err(err) = rt.sender.try_send(Bytes::from(bytes)) {
+                if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
                     warn!(pane = info.id.raw(), err = %err, "failed to forward alternate-scroll key");
                 }
                 true
@@ -2555,6 +2585,7 @@ impl AppState {
     }
 }
 
+#[cfg(test)]
 fn wheel_routing(input_state: crate::pane::InputState) -> WheelRouting {
     if input_state.mouse_protocol_mode != vt100::MouseProtocolMode::None {
         WheelRouting::MouseReport
@@ -3248,11 +3279,11 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
         assert_eq!(app.state.active, Some(0));
         assert!(app.state.workspace_press.is_some());
 
-        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, 3));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, 2));
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.selected, 1);
         assert!(app.state.workspace_press.is_none());
@@ -3271,7 +3302,7 @@ mod tests {
         app.state.active = Some(1);
         app.state.selected = 2;
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 2, 0));
         assert!(matches!(
             app.state.drag.as_ref().map(|drag| &drag.target),
@@ -3334,6 +3365,7 @@ mod tests {
         let input_state = crate::pane::InputState {
             alternate_screen: true,
             application_cursor: false,
+            bracketed_paste: false,
             mouse_protocol_mode: vt100::MouseProtocolMode::ButtonMotion,
             mouse_protocol_encoding: vt100::MouseProtocolEncoding::Sgr,
             mouse_alternate_scroll: true,
@@ -3347,6 +3379,7 @@ mod tests {
         let input_state = crate::pane::InputState {
             alternate_screen: true,
             application_cursor: false,
+            bracketed_paste: false,
             mouse_protocol_mode: vt100::MouseProtocolMode::None,
             mouse_protocol_encoding: vt100::MouseProtocolEncoding::Default,
             mouse_alternate_scroll: true,
@@ -3360,6 +3393,7 @@ mod tests {
         let input_state = crate::pane::InputState {
             alternate_screen: false,
             application_cursor: false,
+            bracketed_paste: false,
             mouse_protocol_mode: vt100::MouseProtocolMode::None,
             mouse_protocol_encoding: vt100::MouseProtocolEncoding::Default,
             mouse_alternate_scroll: true,

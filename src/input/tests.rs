@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
 
 use super::{
-    encode_cursor_key, encode_key, encode_mouse_scroll, encode_terminal_key,
+    encode_cursor_key, encode_key, encode_mouse_button, encode_mouse_scroll, encode_terminal_key,
     parse_terminal_key_sequence, KeyboardProtocol, TerminalKey,
 };
 
@@ -137,6 +137,42 @@ fn legacy_shift_f5() {
 }
 
 #[test]
+fn parse_legacy_f_keys() {
+    assert_terminal_key_eq(
+        parse_terminal_key_sequence("\x1bOP").expect("f1 should parse"),
+        KeyCode::F(1),
+        KeyModifiers::empty(),
+        crossterm::event::KeyEventKind::Press,
+        None,
+    );
+    assert_terminal_key_eq(
+        parse_terminal_key_sequence("\x1b[15~").expect("f5 should parse"),
+        KeyCode::F(5),
+        KeyModifiers::empty(),
+        crossterm::event::KeyEventKind::Press,
+        None,
+    );
+}
+
+#[test]
+fn parse_modified_f_keys() {
+    assert_terminal_key_eq(
+        parse_terminal_key_sequence("\x1b[1;2P").expect("shift+f1 should parse"),
+        KeyCode::F(1),
+        KeyModifiers::SHIFT,
+        crossterm::event::KeyEventKind::Press,
+        None,
+    );
+    assert_terminal_key_eq(
+        parse_terminal_key_sequence("\x1b[15;2~").expect("shift+f5 should parse"),
+        KeyCode::F(5),
+        KeyModifiers::SHIFT,
+        crossterm::event::KeyEventKind::Press,
+        None,
+    );
+}
+
+#[test]
 fn legacy_alt_char_still_esc_prefix() {
     // Alt+a on character keys still uses ESC prefix (not xterm modified)
     let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT);
@@ -167,6 +203,20 @@ fn sgr_mouse_scroll_encodes_wheel_button_and_coordinates() {
     .expect("mouse scroll should encode");
 
     assert_eq!(encoded, b"\x1b[<69;5;7M");
+}
+
+#[test]
+fn sgr_mouse_release_keeps_button_code() {
+    let encoded = encode_mouse_button(
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        11,
+        9,
+        KeyModifiers::empty(),
+        vt100::MouseProtocolEncoding::Sgr,
+    )
+    .expect("mouse release should encode");
+
+    assert_eq!(encoded, b"\x1b[<0;12;10m");
 }
 
 #[test]

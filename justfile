@@ -3,13 +3,15 @@
 # Run unit tests
 test:
     cargo test
-    python3 -m unittest scripts.test_changelog
+    cargo test --features ghostty-vt ghostty::tests
+    python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
 # Check formatting + run unit tests
 check:
     cargo fmt --check
     cargo test
-    python3 -m unittest scripts.test_changelog
+    cargo test --features ghostty-vt ghostty::tests
+    python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
 # Run the full local test suite
 test-all: check
@@ -17,6 +19,10 @@ test-all: check
 # Build release binary
 build:
     cargo build --release
+
+# Build the vendored libghostty-vt source dist
+build-libghostty-vt:
+    scripts/build_vendored_libghostty_vt.sh
 
 # Finalize changelog, bump version, commit, tag, push, trigger release build (usage: just release 0.1.1)
 release version:

@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{KeyboardProtocol, TerminalKey};
 
@@ -6,6 +6,7 @@ const KITTY_FLAG_REPORT_EVENT_TYPES: u16 = 0b0000_0010;
 const KITTY_FLAG_REPORT_ALTERNATE_KEYS: u16 = 0b0000_0100;
 
 /// Encode a key event for a PTY child using the pane's negotiated keyboard protocol.
+#[allow(dead_code)] // exercised in input unit tests; production uses PaneRuntime helpers
 pub fn encode_key(key: KeyEvent, protocol: KeyboardProtocol) -> Vec<u8> {
     encode_terminal_key(key.into(), protocol)
 }
@@ -23,6 +24,7 @@ pub fn encode_terminal_key(key: TerminalKey, protocol: KeyboardProtocol) -> Vec<
     encode_legacy(key.as_key_event())
 }
 
+#[allow(dead_code)] // exercised in input unit tests; production uses PaneRuntime helpers
 pub fn encode_cursor_key(code: KeyCode, application_cursor: bool) -> Vec<u8> {
     match (code, application_cursor) {
         (KeyCode::Up, true) => b"\x1bOA".to_vec(),
@@ -51,8 +53,44 @@ pub fn encode_mouse_scroll(
         MouseEventKind::ScrollRight => 67u16,
         _ => return None,
     };
+    encode_mouse_cb(button, false, column, row, modifiers, encoding)
+}
 
-    let mut cb = button;
+pub fn encode_mouse_button(
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+    modifiers: KeyModifiers,
+    encoding: vt100::MouseProtocolEncoding,
+) -> Option<Vec<u8>> {
+    let (button, release) = match kind {
+        MouseEventKind::Down(MouseButton::Left) => (0u16, false),
+        MouseEventKind::Down(MouseButton::Middle) => (1u16, false),
+        MouseEventKind::Down(MouseButton::Right) => (2u16, false),
+        MouseEventKind::Up(MouseButton::Left) => (0u16, true),
+        MouseEventKind::Up(MouseButton::Middle) => (1u16, true),
+        MouseEventKind::Up(MouseButton::Right) => (2u16, true),
+        MouseEventKind::Drag(MouseButton::Left) => (32u16, false),
+        MouseEventKind::Drag(MouseButton::Middle) => (33u16, false),
+        MouseEventKind::Drag(MouseButton::Right) => (34u16, false),
+        _ => return None,
+    };
+    encode_mouse_cb(button, release, column, row, modifiers, encoding)
+}
+
+fn encode_mouse_cb(
+    base_button: u16,
+    release: bool,
+    column: u16,
+    row: u16,
+    modifiers: KeyModifiers,
+    encoding: vt100::MouseProtocolEncoding,
+) -> Option<Vec<u8>> {
+    let mut cb = match (encoding, release) {
+        (vt100::MouseProtocolEncoding::Sgr, true) => base_button,
+        (_, true) => 3,
+        (_, false) => base_button,
+    };
     if modifiers.contains(KeyModifiers::SHIFT) {
         cb += 4;
     }
@@ -67,9 +105,13 @@ pub fn encode_mouse_scroll(
     let row = row as u32 + 1;
 
     match encoding {
-        vt100::MouseProtocolEncoding::Sgr => {
-            Some(format!("\x1b[<{cb};{column};{row}M").into_bytes())
-        }
+        vt100::MouseProtocolEncoding::Sgr => Some(
+            format!(
+                "\x1b[<{cb};{column};{row}{}",
+                if release { 'm' } else { 'M' }
+            )
+            .into_bytes(),
+        ),
         vt100::MouseProtocolEncoding::Default => {
             let cb = u8::try_from(cb + 32).ok()?;
             let column = u8::try_from(column + 32).ok()?;

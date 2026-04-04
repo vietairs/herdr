@@ -100,6 +100,14 @@ impl Selection {
         }
     }
 
+    pub(crate) fn ordered_cells(&self) -> ((u16, u16), (u16, u16)) {
+        self.ordered()
+    }
+
+    pub(crate) fn pane_width(&self) -> u16 {
+        self.pane_inner.width
+    }
+
     /// Check whether a pane-relative cell (row, col) is inside the selection.
     pub fn contains(&self, row: u16, col: u16) -> bool {
         if !self.is_visible() {

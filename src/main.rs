@@ -24,6 +24,8 @@ mod cli;
 mod config;
 mod detect;
 mod events;
+#[cfg(feature = "ghostty-vt")]
+mod ghostty;
 mod input;
 mod integration;
 mod layout;

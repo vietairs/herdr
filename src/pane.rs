@@ -7,8 +7,14 @@ use std::sync::{
 
 use bytes::Bytes;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use ratatui::{
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    Frame,
+};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
+use tui_term::widget::PseudoTerminal;
 
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
@@ -242,18 +248,12 @@ impl PaneState {
 /// PTY runtime for a pane. Owns the terminal, I/O channels, and background tasks.
 /// Dropping this shuts down all background tasks and closes the PTY.
 pub struct PaneRuntime {
-    pub parser: Arc<RwLock<vt100::Parser<PtyResponses>>>,
-    pub sender: mpsc::Sender<Bytes>,
+    terminal: Arc<PaneTerminal>,
+    sender: mpsc::Sender<Bytes>,
     resize_tx: mpsc::Sender<(u16, u16)>,
     current_size: Cell<(u16, u16)>,
     child_pid: Arc<AtomicU32>,
-    pub kitty_keyboard_flags: Arc<AtomicU16>,
-    mouse_alternate_scroll: Arc<AtomicBool>,
-    /// Live screen content snapshot — updated by reader, read by detector.
-    /// Decouples detection from parser viewport state (scrollback).
-    /// Kept alive here so the Arc isn't dropped; tasks hold their own clones.
-    #[allow(dead_code)]
-    screen_content: Arc<RwLock<String>>,
+    kitty_keyboard_flags: Arc<AtomicU16>,
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     // Task handles for deterministic shutdown
@@ -271,9 +271,900 @@ pub struct ScrollMetrics {
 pub struct InputState {
     pub alternate_screen: bool,
     pub application_cursor: bool,
+    pub bracketed_paste: bool,
     pub mouse_protocol_mode: vt100::MouseProtocolMode,
     pub mouse_protocol_encoding: vt100::MouseProtocolEncoding,
     pub mouse_alternate_scroll: bool,
+}
+
+impl InputState {
+    pub fn mouse_reporting_enabled(self) -> bool {
+        self.mouse_protocol_mode != vt100::MouseProtocolMode::None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessBytesResult {
+    request_render: bool,
+}
+
+#[cfg_attr(feature = "ghostty-vt", allow(dead_code))]
+struct VtPaneTerminal {
+    parser: Arc<RwLock<vt100::Parser<PtyResponses>>>,
+    screen_content: Arc<RwLock<String>>,
+    mouse_alternate_scroll: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "ghostty-vt")]
+struct GhosttyPaneTerminal {
+    core: Mutex<GhosttyPaneCore>,
+}
+
+#[cfg(feature = "ghostty-vt")]
+struct GhosttyPaneCore {
+    terminal: crate::ghostty::Terminal,
+    render_state: crate::ghostty::RenderState,
+}
+
+enum PaneTerminal {
+    #[cfg_attr(feature = "ghostty-vt", allow(dead_code))]
+    Vt(VtPaneTerminal),
+    #[cfg(feature = "ghostty-vt")]
+    Ghostty(GhosttyPaneTerminal),
+}
+
+impl PaneTerminal {
+    fn process_pty_bytes(
+        &self,
+        pane_id: PaneId,
+        bytes: &[u8],
+        response_writer: &mpsc::Sender<Bytes>,
+    ) -> ProcessBytesResult {
+        match self {
+            Self::Vt(vt) => vt.process_pty_bytes(pane_id, bytes, response_writer),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.process_pty_bytes(pane_id, bytes, response_writer),
+        }
+    }
+
+    fn resize(&self, rows: u16, cols: u16) {
+        match self {
+            Self::Vt(vt) => vt.resize(rows, cols),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.resize(rows, cols),
+        }
+    }
+
+    fn scroll_up(&self, lines: usize) {
+        match self {
+            Self::Vt(vt) => vt.scroll_up(lines),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.scroll_up(lines),
+        }
+    }
+
+    fn scroll_down(&self, lines: usize) {
+        match self {
+            Self::Vt(vt) => vt.scroll_down(lines),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.scroll_down(lines),
+        }
+    }
+
+    fn scroll_reset(&self) {
+        match self {
+            Self::Vt(vt) => vt.scroll_reset(),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.scroll_reset(),
+        }
+    }
+
+    fn set_scroll_offset_from_bottom(&self, lines: usize) {
+        match self {
+            Self::Vt(vt) => vt.set_scroll_offset_from_bottom(lines),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.set_scroll_offset_from_bottom(lines),
+        }
+    }
+
+    fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        match self {
+            Self::Vt(vt) => vt.scroll_metrics(),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.scroll_metrics(),
+        }
+    }
+
+    fn input_state(&self) -> Option<InputState> {
+        match self {
+            Self::Vt(vt) => vt.input_state(),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.input_state(),
+        }
+    }
+
+    fn visible_text(&self) -> String {
+        match self {
+            Self::Vt(vt) => vt.visible_text(),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.visible_text(),
+        }
+    }
+
+    fn recent_text(&self, lines: usize) -> String {
+        match self {
+            Self::Vt(vt) => vt.recent_text(lines),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.recent_text(lines),
+        }
+    }
+
+    fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
+        match self {
+            Self::Vt(vt) => vt.extract_selection(selection),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.extract_selection(selection),
+        }
+    }
+
+    fn render(&self, frame: &mut Frame, area: Rect) {
+        match self {
+            Self::Vt(vt) => vt.render(frame, area),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.render(frame, area),
+        }
+    }
+
+    fn encode_terminal_key(
+        &self,
+        key: crate::input::TerminalKey,
+        protocol: crate::input::KeyboardProtocol,
+    ) -> Vec<u8> {
+        match self {
+            Self::Vt(vt) => vt.encode_terminal_key(key, protocol),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.encode_terminal_key(key, protocol),
+        }
+    }
+
+    fn encode_mouse_button(
+        &self,
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> Option<Vec<u8>> {
+        match self {
+            Self::Vt(vt) => vt.input_state().and_then(|input_state| {
+                crate::input::encode_mouse_button(
+                    kind,
+                    column,
+                    row,
+                    modifiers,
+                    input_state.mouse_protocol_encoding,
+                )
+            }),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.input_state().and_then(|input_state| {
+                crate::input::encode_mouse_button(
+                    kind,
+                    column,
+                    row,
+                    modifiers,
+                    input_state.mouse_protocol_encoding,
+                )
+            }),
+        }
+    }
+
+    fn encode_mouse_wheel(
+        &self,
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> Option<Vec<u8>> {
+        match self {
+            Self::Vt(vt) => vt.input_state().and_then(|input_state| {
+                crate::input::encode_mouse_scroll(
+                    kind,
+                    column,
+                    row,
+                    modifiers,
+                    input_state.mouse_protocol_encoding,
+                )
+            }),
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.encode_mouse_wheel(kind, column, row, modifiers),
+        }
+    }
+}
+
+#[cfg_attr(feature = "ghostty-vt", allow(dead_code))]
+impl VtPaneTerminal {
+    fn new(
+        parser: Arc<RwLock<vt100::Parser<PtyResponses>>>,
+        screen_content: Arc<RwLock<String>>,
+        mouse_alternate_scroll: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            parser,
+            screen_content,
+            mouse_alternate_scroll,
+        }
+    }
+
+    fn process_pty_bytes(
+        &self,
+        pane_id: PaneId,
+        bytes: &[u8],
+        response_writer: &mpsc::Sender<Bytes>,
+    ) -> ProcessBytesResult {
+        let resp = if let Ok(mut parser) = self.parser.write() {
+            parser.process(bytes);
+
+            let scrollback = parser.screen().scrollback();
+            if scrollback > 0 {
+                parser.screen_mut().set_scrollback(0);
+            }
+            let content = parser.screen().contents();
+            if scrollback > 0 {
+                parser.screen_mut().set_scrollback(scrollback);
+            }
+            if let Ok(mut screen_content) = self.screen_content.write() {
+                *screen_content = content;
+            }
+            parser.callbacks_mut().take()
+        } else {
+            error!(pane = pane_id.raw(), "parser lock poisoned in reader");
+            return ProcessBytesResult {
+                request_render: false,
+            };
+        };
+
+        if !resp.is_empty() {
+            if let Err(e) = response_writer.try_send(Bytes::from(resp)) {
+                warn!(pane = pane_id.raw(), err = %e, "dropped terminal query response");
+            }
+        }
+
+        ProcessBytesResult {
+            request_render: true,
+        }
+    }
+
+    fn resize(&self, rows: u16, cols: u16) {
+        if let Ok(mut parser) = self.parser.write() {
+            parser.screen_mut().set_size(rows, cols);
+        }
+    }
+
+    fn scroll_up(&self, lines: usize) {
+        if let Ok(mut parser) = self.parser.write() {
+            let current = parser.screen().scrollback();
+            parser.screen_mut().set_scrollback(current + lines);
+        }
+    }
+
+    fn scroll_down(&self, lines: usize) {
+        if let Ok(mut parser) = self.parser.write() {
+            let current = parser.screen().scrollback();
+            parser
+                .screen_mut()
+                .set_scrollback(current.saturating_sub(lines));
+        }
+    }
+
+    fn scroll_reset(&self) {
+        if let Ok(mut parser) = self.parser.write() {
+            parser.screen_mut().set_scrollback(0);
+        }
+    }
+
+    fn set_scroll_offset_from_bottom(&self, lines: usize) {
+        if let Ok(mut parser) = self.parser.write() {
+            parser.screen_mut().set_scrollback(lines);
+        }
+    }
+
+    fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        let Ok(mut parser) = self.parser.write() else {
+            return None;
+        };
+        let max_offset_from_bottom = max_scrollback(&mut parser);
+        let screen = parser.screen();
+        let (viewport_rows, _) = screen.size();
+        Some(ScrollMetrics {
+            offset_from_bottom: screen.scrollback(),
+            max_offset_from_bottom,
+            viewport_rows: viewport_rows as usize,
+        })
+    }
+
+    fn input_state(&self) -> Option<InputState> {
+        let Ok(parser) = self.parser.read() else {
+            return None;
+        };
+        let screen = parser.screen();
+        Some(InputState {
+            alternate_screen: screen.alternate_screen(),
+            application_cursor: screen.application_cursor(),
+            bracketed_paste: screen.bracketed_paste(),
+            mouse_protocol_mode: screen.mouse_protocol_mode(),
+            mouse_protocol_encoding: screen.mouse_protocol_encoding(),
+            mouse_alternate_scroll: self.mouse_alternate_scroll.load(Ordering::Relaxed),
+        })
+    }
+
+    fn visible_text(&self) -> String {
+        let Ok(content) = self.screen_content.read() else {
+            return String::new();
+        };
+        let mut rows: Vec<String> = content
+            .lines()
+            .map(|line| line.trim_end().to_string())
+            .collect();
+        trim_trailing_blank_rows(&mut rows);
+        let text = rows.join("\n");
+        if text.is_empty() {
+            text
+        } else {
+            format!("{text}\n")
+        }
+    }
+
+    fn recent_text(&self, lines: usize) -> String {
+        self.parser
+            .write()
+            .map(|mut parser| recent_text_from_parser(&mut parser, lines))
+            .unwrap_or_default()
+    }
+
+    fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
+        self.parser
+            .read()
+            .map(|parser| crate::selection::extract_text(parser.screen(), selection))
+            .ok()
+    }
+
+    fn render(&self, frame: &mut Frame, area: Rect) {
+        if let Ok(parser) = self.parser.read() {
+            let show_cursor = parser.screen().scrollback() == 0;
+            let pt = PseudoTerminal::new(parser.screen())
+                .cursor(tui_term::widget::Cursor::default().visibility(show_cursor));
+            frame.render_widget(pt, area);
+        }
+    }
+
+    fn encode_terminal_key(
+        &self,
+        key: crate::input::TerminalKey,
+        protocol: crate::input::KeyboardProtocol,
+    ) -> Vec<u8> {
+        let application_cursor = self
+            .input_state()
+            .map(|state| state.application_cursor)
+            .unwrap_or(false);
+        if matches!(
+            key.code,
+            crossterm::event::KeyCode::Up
+                | crossterm::event::KeyCode::Down
+                | crossterm::event::KeyCode::Left
+                | crossterm::event::KeyCode::Right
+        ) && key.modifiers.is_empty()
+        {
+            return crate::input::encode_cursor_key(key.code, application_cursor);
+        }
+        crate::input::encode_terminal_key(key, protocol)
+    }
+}
+
+#[cfg(feature = "ghostty-vt")]
+impl GhosttyPaneTerminal {
+    fn new(
+        mut terminal: crate::ghostty::Terminal,
+        response_writer: mpsc::Sender<Bytes>,
+    ) -> std::io::Result<Self> {
+        terminal
+            .set_write_pty_callback(move |bytes| {
+                let _ = response_writer.try_send(Bytes::copy_from_slice(bytes));
+            })
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        let render_state = crate::ghostty::RenderState::new()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(Self {
+            core: Mutex::new(GhosttyPaneCore {
+                terminal,
+                render_state,
+            }),
+        })
+    }
+
+    fn process_pty_bytes(
+        &self,
+        pane_id: PaneId,
+        bytes: &[u8],
+        response_writer: &mpsc::Sender<Bytes>,
+    ) -> ProcessBytesResult {
+        let Ok(mut core) = self.core.lock() else {
+            error!(pane = pane_id.raw(), "ghostty core lock poisoned in reader");
+            return ProcessBytesResult {
+                request_render: false,
+            };
+        };
+
+        core.terminal.write(bytes);
+        let _ = response_writer;
+        ProcessBytesResult {
+            request_render: true,
+        }
+    }
+
+    fn resize(&self, rows: u16, cols: u16) {
+        if let Ok(mut core) = self.core.lock() {
+            let _ = core.terminal.resize(cols, rows);
+        }
+    }
+
+    fn scroll_up(&self, lines: usize) {
+        if let Ok(mut core) = self.core.lock() {
+            core.terminal.scroll_viewport_delta(-(lines as isize));
+        }
+    }
+
+    fn scroll_down(&self, lines: usize) {
+        if let Ok(mut core) = self.core.lock() {
+            core.terminal.scroll_viewport_delta(lines as isize);
+        }
+    }
+
+    fn scroll_reset(&self) {
+        if let Ok(mut core) = self.core.lock() {
+            core.terminal.scroll_viewport_bottom();
+        }
+    }
+
+    fn set_scroll_offset_from_bottom(&self, lines: usize) {
+        if let Ok(mut core) = self.core.lock() {
+            core.terminal.scroll_viewport_bottom();
+            if lines > 0 {
+                core.terminal.scroll_viewport_delta(-(lines as isize));
+            }
+        }
+    }
+
+    fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        let Ok(core) = self.core.lock() else {
+            return None;
+        };
+        let scrollbar = core.terminal.scrollbar().ok()?;
+        Some(ScrollMetrics {
+            offset_from_bottom: scrollbar.total.saturating_sub(scrollbar.offset + scrollbar.len),
+            max_offset_from_bottom: scrollbar.total.saturating_sub(scrollbar.len),
+            viewport_rows: scrollbar.len,
+        })
+    }
+
+    fn input_state(&self) -> Option<InputState> {
+        let Ok(core) = self.core.lock() else {
+            return None;
+        };
+        let alternate_screen =
+            core.terminal.active_screen().ok()? == crate::ghostty::ActiveScreen::Alternate;
+        let application_cursor = core
+            .terminal
+            .mode_get(crate::ghostty::MODE_APPLICATION_CURSOR_KEYS)
+            .ok()?;
+        let bracketed_paste = core
+            .terminal
+            .mode_get(crate::ghostty::MODE_BRACKETED_PASTE)
+            .ok()?;
+        let mouse_sgr = core.terminal.mode_get(crate::ghostty::MODE_MOUSE_SGR).ok()?;
+        let mouse_utf8 = core.terminal.mode_get(crate::ghostty::MODE_MOUSE_UTF8).ok()?;
+        let mouse_alternate_scroll = core
+            .terminal
+            .mode_get(crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL)
+            .ok()?;
+        let mouse_protocol_mode = if core.terminal.mode_get(1003).ok()? {
+            vt100::MouseProtocolMode::AnyMotion
+        } else if core.terminal.mode_get(1002).ok()? {
+            vt100::MouseProtocolMode::ButtonMotion
+        } else if core.terminal.mode_get(1000).ok()? {
+            vt100::MouseProtocolMode::PressRelease
+        } else if core.terminal.mode_get(9).ok()? {
+            vt100::MouseProtocolMode::Press
+        } else {
+            vt100::MouseProtocolMode::None
+        };
+        let mouse_protocol_encoding = if mouse_sgr {
+            vt100::MouseProtocolEncoding::Sgr
+        } else if mouse_utf8 {
+            vt100::MouseProtocolEncoding::Utf8
+        } else {
+            vt100::MouseProtocolEncoding::Default
+        };
+        Some(InputState {
+            alternate_screen,
+            application_cursor,
+            bracketed_paste,
+            mouse_protocol_mode,
+            mouse_protocol_encoding,
+            mouse_alternate_scroll,
+        })
+    }
+
+    fn encode_terminal_key(
+        &self,
+        key: crate::input::TerminalKey,
+        protocol: crate::input::KeyboardProtocol,
+    ) -> Vec<u8> {
+        let application_cursor = self
+            .input_state()
+            .map(|state| state.application_cursor)
+            .unwrap_or(false);
+        if matches!(
+            key.code,
+            crossterm::event::KeyCode::Up
+                | crossterm::event::KeyCode::Down
+                | crossterm::event::KeyCode::Left
+                | crossterm::event::KeyCode::Right
+        ) && key.modifiers.is_empty()
+        {
+            return crate::input::encode_cursor_key(key.code, application_cursor);
+        }
+        crate::input::encode_terminal_key(key, protocol)
+    }
+
+    fn encode_mouse_wheel(
+        &self,
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> Option<Vec<u8>> {
+        let Ok(core) = self.core.lock() else {
+            return None;
+        };
+        let mut encoder = crate::ghostty::MouseEncoder::new().ok()?;
+        encoder.set_from_terminal(&core.terminal);
+        let cols = core.terminal.cols().ok()? as u32;
+        let rows = core.terminal.rows().ok()? as u32;
+        encoder.set_size(cols, rows, 1, 1);
+
+        let mut event = crate::ghostty::MouseEvent::new().ok()?;
+        event.set_action(crate::ghostty::MOUSE_ACTION_PRESS);
+        let button = match kind {
+            crossterm::event::MouseEventKind::ScrollUp => crate::ghostty::MOUSE_BUTTON_WHEEL_UP,
+            crossterm::event::MouseEventKind::ScrollDown => {
+                crate::ghostty::MOUSE_BUTTON_WHEEL_DOWN
+            }
+            crossterm::event::MouseEventKind::ScrollLeft => {
+                crate::ghostty::MOUSE_BUTTON_WHEEL_LEFT
+            }
+            crossterm::event::MouseEventKind::ScrollRight => {
+                crate::ghostty::MOUSE_BUTTON_WHEEL_RIGHT
+            }
+            _ => return None,
+        };
+        event.set_button(button);
+        let mut ghostty_mods = 0u16;
+        if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+            ghostty_mods |= crate::ghostty::MOD_SHIFT;
+        }
+        if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+            ghostty_mods |= crate::ghostty::MOD_CTRL;
+        }
+        if modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+            ghostty_mods |= crate::ghostty::MOD_ALT;
+        }
+        event.set_mods(ghostty_mods);
+        event.set_position(column as f32, row as f32);
+        encoder.encode(&event).ok()
+    }
+
+    fn visible_text(&self) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|mut core| ghostty_visible_text(&mut core).ok())
+            .unwrap_or_default()
+    }
+
+    fn recent_text(&self, lines: usize) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| ghostty_recent_text(&core, lines).ok())
+            .unwrap_or_default()
+    }
+
+    fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|mut core| ghostty_extract_selection(&mut core, selection).ok())
+    }
+
+    fn render(&self, frame: &mut Frame, area: Rect) {
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+        let GhosttyPaneCore {
+            terminal,
+            render_state,
+        } = &mut *core;
+        if render_state.update(terminal).is_err() {
+            return;
+        }
+        let colors = render_state.colors().ok();
+        let default_bg = colors.map(|c| ghostty_color(c.background));
+        let default_fg = colors.map(|c| ghostty_color(c.foreground));
+
+        let mut row_iterator = match crate::ghostty::RowIterator::new() {
+            Ok(iterator) => iterator,
+            Err(_) => return,
+        };
+        let mut row_cells = match crate::ghostty::RowCells::new() {
+            Ok(cells) => cells,
+            Err(_) => return,
+        };
+        {
+            let buf = frame.buffer_mut();
+            let mut rows = match render_state.populate_row_iterator(&mut row_iterator) {
+                Ok(rows) => rows,
+                Err(_) => return,
+            };
+            let mut y = 0u16;
+            while y < area.height && rows.next() {
+                let mut cells = match rows.populate_cells(&mut row_cells) {
+                    Ok(cells) => cells,
+                    Err(_) => break,
+                };
+                let mut x = 0u16;
+                while x < area.width && cells.next() {
+                    let style = ghostty_cell_style(&cells, default_fg, default_bg);
+                    let symbol = ghostty_cell_symbol(&cells).unwrap_or_else(|_| " ".to_string());
+                    let cell = &mut buf[(area.x + x, area.y + y)];
+                    cell.set_symbol(&symbol);
+                    cell.set_style(style);
+                    x += 1;
+                }
+                while x < area.width {
+                    let cell = &mut buf[(area.x + x, area.y + y)];
+                    cell.set_symbol(" ");
+                    if let Some(bg) = default_bg {
+                        cell.set_bg(bg);
+                    }
+                    if let Some(fg) = default_fg {
+                        cell.set_fg(fg);
+                    }
+                    x += 1;
+                }
+                y += 1;
+            }
+            while y < area.height {
+                for x in 0..area.width {
+                    let cell = &mut buf[(area.x + x, area.y + y)];
+                    cell.set_symbol(" ");
+                    if let Some(bg) = default_bg {
+                        cell.set_bg(bg);
+                    }
+                    if let Some(fg) = default_fg {
+                        cell.set_fg(fg);
+                    }
+                }
+                y += 1;
+            }
+        }
+
+        if render_state.cursor_visible().ok() == Some(true) {
+            if let Ok(Some(cursor)) = render_state.cursor_viewport() {
+                if cursor.x < area.width && cursor.y < area.height {
+                    frame.set_cursor_position((area.x + cursor.x, area.y + cursor.y));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_visible_text(core: &mut GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
+    let GhosttyPaneCore {
+        terminal,
+        render_state,
+    } = core;
+    render_state.update(terminal)?;
+    let mut row_iterator = crate::ghostty::RowIterator::new()?;
+    let mut row_cells = crate::ghostty::RowCells::new()?;
+    let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
+    let mut lines = Vec::new();
+    while rows.next() {
+        let mut cells = rows.populate_cells(&mut row_cells)?;
+        lines.push(ghostty_line_from_cells(&mut cells)?);
+    }
+    trim_trailing_blank_rows(&mut lines);
+    Ok(lines_to_text(lines))
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_recent_text(core: &GhosttyPaneCore, lines: usize) -> Result<String, crate::ghostty::Error> {
+    let total_rows = core.terminal.total_rows()?;
+    let cols = core.terminal.cols()?;
+    let start = total_rows.saturating_sub(lines);
+    let mut rows = Vec::with_capacity(total_rows.saturating_sub(start));
+    for y in start..total_rows {
+        rows.push(ghostty_screen_row(core, cols, y as u32)?);
+    }
+    trim_trailing_blank_rows(&mut rows);
+    Ok(recent_text_from_rows(&rows, lines))
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_extract_selection(
+    core: &mut GhosttyPaneCore,
+    selection: &crate::selection::Selection,
+) -> Result<String, crate::ghostty::Error> {
+    let GhosttyPaneCore {
+        terminal,
+        render_state,
+    } = core;
+    render_state.update(terminal)?;
+    let mut row_iterator = crate::ghostty::RowIterator::new()?;
+    let mut row_cells = crate::ghostty::RowCells::new()?;
+    let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
+    let mut lines = Vec::new();
+    let mut row_index = 0u16;
+    let ((start_row, _), (end_row, _)) = selection.ordered_cells();
+    while rows.next() {
+        if row_index > end_row {
+            break;
+        }
+        if row_index >= start_row {
+            let mut cells = rows.populate_cells(&mut row_cells)?;
+            let (start_col, end_col) = selection_cols_for_row(selection, row_index);
+            let mut line = String::new();
+            for x in start_col..=end_col {
+                cells.select(x)?;
+                line.push_str(&ghostty_cell_symbol(&cells)?);
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        row_index += 1;
+    }
+    Ok(lines.join("\n"))
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn selection_cols_for_row(selection: &crate::selection::Selection, row: u16) -> (u16, u16) {
+    let ((start_row, start_col), (end_row, end_col)) = selection.ordered_cells();
+    if start_row == end_row {
+        (start_col, end_col)
+    } else if row == start_row {
+        (start_col, selection.pane_width().saturating_sub(1))
+    } else if row == end_row {
+        (0, end_col)
+    } else {
+        (0, selection.pane_width().saturating_sub(1))
+    }
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_screen_row(
+    core: &GhosttyPaneCore,
+    cols: u16,
+    y: u32,
+) -> Result<String, crate::ghostty::Error> {
+    let mut line = String::new();
+    for x in 0..cols {
+        let graphemes = core.terminal.screen_graphemes(x, y)?;
+        if graphemes.is_empty() {
+            line.push(' ');
+        } else {
+            for codepoint in graphemes {
+                if let Some(ch) = char::from_u32(codepoint) {
+                    line.push(ch);
+                }
+            }
+        }
+    }
+    Ok(line.trim_end().to_string())
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_line_from_cells(
+    cells: &mut crate::ghostty::RowCellIter<'_>,
+) -> Result<String, crate::ghostty::Error> {
+    let mut line = String::new();
+    while cells.next() {
+        line.push_str(&ghostty_cell_symbol(cells)?);
+    }
+    Ok(line.trim_end().to_string())
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_cell_symbol(cells: &crate::ghostty::RowCellIter<'_>) -> Result<String, crate::ghostty::Error> {
+    let graphemes = cells.graphemes()?;
+    if graphemes.is_empty() {
+        return Ok(" ".to_string());
+    }
+    let mut text = String::new();
+    for codepoint in graphemes {
+        if let Some(ch) = char::from_u32(codepoint) {
+            text.push(ch);
+        }
+    }
+    if text.is_empty() {
+        text.push(' ');
+    }
+    Ok(text)
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_cell_style(
+    cells: &crate::ghostty::RowCellIter<'_>,
+    default_fg: Option<Color>,
+    default_bg: Option<Color>,
+) -> Style {
+    let style_data = cells.style().unwrap_or_default();
+    let mut fg = cells.fg_color().ok().flatten().map(ghostty_color).or(default_fg);
+    let mut bg = cells.bg_color().ok().flatten().map(ghostty_color).or(default_bg);
+    if style_data.invisible {
+        fg = bg.or(default_bg);
+    }
+    if style_data.inverse {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+
+    let mut style = Style::default();
+    if let Some(fg) = fg {
+        style = style.fg(fg);
+    }
+    if let Some(bg) = bg {
+        style = style.bg(bg);
+    }
+
+    let mut modifiers = Modifier::empty();
+    if style_data.bold {
+        modifiers |= Modifier::BOLD;
+    }
+    if style_data.italic {
+        modifiers |= Modifier::ITALIC;
+    }
+    if style_data.faint {
+        modifiers |= Modifier::DIM;
+    }
+    if style_data.blink {
+        modifiers |= Modifier::SLOW_BLINK;
+    }
+    if style_data.underlined {
+        modifiers |= Modifier::UNDERLINED;
+    }
+    if style_data.strikethrough {
+        modifiers |= Modifier::CROSSED_OUT;
+    }
+    style.add_modifier(modifiers)
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_color(color: crate::ghostty::RgbColor) -> Color {
+    Color::Rgb(color.r, color.g, color.b)
+}
+
+fn lines_to_text(lines: Vec<String>) -> String {
+    let text = lines.join("\n");
+    if text.is_empty() {
+        text
+    } else {
+        format!("{text}\n")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelRouting {
+    HostScroll,
+    MouseReport,
+    AlternateScroll,
 }
 
 impl Drop for PaneRuntime {
@@ -431,15 +1322,45 @@ impl PaneRuntime {
             })
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        let responses = PtyResponses::new();
-        let kitty_keyboard_flags = responses.kitty_keyboard_flags.clone();
-        let mouse_alternate_scroll = responses.mouse_alternate_scroll.clone();
-        let parser = Arc::new(RwLock::new(vt100::Parser::new_with_callbacks(
-            rows,
-            cols,
-            10000,
-            responses.clone(),
-        )));
+        // --- Writer channel ---
+        let (input_tx, mut input_rx) = mpsc::channel::<Bytes>(32);
+
+        // Live screen snapshot for detection (decoupled from parser scrollback)
+        #[cfg_attr(feature = "ghostty-vt", allow(unused_variables))]
+        let screen_content = Arc::new(RwLock::new(String::new()));
+
+        #[cfg(not(feature = "ghostty-vt"))]
+        let terminal = {
+            let responses = PtyResponses::new();
+            let kitty_keyboard_flags = responses.kitty_keyboard_flags.clone();
+            let mouse_alternate_scroll = responses.mouse_alternate_scroll.clone();
+            let parser = Arc::new(RwLock::new(vt100::Parser::new_with_callbacks(
+                rows, cols, 10000, responses,
+            )));
+            (
+                Arc::new(PaneTerminal::Vt(VtPaneTerminal::new(
+                    parser,
+                    screen_content.clone(),
+                    mouse_alternate_scroll,
+                ))),
+                kitty_keyboard_flags,
+            )
+        };
+
+        #[cfg(feature = "ghostty-vt")]
+        let terminal = {
+            let terminal = crate::ghostty::Terminal::new(cols, rows, 10000)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            (
+                Arc::new(PaneTerminal::Ghostty(GhosttyPaneTerminal::new(
+                    terminal,
+                    input_tx.clone(),
+                )?)),
+                Arc::new(AtomicU16::new(0)),
+            )
+        };
+
+        let (terminal, kitty_keyboard_flags) = terminal;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         let mut cmd = CommandBuilder::new(&shell);
@@ -484,17 +1405,10 @@ impl PaneRuntime {
             });
         }
 
-        // --- Writer channel ---
-        let (input_tx, mut input_rx) = mpsc::channel::<Bytes>(32);
-
-        // Live screen snapshot for detection (decoupled from parser scrollback)
-        let screen_content = Arc::new(RwLock::new(String::new()));
-
-        // --- Reader task: PTY → parser + screen snapshot + terminal query responses ---
+        // --- Reader task: PTY → terminal backend + screen snapshot + terminal query responses ---
         {
             let mut reader = reader;
-            let parser = parser.clone();
-            let screen_content = screen_content.clone();
+            let terminal = terminal.clone();
             let response_writer = input_tx.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
@@ -508,34 +1422,9 @@ impl PaneRuntime {
                             break;
                         }
                         Ok(n) => {
-                            if let Ok(mut p) = parser.write() {
-                                p.process(&buf[..n]);
-
-                                // Snapshot live screen content for detection.
-                                // Always reads at scrollback 0 (current view),
-                                // without touching the user's scroll position.
-                                let scrollback = p.screen().scrollback();
-                                if scrollback > 0 {
-                                    p.screen_mut().set_scrollback(0);
-                                }
-                                let content = p.screen().contents();
-                                if scrollback > 0 {
-                                    p.screen_mut().set_scrollback(scrollback);
-                                }
-                                if let Ok(mut sc) = screen_content.write() {
-                                    *sc = content;
-                                }
-                            } else {
-                                error!(pane = pane_id.raw(), "parser lock poisoned in reader");
-                                break;
-                            }
-                            let resp = responses.take();
-                            if !resp.is_empty() {
-                                if let Err(e) = response_writer.try_send(Bytes::from(resp)) {
-                                    warn!(pane = pane_id.raw(), err = %e, "dropped terminal query response");
-                                }
-                            }
-                            if !render_dirty.swap(true, Ordering::AcqRel) {
+                            let result =
+                                terminal.process_pty_bytes(pane_id, &buf[..n], &response_writer);
+                            if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                                 render_notify.notify_one();
                             }
                         }
@@ -556,7 +1445,7 @@ impl PaneRuntime {
             const PROCESS_RECHECK: Duration = Duration::from_secs(5);
 
             let child_pid = child_pid.clone();
-            let screen_content = screen_content.clone();
+            let terminal = terminal.clone();
             let state_events = events.clone();
             let detect_reset_notify = Arc::new(Notify::new());
             let detect_reset = detect_reset_notify.clone();
@@ -639,11 +1528,8 @@ impl PaneRuntime {
                         }
                     }
 
-                    let raw_state = if let Ok(content) = screen_content.read() {
-                        detect::detect_state(agent, &content)
-                    } else {
-                        continue;
-                    };
+                    let content = terminal.visible_text();
+                    let raw_state = detect::detect_state(agent, &content);
                     let new_state = stabilize_agent_state(
                         agent,
                         state,
@@ -714,14 +1600,12 @@ impl PaneRuntime {
         }
 
         Ok(Self {
-            parser,
+            terminal,
             sender: input_tx,
             resize_tx,
             current_size: Cell::new((rows, cols)),
             child_pid,
             kitty_keyboard_flags,
-            mouse_alternate_scroll,
-            screen_content,
             detect_reset_notify,
             pending_release,
             detect_handle,
@@ -746,92 +1630,141 @@ impl PaneRuntime {
             return;
         }
         self.current_size.set((rows, cols));
-        if let Ok(mut p) = self.parser.write() {
-            p.screen_mut().set_size(rows, cols);
-        }
+        self.terminal.resize(rows, cols);
         let _ = self.resize_tx.try_send((rows, cols));
     }
 
     /// Scroll up by N lines (into scrollback history).
     pub fn scroll_up(&self, lines: usize) {
-        if let Ok(mut p) = self.parser.write() {
-            let current = p.screen().scrollback();
-            p.screen_mut().set_scrollback(current + lines);
-        }
+        self.terminal.scroll_up(lines);
     }
 
     /// Scroll down by N lines (toward live output).
     pub fn scroll_down(&self, lines: usize) {
-        if let Ok(mut p) = self.parser.write() {
-            let current = p.screen().scrollback();
-            p.screen_mut().set_scrollback(current.saturating_sub(lines));
-        }
+        self.terminal.scroll_down(lines);
     }
 
     /// Reset scroll to live view (offset = 0).
     pub fn scroll_reset(&self) {
-        if let Ok(mut p) = self.parser.write() {
-            p.screen_mut().set_scrollback(0);
-        }
+        self.terminal.scroll_reset();
     }
 
     /// Set scrollback offset measured from the live bottom of the terminal.
     pub fn set_scroll_offset_from_bottom(&self, lines: usize) {
-        if let Ok(mut p) = self.parser.write() {
-            p.screen_mut().set_scrollback(lines);
-        }
+        self.terminal.set_scroll_offset_from_bottom(lines);
     }
 
     pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
-        let Ok(mut parser) = self.parser.write() else {
-            return None;
-        };
-        let max_offset_from_bottom = max_scrollback(&mut parser);
-        let screen = parser.screen();
-        let (viewport_rows, _) = screen.size();
-        Some(ScrollMetrics {
-            offset_from_bottom: screen.scrollback(),
-            max_offset_from_bottom,
-            viewport_rows: viewport_rows as usize,
-        })
+        self.terminal.scroll_metrics()
     }
 
     pub fn input_state(&self) -> Option<InputState> {
-        let Ok(parser) = self.parser.read() else {
-            return None;
-        };
-        let screen = parser.screen();
-        Some(InputState {
-            alternate_screen: screen.alternate_screen(),
-            application_cursor: screen.application_cursor(),
-            mouse_protocol_mode: screen.mouse_protocol_mode(),
-            mouse_protocol_encoding: screen.mouse_protocol_encoding(),
-            mouse_alternate_scroll: self.mouse_alternate_scroll.load(Ordering::Relaxed),
-        })
+        self.terminal.input_state()
     }
 
     pub fn visible_text(&self) -> String {
-        let Ok(content) = self.screen_content.read() else {
-            return String::new();
-        };
-        let mut rows: Vec<String> = content
-            .lines()
-            .map(|line| line.trim_end().to_string())
-            .collect();
-        trim_trailing_blank_rows(&mut rows);
-        let text = rows.join("\n");
-        if text.is_empty() {
-            text
-        } else {
-            format!("{text}\n")
-        }
+        self.terminal.visible_text()
     }
 
     pub fn recent_text(&self, lines: usize) -> String {
-        self.parser
-            .write()
-            .map(|mut parser| recent_text_from_parser(&mut parser, lines))
-            .unwrap_or_default()
+        self.terminal.recent_text(lines)
+    }
+
+    pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
+        self.terminal.extract_selection(selection)
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        self.terminal.render(frame, area);
+    }
+
+    pub fn keyboard_protocol(&self) -> crate::input::KeyboardProtocol {
+        let flags = self.kitty_keyboard_flags.load(Ordering::Relaxed);
+        crate::input::KeyboardProtocol::from_kitty_flags(flags)
+    }
+
+    pub fn encode_terminal_key(&self, key: crate::input::TerminalKey) -> Vec<u8> {
+        self.terminal
+            .encode_terminal_key(key, self.keyboard_protocol())
+    }
+
+    pub async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
+        self.sender.send(bytes).await
+    }
+
+    pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.sender.try_send(bytes)
+    }
+
+    pub async fn send_paste(&self, text: String) -> Result<(), mpsc::error::SendError<Bytes>> {
+        let bracketed = self
+            .input_state()
+            .map(|state| state.bracketed_paste)
+            .unwrap_or(false);
+        let payload = if bracketed {
+            format!("\x1b[200~{text}\x1b[201~")
+        } else {
+            text
+        };
+        self.send_bytes(Bytes::from(payload)).await
+    }
+
+    pub fn wheel_routing(&self) -> Option<WheelRouting> {
+        let input_state = self.input_state()?;
+        Some(if input_state.mouse_reporting_enabled() {
+            WheelRouting::MouseReport
+        } else if input_state.alternate_screen && input_state.mouse_alternate_scroll {
+            WheelRouting::AlternateScroll
+        } else {
+            WheelRouting::HostScroll
+        })
+    }
+
+    pub fn encode_mouse_button(
+        &self,
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> Option<Vec<u8>> {
+        if self.input_state()?.mouse_protocol_mode == vt100::MouseProtocolMode::None {
+            return None;
+        }
+        self.terminal
+            .encode_mouse_button(kind, column, row, modifiers)
+    }
+
+    pub fn encode_mouse_wheel(
+        &self,
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> Option<Vec<u8>> {
+        if self.wheel_routing()? != WheelRouting::MouseReport {
+            return None;
+        }
+        self.terminal
+            .encode_mouse_wheel(kind, column, row, modifiers)
+    }
+
+    pub fn encode_alternate_scroll(
+        &self,
+        kind: crossterm::event::MouseEventKind,
+    ) -> Option<Vec<u8>> {
+        self.input_state()?;
+        if self.wheel_routing()? != WheelRouting::AlternateScroll {
+            return None;
+        }
+        let key = match kind {
+            crossterm::event::MouseEventKind::ScrollUp => crossterm::event::KeyCode::Up,
+            crossterm::event::MouseEventKind::ScrollDown => crossterm::event::KeyCode::Down,
+            _ => return None,
+        };
+        Some(self.encode_terminal_key(crate::input::TerminalKey::new(
+            key,
+            crossterm::event::KeyModifiers::empty(),
+        )))
     }
 
     /// Get the current working directory of the child shell process.

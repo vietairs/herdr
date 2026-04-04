@@ -1582,7 +1582,7 @@ impl App {
                     })
                     .unwrap();
                 };
-                if let Err(err) = runtime.0.try_send(Bytes::from(params.text)) {
+                if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -1681,15 +1681,8 @@ impl App {
                         })
                         .unwrap();
                     };
-                    let flags = runtime
-                        .1
-                        .kitty_keyboard_flags
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let bytes = crate::input::encode_key(
-                        key_event,
-                        crate::input::KeyboardProtocol::from_kitty_flags(flags),
-                    );
-                    if let Err(err) = runtime.0.try_send(Bytes::from(bytes)) {
+                    let bytes = runtime.encode_terminal_key(key_event.into());
+                    if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
                         return serde_json::to_string(&ErrorResponse {
                             id: request.id,
                             error: ErrorBody {
@@ -2023,13 +2016,9 @@ impl App {
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
-    ) -> Option<(
-        &tokio::sync::mpsc::Sender<bytes::Bytes>,
-        &crate::pane::PaneRuntime,
-    )> {
+    ) -> Option<&crate::pane::PaneRuntime> {
         let ws = self.state.workspaces.get(ws_idx)?;
-        let runtime = ws.runtime(pane_id)?;
-        Some((&runtime.sender, runtime))
+        ws.runtime(pane_id)
     }
 
     fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {

@@ -5,7 +5,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame,
 };
-use tui_term::widget::PseudoTerminal;
 
 use crate::app::state::{ToastKind, ToastNotification};
 use crate::app::{AppState, Mode};
@@ -835,12 +834,7 @@ fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
             }
 
             // Draw terminal content
-            if let Ok(parser) = rt.parser.read() {
-                let show_cursor = parser.screen().scrollback() == 0;
-                let pt = PseudoTerminal::new(parser.screen())
-                    .cursor(tui_term::widget::Cursor::default().visibility(show_cursor));
-                frame.render_widget(pt, info.inner_rect);
-            }
+            rt.render(frame, info.inner_rect);
             render_pane_scrollbar(app, frame, info, rt);
 
             // Dim unfocused panes only in navigate mode
