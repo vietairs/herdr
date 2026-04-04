@@ -121,6 +121,7 @@ pub const MOUSE_BUTTON_WHEEL_RIGHT: ffi::GhosttyMouseButton =
     ffi::GhosttyMouseButton_GHOSTTY_MOUSE_BUTTON_SEVEN;
 
 pub const MODE_APPLICATION_CURSOR_KEYS: u16 = 1;
+pub const MODE_FOCUS_EVENT: u16 = 1004;
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 pub const MODE_MOUSE_UTF8: u16 = 1005;
 pub const MODE_MOUSE_SGR: u16 = 1006;

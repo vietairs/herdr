@@ -272,6 +272,7 @@ pub struct InputState {
     pub alternate_screen: bool,
     pub application_cursor: bool,
     pub bracketed_paste: bool,
+    pub focus_reporting: bool,
     pub mouse_protocol_mode: vt100::MouseProtocolMode,
     pub mouse_protocol_encoding: vt100::MouseProtocolEncoding,
     pub mouse_alternate_scroll: bool,
@@ -593,6 +594,7 @@ impl VtPaneTerminal {
             alternate_screen: screen.alternate_screen(),
             application_cursor: screen.application_cursor(),
             bracketed_paste: screen.bracketed_paste(),
+            focus_reporting: false,
             mouse_protocol_mode: screen.mouse_protocol_mode(),
             mouse_protocol_encoding: screen.mouse_protocol_encoding(),
             mouse_alternate_scroll: self.mouse_alternate_scroll.load(Ordering::Relaxed),
@@ -772,6 +774,10 @@ impl GhosttyPaneTerminal {
             .terminal
             .mode_get(crate::ghostty::MODE_BRACKETED_PASTE)
             .ok()?;
+        let focus_reporting = core
+            .terminal
+            .mode_get(crate::ghostty::MODE_FOCUS_EVENT)
+            .ok()?;
         let mouse_sgr = core.terminal.mode_get(crate::ghostty::MODE_MOUSE_SGR).ok()?;
         let mouse_utf8 = core.terminal.mode_get(crate::ghostty::MODE_MOUSE_UTF8).ok()?;
         let mouse_alternate_scroll = core
@@ -800,6 +806,7 @@ impl GhosttyPaneTerminal {
             alternate_screen,
             application_cursor,
             bracketed_paste,
+            focus_reporting,
             mouse_protocol_mode,
             mouse_protocol_encoding,
             mouse_alternate_scroll,
@@ -2008,6 +2015,25 @@ impl PaneRuntime {
         self.send_bytes(Bytes::from(payload)).await
     }
 
+    #[cfg(feature = "ghostty-vt")]
+    pub fn try_send_focus_event(&self, event: crate::ghostty::FocusEvent) -> bool {
+        if !self
+            .input_state()
+            .map(|state| state.focus_reporting)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        let Ok(bytes) = crate::ghostty::encode_focus(event) else {
+            return false;
+        };
+        if let Err(err) = self.try_send_bytes(Bytes::from(bytes)) {
+            warn!(err = %err, ?event, "failed to forward pane focus event");
+        }
+        true
+    }
+
     pub fn wheel_routing(&self) -> Option<WheelRouting> {
         let input_state = self.input_state()?;
         Some(if input_state.mouse_reporting_enabled() {
@@ -2181,6 +2207,51 @@ mod tests {
         );
 
         assert_eq!(encoded.as_deref(), Some(&b"\x1b[<36;5;7M"[..]));
+    }
+
+    #[cfg(feature = "ghostty-vt")]
+    #[tokio::test]
+    async fn focus_events_are_forwarded_when_enabled() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.mode_set(crate::ghostty::MODE_FOCUS_EVENT, true).unwrap();
+        let runtime = PaneRuntime {
+            terminal: Arc::new(PaneTerminal::Ghostty(GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap())),
+            sender: tx,
+            resize_tx,
+            current_size: Cell::new((80, 24)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            detect_reset_notify: Arc::new(Notify::new()),
+            pending_release: Arc::new(Mutex::new(None)),
+            detect_handle: tokio::spawn(async {}).abort_handle(),
+        };
+
+        assert!(runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
+        assert_eq!(rx.recv().await.unwrap(), Bytes::from_static(b"\x1b[I"));
+    }
+
+    #[cfg(feature = "ghostty-vt")]
+    #[tokio::test]
+    async fn focus_events_are_suppressed_when_disabled() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let runtime = PaneRuntime {
+            terminal: Arc::new(PaneTerminal::Ghostty(GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap())),
+            sender: tx,
+            resize_tx,
+            current_size: Cell::new((80, 24)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            detect_reset_notify: Arc::new(Notify::new()),
+            pending_release: Arc::new(Mutex::new(None)),
+            detect_handle: tokio::spawn(async {}).abort_handle(),
+        };
+
+        assert!(!runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv()).await.is_err());
     }
 
     #[test]

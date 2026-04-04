@@ -738,7 +738,13 @@ impl App {
             return;
         }
 
+        #[cfg(feature = "ghostty-vt")]
+        if let Some((ws_idx, pane_id)) = self.last_focus {
+            self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Lost);
+        }
         if let Some((ws_idx, pane_id)) = current_focus {
+            #[cfg(feature = "ghostty-vt")]
+            self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Gained);
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::WorkspaceFocused,
                 data: crate::api::schema::EventData::WorkspaceFocused {
@@ -768,6 +774,24 @@ impl App {
         }
 
         self.last_focus = current_focus;
+    }
+
+    #[cfg(feature = "ghostty-vt")]
+    fn send_pane_focus_event(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        event: crate::ghostty::FocusEvent,
+    ) {
+        let Some(runtime) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.runtime(pane_id))
+        else {
+            return;
+        };
+        runtime.try_send_focus_event(event);
     }
 
     fn find_pane(
