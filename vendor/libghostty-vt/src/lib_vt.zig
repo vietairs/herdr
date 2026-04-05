@@ -242,6 +242,18 @@ comptime {
     }
 }
 
+fn silentLog(
+    comptime level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    _ = level;
+    _ = scope;
+    _ = format;
+    _ = args;
+}
+
 pub const std_options: std.Options = options: {
     if (builtin.target.cpu.arch.isWasm()) break :options .{
         // Wasm builds we specifically want to optimize for space with small
@@ -256,10 +268,13 @@ pub const std_options: std.Options = options: {
         .logFn = @import("os/wasm/log.zig").log,
     };
 
-    // For everything else we currently use defaults. Longer term I'm
-    // SURE this isn't right (e.g. we definitely want to customize the log
-    // function for the C lib at least).
-    break :options .{};
+    // Embedded libghostty-vt runs inside herdr's TUI process. Writing logs to
+    // stdout/stderr corrupts the ratatui surface, so silence library-side Zig
+    // logging by default for the C library build.
+    break :options .{
+        .log_level = .err,
+        .logFn = silentLog,
+    };
 };
 
 test {

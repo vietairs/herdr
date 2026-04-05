@@ -45,6 +45,14 @@ class VendorLibghosttyVtTests(unittest.TestCase):
         self.assertIn('"dist_archive"', text)
         self.assertIn('"extracted_dir"', text)
 
+    def test_embedded_libghostty_logging_is_silenced(self) -> None:
+        root = Path(__file__).resolve().parent.parent / "vendor" / "libghostty-vt"
+        lib_vt = root / "src" / "lib_vt.zig"
+        text = lib_vt.read_text()
+        self.assertIn("fn silentLog(", text)
+        self.assertIn(".log_level = .err", text)
+        self.assertIn(".logFn = silentLog", text)
+
 
 if __name__ == "__main__":
     unittest.main()
