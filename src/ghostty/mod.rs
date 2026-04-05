@@ -199,6 +199,26 @@ pub struct RenderColors {
     pub foreground: RgbColor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellWide {
+    Narrow,
+    Wide,
+    SpacerTail,
+    SpacerHead,
+}
+
+impl CellWide {
+    fn from_raw(value: ffi::GhosttyCellWide) -> Self {
+        match value {
+            ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_NARROW => Self::Narrow,
+            ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_WIDE => Self::Wide,
+            ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_TAIL => Self::SpacerTail,
+            ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_SPACER_HEAD => Self::SpacerHead,
+            _ => Self::Narrow,
+        }
+    }
+}
+
 struct WritePtyCallbackState {
     callback: Box<dyn FnMut(&[u8]) + Send>,
 }
@@ -915,6 +935,33 @@ impl<'a> RowCellIter<'a> {
 
     pub fn select(&mut self, x: u16) -> Result<(), Error> {
         unsafe { ffi::ghostty_render_state_row_cells_select(self.cells.raw, x).into_result() }
+    }
+
+    fn raw_cell(&self) -> Result<ffi::GhosttyCell, Error> {
+        let mut raw = ffi::GhosttyCell::default();
+        unsafe {
+            ffi::ghostty_render_state_row_cells_get(
+                self.cells.raw,
+                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+                (&mut raw as *mut ffi::GhosttyCell).cast(),
+            )
+            .into_result()?;
+        }
+        Ok(raw)
+    }
+
+    pub fn wide(&self) -> Result<CellWide, Error> {
+        let raw = self.raw_cell()?;
+        let mut wide = ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_NARROW;
+        unsafe {
+            ffi::ghostty_cell_get(
+                raw,
+                ffi::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE,
+                (&mut wide as *mut ffi::GhosttyCellWide).cast(),
+            )
+            .into_result()?;
+        }
+        Ok(CellWide::from_raw(wide))
     }
 
     pub fn style(&self) -> Result<CellStyle, Error> {

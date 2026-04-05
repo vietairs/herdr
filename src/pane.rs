@@ -13,6 +13,8 @@ use ratatui::{layout::Rect, Frame};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 use tui_term::widget::PseudoTerminal;
+#[cfg(feature = "ghostty-vt")]
+use unicode_width::UnicodeWidthStr;
 
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
@@ -965,22 +967,19 @@ impl GhosttyPaneTerminal {
                 };
                 let mut x = 0u16;
                 while x < area.width && cells.next() {
+                    let wide = cells.wide().unwrap_or(crate::ghostty::CellWide::Narrow);
                     let style = ghostty_cell_style(&cells, default_fg, default_bg);
-                    let symbol = ghostty_cell_symbol(&cells).unwrap_or_else(|_| " ".to_string());
+                    let symbol = ghostty_buffer_symbol(&cells, wide)
+                        .unwrap_or_else(|_| ghostty_blank_symbol_for_width(wide).to_string());
                     let cell = &mut buf[(area.x + x, area.y + y)];
+                    cell.reset();
                     cell.set_symbol(&symbol);
                     cell.set_style(style);
                     x += 1;
                 }
                 while x < area.width {
                     let cell = &mut buf[(area.x + x, area.y + y)];
-                    cell.set_symbol(" ");
-                    if let Some(bg) = default_bg {
-                        cell.set_bg(bg);
-                    }
-                    if let Some(fg) = default_fg {
-                        cell.set_fg(fg);
-                    }
+                    ghostty_reset_cell(cell, default_fg, default_bg);
                     x += 1;
                 }
                 y += 1;
@@ -988,13 +987,7 @@ impl GhosttyPaneTerminal {
             while y < area.height {
                 for x in 0..area.width {
                     let cell = &mut buf[(area.x + x, area.y + y)];
-                    cell.set_symbol(" ");
-                    if let Some(bg) = default_bg {
-                        cell.set_bg(bg);
-                    }
-                    if let Some(fg) = default_fg {
-                        cell.set_fg(fg);
-                    }
+                    ghostty_reset_cell(cell, default_fg, default_bg);
                 }
                 y += 1;
             }
@@ -1451,6 +1444,60 @@ fn ghostty_cell_symbol(
         text.push(' ');
     }
     Ok(text)
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_blank_symbol_for_width(wide: crate::ghostty::CellWide) -> &'static str {
+    match wide {
+        crate::ghostty::CellWide::Wide => "  ",
+        crate::ghostty::CellWide::SpacerTail => "",
+        crate::ghostty::CellWide::Narrow | crate::ghostty::CellWide::SpacerHead => " ",
+    }
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_normalize_buffer_symbol(symbol: &str, wide: crate::ghostty::CellWide) -> String {
+    let expected_width = match wide {
+        crate::ghostty::CellWide::Wide => 2,
+        crate::ghostty::CellWide::Narrow | crate::ghostty::CellWide::SpacerHead => 1,
+        crate::ghostty::CellWide::SpacerTail => 0,
+    };
+    let actual_width = symbol.width();
+    if actual_width == expected_width {
+        return symbol.to_string();
+    }
+    ghostty_blank_symbol_for_width(wide).to_string()
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_buffer_symbol(
+    cells: &crate::ghostty::RowCellIter<'_>,
+    wide: crate::ghostty::CellWide,
+) -> Result<String, crate::ghostty::Error> {
+    let symbol = match wide {
+        crate::ghostty::CellWide::SpacerTail => String::new(),
+        crate::ghostty::CellWide::SpacerHead => " ".to_string(),
+        crate::ghostty::CellWide::Narrow | crate::ghostty::CellWide::Wide => {
+            ghostty_cell_symbol(cells)?
+        }
+    };
+    Ok(ghostty_normalize_buffer_symbol(&symbol, wide))
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_reset_cell(
+    cell: &mut ratatui::buffer::Cell,
+    default_fg: Option<Color>,
+    default_bg: Option<Color>,
+) {
+    cell.reset();
+    cell.set_symbol(" ");
+    if let Some(bg) = default_bg {
+        cell.set_bg(bg);
+    }
+    if let Some(fg) = default_fg {
+        cell.set_fg(fg);
+    }
 }
 
 #[cfg(feature = "ghostty-vt")]
@@ -2272,6 +2319,31 @@ mod tests {
         );
 
         assert_eq!(encoded.as_deref(), Some(&b"\x1b[<36;5;7M"[..]));
+    }
+
+    #[cfg(feature = "ghostty-vt")]
+    #[test]
+    fn ghostty_normalize_buffer_symbol_uses_ratatui_width_contract() {
+        assert_eq!(
+            ghostty_normalize_buffer_symbol("🙂", crate::ghostty::CellWide::Wide),
+            "🙂"
+        );
+        assert_eq!(
+            ghostty_normalize_buffer_symbol("a", crate::ghostty::CellWide::Wide),
+            "  "
+        );
+        assert_eq!(
+            ghostty_normalize_buffer_symbol("⌨️", crate::ghostty::CellWide::Narrow),
+            " "
+        );
+        assert_eq!(
+            ghostty_normalize_buffer_symbol(" ", crate::ghostty::CellWide::SpacerTail),
+            ""
+        );
+        assert_eq!(
+            ghostty_normalize_buffer_symbol("xx", crate::ghostty::CellWide::SpacerHead),
+            " "
+        );
     }
 
     #[cfg(feature = "ghostty-vt")]
