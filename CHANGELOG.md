@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.0] - 2026-04-05
+
 ### Major Changes
 - Herdr now uses a Ghostty-backed terminal engine as its pane runtime.
 - The legacy vt100 pane backend has been removed, making Ghostty the single terminal backend going forward.
