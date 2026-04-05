@@ -84,7 +84,6 @@ jobs:
       - name: Package artifact
         run: |
           cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
-          ./${{ matrix.name }} --version
           file ${{ matrix.name }} > BUILD_INFO.txt
           {
             echo "commit=$GITHUB_SHA"
@@ -145,7 +144,6 @@ jobs:
       - name: Package artifact
         run: |
           cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
-          ./${{ matrix.name }} --version
           file ${{ matrix.name }} > BUILD_INFO.txt
           {
             echo "commit=$GITHUB_SHA"
