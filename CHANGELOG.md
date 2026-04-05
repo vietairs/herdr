@@ -2,8 +2,19 @@
 
 ## Unreleased
 
-### Added
-- Added configurable custom mp3 notification sound paths under `[ui.sound]`, with support for one shared file or separate files for finished vs needs-attention alerts. Relative paths are resolved from the config file's directory, and missing/unsupported custom files fall back to the built-in sounds.
+### Major Changes
+- Herdr now uses a Ghostty-backed terminal engine as its pane runtime.
+- The legacy vt100 pane backend has been removed, making Ghostty the single terminal backend going forward.
+
+### UX and Interaction
+- Workspaces can now be reordered by dragging them in the sidebar.
+- Notification sounds now support custom mp3 file overrides, with either one shared file or separate files for finished vs needs-attention alerts.
+
+### API and Integration
+- Workspace API ids are now stable, making socket and CLI automation more predictable across workspace changes and restores.
+
+### Packaging and Runtime
+- macOS builds now statically link the vendored `libghostty-vt`, preserving the single-binary install and update flow.
 
 ## [0.3.2] - 2026-04-03
 
