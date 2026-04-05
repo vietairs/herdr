@@ -19,17 +19,28 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: herdr-linux-x86_64
+            libghostty_vt_optimize: ReleaseFast
+            libghostty_vt_simd: 'false'
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: herdr-linux-aarch64
+            libghostty_vt_optimize: ReleaseFast
+            libghostty_vt_simd: 'false'
           - target: x86_64-apple-darwin
             os: macos-latest
             name: herdr-macos-x86_64
+            libghostty_vt_optimize: ReleaseFast
+            libghostty_vt_simd: 'true'
           - target: aarch64-apple-darwin
             os: macos-latest
             name: herdr-macos-aarch64
+            libghostty_vt_optimize: ReleaseFast
+            libghostty_vt_simd: 'true'
 
     runs-on: ${{ matrix.os }}
+    env:
+      LIBGHOSTTY_VT_OPTIMIZE: ${{ matrix.libghostty_vt_optimize }}
+      LIBGHOSTTY_VT_SIMD: ${{ matrix.libghostty_vt_simd }}
 
     steps:
       - uses: actions/checkout@v4
@@ -70,13 +81,8 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      - name: Cache vendored libghostty-vt build outputs
-        uses: actions/cache@v4
-        with:
-          path: |
-            vendor/libghostty-vt/.zig-cache
-            vendor/libghostty-vt/zig-out
-          key: ${{ runner.os }}-${{ matrix.target }}-libghostty-${{ hashFiles('vendor/libghostty-vt.vendor.json', 'vendor/libghostty-vt/build.zig', 'vendor/libghostty-vt/build.zig.zon', 'vendor/libghostty-vt/VERSION', 'build.rs') }}
+      - name: Remove Zig caches
+        run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
