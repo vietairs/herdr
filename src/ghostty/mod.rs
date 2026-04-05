@@ -121,10 +121,11 @@ pub const MOUSE_BUTTON_WHEEL_RIGHT: ffi::GhosttyMouseButton =
 
 pub const MODE_APPLICATION_CURSOR_KEYS: u16 = 1;
 pub const MODE_FOCUS_EVENT: u16 = 1004;
-pub const MODE_BRACKETED_PASTE: u16 = 2004;
 pub const MODE_MOUSE_UTF8: u16 = 1005;
 pub const MODE_MOUSE_SGR: u16 = 1006;
 pub const MODE_MOUSE_ALTERNATE_SCROLL: u16 = 1007;
+pub const MODE_BRACKETED_PASTE: u16 = 2004;
+pub const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveScreen {

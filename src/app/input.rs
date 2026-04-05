@@ -3284,12 +3284,18 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
         app.state.active = Some(0);
         app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let target_row = app.state.view.workspace_card_areas[1].rect.y;
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            target_row,
+        ));
         assert_eq!(app.state.active, Some(0));
         assert!(app.state.workspace_press.is_some());
 
-        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, 2));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.selected, 1);
         assert!(app.state.workspace_press.is_none());
@@ -3307,9 +3313,25 @@ mod tests {
         let selected_id = app.state.workspaces[2].id.clone();
         app.state.active = Some(1);
         app.state.selected = 2;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let source_row = app.state.view.workspace_card_areas[1].rect.y;
+        let target_row = crate::ui::workspace_drop_indicator_row(
+            &app.state.view.workspace_card_areas,
+            app.state.workspace_list_rect(),
+            0,
+        )
+        .unwrap();
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
-        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 2, 0));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            source_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            2,
+            target_row,
+        ));
         assert!(matches!(
             app.state.drag.as_ref().map(|drag| &drag.target),
             Some(DragTarget::WorkspaceReorder {
@@ -3317,7 +3339,7 @@ mod tests {
                 insert_idx: Some(0),
             })
         ));
-        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, 0));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
 
         let names: Vec<_> = app
             .state
@@ -3336,6 +3358,7 @@ mod tests {
     fn top_drop_slot_is_distinct_from_gap_below_first_workspace() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
         assert_eq!(app.state.workspace_drop_index_at_row(0), Some(0));
         assert_eq!(app.state.workspace_drop_index_at_row(1), Some(1));

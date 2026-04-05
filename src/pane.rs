@@ -449,9 +449,13 @@ impl GhosttyPaneTerminal {
         };
 
         core.terminal.write(bytes);
+        let synchronized_output = core
+            .terminal
+            .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
+            .unwrap_or(false);
         let _ = response_writer;
         ProcessBytesResult {
-            request_render: true,
+            request_render: !synchronized_output,
         }
     }
 
@@ -1962,6 +1966,23 @@ mod tests {
             ghostty_normalize_buffer_symbol("xx", crate::ghostty::CellWide::SpacerHead),
             " "
         );
+    }
+
+    #[test]
+    fn synchronized_output_suppresses_intermediate_render_requests_until_batch_ends() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        let begin = pane_terminal.process_pty_bytes(pane_id, b"\x1b[?2026h", &tx);
+        assert!(!begin.request_render);
+
+        let body = pane_terminal.process_pty_bytes(pane_id, b"hello", &tx);
+        assert!(!body.request_render);
+
+        let end = pane_terminal.process_pty_bytes(pane_id, b"\x1b[?2026l", &tx);
+        assert!(end.request_render);
     }
 
     #[tokio::test]
