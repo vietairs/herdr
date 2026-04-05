@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.1] - 2026-04-06
+
 ### Fixed
 - Fixed Linux release binaries crashing on startup.
 
