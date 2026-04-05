@@ -39,6 +39,7 @@ pub fn encode_cursor_key(code: KeyCode, application_cursor: bool) -> Vec<u8> {
     }
 }
 
+#[allow(dead_code)] // exercised in input unit tests; pane runtime uses backend helpers
 pub fn encode_mouse_scroll(
     kind: MouseEventKind,
     column: u16,
@@ -56,6 +57,7 @@ pub fn encode_mouse_scroll(
     encode_mouse_cb(button, false, column, row, modifiers, encoding)
 }
 
+#[allow(dead_code)] // exercised in input unit tests; pane runtime uses backend helpers
 pub fn encode_mouse_button(
     kind: MouseEventKind,
     column: u16,
@@ -78,6 +80,7 @@ pub fn encode_mouse_button(
     encode_mouse_cb(button, release, column, row, modifiers, encoding)
 }
 
+#[allow(dead_code)] // only reached through mouse encoding helpers above
 fn encode_mouse_cb(
     base_button: u16,
     release: bool,
@@ -129,6 +132,7 @@ fn encode_mouse_cb(
     }
 }
 
+#[allow(dead_code)] // only reached through mouse encoding helpers above
 fn push_mouse_codepoint(bytes: &mut Vec<u8>, value: u32) -> Option<()> {
     let ch = char::from_u32(value)?;
     let mut buf = [0u8; 4];

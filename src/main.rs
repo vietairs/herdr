@@ -24,7 +24,6 @@ mod cli;
 mod config;
 mod detect;
 mod events;
-#[cfg(feature = "ghostty-vt")]
 mod ghostty;
 mod input;
 mod integration;
@@ -32,7 +31,6 @@ mod layout;
 mod pane;
 mod persist;
 mod platform;
-mod pty_callbacks;
 mod raw_input;
 mod release_notes;
 mod selection;

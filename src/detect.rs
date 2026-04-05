@@ -1,6 +1,6 @@
 //! Agent state detection via screen content pattern matching.
 //!
-//! Each pane's `vt100::Screen` content is read periodically and matched
+//! Each pane's visible terminal content is read periodically and matched
 //! against known agent output patterns to determine state.
 
 /// The detected state of a terminal pane.
@@ -1177,31 +1177,19 @@ mod tests {
         let _ = tpgid;
     }
 
-    // ---- VT100 integration ----
-
     #[test]
-    fn vt100_screen_content_works_with_detection() {
-        let mut parser = vt100::Parser::new(24, 80, 0);
-        parser.process(b"Working...");
-        let content = parser.screen().contents();
-        assert_eq!(detect_pi(&content), AgentState::Working);
+    fn visible_screen_content_works_with_detection() {
+        assert_eq!(detect_pi("Working..."), AgentState::Working);
     }
 
     #[test]
-    fn vt100_screen_with_ansi_colors() {
-        let mut parser = vt100::Parser::new(24, 80, 0);
-        // Red "Working..." with ANSI codes — contents() strips formatting
-        parser.process(b"\x1b[31mWorking...\x1b[0m");
-        let content = parser.screen().contents();
-        assert_eq!(detect_pi(&content), AgentState::Working);
+    fn ansi_colored_content_still_detects_working() {
+        assert_eq!(detect_pi("\x1b[31mWorking...\x1b[0m"), AgentState::Working);
     }
 
     #[test]
-    fn vt100_screen_claude_prompt_box() {
-        let mut parser = vt100::Parser::new(24, 80, 0);
+    fn visible_claude_prompt_box_is_idle() {
         let screen = "Task complete.\n─────────────\n❯ \n─────────────";
-        parser.process(screen.as_bytes());
-        let content = parser.screen().contents();
-        assert_eq!(detect_claude(&content), AgentState::Idle);
+        assert_eq!(detect_claude(screen), AgentState::Idle);
     }
 }

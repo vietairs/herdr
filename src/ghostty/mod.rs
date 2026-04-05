@@ -1,4 +1,3 @@
-#![cfg(feature = "ghostty-vt")]
 #![allow(dead_code)]
 
 #[allow(

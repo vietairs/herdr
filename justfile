@@ -3,14 +3,12 @@
 # Run unit tests
 test:
     cargo test
-    cargo test --features ghostty-vt ghostty::tests
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
 # Check formatting + run unit tests
 check:
     cargo fmt --check
     cargo test
-    cargo test --features ghostty-vt ghostty::tests
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
 # Run the full local test suite

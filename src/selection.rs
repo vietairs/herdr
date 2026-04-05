@@ -142,13 +142,6 @@ impl Selection {
     }
 }
 
-/// Extract selected text from a vt100 screen.
-pub fn extract_text(screen: &vt100::Screen, selection: &Selection) -> String {
-    let ((sr, sc), (er, ec)) = selection.ordered();
-    // contents_between end_col is exclusive in vt100
-    screen.contents_between(sr, sc, er, ec + 1)
-}
-
 /// Write text to the system clipboard via OSC 52.
 ///
 /// OSC 52 format: `ESC ] 52 ; c ; <base64> BEL`

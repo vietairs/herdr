@@ -10,10 +10,6 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/VERSION");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_OPTIMIZE");
 
-    if env::var_os("CARGO_FEATURE_GHOSTTY_VT").is_none() {
-        return;
-    }
-
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let vendored_dir = manifest_dir.join("vendor/libghostty-vt");
     let optimize = env::var("LIBGHOSTTY_VT_OPTIMIZE").unwrap_or_else(|_| "ReleaseFast".into());
