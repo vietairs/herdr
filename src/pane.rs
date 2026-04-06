@@ -1059,47 +1059,12 @@ fn ghostty_extract_selection(
     core: &mut GhosttyPaneCore,
     selection: &crate::selection::Selection,
 ) -> Result<String, crate::ghostty::Error> {
-    let GhosttyPaneCore {
-        terminal,
-        render_state,
-    } = core;
-    render_state.update(terminal)?;
-    let mut row_iterator = crate::ghostty::RowIterator::new()?;
-    let mut row_cells = crate::ghostty::RowCells::new()?;
-    let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
-    let mut lines = Vec::new();
-    let mut row_index = 0u16;
-    let ((start_row, _), (end_row, _)) = selection.ordered_cells();
-    while rows.next() {
-        if row_index > end_row {
-            break;
-        }
-        if row_index >= start_row {
-            let mut cells = rows.populate_cells(&mut row_cells)?;
-            let (start_col, end_col) = selection_cols_for_row(selection, row_index);
-            let mut line = String::new();
-            for x in start_col..=end_col {
-                cells.select(x)?;
-                line.push_str(&ghostty_cell_symbol(&cells)?);
-            }
-            lines.push(line.trim_end().to_string());
-        }
-        row_index += 1;
-    }
-    Ok(lines.join("\n"))
-}
-
-fn selection_cols_for_row(selection: &crate::selection::Selection, row: u16) -> (u16, u16) {
     let ((start_row, start_col), (end_row, end_col)) = selection.ordered_cells();
-    if start_row == end_row {
-        (start_col, end_col)
-    } else if row == start_row {
-        (start_col, selection.pane_width().saturating_sub(1))
-    } else if row == end_row {
-        (0, end_col)
-    } else {
-        (0, selection.pane_width().saturating_sub(1))
-    }
+    core.terminal.read_text_viewport(
+        (start_col, u32::from(start_row)),
+        (end_col, u32::from(end_row)),
+        false,
+    )
 }
 
 fn ghostty_screen_row(

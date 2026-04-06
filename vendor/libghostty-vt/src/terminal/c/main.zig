@@ -142,6 +142,7 @@ pub const terminal_mode_get = terminal.mode_get;
 pub const terminal_mode_set = terminal.mode_set;
 pub const terminal_get = terminal.get;
 pub const terminal_grid_ref = terminal.grid_ref;
+pub const terminal_read_text = terminal.read_text;
 
 pub const type_json = types.get_json;
 

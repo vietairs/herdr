@@ -13,6 +13,8 @@ const size = @import("../size.zig");
 const device_attributes = @import("../device_attributes.zig");
 const device_status = @import("../device_status.zig");
 const size_report = @import("../size_report.zig");
+const formatterpkg = @import("../formatter.zig");
+const selectionpkg = @import("../Selection.zig");
 const cell_c = @import("cell.zig");
 const row_c = @import("row.zig");
 const grid_ref_c = @import("grid_ref.zig");
@@ -398,6 +400,21 @@ pub const DeviceAttributes = Effects.CDeviceAttributes;
 /// C: GhosttyTerminalScrollViewport
 pub const ScrollViewport = ZigTerminal.ScrollViewport.C;
 
+/// C: GhosttyTerminalSelection
+pub const Selection = extern struct {
+    start: point.Point.C,
+    end: point.Point.C,
+    rectangle: bool,
+
+    fn toZig(self: Selection, terminal: *const ZigTerminal) ?selectionpkg {
+        return selectionpkg.init(
+            pinFromPoint(terminal, self.start) orelse return null,
+            pinFromPoint(terminal, self.end) orelse return null,
+            self.rectangle,
+        );
+    }
+};
+
 pub fn scroll_viewport(
     terminal_: Terminal,
     behavior: ScrollViewport,
@@ -608,21 +625,58 @@ fn getTyped(
     return .success;
 }
 
+fn pointToZig(pt: point.Point.C) point.Point {
+    return switch (pt.tag) {
+        .active => .{ .active = pt.value.active },
+        .viewport => .{ .viewport = pt.value.viewport },
+        .screen => .{ .screen = pt.value.screen },
+        .history => .{ .history = pt.value.history },
+    };
+}
+
+fn pinFromPoint(terminal: *const ZigTerminal, pt: point.Point.C) ?PageList.Pin {
+    return terminal.screens.active.pages.pin(pointToZig(pt));
+}
+
 pub fn grid_ref(
     terminal_: Terminal,
     pt: point.Point.C,
     out_ref: ?*grid_ref_c.CGridRef,
 ) callconv(lib.calling_conv) Result {
     const t: *ZigTerminal = (terminal_ orelse return .invalid_value).terminal;
-    const zig_pt: point.Point = switch (pt.tag) {
-        .active => .{ .active = pt.value.active },
-        .viewport => .{ .viewport = pt.value.viewport },
-        .screen => .{ .screen = pt.value.screen },
-        .history => .{ .history = pt.value.history },
-    };
-    const p = t.screens.active.pages.pin(zig_pt) orelse
-        return .invalid_value;
+    const p = pinFromPoint(t, pt) orelse return .invalid_value;
     if (out_ref) |out| out.* = grid_ref_c.CGridRef.fromPin(p);
+    return .success;
+}
+
+pub fn read_text(
+    terminal_: Terminal,
+    selection: Selection,
+    alloc_: ?*const CAllocator,
+    out_ptr: *?[*]u8,
+    out_len: *usize,
+) callconv(lib.calling_conv) Result {
+    out_ptr.* = null;
+    out_len.* = 0;
+
+    const t: *ZigTerminal = (terminal_ orelse return .invalid_value).terminal;
+    const alloc = lib.alloc.default(alloc_);
+    const sel = selection.toZig(t) orelse return .invalid_value;
+
+    var formatter: formatterpkg.ScreenFormatter = .init(t.screens.active, .{
+        .emit = .plain,
+        .unwrap = true,
+        .trim = true,
+    });
+    formatter.content = .{ .selection = sel };
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    formatter.format(&aw.writer) catch return .out_of_memory;
+
+    const buf = aw.toOwnedSlice() catch return .out_of_memory;
+    out_ptr.* = buf.ptr;
+    out_len.* = buf.len;
     return .success;
 }
 

@@ -41,6 +41,7 @@ pub const structs: std.StaticStringMap(StructInfo) = .initComptime(.{
     .{ "GhosttyTerminalOptions", StructInfo.init(terminal.Options) },
     .{ "GhosttyTerminalScrollbar", StructInfo.init(terminal.TerminalScrollbar) },
     .{ "GhosttyTerminalScrollViewport", StructInfo.init(terminal.ScrollViewport) },
+    .{ "GhosttyTerminalSelection", StructInfo.init(terminal.Selection) },
 });
 
 /// The comptime-generated JSON string of all structs.

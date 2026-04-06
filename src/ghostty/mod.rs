@@ -223,6 +223,23 @@ struct WritePtyCallbackState {
     callback: Box<dyn FnMut(&[u8]) + Send>,
 }
 
+#[repr(C)]
+struct GhosttyTerminalSelection {
+    start: ffi::GhosttyPoint,
+    end: ffi::GhosttyPoint,
+    rectangle: bool,
+}
+
+unsafe extern "C" {
+    fn ghostty_terminal_read_text(
+        terminal: ffi::GhosttyTerminal_ptr,
+        selection: GhosttyTerminalSelection,
+        allocator: *const ffi::GhosttyAllocator,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> ffi::GhosttyResult;
+}
+
 unsafe extern "C" fn write_pty_trampoline(
     _terminal: ffi::GhosttyTerminal_ptr,
     userdata: *mut c_void,
@@ -438,6 +455,46 @@ impl Terminal {
         Ok(buffer)
     }
 
+    pub fn read_text_viewport(
+        &self,
+        start: (u16, u32),
+        end: (u16, u32),
+        rectangle: bool,
+    ) -> Result<String, Error> {
+        let selection = GhosttyTerminalSelection {
+            start: ghostty_viewport_point(start.0, start.1),
+            end: ghostty_viewport_point(end.0, end.1),
+            rectangle,
+        };
+        let mut out_ptr = ptr::null_mut();
+        let mut out_len = 0usize;
+        unsafe {
+            ghostty_terminal_read_text(
+                self.raw,
+                selection,
+                ptr::null(),
+                &mut out_ptr,
+                &mut out_len,
+            )
+            .into_result()?;
+        }
+
+        let text = if out_len == 0 {
+            String::new()
+        } else {
+            let bytes = unsafe { slice::from_raw_parts(out_ptr.cast_const(), out_len) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+
+        if !out_ptr.is_null() {
+            unsafe {
+                ffi::ghostty_free(ptr::null(), out_ptr, out_len);
+            }
+        }
+
+        Ok(text)
+    }
+
     pub fn scroll_viewport_bottom(&mut self) {
         let viewport = ffi::GhosttyTerminalScrollViewport {
             tag: ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_BOTTOM,
@@ -501,6 +558,15 @@ impl Drop for Terminal {
         unsafe {
             ffi::ghostty_terminal_free(self.raw);
         }
+    }
+}
+
+fn ghostty_viewport_point(x: u16, y: u32) -> ffi::GhosttyPoint {
+    ffi::GhosttyPoint {
+        tag: ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_VIEWPORT,
+        value: ffi::GhosttyPointValue {
+            coordinate: ffi::GhosttyPointCoordinate { x, y },
+        },
     }
 }
 
@@ -1101,6 +1167,30 @@ mod tests {
         mouse_event.set_position(0.0, 0.0);
         let encoded_mouse = mouse_encoder.encode(&mouse_event).unwrap();
         assert_eq!(encoded_mouse, b"\x1b[<0;1;1M");
+    }
+
+    #[test]
+    fn terminal_read_text_viewport_unwraps_soft_wrapped_selection() {
+        let mut terminal = Terminal::new(5, 3, 0).unwrap();
+        terminal.write("1ABCD2EFGH3IJKL".as_bytes());
+
+        let text = terminal.read_text_viewport((0, 1), (2, 2), false).unwrap();
+        assert_eq!(text, "2EFGH3IJ");
+    }
+
+    #[test]
+    fn terminal_read_text_viewport_handles_wide_chars() {
+        let mut terminal = Terminal::new(5, 3, 0).unwrap();
+        terminal.write("1A⚡".as_bytes());
+
+        let full = terminal.read_text_viewport((0, 0), (3, 0), false).unwrap();
+        assert_eq!(full, "1A⚡");
+
+        let through_wide_head = terminal.read_text_viewport((0, 0), (2, 0), false).unwrap();
+        assert_eq!(through_wide_head, "1A⚡");
+
+        let wide_only = terminal.read_text_viewport((3, 0), (3, 0), false).unwrap();
+        assert_eq!(wide_only, "⚡");
     }
 
     #[test]

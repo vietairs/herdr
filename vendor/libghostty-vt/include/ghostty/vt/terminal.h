@@ -254,6 +254,26 @@ typedef struct {
 } GhosttyTerminalScrollbar;
 
 /**
+ * Selection bounds for terminal text extraction.
+ *
+ * The start and end points may be in any supported point coordinate system
+ * (active, viewport, screen, or history). Text is always returned in reading
+ * order. Set `rectangle` to true for rectangular selection semantics.
+ *
+ * @ingroup terminal
+ */
+typedef struct {
+  /** Selection start point. */
+  GhosttyPoint start;
+
+  /** Selection end point. */
+  GhosttyPoint end;
+
+  /** Whether to treat the selection as a rectangle. */
+  bool rectangle;
+} GhosttyTerminalSelection;
+
+/**
  * Callback function type for bell.
  *
  * Called when the terminal receives a BEL character (0x07).
@@ -973,6 +993,34 @@ GHOSTTY_API GhosttyResult ghostty_terminal_get(GhosttyTerminal terminal,
 GHOSTTY_API GhosttyResult ghostty_terminal_grid_ref(GhosttyTerminal terminal,
                                         GhosttyPoint point,
                                         GhosttyGridRef *out_ref);
+
+/**
+ * Read terminal text for an arbitrary selection.
+ *
+ * Formats the selected region as plain text using Ghostty's native selection
+ * semantics. Soft-wrapped lines are unwrapped and trailing whitespace is
+ * trimmed on non-blank lines.
+ *
+ * The returned buffer is allocated using the provided allocator, or the
+ * default allocator if NULL is passed. Free it with ghostty_free(), passing
+ * the same allocator pointer and returned length.
+ *
+ * @param terminal The terminal handle (NULL returns GHOSTTY_INVALID_VALUE)
+ * @param selection The selection bounds to read
+ * @param allocator Pointer to allocator, or NULL to use the default allocator
+ * @param[out] out_ptr On success, set to the allocated output buffer
+ * @param[out] out_len On success, set to the output length in bytes
+ * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if the terminal
+ *         is NULL or the selection points are out of bounds,
+ *         GHOSTTY_OUT_OF_MEMORY on allocation failure
+ *
+ * @ingroup terminal
+ */
+GHOSTTY_API GhosttyResult ghostty_terminal_read_text(GhosttyTerminal terminal,
+                                         GhosttyTerminalSelection selection,
+                                         const GhosttyAllocator* allocator,
+                                         uint8_t** out_ptr,
+                                         size_t* out_len);
 
 /** @} */
 

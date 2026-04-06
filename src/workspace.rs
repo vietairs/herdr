@@ -670,13 +670,26 @@ pub fn derive_label_from_cwd(cwd: &Path) -> String {
 }
 
 pub fn git_branch(cwd: &Path) -> Option<String> {
-    let repo_root = git_repo_root(cwd)?;
-    let head_path = repo_root.join(".git").join("HEAD");
-    let content = std::fs::read_to_string(head_path).ok()?;
-    let trimmed = content.trim();
-    trimmed
-        .strip_prefix("ref: refs/heads/")
-        .map(|s| s.to_string())
+    git_repo_root(cwd)?;
+
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let branch = stdout.trim();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch.to_string())
+    }
 }
 
 fn git_repo_root(start: &Path) -> Option<PathBuf> {

@@ -214,6 +214,7 @@ comptime {
         @export(&c.terminal_mode_set, .{ .name = "ghostty_terminal_mode_set" });
         @export(&c.terminal_get, .{ .name = "ghostty_terminal_get" });
         @export(&c.terminal_grid_ref, .{ .name = "ghostty_terminal_grid_ref" });
+        @export(&c.terminal_read_text, .{ .name = "ghostty_terminal_read_text" });
         @export(&c.grid_ref_cell, .{ .name = "ghostty_grid_ref_cell" });
         @export(&c.grid_ref_row, .{ .name = "ghostty_grid_ref_row" });
         @export(&c.grid_ref_graphemes, .{ .name = "ghostty_grid_ref_graphemes" });
