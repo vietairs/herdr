@@ -318,7 +318,8 @@ impl App {
             self.last_sidebar_divider_click = Some(now);
 
             if is_double_click {
-                self.state.sidebar_width_auto = true;
+                self.state.sidebar_width = self.state.default_sidebar_width;
+                self.state.sidebar_width_auto = false;
                 self.state.drag = None;
                 return;
             }
@@ -1918,7 +1919,6 @@ impl AppState {
                     self.drag = Some(DragState {
                         target: DragTarget::SidebarDivider,
                     });
-                    self.sidebar_width_auto = false;
                     self.set_manual_sidebar_width(mouse.column);
                     return None;
                 }
@@ -2154,7 +2154,6 @@ impl AppState {
                             }
                         }
                         DragTarget::SidebarDivider => {
-                            self.sidebar_width_auto = false;
                             self.set_manual_sidebar_width(mouse.column);
                         }
                         DragTarget::ReleaseNotesScrollbar { .. }
@@ -3734,21 +3733,20 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30, 5));
 
-        assert!(!app.state.sidebar_width_auto);
         assert_eq!(app.state.sidebar_width, 31);
     }
 
     #[test]
-    fn double_clicking_sidebar_divider_resets_auto_width() {
+    fn double_clicking_sidebar_divider_resets_default_width() {
         let mut app = app_for_mouse_test();
-        app.state.sidebar_width_auto = false;
+        app.state.default_sidebar_width = 26;
         app.state.sidebar_width = 30;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 25, 5));
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
 
-        assert!(app.state.sidebar_width_auto);
+        assert_eq!(app.state.sidebar_width, 26);
         assert!(app.state.drag.is_none());
     }
 

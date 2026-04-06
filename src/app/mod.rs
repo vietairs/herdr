@@ -157,12 +157,13 @@ impl App {
         let render_dirty = Arc::new(AtomicBool::new(false));
 
         // Try to restore previous session
-        let (workspaces, active, selected, agent_panel_scope) = if no_session {
+        let (workspaces, active, selected, agent_panel_scope, sidebar_width) = if no_session {
             (
                 Vec::new(),
                 None,
                 0,
                 state::AgentPanelScope::CurrentWorkspace,
+                config.ui.sidebar_width,
             )
         } else if let Some(snap) = crate::persist::load() {
             let ws = crate::persist::restore(
@@ -175,12 +176,24 @@ impl App {
             );
             if ws.is_empty() {
                 info!("session file found but no workspaces restored");
-                (Vec::new(), None, 0, snap.agent_panel_scope)
+                (
+                    Vec::new(),
+                    None,
+                    0,
+                    snap.agent_panel_scope,
+                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
+                )
             } else {
                 info!(count = ws.len(), "session restored");
                 let active = snap.active.filter(|&i| i < ws.len());
                 let selected = snap.selected.min(ws.len().saturating_sub(1));
-                (ws, active, selected, snap.agent_panel_scope)
+                (
+                    ws,
+                    active,
+                    selected,
+                    snap.agent_panel_scope,
+                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
+                )
             }
         } else {
             (
@@ -188,6 +201,7 @@ impl App {
                 None,
                 0,
                 state::AgentPanelScope::CurrentWorkspace,
+                config.ui.sidebar_width,
             )
         };
 
@@ -247,8 +261,9 @@ impl App {
             toast: None,
             prefix_code,
             prefix_mods,
-            sidebar_width: config.ui.sidebar_width,
-            sidebar_width_auto: true,
+            default_sidebar_width: config.ui.sidebar_width,
+            sidebar_width,
+            sidebar_width_auto: false,
             sidebar_collapsed: false,
             agent_panel_scope,
             confirm_close: config.ui.confirm_close,
@@ -434,6 +449,7 @@ impl App {
                 self.state.active,
                 self.state.selected,
                 self.state.agent_panel_scope,
+                self.state.sidebar_width,
             );
             crate::persist::save(&snap);
         }

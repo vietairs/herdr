@@ -32,6 +32,8 @@ pub struct SessionSnapshot {
     pub selected: usize,
     #[serde(default)]
     pub agent_panel_scope: crate::app::state::AgentPanelScope,
+    #[serde(default)]
+    pub sidebar_width: Option<u16>,
 }
 
 #[derive(Serialize)]
@@ -218,6 +220,7 @@ pub fn capture(
     active: Option<usize>,
     selected: usize,
     agent_panel_scope: crate::app::state::AgentPanelScope,
+    sidebar_width: u16,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -225,6 +228,7 @@ pub fn capture(
         active,
         selected,
         agent_panel_scope,
+        sidebar_width: Some(sidebar_width),
     }
 }
 
@@ -561,11 +565,13 @@ mod tests {
             active: None,
             selected: 0,
             agent_panel_scope: crate::app::state::AgentPanelScope::CurrentWorkspace,
+            sidebar_width: Some(26),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored: SessionSnapshot = serde_json::from_str(&json).unwrap();
         assert!(restored.workspaces.is_empty());
         assert_eq!(restored.active, None);
+        assert_eq!(restored.sidebar_width, Some(26));
     }
 
     #[test]
@@ -630,6 +636,7 @@ mod tests {
             active: Some(0),
             selected: 0,
             agent_panel_scope: crate::app::state::AgentPanelScope::CurrentWorkspace,
+            sidebar_width: Some(26),
             version: SNAPSHOT_VERSION,
         };
 
@@ -652,6 +659,7 @@ mod tests {
             restored.agent_panel_scope,
             crate::app::state::AgentPanelScope::CurrentWorkspace
         );
+        assert_eq!(restored.sidebar_width, Some(26));
     }
 
     #[test]
@@ -670,6 +678,7 @@ mod tests {
             restored.agent_panel_scope,
             crate::app::state::AgentPanelScope::CurrentWorkspace
         );
+        assert_eq!(restored.sidebar_width, None);
     }
 
     #[test]

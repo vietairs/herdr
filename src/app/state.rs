@@ -595,6 +595,7 @@ pub struct AppState {
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
+    pub default_sidebar_width: u16,
     pub sidebar_width: u16,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
@@ -703,8 +704,9 @@ impl AppState {
             toast: None,
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
+            default_sidebar_width: 26,
             sidebar_width: 26,
-            sidebar_width_auto: true,
+            sidebar_width_auto: false,
             sidebar_collapsed: false,
             agent_panel_scope: AgentPanelScope::CurrentWorkspace,
             confirm_close: true,

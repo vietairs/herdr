@@ -208,8 +208,6 @@ fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -
 pub fn compute_view(app: &mut AppState, area: Rect) {
     let sidebar_w = if app.sidebar_collapsed {
         COLLAPSED_WIDTH
-    } else if app.sidebar_width_auto {
-        compute_sidebar_width(app)
     } else {
         app.sidebar_width
             .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
@@ -588,42 +586,6 @@ fn compute_pane_infos(app: &AppState, area: Rect) -> Vec<PaneInfo> {
 }
 
 /// Auto-scale sidebar width based on workspace identity + agent summary.
-fn compute_sidebar_width(app: &AppState) -> u16 {
-    if app.workspaces.is_empty() {
-        return app
-            .sidebar_width
-            .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-    }
-    let max_workspace_line = app
-        .workspaces
-        .iter()
-        .enumerate()
-        .map(|(i, ws)| {
-            let name_len = ws.display_name().len();
-            let number_len = (i + 1).to_string().len();
-            // marker + number + space + name + spaces + aggregate dot
-            let line1 = 3 + number_len + name_len + 3;
-            // branch line: "  branch"
-            let line2 = ws.branch().map(|b| 3 + b.len()).unwrap_or(0);
-            line1.max(line2)
-        })
-        .max()
-        .unwrap_or(12);
-    let max_agent_line = app
-        .workspaces
-        .iter()
-        .flat_map(|ws| ws.pane_details().into_iter())
-        .map(|detail| {
-            let name_line = 3 + detail.label.len(); // " icon name"
-            let state_line = 2 + state_label(detail.state, detail.seen).len(); // "  state"
-            name_line.max(state_line)
-        })
-        .max()
-        .unwrap_or(0);
-    ((max_workspace_line.max(max_agent_line) as u16) + 2)
-        .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
-}
-
 pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
