@@ -1054,6 +1054,16 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 }
 
+pub(crate) fn collapsed_sidebar_toggle_rect(area: Rect) -> Rect {
+    let bottom_y = area.y + area.height.saturating_sub(1);
+    let content_w = area.width.saturating_sub(1);
+    if content_w == 0 || area.height == 0 {
+        return Rect::default();
+    }
+    let x = area.x + content_w / 2;
+    Rect::new(x, bottom_y, 1, 1)
+}
+
 fn render_sidebar_toggle(
     app: &AppState,
     frame: &mut Frame,
@@ -1066,9 +1076,8 @@ fn render_sidebar_toggle(
     if !collapsed {
         return;
     }
-    let bottom_y = area.y + area.height.saturating_sub(1);
-    let content_w = area.width.saturating_sub(1);
-    if content_w == 0 || area.height == 0 {
+    let toggle_area = collapsed_sidebar_toggle_rect(area);
+    if toggle_area == Rect::default() {
         return;
     }
     let icon_style = if app.update_available.is_some() {
@@ -1076,8 +1085,6 @@ fn render_sidebar_toggle(
     } else {
         Style::default().fg(p.overlay0)
     };
-    let x = area.x + content_w / 2;
-    let toggle_area = Rect::new(x, bottom_y, 1, 1);
     frame.render_widget(Paragraph::new(Span::styled("»", icon_style)), toggle_area);
 }
 

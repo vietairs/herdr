@@ -1971,6 +1971,11 @@ impl AppState {
 
                 if in_sidebar {
                     if self.sidebar_collapsed {
+                        if self.on_collapsed_sidebar_toggle(mouse.column, mouse.row) {
+                            self.sidebar_collapsed = false;
+                            return None;
+                        }
+
                         if let Some(idx) = self.collapsed_workspace_at_row(mouse.row) {
                             self.switch_workspace(idx);
                             self.mode = Mode::Terminal;
@@ -2314,6 +2319,18 @@ impl AppState {
             && col == sidebar.x + sidebar.width.saturating_sub(1)
             && row >= sidebar.y
             && row < sidebar.y + sidebar.height
+    }
+
+    fn on_collapsed_sidebar_toggle(&self, col: u16, row: u16) -> bool {
+        if !self.sidebar_collapsed {
+            return false;
+        }
+        let rect = crate::ui::collapsed_sidebar_toggle_rect(self.view.sidebar_rect);
+        rect.width > 0
+            && col >= rect.x
+            && col < rect.x + rect.width
+            && row >= rect.y
+            && row < rect.y + rect.height
     }
 
     fn set_manual_sidebar_width(&mut self, divider_col: u16) {
@@ -3618,6 +3635,23 @@ mod tests {
             second_pane
         );
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn clicking_collapsed_sidebar_toggle_expands_sidebar() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_collapsed = true;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
+        app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
+
+        let toggle = crate::ui::collapsed_sidebar_toggle_rect(app.state.view.sidebar_rect);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+
+        assert!(!app.state.sidebar_collapsed);
     }
 
     #[test]
