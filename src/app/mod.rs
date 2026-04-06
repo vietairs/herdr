@@ -640,7 +640,7 @@ impl App {
     }
 
     fn sync_animation_timer(&mut self, now: Instant) {
-        if self.active_workspace_has_animation() {
+        if self.agent_panel_has_animation() {
             self.next_animation_tick
                 .get_or_insert(now + ANIMATION_INTERVAL);
         } else {
@@ -648,11 +648,19 @@ impl App {
         }
     }
 
-    fn active_workspace_has_animation(&self) -> bool {
-        self.state
-            .active
-            .and_then(|idx| self.state.workspaces.get(idx))
-            .is_some_and(Workspace::has_working_pane)
+    fn agent_panel_has_animation(&self) -> bool {
+        match self.state.agent_panel_scope {
+            crate::app::state::AgentPanelScope::CurrentWorkspace => self
+                .state
+                .active
+                .and_then(|idx| self.state.workspaces.get(idx))
+                .is_some_and(Workspace::has_working_pane),
+            crate::app::state::AgentPanelScope::AllWorkspaces => self
+                .state
+                .workspaces
+                .iter()
+                .any(Workspace::has_working_pane),
+        }
     }
 
     fn can_render_now(&self, now: Instant) -> bool {
