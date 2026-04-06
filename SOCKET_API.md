@@ -576,10 +576,12 @@ matcher forms:
 
 notes:
 
-- `source` must be `visible` or `recent`
+- `source` must be `visible`, `recent`, or `recent_unwrapped`
 - `lines` is optional
 - `timeout_ms` is optional
 - `strip_ansi` defaults to `true`
+- for `source = "recent"`, output matching uses unwrapped recent terminal text so soft wraps do not break matches
+- `source = "recent_unwrapped"` is also available on `pane.read` when you want to inspect the same unwrapped transcript directly
 - on success you get `output_matched`
 - on timeout you get an error response with code `timeout`
 
@@ -597,7 +599,7 @@ example success response:
       "pane_id": "1-1",
       "workspace_id": "1",
       "tab_id": "1:1",
-      "source": "recent",
+      "source": "recent_unwrapped",
       "text": "...server ready...",
       "revision": 0,
       "truncated": false
@@ -748,7 +750,7 @@ example pushed `pane.output_matched` event:
       "pane_id": "1-1",
       "workspace_id": "1",
       "tab_id": "1:1",
-      "source": "recent",
+      "source": "recent_unwrapped",
       "text": "...server ready...",
       "revision": 0,
       "truncated": false
@@ -804,7 +806,7 @@ pane commands:
 ```text
 herdr pane list [--workspace <workspace_id>]
 herdr pane get <pane_id>
-herdr pane read <pane_id> [--source visible|recent] [--lines N] [--raw]
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--raw]
 herdr pane split <pane_id> --direction right|down [--cwd PATH] [--no-focus]
 herdr pane close <pane_id>
 herdr pane send-text <pane_id> <text>
@@ -815,7 +817,7 @@ herdr pane run <pane_id> <command>
 wait commands:
 
 ```text
-herdr wait output <pane_id> --match <text> [--source visible|recent] [--lines N] [--timeout MS] [--regex] [--raw]
+herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]
 herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeout MS]
 ```
 
@@ -825,11 +827,13 @@ herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeo
 - `tab create` focuses by default; pass `--no-focus` to keep focus where it is
 - `pane split` focuses the new pane by default; pass `--no-focus` to keep focus on the original pane
 - `pane read` prints **text**, not json
+- `pane read --source recent-unwrapped` returns recent terminal text with soft wraps joined back together
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success
 - list/get/create/split/wait commands print json on success
 - `pane run` is a convenience wrapper for `pane send-text` + `pane send-keys Enter`
 - `wait agent-state` is a cli convenience built on top of event subscriptions
 - `--raw` disables ansi stripping for `pane read` and `wait output`
+- `wait output --source recent` matches against unwrapped recent terminal text by default, so pane width and soft wrapping do not break matches
 
 ### cli examples
 

@@ -197,6 +197,7 @@ pub struct PaneReleaseAgentParams {
 pub enum ReadSource {
     Visible,
     Recent,
+    RecentUnwrapped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

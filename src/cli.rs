@@ -429,7 +429,7 @@ fn pane_get(args: &[String]) -> std::io::Result<i32> {
 
 fn pane_read(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: herdr pane read <pane_id> [--source visible|recent] [--lines N]");
+        eprintln!("usage: herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N]");
         return Ok(2);
     };
 
@@ -763,7 +763,7 @@ fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
 
 fn wait_output(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: herdr wait output <pane_id> --match <text> [--source visible|recent] [--lines N] [--timeout MS] [--regex]");
+        eprintln!("usage: herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex]");
         return Ok(2);
     };
 
@@ -1016,6 +1016,7 @@ fn parse_read_source(value: &str) -> std::io::Result<ReadSource> {
     match value {
         "visible" => Ok(ReadSource::Visible),
         "recent" => Ok(ReadSource::Recent),
+        "recent-unwrapped" | "recent_unwrapped" => Ok(ReadSource::RecentUnwrapped),
         _ => Err(std::io::Error::other(format!(
             "invalid read source: {value}"
         ))),
@@ -1070,7 +1071,7 @@ fn print_pane_help() {
     eprintln!("herdr pane commands:");
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane get <pane_id>");
-    eprintln!("  herdr pane read <pane_id> [--source visible|recent] [--lines N]");
+    eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N]");
     eprintln!("  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--no-focus]");
     eprintln!("  herdr pane close <pane_id>");
     eprintln!("  herdr pane send-text <pane_id> <text>");
@@ -1080,7 +1081,7 @@ fn print_pane_help() {
 
 fn print_wait_help() {
     eprintln!("herdr wait commands:");
-    eprintln!("  herdr wait output <pane_id> --match <text> [--source visible|recent] [--lines N] [--timeout MS] [--regex]");
+    eprintln!("  herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex]");
     eprintln!(
         "  herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeout MS]"
     );

@@ -345,6 +345,10 @@ impl PaneTerminal {
         self.ghostty.recent_text(lines)
     }
 
+    fn recent_unwrapped_text(&self, lines: usize) -> String {
+        self.ghostty.recent_unwrapped_text(lines)
+    }
+
     fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
         self.ghostty.extract_selection(selection)
     }
@@ -645,6 +649,14 @@ impl GhosttyPaneTerminal {
             .lock()
             .ok()
             .and_then(|core| ghostty_recent_text(&core, lines).ok())
+            .unwrap_or_default()
+    }
+
+    fn recent_unwrapped_text(&self, lines: usize) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| ghostty_recent_text_unwrapped(&core, lines).ok())
             .unwrap_or_default()
     }
 
@@ -1053,6 +1065,21 @@ fn ghostty_recent_text(
     }
     trim_trailing_blank_rows(&mut rows);
     Ok(recent_text_from_rows(&rows, lines))
+}
+
+fn ghostty_recent_text_unwrapped(
+    core: &GhosttyPaneCore,
+    lines: usize,
+) -> Result<String, crate::ghostty::Error> {
+    let total_rows = core.terminal.total_rows()?;
+    let cols = core.terminal.cols()?;
+    if total_rows == 0 || cols == 0 {
+        return Ok(String::new());
+    }
+    let start = total_rows.saturating_sub(lines) as u32;
+    let end = (total_rows.saturating_sub(1)) as u32;
+    core.terminal
+        .read_text_screen((0, start), (cols.saturating_sub(1), end), false)
 }
 
 fn ghostty_extract_selection(
@@ -1685,6 +1712,10 @@ impl PaneRuntime {
         self.terminal.recent_text(lines)
     }
 
+    pub fn recent_unwrapped_text(&self, lines: usize) -> String {
+        self.terminal.recent_unwrapped_text(lines)
+    }
+
     pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
         self.terminal.extract_selection(selection)
     }
@@ -1961,6 +1992,17 @@ mod tests {
         let after = pane.scroll_metrics().expect("scroll metrics after scroll");
         assert_eq!(after.offset_from_bottom, after.max_offset_from_bottom);
         assert!(pane.visible_text().contains("000000"));
+    }
+
+    #[test]
+    fn recent_unwrapped_text_ignores_soft_wraps() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(5, 3, 100).unwrap();
+        terminal.write(b"ABCDEFGHIJ");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        assert_eq!(pane.recent_text(3), "ABCDE\nFGHIJ\n");
+        assert_eq!(pane.recent_unwrapped_text(3), "ABCDEFGHIJ");
     }
 
     #[test]

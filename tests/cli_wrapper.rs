@@ -340,6 +340,81 @@ fn pane_run_read_and_wait_commands_work() {
 }
 
 #[test]
+fn wait_output_matches_recent_unwrapped_text() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    assert!(created.status.success());
+
+    let token = "WRAP_WAIT_TEST_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789";
+    let script = base.join("emit-long-token.sh");
+    std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{token}'\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+
+    let run = run_cli(
+        &socket_path,
+        &["pane", "run", "1-1", &format!("sh {}", script.display())],
+    );
+    assert!(run.status.success());
+
+    let waited = run_cli(
+        &socket_path,
+        &[
+            "wait",
+            "output",
+            "1-1",
+            "--match",
+            token,
+            "--source",
+            "recent",
+            "--lines",
+            "80",
+            "--timeout",
+            "5000",
+        ],
+    );
+    assert!(
+        waited.status.success(),
+        "stderr: {} stdout: {}",
+        String::from_utf8_lossy(&waited.stderr),
+        String::from_utf8_lossy(&waited.stdout)
+    );
+
+    let read = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "read",
+            "1-1",
+            "--source",
+            "recent-unwrapped",
+            "--lines",
+            "80",
+        ],
+    );
+    assert!(read.status.success());
+    let text = String::from_utf8(read.stdout).unwrap();
+    assert!(text.contains(token));
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn closing_pane_terminates_processes_inside_it() {
     let base = unique_test_dir();
     let config_home = base.join("config");

@@ -461,11 +461,27 @@ impl Terminal {
         end: (u16, u32),
         rectangle: bool,
     ) -> Result<String, Error> {
-        let selection = GhosttyTerminalSelection {
+        self.read_text_selection(GhosttyTerminalSelection {
             start: ghostty_viewport_point(start.0, start.1),
             end: ghostty_viewport_point(end.0, end.1),
             rectangle,
-        };
+        })
+    }
+
+    pub fn read_text_screen(
+        &self,
+        start: (u16, u32),
+        end: (u16, u32),
+        rectangle: bool,
+    ) -> Result<String, Error> {
+        self.read_text_selection(GhosttyTerminalSelection {
+            start: ghostty_screen_point(start.0, start.1),
+            end: ghostty_screen_point(end.0, end.1),
+            rectangle,
+        })
+    }
+
+    fn read_text_selection(&self, selection: GhosttyTerminalSelection) -> Result<String, Error> {
         let mut out_ptr = ptr::null_mut();
         let mut out_len = 0usize;
         unsafe {
@@ -564,6 +580,15 @@ impl Drop for Terminal {
 fn ghostty_viewport_point(x: u16, y: u32) -> ffi::GhosttyPoint {
     ffi::GhosttyPoint {
         tag: ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_VIEWPORT,
+        value: ffi::GhosttyPointValue {
+            coordinate: ffi::GhosttyPointCoordinate { x, y },
+        },
+    }
+}
+
+fn ghostty_screen_point(x: u16, y: u32) -> ffi::GhosttyPoint {
+    ffi::GhosttyPoint {
+        tag: ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN,
         value: ffi::GhosttyPointValue {
             coordinate: ffi::GhosttyPointCoordinate { x, y },
         },

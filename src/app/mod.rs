@@ -1566,6 +1566,7 @@ impl App {
                 let text = match params.source {
                     ReadSource::Visible => pane.visible_text(),
                     ReadSource::Recent => pane.recent_text(requested_lines),
+                    ReadSource::RecentUnwrapped => pane.recent_unwrapped_text(requested_lines),
                 };
                 SuccessResponse {
                     id: request.id,

@@ -40,7 +40,7 @@ plain shells still exist as panes, but herdr's sidebar agent section intentional
 
 **ids** — workspace ids look like `1`, `2`. tab ids look like `1:1`, `1:2`, `2:1`. pane ids look like `1-1`, `1-2`, `2-1`. these are compact public ids for the current live session.
 
-important: ids can compact when tabs, panes, or workspaces are closed. do not treat them as durable ids.
+important: ids can compact when tabs, panes, or workspaces are closed. do not treat them as durable ids. re-read ids from `workspace list`, `tab list`, `pane list`, or create/split responses when you need a current id. do not guess that an older `1-3` is still the same pane later.
 
 ## discover yourself
 
@@ -99,7 +99,8 @@ herdr pane read 1-1 --source recent --lines 50
 ```
 
 - `--source visible` = current viewport
-- `--source recent` = recent scrollback
+- `--source recent` = recent scrollback as rendered in the pane
+- `--source recent-unwrapped` = recent terminal text with soft wraps joined back together
 
 ## split a pane and run a command
 
@@ -109,10 +110,11 @@ split your pane to the right and keep focus on your current pane:
 herdr pane split 1-2 --direction right --no-focus
 ```
 
-that prints json with the new pane id. read the returned `pane_id`, then run a command in that pane:
+that prints json with the new pane nested at `result.pane.pane_id`. parse that value, then run a command in that pane:
 
 ```bash
-herdr pane run 1-3 "npm run dev"
+NEW_PANE=$(herdr pane split 1-2 --direction right --no-focus | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["pane"]["pane_id"])')
+herdr pane run "$NEW_PANE" "npm run dev"
 ```
 
 split downward instead:
@@ -123,7 +125,9 @@ herdr pane split 1-2 --direction down --no-focus
 
 ## wait for output
 
-block until specific text appears in a pane. useful for waiting on servers, builds, and tests:
+block until specific text appears in a pane. useful for waiting on servers, builds, and tests.
+
+for `--source recent`, matching uses unwrapped recent terminal text, so pane width and soft wrapping do not break matches. `pane read --source recent` still shows the pane as rendered. if you want to inspect the same transcript that the waiter matches, use `pane read --source recent-unwrapped`.
 
 ```bash
 herdr wait output 1-3 --match "ready on port 3000" --timeout 30000
@@ -210,18 +214,10 @@ herdr pane close 1-3
 ### run a server and wait until it is ready
 
 ```bash
-# split a pane for the server
-herdr pane split 1-2 --direction right --no-focus
-# read the returned JSON to get the new pane_id, for example 1-3
-
-# start the server
-herdr pane run 1-3 "npm run dev"
-
-# wait until it is ready
-herdr wait output 1-3 --match "ready" --timeout 30000
-
-# read the output to confirm
-herdr pane read 1-3 --source recent --lines 20
+NEW_PANE=$(herdr pane split 1-2 --direction right --no-focus | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["pane"]["pane_id"])')
+herdr pane run "$NEW_PANE" "npm run dev"
+herdr wait output "$NEW_PANE" --match "ready" --timeout 30000
+herdr pane read "$NEW_PANE" --source recent --lines 20
 ```
 
 ### run tests in a separate pane and inspect the result
@@ -238,6 +234,22 @@ herdr pane read 1-3 --source recent --lines 30
 ```bash
 herdr pane list
 herdr pane read 1-1 --source recent --lines 80
+```
+
+### watch another pane robustly
+
+use this pattern when you need to coordinate with a sibling pane:
+
+```bash
+# inspect what is already there
+herdr pane read 1-3 --source recent --lines 40
+
+# wait only for the next output you expect
+herdr wait output 1-3 --match "ready" --timeout 30000
+
+# if you need to inspect the same transcript the waiter matched,
+# read the unwrapped recent text directly
+herdr pane read 1-3 --source recent-unwrapped --lines 40
 ```
 
 ### spawn a new agent and give it a task
@@ -260,7 +272,9 @@ herdr pane read 1-1 --source recent --lines 100
 
 - `workspace list`, `workspace create`, `tab list`, `tab create`, `tab get`, `tab focus`, `tab rename`, `tab close`, `pane list`, `pane get`, `pane split`, `wait output`, and `wait agent-state` print json on success.
 - `pane read` prints text, not json.
+- `pane read --source recent-unwrapped` is useful when you want to inspect the same unwrapped transcript that `wait output --source recent` matches against.
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success.
-- parse ids from `workspace create`, `tab create`, and `pane split` responses when you need new ids. do not guess.
+- parse ids from `workspace create`, `tab create`, and `pane split` responses when you need new ids. for `pane split`, the new pane id is at `result.pane.pane_id`.
+- use `pane read` for current output that already exists. use `wait output` for future output you expect next.
 - `--no-focus` on split, tab create, and workspace create keeps your current terminal context focused.
 - if you are running inside herdr, the `HERDR_ENV` environment variable is set to `1`.

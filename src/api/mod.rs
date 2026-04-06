@@ -248,6 +248,15 @@ fn handle_request(request: Request, api_tx: &ApiRequestSender) -> String {
     }
 }
 
+fn output_match_read_source(
+    source: &crate::api::schema::ReadSource,
+) -> crate::api::schema::ReadSource {
+    match source {
+        crate::api::schema::ReadSource::Recent => crate::api::schema::ReadSource::RecentUnwrapped,
+        other => other.clone(),
+    }
+}
+
 fn wait_for_output(
     request_id: String,
     params: crate::api::schema::PaneWaitForOutputParams,
@@ -279,7 +288,7 @@ fn wait_for_output(
             id: format!("{request_id}:read"),
             method: Method::PaneRead(crate::api::schema::PaneReadParams {
                 pane_id: params.pane_id.clone(),
-                source: params.source.clone(),
+                source: output_match_read_source(&params.source),
                 lines: params.lines,
                 strip_ansi: params.strip_ansi,
             }),
@@ -587,7 +596,7 @@ impl ActiveOutputMatchedSubscription {
         let read = pane_read(
             format!("{}:read", self.request_prefix),
             &self.pane_id,
-            self.source.clone(),
+            output_match_read_source(&self.source),
             self.lines,
             self.strip_ansi,
             api_tx,
