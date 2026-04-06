@@ -20,12 +20,12 @@ jobs:
             os: ubuntu-latest
             name: herdr-linux-x86_64
             libghostty_vt_optimize: ReleaseFast
-            libghostty_vt_simd: 'false'
+            libghostty_vt_simd: 'true'
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: herdr-linux-aarch64
             libghostty_vt_optimize: ReleaseFast
-            libghostty_vt_simd: 'false'
+            libghostty_vt_simd: 'true'
           - target: x86_64-apple-darwin
             os: macos-latest
             name: herdr-macos-x86_64
