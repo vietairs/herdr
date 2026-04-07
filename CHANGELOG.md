@@ -12,6 +12,8 @@
 - Linux release binaries now ship with libghostty SIMD enabled again without reintroducing the musl startup issue, restoring the optimized Linux build path.
 
 ### Fixed
+- Typing in pane terminals on macOS is responsive again after the Ghostty migration, by keeping a persistent per-pane Ghostty key encoder instead of rebuilding it on every keypress.
+- The collapsed sidebar expand toggle works again.
 - Creating a new tab now waits until you confirm the dialog, so cancelling the new-tab flow no longer leaves behind an unwanted tab.
 - Copying selected pane text now uses Ghostty's native selection extraction, which preserves wrapped text and wide characters more accurately.
 - Session restore is more tolerant of older and current snapshot formats, including pre-tab session files.
