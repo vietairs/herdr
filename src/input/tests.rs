@@ -462,6 +462,19 @@ fn parse_legacy_ctrl_c_sequence() {
 }
 
 #[test]
+fn parse_legacy_lf_sequence_as_ctrl_j() {
+    let key = parse_terminal_key_sequence("\n").unwrap();
+    assert_eq!(key.code, KeyCode::Char('j'));
+    assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+}
+
+#[test]
+fn legacy_lf_roundtrips_as_lf() {
+    let key = parse_terminal_key_sequence("\n").unwrap();
+    assert_eq!(encode_terminal_key(key, KeyboardProtocol::Legacy), b"\n");
+}
+
+#[test]
 fn legacy_ctrl_byte_matrix_is_covered() {
     for (byte, expected) in [
         (b'\x01', 'a'),

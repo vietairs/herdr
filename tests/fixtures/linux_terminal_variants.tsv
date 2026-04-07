@@ -17,6 +17,6 @@ kitty-linux	home	01	char:a	control	press
 kitty-linux	end	05	char:e	control	press	
 kitty-linux	pageup	1b5b357e	pageup	-	press	
 kitty-linux	pagedown	1b5b367e	pagedown	-	press	
-kitty-linux	shift+enter	0a	enter	-	press	
+kitty-linux	shift+enter	0a	char:j	control	press	
 kitty-linux	alt+left	1b5b313b3344	left	alt	press	
 kitty-linux	alt+right	1b5b313b3343	right	alt	press	

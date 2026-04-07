@@ -530,6 +530,16 @@ mod tests {
         assert_eq!(key.modifiers, KeyModifiers::CONTROL);
     }
 
+    #[test]
+    fn parses_raw_lf_as_ctrl_j() {
+        let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\n").unwrap() else {
+            panic!("expected key");
+        };
+        assert_eq!(consumed, 1);
+        assert_eq!(key.code, KeyCode::Char('j'));
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+    }
+
     fn assert_fixture_extracts_whole_events(corpus: &str, macos_layout: bool) {
         for line in corpus.lines() {
             let line = line.trim();

@@ -61,7 +61,10 @@ fn parse_legacy_key_sequence(data: &str) -> Option<TerminalKey> {
     }
 
     match data {
-        "\r" | "\n" => Some(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty())),
+        // In raw mode, Enter is carriage return. A bare line feed is ambiguous in
+        // terminal input and is commonly used for Ctrl+J or Shift+Enter workarounds.
+        // Preserve LF by letting it fall through to legacy control-byte parsing.
+        "\r" => Some(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty())),
         "\t" => Some(TerminalKey::new(KeyCode::Tab, KeyModifiers::empty())),
         "\x1b" => Some(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty())),
         "\x7f" => Some(TerminalKey::new(KeyCode::Backspace, KeyModifiers::empty())),
