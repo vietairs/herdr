@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.2] - 2026-04-07
+
 ### Added
 - The expanded sidebar agent panel can now switch between the current workspace and all workspaces, so you can scan and jump to agents across the whole session.
 - The collapsed sidebar now shows compact per-pane agent indicators, so you can keep an eye on agent activity without reopening the full sidebar.
