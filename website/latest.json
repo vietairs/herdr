@@ -1,0 +1,10 @@
+{
+  "version": "0.4.2",
+  "notes_url": "https://github.com/ogulcancelik/herdr/releases/tag/v0.4.2",
+  "assets": {
+    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.2/herdr-linux-x86_64",
+    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.2/herdr-linux-aarch64",
+    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.2/herdr-macos-x86_64",
+    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.2/herdr-macos-aarch64"
+  }
+}
