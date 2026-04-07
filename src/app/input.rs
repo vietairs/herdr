@@ -1431,7 +1431,17 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        crate::ui::workspace_list_rect(sidebar)
+        crate::ui::workspace_list_rect(sidebar, self.sidebar_section_split)
+    }
+
+    fn agent_panel_rect(&self) -> Rect {
+        let sidebar = self.view.sidebar_rect;
+        if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
+            return Rect::default();
+        }
+        let (_, detail_area) =
+            crate::ui::expanded_sidebar_sections(sidebar, self.sidebar_section_split);
+        detail_area
     }
 
     fn workspace_list_scrollbar_target_at(
@@ -1495,6 +1505,61 @@ impl AppState {
                 break;
             }
             self.workspace_scroll = self.workspace_scroll.saturating_add(1);
+        }
+    }
+
+    fn agent_panel_scrollbar_target_at(&self, col: u16, row: u16) -> Option<ScrollbarClickTarget> {
+        let area = self.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(self, area);
+        let track = crate::ui::agent_panel_scrollbar_rect(self, area)?;
+        if col < track.x
+            || col >= track.x + track.width
+            || row < track.y
+            || row >= track.y + track.height
+        {
+            return None;
+        }
+        if let Some(grab_row_offset) = crate::ui::scrollbar_thumb_grab_offset(metrics, track, row) {
+            Some(ScrollbarClickTarget::Thumb { grab_row_offset })
+        } else {
+            Some(ScrollbarClickTarget::Track {
+                offset_from_bottom: crate::ui::scrollbar_offset_from_row(metrics, track, row),
+            })
+        }
+    }
+
+    fn agent_panel_offset_for_drag_row(&self, row: u16, grab_row_offset: u16) -> Option<usize> {
+        let area = self.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(self, area);
+        let track = crate::ui::agent_panel_scrollbar_rect(self, area)?;
+        Some(crate::ui::scrollbar_offset_from_drag_row(
+            metrics,
+            track,
+            row,
+            grab_row_offset,
+        ))
+    }
+
+    fn set_agent_panel_offset_from_bottom(&mut self, offset_from_bottom: usize) {
+        let area = self.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(self, area);
+        self.agent_panel_scroll = metrics
+            .max_offset_from_bottom
+            .saturating_sub(offset_from_bottom);
+    }
+
+    fn scroll_agent_panel(&mut self, delta: i16) {
+        let area = self.agent_panel_rect();
+        let max_scroll = crate::ui::agent_panel_scroll_metrics(self, area).max_offset_from_bottom;
+        if delta.is_negative() {
+            self.agent_panel_scroll = self
+                .agent_panel_scroll
+                .saturating_sub(delta.unsigned_abs() as usize);
+        } else {
+            self.agent_panel_scroll = self
+                .agent_panel_scroll
+                .saturating_add(delta as usize)
+                .min(max_scroll);
         }
     }
 
@@ -1923,6 +1988,14 @@ impl AppState {
                     return None;
                 }
 
+                if self.on_sidebar_section_divider(mouse.column, mouse.row) {
+                    self.drag = Some(DragState {
+                        target: DragTarget::SidebarSectionDivider,
+                    });
+                    self.set_sidebar_section_split(mouse.row);
+                    return None;
+                }
+
                 if !in_sidebar {
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
                         self.drag = Some(DragState {
@@ -2035,6 +2108,23 @@ impl AppState {
                             AgentPanelScope::CurrentWorkspace => AgentPanelScope::AllWorkspaces,
                             AgentPanelScope::AllWorkspaces => AgentPanelScope::CurrentWorkspace,
                         };
+                        self.agent_panel_scroll = 0;
+                        return None;
+                    }
+
+                    if let Some(target) =
+                        self.agent_panel_scrollbar_target_at(mouse.column, mouse.row)
+                    {
+                        match target {
+                            ScrollbarClickTarget::Thumb { grab_row_offset } => {
+                                self.drag = Some(DragState {
+                                    target: DragTarget::AgentPanelScrollbar { grab_row_offset },
+                                });
+                            }
+                            ScrollbarClickTarget::Track { offset_from_bottom } => {
+                                self.set_agent_panel_offset_from_bottom(offset_from_bottom);
+                            }
+                        }
                         return None;
                     }
 
@@ -2125,6 +2215,13 @@ impl AppState {
                                 self.set_workspace_list_offset_from_bottom(offset_from_bottom);
                             }
                         }
+                        DragTarget::AgentPanelScrollbar { grab_row_offset } => {
+                            if let Some(offset_from_bottom) =
+                                self.agent_panel_offset_for_drag_row(mouse.row, *grab_row_offset)
+                            {
+                                self.set_agent_panel_offset_from_bottom(offset_from_bottom);
+                            }
+                        }
                         DragTarget::PaneSplit {
                             path,
                             direction,
@@ -2160,6 +2257,9 @@ impl AppState {
                         }
                         DragTarget::SidebarDivider => {
                             self.set_manual_sidebar_width(mouse.column);
+                        }
+                        DragTarget::SidebarSectionDivider => {
+                            self.set_sidebar_section_split(mouse.row);
                         }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::KeybindHelpScrollbar { .. } => {}
@@ -2224,10 +2324,19 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
-                if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
-                    self,
-                    self.workspace_list_rect(),
-                )) {
+                let agent_area = self.agent_panel_rect();
+                let over_agent_panel = agent_area != Rect::default()
+                    && mouse.row >= agent_area.y
+                    && mouse.row < agent_area.y + agent_area.height;
+                if over_agent_panel {
+                    if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
+                        self, agent_area,
+                    )) {
+                        self.scroll_agent_panel(-1);
+                    }
+                } else if crate::ui::should_show_scrollbar(
+                    crate::ui::workspace_list_scroll_metrics(self, self.workspace_list_rect()),
+                ) {
                     self.scroll_workspace_list(-1);
                 } else if self.selected > 0 {
                     self.selected -= 1;
@@ -2235,10 +2344,19 @@ impl AppState {
                 }
             }
             MouseEventKind::ScrollDown if in_sidebar => {
-                if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
-                    self,
-                    self.workspace_list_rect(),
-                )) {
+                let agent_area = self.agent_panel_rect();
+                let over_agent_panel = agent_area != Rect::default()
+                    && mouse.row >= agent_area.y
+                    && mouse.row < agent_area.y + agent_area.height;
+                if over_agent_panel {
+                    if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
+                        self, agent_area,
+                    )) {
+                        self.scroll_agent_panel(1);
+                    }
+                } else if crate::ui::should_show_scrollbar(
+                    crate::ui::workspace_list_scroll_metrics(self, self.workspace_list_rect()),
+                ) {
                     self.scroll_workspace_list(1);
                 } else if !self.workspaces.is_empty() && self.selected < self.workspaces.len() - 1 {
                     self.selected += 1;
@@ -2338,6 +2456,32 @@ impl AppState {
         let width = divider_col.saturating_sub(sidebar.x).saturating_add(1);
         self.sidebar_width =
             width.clamp(crate::ui::MIN_SIDEBAR_WIDTH, crate::ui::MAX_SIDEBAR_WIDTH);
+    }
+
+    fn on_sidebar_section_divider(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
+        let rect = crate::ui::sidebar_section_divider_rect(
+            self.view.sidebar_rect,
+            self.sidebar_section_split,
+        );
+        rect.width > 0
+            && col >= rect.x
+            && col < rect.x + rect.width
+            && row >= rect.y
+            && row < rect.y + rect.height
+    }
+
+    fn set_sidebar_section_split(&mut self, row: u16) {
+        let sidebar = self.view.sidebar_rect;
+        let content_height = sidebar.height;
+        if content_height < 6 {
+            return;
+        }
+        let relative_y = row.saturating_sub(sidebar.y);
+        let ratio = (relative_y as f32) / (content_height as f32);
+        self.sidebar_section_split = ratio.clamp(0.1, 0.9);
     }
 
     /// Find which workspace index a sidebar row belongs to (two-section layout).
@@ -2487,7 +2631,10 @@ impl AppState {
             return false;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(self.view.sidebar_rect);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            self.view.sidebar_rect,
+            self.sidebar_section_split,
+        );
         let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_scope);
         rect.width > 0
             && col >= rect.x
@@ -2501,23 +2648,33 @@ impl AppState {
             return None;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(self.view.sidebar_rect);
-        if detail_area.height < 4
-            || row < detail_area.y + 3
-            || row >= detail_area.y + detail_area.height
-        {
+        let detail_area = self.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
+        let body = crate::ui::agent_panel_body_rect(
+            detail_area,
+            crate::ui::should_show_scrollbar(metrics),
+        );
+        if body.height < 2 || row < body.y || row >= body.y + body.height {
             return None;
         }
 
-        let relative_row = row - (detail_area.y + 3);
-        let entry_height = 3;
-        if relative_row % entry_height == 2 {
-            return None;
+        let mut row_y = body.y;
+        for detail in crate::ui::agent_panel_entries(self)
+            .into_iter()
+            .skip(self.agent_panel_scroll)
+        {
+            if row_y.saturating_add(1) >= body.y + body.height {
+                break;
+            }
+            if row == row_y || row == row_y + 1 {
+                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
+            }
+            row_y = row_y.saturating_add(2);
+            if row_y < body.y + body.height {
+                row_y = row_y.saturating_add(1);
+            }
         }
-        let detail_idx = (relative_row / entry_height) as usize;
-        let details = crate::ui::agent_panel_entries(self);
-        let detail = details.get(detail_idx)?;
-        Some((detail.ws_idx, detail.tab_idx, detail.pane_id))
+        None
     }
 
     fn screen_rect(&self) -> Rect {
@@ -3543,8 +3700,12 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
+        app.state.agent_panel_scroll = 3;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(app.state.view.sidebar_rect);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
         let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_scope);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -3553,6 +3714,7 @@ mod tests {
         ));
 
         assert_eq!(app.state.agent_panel_scope, AgentPanelScope::AllWorkspaces);
+        assert_eq!(app.state.agent_panel_scroll, 0);
     }
 
     #[test]
@@ -3580,7 +3742,10 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(app.state.view.sidebar_rect);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             detail_area.x + 2,
@@ -3594,6 +3759,102 @@ mod tests {
             app.state.workspaces[1].tabs[0].layout.focused(),
             second_pane
         );
+    }
+
+    #[test]
+    fn scrolling_agent_panel_with_wheel_updates_agent_panel_scroll() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        ws.tabs[0]
+            .panes
+            .get_mut(&first_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+
+        for (tab_name, agent) in [
+            ("logs", Agent::Claude),
+            ("review", Agent::Codex),
+            ("ops", Agent::Gemini),
+        ] {
+            let tab_idx = ws.test_add_tab(Some(tab_name));
+            let pane_id = ws.tabs[tab_idx].root_pane;
+            ws.tabs[tab_idx]
+                .panes
+                .get_mut(&pane_id)
+                .unwrap()
+                .detected_agent = Some(agent);
+        }
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let detail_area = app.state.agent_panel_rect();
+        assert!(crate::ui::should_show_scrollbar(
+            crate::ui::agent_panel_scroll_metrics(&app.state, detail_area)
+        ));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            detail_area.x + 1,
+            detail_area.y + 4,
+        ));
+
+        assert_eq!(app.state.agent_panel_scroll, 1);
+        assert_eq!(app.state.selected, 0);
+    }
+
+    #[test]
+    fn clicking_scrolled_agent_detail_row_switches_to_correct_tab_and_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        ws.tabs[0]
+            .panes
+            .get_mut(&first_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+
+        let second_tab = ws.test_add_tab(Some("logs"));
+        let second_pane = ws.tabs[second_tab].root_pane;
+        ws.tabs[second_tab]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+
+        for (tab_name, agent) in [("review", Agent::Codex), ("ops", Agent::Gemini)] {
+            let tab_idx = ws.test_add_tab(Some(tab_name));
+            let pane_id = ws.tabs[tab_idx].root_pane;
+            ws.tabs[tab_idx]
+                .panes
+                .get_mut(&pane_id)
+                .unwrap()
+                .detected_agent = Some(agent);
+        }
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_scroll = 1;
+
+        let detail_area = app.state.agent_panel_rect();
+        let body = crate::ui::agent_panel_body_rect(detail_area, true);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 1,
+            body.y,
+        ));
+
+        assert_eq!(app.state.workspaces[0].active_tab, second_tab);
+        assert_eq!(
+            app.state.workspaces[0].tabs[second_tab].layout.focused(),
+            second_pane
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]
@@ -3773,6 +4034,28 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30, 5));
 
         assert_eq!(app.state.sidebar_width, 31);
+    }
+
+    #[test]
+    fn dragging_sidebar_section_divider_sets_split_ratio() {
+        let mut app = app_for_mouse_test();
+        let divider = crate::ui::sidebar_section_divider_rect(
+            app.state.view.sidebar_rect,
+            app.state.sidebar_section_split,
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            divider.x + 1,
+            divider.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            divider.x + 1,
+            divider.y + 4,
+        ));
+
+        assert!(app.state.sidebar_section_split > 0.5);
     }
 
     #[test]

@@ -74,5 +74,6 @@
   ],
   "active": 0,
   "selected": 0,
-  "agent_panel_scope": "CurrentWorkspace"
+  "agent_panel_scope": "CurrentWorkspace",
+  "sidebar_section_split": 0.4
 }

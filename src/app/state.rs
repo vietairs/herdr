@@ -476,6 +476,9 @@ pub(crate) enum DragTarget {
     WorkspaceListScrollbar {
         grab_row_offset: u16,
     },
+    AgentPanelScrollbar {
+        grab_row_offset: u16,
+    },
     PaneSplit {
         path: Vec<bool>,
         direction: Direction,
@@ -492,6 +495,7 @@ pub(crate) enum DragTarget {
         grab_row_offset: u16,
     },
     SidebarDivider,
+    SidebarSectionDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -580,6 +584,7 @@ pub struct AppState {
     pub release_notes: Option<ReleaseNotesState>,
     pub keybind_help: KeybindHelpState,
     pub workspace_scroll: usize,
+    pub agent_panel_scroll: usize,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
@@ -599,6 +604,8 @@ pub struct AppState {
     pub sidebar_width: u16,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
+    /// Ratio of sidebar height allocated to the workspaces section.
+    pub sidebar_section_split: f32,
     pub agent_panel_scope: AgentPanelScope,
     pub confirm_close: bool,
     pub pane_scrollback_limit_bytes: usize,
@@ -684,6 +691,7 @@ impl AppState {
             release_notes: None,
             keybind_help: KeybindHelpState { scroll: 0 },
             workspace_scroll: 0,
+            agent_panel_scroll: 0,
             view: ViewState {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
@@ -709,6 +717,7 @@ impl AppState {
             sidebar_width: 26,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
+            sidebar_section_split: 0.5,
             agent_panel_scope: AgentPanelScope::CurrentWorkspace,
             confirm_close: true,
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,

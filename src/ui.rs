@@ -37,24 +37,43 @@ pub(crate) struct AgentPanelEntry {
     pub seen: bool,
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect) -> (Rect, Rect) {
+fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
+    if total_h == 0 {
+        return (0, 0);
+    }
+
+    if total_h < 6 {
+        let ws_h = (total_h + 1) / 2;
+        return (ws_h, total_h.saturating_sub(ws_h));
+    }
+
+    let ratio = split_ratio.clamp(0.1, 0.9);
+    let ws_h = ((total_h as f32) * ratio).round() as u16;
+    let ws_h = ws_h.clamp(3, total_h.saturating_sub(3));
+    let detail_h = total_h.saturating_sub(ws_h);
+    (ws_h, detail_h)
+}
+
+pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), Rect::default());
     }
 
-    let total_h = content.height as usize;
-    let ws_h = (total_h + 1) / 2;
-    let detail_h = total_h.saturating_sub(ws_h);
-
-    let ws_area = Rect::new(content.x, content.y, content.width, ws_h as u16);
-    let detail_area = Rect::new(
-        content.x,
-        content.y + ws_h as u16,
-        content.width,
-        detail_h as u16,
-    );
+    let (ws_h, detail_h) = sidebar_section_heights(content.height, split_ratio);
+    let ws_area = Rect::new(content.x, content.y, content.width, ws_h);
+    let detail_area = Rect::new(content.x, content.y + ws_h, content.width, detail_h);
     (ws_area, detail_area)
+}
+
+pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
+    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    if content.width == 0 || content.height < 6 {
+        return Rect::default();
+    }
+
+    let (ws_h, _) = sidebar_section_heights(content.height, split_ratio);
+    Rect::new(content.x, content.y + ws_h, content.width, 1)
 }
 
 fn agent_panel_current_workspace_idx(app: &AppState) -> Option<usize> {
@@ -228,6 +247,13 @@ pub fn compute_view(app: &mut AppState, area: Rect) {
     app.workspace_scroll = app
         .workspace_scroll
         .min(app.workspaces.len().saturating_sub(1));
+    if !app.sidebar_collapsed {
+        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
+        let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
+        app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
+    } else {
+        app.agent_panel_scroll = 0;
+    }
 
     let workspace_card_areas = if app.sidebar_collapsed {
         Vec::new()
@@ -311,6 +337,7 @@ pub fn render(app: &AppState, frame: &mut Frame) {
 const MIN_TAB_WIDTH: u16 = 8;
 const NEW_TAB_WIDTH: u16 = 3;
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
+const AGENT_PANEL_HEADER_ROWS: u16 = 3;
 
 fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
     if ws.branch().is_some() {
@@ -320,15 +347,9 @@ fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
     }
 }
 
-pub(crate) fn workspace_list_rect(area: Rect) -> Rect {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height == 0 {
-        return Rect::default();
-    }
-
-    let total_h = content.height as usize;
-    let ws_h = (total_h + 1) / 2;
-    Rect::new(content.x, content.y, content.width, ws_h as u16)
+pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
+    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
+    ws_area
 }
 
 pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
@@ -391,11 +412,66 @@ pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Optio
     ))
 }
 
+pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
+    if area.width == 0 || area.height <= AGENT_PANEL_HEADER_ROWS {
+        return Rect::default();
+    }
+
+    let body_y = area.y.saturating_add(AGENT_PANEL_HEADER_ROWS);
+    let body_height = (area.y + area.height).saturating_sub(body_y);
+    let body_width = area.width.saturating_sub(u16::from(has_scrollbar));
+    Rect::new(area.x, body_y, body_width, body_height)
+}
+
+fn agent_panel_visible_count(area: Rect) -> usize {
+    let body = agent_panel_body_rect(area, false);
+    if body.width == 0 || body.height < 2 {
+        return 0;
+    }
+
+    let mut used_rows = 0u16;
+    let mut visible = 0usize;
+    while used_rows.saturating_add(2) <= body.height {
+        used_rows = used_rows.saturating_add(2);
+        visible += 1;
+        if used_rows < body.height {
+            used_rows = used_rows.saturating_add(1);
+        }
+    }
+    visible
+}
+
+pub(crate) fn agent_panel_scroll_metrics(app: &AppState, area: Rect) -> crate::pane::ScrollMetrics {
+    let viewport_rows = agent_panel_visible_count(area);
+    let total_rows = agent_panel_entries(app).len();
+    let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
+    let offset_from_bottom = total_rows
+        .saturating_sub(app.agent_panel_scroll)
+        .saturating_sub(viewport_rows);
+
+    crate::pane::ScrollMetrics {
+        offset_from_bottom,
+        max_offset_from_bottom,
+        viewport_rows,
+    }
+}
+
+pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<Rect> {
+    let metrics = agent_panel_scroll_metrics(app, area);
+    let body = agent_panel_body_rect(area, true);
+    (should_show_scrollbar(metrics) && body.width > 0 && body.height > 0).then_some(Rect::new(
+        area.x + area.width.saturating_sub(1),
+        body.y,
+        1,
+        body.height,
+    ))
+}
+
 pub(crate) fn compute_workspace_card_areas(
     app: &AppState,
     area: Rect,
 ) -> Vec<crate::app::state::WorkspaceCardArea> {
-    let ws_area = workspace_list_rect(area);
+    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
     if ws_area == Rect::default() {
         return Vec::new();
     }
@@ -760,7 +836,7 @@ fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area);
+    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
 
     // --- Top section: Workspaces ---
     render_workspace_list(app, frame, ws_area, is_navigating);
@@ -970,22 +1046,18 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let mut row_y = area.y;
-
-    // Horizontal separator
     let sep_line = "─".repeat(area.width as usize);
     frame.render_widget(
         Paragraph::new(Span::styled(&sep_line, Style::default().fg(p.surface_dim))),
-        Rect::new(area.x, row_y, area.width, 1),
+        Rect::new(area.x, area.y, area.width, 1),
     );
-    row_y += 1;
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             " agents",
             Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
         )])),
-        Rect::new(area.x, row_y, area.width, 1),
+        Rect::new(area.x, area.y + 1, area.width, 1),
     );
     let toggle_rect = agent_panel_toggle_rect(area, app.agent_panel_scope);
     if toggle_rect != Rect::default() {
@@ -998,13 +1070,19 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
             toggle_rect,
         );
     }
-    row_y += 1;
 
-    // Blank line for breathing room
-    row_y += 1;
+    let details = agent_panel_entries(app);
+    let metrics = agent_panel_scroll_metrics(app, area);
+    let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
+    let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
+    if body == Rect::default() {
+        return;
+    }
 
-    for detail in &agent_panel_entries(app) {
-        if row_y + 1 >= area.y + area.height {
+    let mut row_y = body.y;
+    let body_bottom = body.y + body.height;
+    for detail in details.iter().skip(app.agent_panel_scroll) {
+        if row_y.saturating_add(1) >= body_bottom {
             break;
         }
 
@@ -1017,7 +1095,7 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
         let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
 
         let primary_label =
-            format_agent_panel_primary_label(detail, area.width.saturating_sub(3) as usize);
+            format_agent_panel_primary_label(detail, body.width.saturating_sub(3) as usize);
         let name_line = Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled(icon, icon_style),
@@ -1026,13 +1104,9 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
         ]);
         frame.render_widget(
             Paragraph::new(name_line),
-            Rect::new(area.x, row_y, area.width, 1),
+            Rect::new(body.x, row_y, body.width, 1),
         );
         row_y += 1;
-
-        if row_y >= area.y + area.height {
-            break;
-        }
 
         let mut status_spans = vec![
             Span::styled("   ", Style::default()),
@@ -1044,13 +1118,17 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
         }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)),
-            Rect::new(area.x, row_y, area.width, 1),
+            Rect::new(body.x, row_y, body.width, 1),
         );
         row_y += 1;
 
-        if row_y < area.y + area.height {
+        if row_y < body_bottom {
             row_y += 1;
         }
+    }
+
+    if let Some(track) = scrollbar_rect {
+        render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
 }
 
@@ -3002,6 +3080,21 @@ mod tests {
         let label = format_agent_panel_primary_label(&entry, 18);
 
         assert_eq!(label, "agent-bro… · test…");
+    }
+
+    #[test]
+    fn expanded_sidebar_sections_handle_tiny_heights() {
+        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
+
+        assert_eq!(ws_area, Rect::new(0, 0, 19, 3));
+        assert_eq!(detail_area, Rect::new(0, 3, 19, 2));
+    }
+
+    #[test]
+    fn sidebar_section_divider_is_hidden_for_tiny_heights() {
+        let divider = sidebar_section_divider_rect(Rect::new(0, 0, 20, 5), 0.5);
+
+        assert_eq!(divider, Rect::default());
     }
 
     #[test]

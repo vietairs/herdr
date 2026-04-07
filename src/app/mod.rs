@@ -157,54 +157,59 @@ impl App {
         let render_dirty = Arc::new(AtomicBool::new(false));
 
         // Try to restore previous session
-        let (workspaces, active, selected, agent_panel_scope, sidebar_width) = if no_session {
-            (
-                Vec::new(),
-                None,
-                0,
-                state::AgentPanelScope::CurrentWorkspace,
-                config.ui.sidebar_width,
-            )
-        } else if let Some(snap) = crate::persist::load() {
-            let ws = crate::persist::restore(
-                &snap,
-                24,
-                80,
-                config.advanced.scrollback_limit_bytes,
-                event_tx.clone(),
-                render_notify.clone(),
-                render_dirty.clone(),
-            );
-            if ws.is_empty() {
-                info!("session file found but no workspaces restored");
+        let (workspaces, active, selected, agent_panel_scope, sidebar_width, sidebar_section_split) =
+            if no_session {
                 (
                     Vec::new(),
                     None,
                     0,
-                    snap.agent_panel_scope,
-                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
+                    state::AgentPanelScope::CurrentWorkspace,
+                    config.ui.sidebar_width,
+                    0.5_f32,
                 )
+            } else if let Some(snap) = crate::persist::load() {
+                let ws = crate::persist::restore(
+                    &snap,
+                    24,
+                    80,
+                    config.advanced.scrollback_limit_bytes,
+                    event_tx.clone(),
+                    render_notify.clone(),
+                    render_dirty.clone(),
+                );
+                if ws.is_empty() {
+                    info!("session file found but no workspaces restored");
+                    (
+                        Vec::new(),
+                        None,
+                        0,
+                        snap.agent_panel_scope,
+                        snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
+                        snap.sidebar_section_split.unwrap_or(0.5),
+                    )
+                } else {
+                    info!(count = ws.len(), "session restored");
+                    let active = snap.active.filter(|&i| i < ws.len());
+                    let selected = snap.selected.min(ws.len().saturating_sub(1));
+                    (
+                        ws,
+                        active,
+                        selected,
+                        snap.agent_panel_scope,
+                        snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
+                        snap.sidebar_section_split.unwrap_or(0.5),
+                    )
+                }
             } else {
-                info!(count = ws.len(), "session restored");
-                let active = snap.active.filter(|&i| i < ws.len());
-                let selected = snap.selected.min(ws.len().saturating_sub(1));
                 (
-                    ws,
-                    active,
-                    selected,
-                    snap.agent_panel_scope,
-                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
+                    Vec::new(),
+                    None,
+                    0,
+                    state::AgentPanelScope::CurrentWorkspace,
+                    config.ui.sidebar_width,
+                    0.5_f32,
                 )
-            }
-        } else {
-            (
-                Vec::new(),
-                None,
-                0,
-                state::AgentPanelScope::CurrentWorkspace,
-                config.ui.sidebar_width,
-            )
-        };
+            };
 
         info!(
             pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes,
@@ -246,6 +251,7 @@ impl App {
             }),
             keybind_help: state::KeybindHelpState { scroll: 0 },
             workspace_scroll: 0,
+            agent_panel_scroll: 0,
             view: state::ViewState {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
@@ -271,6 +277,7 @@ impl App {
             sidebar_width,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
+            sidebar_section_split,
             agent_panel_scope,
             confirm_close: config.ui.confirm_close,
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
@@ -457,6 +464,7 @@ impl App {
                 self.state.selected,
                 self.state.agent_panel_scope,
                 self.state.sidebar_width,
+                self.state.sidebar_section_split,
             );
             crate::persist::save(&snap);
         }

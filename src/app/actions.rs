@@ -106,6 +106,12 @@ impl AppState {
         if idx < self.workspaces.len() {
             self.active = Some(idx);
             self.selected = idx;
+            if matches!(
+                self.agent_panel_scope,
+                crate::app::state::AgentPanelScope::CurrentWorkspace
+            ) {
+                self.agent_panel_scroll = 0;
+            }
             self.ensure_workspace_visible(idx);
             if let Some(ws) = self.workspaces.get_mut(idx) {
                 ws.switch_tab(ws.active_tab);
