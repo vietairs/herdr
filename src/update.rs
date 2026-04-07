@@ -1,16 +1,17 @@
 //! Self-update mechanism.
 //!
-//! Checks GitHub releases for newer versions and downloads the binary.
+//! Checks the hosted herdr.dev update manifest for newer versions and downloads the binary.
 //! Uses `curl` as a subprocess for HTTP — no additional Rust HTTP dependencies.
 //! JSON parsing uses serde_json (already in deps for persistence).
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::process::Command;
 
 use serde::Deserialize;
 
-const GITHUB_REPO: &str = "ogulcancelik/herdr";
+const UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 
@@ -58,21 +59,37 @@ impl std::fmt::Display for Version {
 }
 
 // ---------------------------------------------------------------------------
-// GitHub release API types
+// Update manifest
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
+struct UpdateManifest {
+    version: String,
     #[serde(default)]
-    body: String,
-    assets: Vec<GitHubAsset>,
+    notes: String,
+    #[serde(default)]
+    notes_url: String,
+    assets: BTreeMap<String, String>,
 }
 
-#[derive(Deserialize)]
-struct GitHubAsset {
-    name: String,
-    browser_download_url: String,
+impl UpdateManifest {
+    fn download_url_for(&self, os: &str, arch: &str) -> Option<String> {
+        self.assets.get(&format!("{os}-{arch}")).cloned()
+    }
+
+    fn notes_body(&self) -> String {
+        let notes = self.notes.trim();
+        if !notes.is_empty() {
+            return notes.to_string();
+        }
+
+        let notes_url = self.notes_url.trim();
+        if notes_url.is_empty() {
+            return String::new();
+        }
+
+        format!("### Release notes\n- {notes_url}")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -86,54 +103,47 @@ struct ReleaseInfo {
     notes_body: String,
 }
 
-/// Check GitHub for the latest release. Returns release info if newer.
+/// Check the hosted update manifest for the latest release. Returns release info if newer.
 fn check_latest() -> Result<Option<ReleaseInfo>, String> {
     let current = Version::current();
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
 
     let output = Command::new("curl")
         .args([
             "-sfL",
-            "--max-time",
+            "--retry",
+            "3",
+            "--connect-timeout",
             "10",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            "User-Agent: herdr-updater",
-            &url,
+            "--max-time",
+            "20",
+            UPDATE_MANIFEST_URL,
         ])
         .output()
         .map_err(|e| format!("curl failed: {e}"))?;
 
     if !output.status.success() {
-        return Err("failed to fetch release info".into());
+        return Err("failed to fetch update manifest".into());
     }
 
-    let release: GitHubRelease = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("failed to parse release JSON: {e}"))?;
+    let manifest: UpdateManifest = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("failed to parse update manifest JSON: {e}"))?;
 
-    let latest = Version::parse(&release.tag_name)
-        .ok_or_else(|| format!("invalid version tag: {}", release.tag_name))?;
+    let latest = Version::parse(&manifest.version)
+        .ok_or_else(|| format!("invalid version in update manifest: {}", manifest.version))?;
 
     if latest <= current {
         return Ok(None); // up to date
     }
 
-    // Find the asset for our platform
     let (os, arch) = platform_target();
-    let asset_name = format!("herdr-{os}-{arch}");
-
-    let download_url = release
-        .assets
-        .iter()
-        .find(|a| a.name == asset_name)
-        .map(|a| a.browser_download_url.clone())
-        .ok_or_else(|| format!("no binary for {os}-{arch} in release {}", release.tag_name))?;
+    let download_url = manifest
+        .download_url_for(os, arch)
+        .ok_or_else(|| format!("no binary for {os}-{arch} in update manifest"))?;
 
     Ok(Some(ReleaseInfo {
         version: latest,
         download_url,
-        notes_body: release.body.trim().to_string(),
+        notes_body: manifest.notes_body(),
     }))
 }
 
@@ -390,32 +400,48 @@ mod tests {
     }
 
     #[test]
-    fn github_release_deserializes() {
+    fn update_manifest_deserializes() {
         let json = r#"{
-            "tag_name": "v0.2.0",
-            "assets": [
-                {"name": "herdr-linux-x86_64", "browser_download_url": "https://example.com/herdr-linux-x86_64"},
-                {"name": "herdr-macos-aarch64", "browser_download_url": "https://example.com/herdr-macos-aarch64"}
-            ]
+            "version": "0.2.0",
+            "notes_url": "https://example.com/releases/v0.2.0",
+            "assets": {
+                "linux-x86_64": "https://example.com/herdr-linux-x86_64",
+                "macos-aarch64": "https://example.com/herdr-macos-aarch64"
+            }
         }"#;
-        let release: GitHubRelease = serde_json::from_str(json).unwrap();
-        assert_eq!(release.tag_name, "v0.2.0");
-        assert_eq!(release.assets.len(), 2);
-        assert_eq!(release.assets[0].name, "herdr-linux-x86_64");
+        let manifest: UpdateManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.version, "0.2.0");
+        assert_eq!(manifest.assets.len(), 2);
+        assert_eq!(
+            manifest.download_url_for("linux", "x86_64").as_deref(),
+            Some("https://example.com/herdr-linux-x86_64")
+        );
     }
 
     #[test]
-    fn github_release_ignores_extra_fields() {
-        let json = r#"{
-            "tag_name": "v0.1.0",
-            "name": "Release v0.1.0",
-            "body": "Some notes",
-            "draft": false,
-            "prerelease": false,
-            "assets": []
-        }"#;
-        let release: GitHubRelease = serde_json::from_str(json).unwrap();
-        assert_eq!(release.tag_name, "v0.1.0");
-        assert!(release.assets.is_empty());
+    fn update_manifest_prefers_embedded_notes() {
+        let manifest = UpdateManifest {
+            version: "0.2.0".into(),
+            notes: "### Changed\n- One".into(),
+            notes_url: "https://example.com/releases/v0.2.0".into(),
+            assets: BTreeMap::new(),
+        };
+
+        assert_eq!(manifest.notes_body(), "### Changed\n- One");
+    }
+
+    #[test]
+    fn update_manifest_falls_back_to_notes_url() {
+        let manifest = UpdateManifest {
+            version: "0.2.0".into(),
+            notes: String::new(),
+            notes_url: "https://example.com/releases/v0.2.0".into(),
+            assets: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            manifest.notes_body(),
+            "### Release notes\n- https://example.com/releases/v0.2.0"
+        );
     }
 }
