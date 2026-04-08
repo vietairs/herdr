@@ -1207,8 +1207,8 @@ fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
                 frame.render_widget(block, info.rect);
             }
 
-            // Draw terminal content
-            rt.render(frame, info.inner_rect);
+            // Draw terminal content. Only the focused pane should own the cursor.
+            rt.render(frame, info.inner_rect, info.is_focused && terminal_active);
             render_pane_scrollbar(app, frame, info, rt);
 
             // Dim unfocused panes only in navigate mode
@@ -3029,6 +3029,46 @@ fn _build_hints(items: &[(&str, &str)], key_style: Style, dim_style: Style) -> V
 mod tests {
     use super::*;
     use crate::{detect::Agent, workspace::Workspace};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[tokio::test]
+    async fn focused_pane_cursor_wins_during_terminal_render() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_pane = ws.test_split(ratatui::layout::Direction::Horizontal);
+
+        ws.tabs[0].runtimes.insert(
+            first_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(20, 5, b"left"),
+        );
+        ws.tabs[0].runtimes.insert(
+            second_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(20, 5, b"r\r\nb"),
+        );
+        ws.tabs[0].layout.focus_pane(first_pane);
+
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        let focused = app
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == first_pane)
+            .expect("focused pane info");
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+
+        terminal
+            .backend_mut()
+            .assert_cursor_position((focused.inner_rect.x + 4, focused.inner_rect.y));
+    }
 
     #[test]
     fn all_workspaces_agent_panel_entries_use_workspace_and_optional_tab_labels() {

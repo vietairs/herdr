@@ -354,8 +354,8 @@ impl PaneTerminal {
         self.ghostty.extract_selection(selection)
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
-        self.ghostty.render(frame, area);
+    fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
+        self.ghostty.render(frame, area, show_cursor);
     }
 
     fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
@@ -669,7 +669,7 @@ impl GhosttyPaneTerminal {
             .and_then(|mut core| ghostty_extract_selection(&mut core, selection).ok())
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
         let Ok(mut core) = self.core.lock() else {
             return;
         };
@@ -732,7 +732,7 @@ impl GhosttyPaneTerminal {
             }
         }
 
-        if render_state.cursor_visible().ok() == Some(true) {
+        if show_cursor && render_state.cursor_visible().ok() == Some(true) {
             if let Ok(Some(cursor)) = render_state.cursor_viewport() {
                 if cursor.x < area.width && cursor.y < area.height {
                     frame.set_cursor_position((area.x + cursor.x, area.y + cursor.y));
@@ -1722,8 +1722,8 @@ impl PaneRuntime {
         self.terminal.extract_selection(selection)
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
-        self.terminal.render(frame, area);
+    pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
+        self.terminal.render(frame, area, show_cursor);
     }
 
     pub fn keyboard_protocol(&self) -> crate::input::KeyboardProtocol {
@@ -1843,6 +1843,30 @@ impl PaneRuntime {
 }
 
 #[cfg(test)]
+impl PaneRuntime {
+    pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
+        let (tx, _rx) = mpsc::channel(4);
+        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let mut terminal = crate::ghostty::Terminal::new(cols, rows, 0).unwrap();
+        terminal.write(bytes);
+
+        Self {
+            terminal: Arc::new(PaneTerminal {
+                ghostty: GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
+            }),
+            sender: tx,
+            resize_tx,
+            current_size: Cell::new((rows, cols)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            detect_reset_notify: Arc::new(Notify::new()),
+            pending_release: Arc::new(Mutex::new(None)),
+            detect_handle: tokio::spawn(async {}).abort_handle(),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1850,6 +1874,29 @@ mod tests {
         for i in 0..count {
             terminal.write(format!("{i:06}\r\n").as_bytes());
         }
+    }
+
+    #[test]
+    fn ghostty_render_can_suppress_cursor_position() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut first_terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        first_terminal.write(b"left");
+        let first = GhosttyPaneTerminal::new(first_terminal, tx.clone()).unwrap();
+
+        let mut second_terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        second_terminal.write(b"r\r\nb");
+        let second = GhosttyPaneTerminal::new(second_terminal, tx).unwrap();
+
+        let backend = ratatui::backend::TestBackend::new(40, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                first.render(frame, Rect::new(0, 0, 20, 5), true);
+                second.render(frame, Rect::new(20, 0, 20, 5), false);
+            })
+            .unwrap();
+
+        terminal.backend_mut().assert_cursor_position((4, 0));
     }
 
     #[test]
