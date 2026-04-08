@@ -1,9 +1,12 @@
 pub mod schema;
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
@@ -18,6 +21,12 @@ use crate::api::schema::{
 };
 
 pub const SOCKET_PATH_ENV_VAR: &str = "HERDR_SOCKET_PATH";
+
+const SOCKET_PERMISSION_MODE: u32 = 0o600;
+const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct ApiRequestMessage {
     pub request: Request,
@@ -87,10 +96,13 @@ pub fn socket_path() -> PathBuf {
 pub struct ServerHandle {
     _thread: std::thread::JoinHandle<()>,
     path: PathBuf,
+    running: Arc<AtomicBool>,
 }
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+
         if let Err(err) = fs::remove_file(&self.path) {
             if err.kind() != std::io::ErrorKind::NotFound {
                 warn!(path = %self.path.display(), err = %err, "failed to remove api socket on shutdown");
@@ -107,16 +119,22 @@ pub fn start_server(
     prepare_socket_path(&path)?;
 
     let listener = UnixListener::bind(&path)?;
+    restrict_socket_permissions(&path)?;
     info!(path = %path.display(), "api server listening");
 
+    let running = Arc::new(AtomicBool::new(true));
+    let listener_running = Arc::clone(&running);
     let thread = std::thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
                     let api_tx = api_tx.clone();
                     let event_hub = event_hub.clone();
+                    let connection_running = Arc::clone(&listener_running);
                     std::thread::spawn(move || {
-                        if let Err(err) = handle_connection(stream, &api_tx, &event_hub) {
+                        if let Err(err) =
+                            handle_connection(stream, &api_tx, &event_hub, &connection_running)
+                        {
                             warn!(err = %err, "api connection failed");
                         }
                     });
@@ -133,6 +151,7 @@ pub fn start_server(
     Ok(ServerHandle {
         _thread: thread,
         path,
+        running,
     })
 }
 
@@ -174,11 +193,21 @@ fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn restrict_socket_permissions(path: &Path) -> std::io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(SOCKET_PERMISSION_MODE);
+    fs::set_permissions(path, permissions)
+}
+
 fn handle_connection(
     mut stream: UnixStream,
     api_tx: &ApiRequestSender,
     event_hub: &EventHub,
+    running: &Arc<AtomicBool>,
 ) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(INITIAL_REQUEST_TIMEOUT))?;
+    stream.set_write_timeout(Some(STREAM_WRITE_TIMEOUT))?;
+
     let mut line = String::new();
     {
         let mut reader = BufReader::new(&stream);
@@ -188,6 +217,8 @@ fn handle_connection(
         }
     }
 
+    stream.set_read_timeout(None)?;
+
     let line = line.trim();
     if line.is_empty() {
         return Ok(());
@@ -196,7 +227,7 @@ fn handle_connection(
     let request = match serde_json::from_str::<Request>(line) {
         Ok(request) => request,
         Err(err) => {
-            write_json_line(
+            write_json_line_allow_disconnect(
                 &mut stream,
                 &ErrorResponse {
                     id: String::new(),
@@ -212,7 +243,14 @@ fn handle_connection(
 
     match request.method {
         Method::EventsSubscribe(params) => {
-            stream_subscriptions(stream, request.id, params, api_tx, event_hub)
+            stream_subscriptions(stream, request.id, params, api_tx, event_hub, running)
+        }
+        Method::PaneWaitForOutput(params) => {
+            let Some(response) = wait_for_output(request.id, params, &mut stream, api_tx, running)?
+            else {
+                return Ok(());
+            };
+            write_text_line_allow_disconnect(&mut stream, &response)
         }
         method => {
             let response = handle_request(
@@ -222,16 +260,12 @@ fn handle_connection(
                 },
                 api_tx,
             );
-            stream.write_all(response.as_bytes())?;
-            stream.write_all(b"\n")?;
-            stream.flush()?;
-            Ok(())
+            write_text_line_allow_disconnect(&mut stream, &response)
         }
     }
 }
 
 fn handle_request(request: Request, api_tx: &ApiRequestSender) -> String {
-    let request_id = request.id.clone();
     match request.method {
         Method::Ping(_) => serde_json::to_string(&SuccessResponse {
             id: request.id,
@@ -243,7 +277,6 @@ fn handle_request(request: Request, api_tx: &ApiRequestSender) -> String {
             r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
                 .to_string()
         }),
-        Method::PaneWaitForOutput(params) => wait_for_output(request_id, params, api_tx),
         _ => dispatch_to_app(request, api_tx),
     }
 }
@@ -260,8 +293,10 @@ fn output_match_read_source(
 fn wait_for_output(
     request_id: String,
     params: crate::api::schema::PaneWaitForOutputParams,
+    stream: &mut UnixStream,
     api_tx: &ApiRequestSender,
-) -> String {
+    running: &Arc<AtomicBool>,
+) -> std::io::Result<Option<String>> {
     let deadline = params
         .timeout_ms
         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
@@ -270,20 +305,26 @@ fn wait_for_output(
         crate::api::schema::OutputMatch::Regex { value } => match Regex::new(value) {
             Ok(regex) => Some(regex),
             Err(err) => {
-                return serde_json::to_string(&ErrorResponse {
-                    id: request_id,
-                    error: ErrorBody {
-                        code: "invalid_regex".into(),
-                        message: err.to_string(),
-                    },
-                })
-                .unwrap();
+                return Ok(Some(
+                    serde_json::to_string(&ErrorResponse {
+                        id: request_id,
+                        error: ErrorBody {
+                            code: "invalid_regex".into(),
+                            message: err.to_string(),
+                        },
+                    })
+                    .unwrap(),
+                ));
             }
         },
         crate::api::schema::OutputMatch::Substring { .. } => None,
     };
 
     loop {
+        if should_stop_connection(stream, running)? {
+            return Ok(None);
+        }
+
         let read_request = Request {
             id: format!("{request_id}:read"),
             method: Method::PaneRead(crate::api::schema::PaneReadParams {
@@ -293,56 +334,63 @@ fn wait_for_output(
                 strip_ansi: params.strip_ansi,
             }),
         };
-        let response = dispatch_to_app(read_request, api_tx);
+        let response =
+            dispatch_to_app_with_timeout(read_request, api_tx, Some(APP_RESPONSE_TIMEOUT));
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&response) else {
-            return response;
+            return Ok(Some(response));
         };
         if value.get("error").is_some() {
             let mut value = value;
-            value["id"] = serde_json::Value::String(request_id);
-            return serde_json::to_string(&value).unwrap();
+            value["id"] = serde_json::Value::String(request_id.clone());
+            return Ok(Some(serde_json::to_string(&value).unwrap()));
         }
 
         let read_value = value["result"]["read"].clone();
         let Ok(read) = serde_json::from_value::<crate::api::schema::PaneReadResult>(read_value)
         else {
-            return serde_json::to_string(&ErrorResponse {
-                id: request_id,
-                error: ErrorBody {
-                    code: "internal_error".into(),
-                    message: "failed to decode pane read result".into(),
-                },
-            })
-            .unwrap();
+            return Ok(Some(
+                serde_json::to_string(&ErrorResponse {
+                    id: request_id,
+                    error: ErrorBody {
+                        code: "internal_error".into(),
+                        message: "failed to decode pane read result".into(),
+                    },
+                })
+                .unwrap(),
+            ));
         };
 
         let matched_line = match_output(&read.text, &params.r#match, regex.as_ref());
         if matched_line.is_some() {
             let revision = read.revision;
-            return serde_json::to_string(&SuccessResponse {
-                id: request_id,
-                result: ResponseResult::OutputMatched {
-                    pane_id: params.pane_id,
-                    revision,
-                    matched_line,
-                    read,
-                },
-            })
-            .unwrap();
+            return Ok(Some(
+                serde_json::to_string(&SuccessResponse {
+                    id: request_id,
+                    result: ResponseResult::OutputMatched {
+                        pane_id: params.pane_id,
+                        revision,
+                        matched_line,
+                        read,
+                    },
+                })
+                .unwrap(),
+            ));
         }
 
         if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-            return serde_json::to_string(&ErrorResponse {
-                id: request_id,
-                error: ErrorBody {
-                    code: "timeout".into(),
-                    message: "timed out waiting for output match".into(),
-                },
-            })
-            .unwrap();
+            return Ok(Some(
+                serde_json::to_string(&ErrorResponse {
+                    id: request_id,
+                    error: ErrorBody {
+                        code: "timeout".into(),
+                        message: "timed out waiting for output match".into(),
+                    },
+                })
+                .unwrap(),
+            ));
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(CONNECTION_POLL_INTERVAL);
     }
 }
 
@@ -352,6 +400,7 @@ fn stream_subscriptions(
     params: crate::api::schema::EventsSubscribeParams,
     api_tx: &ApiRequestSender,
     event_hub: &EventHub,
+    running: &Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     let mut subscriptions = Vec::with_capacity(params.subscriptions.len());
     for (index, subscription) in params.subscriptions.into_iter().enumerate() {
@@ -359,38 +408,120 @@ fn stream_subscriptions(
             match ActiveSubscription::new(subscription, &request_id, index, api_tx, event_hub) {
                 Ok(active) => active,
                 Err(response) => {
-                    write_json_line(&mut stream, &response)?;
+                    if let Err(err) = write_json_line(&mut stream, &response) {
+                        if is_connection_closed_error(&err) {
+                            return Ok(());
+                        }
+                        return Err(err);
+                    }
                     return Ok(());
                 }
             };
         subscriptions.push(active);
     }
 
-    write_json_line(
+    if let Err(err) = write_json_line(
         &mut stream,
         &SuccessResponse {
             id: request_id,
             result: ResponseResult::SubscriptionStarted {},
         },
-    )?;
+    ) {
+        if is_connection_closed_error(&err) {
+            return Ok(());
+        }
+        return Err(err);
+    }
 
     loop {
+        if should_stop_connection(&mut stream, running)? {
+            return Ok(());
+        }
+
         for subscription in &mut subscriptions {
             if let Some(event) = subscription.poll(api_tx, event_hub) {
-                write_json_line(&mut stream, &event)?;
+                if let Err(err) = write_json_line(&mut stream, &event) {
+                    if is_connection_closed_error(&err) {
+                        return Ok(());
+                    }
+                    return Err(err);
+                }
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(CONNECTION_POLL_INTERVAL);
+    }
+}
+
+fn write_text_line(stream: &mut UnixStream, value: &str) -> std::io::Result<()> {
+    stream.write_all(value.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()
+}
+
+fn write_text_line_allow_disconnect(stream: &mut UnixStream, value: &str) -> std::io::Result<()> {
+    match write_text_line(stream, value) {
+        Err(err) if is_connection_closed_error(&err) => Ok(()),
+        result => result,
     }
 }
 
 fn write_json_line<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
     let encoded = serde_json::to_string(value)
         .map_err(|err| std::io::Error::other(format!("failed to encode json: {err}")))?;
-    stream.write_all(encoded.as_bytes())?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
-    Ok(())
+    write_text_line(stream, &encoded)
+}
+
+fn write_json_line_allow_disconnect<T: serde::Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+) -> std::io::Result<()> {
+    let encoded = serde_json::to_string(value)
+        .map_err(|err| std::io::Error::other(format!("failed to encode json: {err}")))?;
+    write_text_line_allow_disconnect(stream, &encoded)
+}
+
+fn should_stop_connection(
+    stream: &mut UnixStream,
+    running: &Arc<AtomicBool>,
+) -> std::io::Result<bool> {
+    if !running.load(Ordering::Relaxed) {
+        return Ok(true);
+    }
+
+    probe_stream_closed(stream)
+}
+
+fn probe_stream_closed(stream: &mut UnixStream) -> std::io::Result<bool> {
+    stream.set_nonblocking(true)?;
+    let mut probe = [0u8; 1];
+    let status = match stream.read(&mut probe) {
+        Ok(0) => Ok(true),
+        Ok(_) => Ok(true),
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(err) if is_connection_closed_error(&err) => Ok(true),
+        Err(err) => Err(err),
+    };
+    stream.set_nonblocking(false)?;
+    status
+}
+
+fn is_connection_closed_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::WriteZero
+    )
 }
 
 fn match_output(
@@ -667,7 +798,7 @@ fn pane_read(
     strip_ansi: bool,
     api_tx: &ApiRequestSender,
 ) -> Result<crate::api::schema::PaneReadResult, ErrorResponse> {
-    let response = dispatch_to_app(
+    let response = dispatch_to_app_with_timeout(
         Request {
             id: request_id.clone(),
             method: Method::PaneRead(crate::api::schema::PaneReadParams {
@@ -678,6 +809,7 @@ fn pane_read(
             }),
         },
         api_tx,
+        Some(APP_RESPONSE_TIMEOUT),
     );
     let value: serde_json::Value = serde_json::from_str(&response).map_err(|_| ErrorResponse {
         id: request_id.clone(),
@@ -709,7 +841,7 @@ fn pane_get(
     pane_id: &str,
     api_tx: &ApiRequestSender,
 ) -> Result<crate::api::schema::PaneInfo, ErrorResponse> {
-    let response = dispatch_to_app(
+    let response = dispatch_to_app_with_timeout(
         Request {
             id: request_id.clone(),
             method: Method::PaneGet(crate::api::schema::PaneTarget {
@@ -717,6 +849,7 @@ fn pane_get(
             }),
         },
         api_tx,
+        Some(APP_RESPONSE_TIMEOUT),
     );
     let value: serde_json::Value = serde_json::from_str(&response).map_err(|_| ErrorResponse {
         id: request_id.clone(),
@@ -744,34 +877,67 @@ fn pane_get(
 }
 
 fn dispatch_to_app(request: Request, api_tx: &ApiRequestSender) -> String {
+    dispatch_to_app_with_timeout(request, api_tx, None)
+}
+
+fn dispatch_to_app_with_timeout(
+    request: Request,
+    api_tx: &ApiRequestSender,
+    timeout: Option<Duration>,
+) -> String {
+    let request_id = request.id.clone();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     if let Err(err) = api_tx.send(ApiRequestMessage {
         request,
         respond_to,
     }) {
-        return serde_json::to_string(&ErrorResponse {
-            id: String::new(),
-            error: ErrorBody {
-                code: "server_unavailable".into(),
-                message: format!("failed to dispatch request: {err}"),
-            },
-        })
-        .unwrap_or_else(|_| {
-            r#"{"id":"","error":{"code":"internal_error","message":"failed to encode error response"}}"#.to_string()
-        });
+        return error_response_json(
+            request_id,
+            "server_unavailable",
+            format!("failed to dispatch request: {err}"),
+        );
     }
 
-    response_rx.recv().unwrap_or_else(|err| {
-        serde_json::to_string(&ErrorResponse {
-            id: String::new(),
-            error: ErrorBody {
-                code: "server_unavailable".into(),
-                message: format!("request handling failed: {err}"),
-            },
-        })
-        .unwrap_or_else(|_| {
-            r#"{"id":"","error":{"code":"internal_error","message":"failed to encode error response"}}"#.to_string()
-        })
+    let response = match timeout {
+        Some(timeout) => response_rx.recv_timeout(timeout).map_err(|err| match err {
+            std::sync::mpsc::RecvTimeoutError::Timeout => std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "timed out waiting for app response after {} ms",
+                    timeout.as_millis()
+                ),
+            ),
+            std::sync::mpsc::RecvTimeoutError::Disconnected => std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "app response channel closed",
+            ),
+        }),
+        None => response_rx
+            .recv()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::BrokenPipe, err)),
+    };
+
+    match response {
+        Ok(response) => response,
+        Err(err) => error_response_json(
+            request_id,
+            "server_unavailable",
+            format!("request handling failed: {err}"),
+        ),
+    }
+}
+
+fn error_response_json(id: String, code: &str, message: String) -> String {
+    serde_json::to_string(&ErrorResponse {
+        id,
+        error: ErrorBody {
+            code: code.into(),
+            message,
+        },
+    })
+    .unwrap_or_else(|_| {
+        r#"{"id":"","error":{"code":"internal_error","message":"failed to encode error response"}}"#
+            .to_string()
     })
 }
 
@@ -779,12 +945,44 @@ fn dispatch_to_app(request: Request, api_tx: &ApiRequestSender) -> String {
 mod tests {
     use super::*;
 
+    fn unique_test_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn read_line(stream: &mut UnixStream) -> String {
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        line
+    }
+
     #[test]
     fn socket_path_prefers_explicit_env_override() {
         let unique = format!("/tmp/herdr-test-{}.sock", std::process::id());
         std::env::set_var(SOCKET_PATH_ENV_VAR, &unique);
         assert_eq!(socket_path(), PathBuf::from(&unique));
         std::env::remove_var(SOCKET_PATH_ENV_VAR);
+    }
+
+    #[test]
+    fn restrict_socket_permissions_sets_user_only_mode() {
+        let dir = unique_test_path("socket-perms");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("api.sock");
+        let _listener = UnixListener::bind(&path).unwrap();
+
+        restrict_socket_permissions(&path).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, SOCKET_PERMISSION_MODE);
+
+        drop(_listener);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -829,5 +1027,130 @@ mod tests {
         let response = thread.join().unwrap();
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_2");
+    }
+
+    #[test]
+    fn wait_for_output_stops_when_client_disconnects() {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (first_read_tx, first_read_rx) = std::sync::mpsc::channel();
+        let responder = std::thread::spawn(move || {
+            let mut notified = false;
+            while let Some(msg) = api_rx.blocking_recv() {
+                assert!(matches!(msg.request.method, Method::PaneRead(_)));
+                if !notified {
+                    first_read_tx.send(()).unwrap();
+                    notified = true;
+                }
+                msg.respond_to
+                    .send(
+                        serde_json::to_string(&SuccessResponse {
+                            id: msg.request.id,
+                            result: ResponseResult::PaneRead {
+                                read: crate::api::schema::PaneReadResult {
+                                    pane_id: "pane_1".into(),
+                                    workspace_id: "ws_1".into(),
+                                    tab_id: "tab_1".into(),
+                                    source: crate::api::schema::ReadSource::RecentUnwrapped,
+                                    text: String::new(),
+                                    revision: 0,
+                                    truncated: false,
+                                },
+                            },
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+        });
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .write_all(br#"{"id":"req_wait","method":"pane.wait_for_output","params":{"pane_id":"pane_1","source":"recent","match":{"type":"substring","value":"never"}}}"#)
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running);
+            done_tx.send(result).unwrap();
+        });
+
+        first_read_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(client);
+
+        let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_ok());
+
+        server_thread.join().unwrap();
+        drop(running);
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn subscriptions_stop_when_client_disconnects() {
+        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .write_all(
+                br#"{"id":"sub_1","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.created"}]}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running);
+            done_tx.send(result).unwrap();
+        });
+
+        let ack = read_line(&mut client);
+        let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack["result"]["type"], "subscription_started");
+
+        drop(client);
+
+        let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_ok());
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn subscriptions_stop_when_server_shuts_down() {
+        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .write_all(
+                br#"{"id":"sub_2","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.created"}]}}"#,
+            )
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server_thread = std::thread::spawn(move || {
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running);
+            done_tx.send(result).unwrap();
+        });
+
+        let ack = read_line(&mut client);
+        let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack["result"]["type"], "subscription_started");
+
+        running.store(false, Ordering::Relaxed);
+
+        let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_ok());
+        server_thread.join().unwrap();
     }
 }
