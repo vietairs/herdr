@@ -11,6 +11,28 @@ Terminal workspace manager for AI coding agents. Rust + ratatui.
 - **Detection is decoupled.** The detector reads a screen snapshot, never touches the parser or viewport state.
 - **UI patterns should be reused.** Herdr is a mouse-first TUI. New dialogs, onboarding, settings, and post-update flows should follow the existing UI/UX language and interaction patterns instead of inventing one-off screens. Prefer reusing existing modal/screen structure, affordances, and close actions so the app feels consistent.
 
+## Multi-agent isolation
+
+Read-only investigation can happen in the shared checkout.
+
+When starting any file-changing task, use a dedicated git worktree by default. This is required whenever parallel agent work may happen in the repository.
+
+Use this layout:
+
+- shared integration checkout: `../herdr`
+- task worktrees: `../herdr-worktrees/<task-slug>`
+- task branches: `issue/<id>-<slug>` when an issue exists
+
+Do all code edits, tests, and validation inside the task worktree.
+
+You may skip a worktree only for a clearly solo, trivial change when no other agent is expected to modify the repository at the same time.
+
+If the current session is already inside an isolated task worktree, keep using it. Do not create nested worktrees.
+
+Before committing, propose the commit message and get alignment.
+
+After the change is accepted and integrated back into the main checkout at `../herdr`, remove the task worktree and delete its branch.
+
 ## Testing
 
 ```bash
