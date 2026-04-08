@@ -564,6 +564,11 @@ pub fn load() -> Option<SessionSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::layout::Rect;
+
+    use crate::app::{state::AgentPanelScope, AppState, Mode};
+    use crate::layout::NavDirection;
+    use crate::workspace::Workspace;
 
     fn session_fixture(name: &str) -> &'static str {
         match name {
@@ -783,6 +788,194 @@ mod tests {
         assert_eq!(ids.len(), 3);
         let unique: std::collections::HashSet<u32> = ids.iter().map(|id| id.raw()).collect();
         assert_eq!(unique.len(), 3);
+    }
+
+    fn state_with_workspaces(names: &[&str]) -> AppState {
+        let mut state = AppState::test_new();
+        state.workspaces = names.iter().map(|name| Workspace::test_new(name)).collect();
+        if !state.workspaces.is_empty() {
+            state.active = Some(0);
+            state.selected = 0;
+            state.mode = Mode::Terminal;
+        }
+        state
+    }
+
+    fn capture_from_state(state: &AppState) -> SessionSnapshot {
+        capture(
+            &state.workspaces,
+            state.active,
+            state.selected,
+            state.agent_panel_scope,
+            state.sidebar_width,
+            state.sidebar_section_split,
+        )
+    }
+
+    fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {
+        match &tab.layout {
+            LayoutSnapshot::Split { ratio, .. } => Some(*ratio),
+            LayoutSnapshot::Pane(_) => None,
+        }
+    }
+
+    #[test]
+    fn capture_contract_tracks_workspace_order_active_and_selected() {
+        let mut state = state_with_workspaces(&["a", "b", "c"]);
+        state.active = Some(1);
+        state.selected = 2;
+
+        state.move_workspace(1, 0);
+
+        let snapshot = capture_from_state(&state);
+        let ids: Vec<_> = state.workspaces.iter().map(|ws| ws.id.clone()).collect();
+        let captured_ids: Vec<_> = snapshot
+            .workspaces
+            .iter()
+            .map(|ws| ws.id.clone().unwrap())
+            .collect();
+        assert_eq!(captured_ids, ids);
+        assert_eq!(snapshot.active, state.active);
+        assert_eq!(snapshot.selected, state.selected);
+    }
+
+    #[test]
+    fn capture_contract_tracks_workspace_and_tab_names_and_active_tab() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.workspaces[0].set_custom_name("renamed-workspace".into());
+        let second_tab = state.workspaces[0].test_add_tab(Some("logs"));
+        state.workspaces[0].switch_tab(second_tab);
+        state.workspaces[0].tabs[0].set_custom_name("main".into());
+
+        let snapshot = capture_from_state(&state);
+        let workspace = &snapshot.workspaces[0];
+        assert_eq!(workspace.custom_name.as_deref(), Some("renamed-workspace"));
+        assert_eq!(workspace.active_tab, second_tab);
+        assert_eq!(workspace.tabs[0].custom_name.as_deref(), Some("main"));
+        assert_eq!(workspace.tabs[1].custom_name.as_deref(), Some("logs"));
+    }
+
+    #[test]
+    fn capture_contract_tracks_workspace_closure() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.selected = 1;
+        state.active = Some(1);
+
+        state.close_selected_workspace();
+
+        let snapshot = capture_from_state(&state);
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(snapshot.workspaces[0].custom_name.as_deref(), Some("one"));
+        assert_eq!(snapshot.active, Some(0));
+        assert_eq!(snapshot.selected, 0);
+    }
+
+    #[test]
+    fn capture_contract_tracks_sidebar_state() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.sidebar_width = 31;
+        state.sidebar_section_split = 0.4;
+        state.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let snapshot = capture_from_state(&state);
+        assert_eq!(snapshot.sidebar_width, Some(31));
+        assert_eq!(snapshot.sidebar_section_split, Some(0.4));
+        assert_eq!(snapshot.agent_panel_scope, AgentPanelScope::AllWorkspaces);
+    }
+
+    #[test]
+    fn capture_contract_tracks_layout_focus_zoom_and_root_pane() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let second = state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].tabs[0].layout.focus_pane(second);
+        state.toggle_fullscreen();
+
+        let snapshot = capture_from_state(&state);
+        let tab = &snapshot.workspaces[0].tabs[0];
+        assert!(matches!(tab.layout, LayoutSnapshot::Split { .. }));
+        assert_eq!(tab.focused, Some(second.raw()));
+        assert_eq!(tab.root_pane, Some(root.raw()));
+        assert!(tab.zoomed);
+        assert_eq!(tab.panes.len(), 2);
+    }
+
+    #[test]
+    fn capture_contract_tracks_focus_navigation() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let second = state.workspaces[0].test_split(Direction::Horizontal);
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 106, 20));
+
+        state.navigate_pane(NavDirection::Right);
+
+        let snapshot = capture_from_state(&state);
+        assert_eq!(snapshot.workspaces[0].tabs[0].focused, Some(second.raw()));
+        assert_ne!(snapshot.workspaces[0].tabs[0].focused, Some(root.raw()));
+    }
+
+    #[test]
+    fn capture_contract_tracks_resize_ratio_changes() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.workspaces[0].test_split(Direction::Horizontal);
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 106, 20));
+        let before = capture_from_state(&state);
+
+        state.resize_pane(NavDirection::Right);
+
+        let after = capture_from_state(&state);
+        let before_ratio = root_split_ratio(&before.workspaces[0].tabs[0]).unwrap();
+        let after_ratio = root_split_ratio(&after.workspaces[0].tabs[0]).unwrap();
+        assert_ne!(before_ratio, after_ratio);
+    }
+
+    #[test]
+    fn capture_contract_tracks_tab_closure() {
+        let mut state = state_with_workspaces(&["one"]);
+        let second_tab = state.workspaces[0].test_add_tab(Some("logs"));
+        state.switch_tab(second_tab);
+
+        state.close_tab();
+
+        let snapshot = capture_from_state(&state);
+        let workspace = &snapshot.workspaces[0];
+        assert_eq!(workspace.tabs.len(), 1);
+        assert_eq!(workspace.active_tab, 0);
+        assert!(workspace.tabs[0].custom_name.is_none());
+    }
+
+    #[test]
+    fn capture_contract_tracks_pane_closure() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.workspaces[0].test_split(Direction::Horizontal);
+
+        state.close_pane();
+
+        let snapshot = capture_from_state(&state);
+        let tab = &snapshot.workspaces[0].tabs[0];
+        assert_eq!(tab.panes.len(), 1);
+        assert!(matches!(tab.layout, LayoutSnapshot::Pane(_)));
+        assert!(!tab.zoomed);
+    }
+
+    #[test]
+    fn capture_contract_tracks_workspace_identity_and_pane_cwds() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.workspaces[0].tabs[0]
+            .pane_cwds
+            .insert(root, PathBuf::from("/tmp/pion"));
+        let second = state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].tabs[0]
+            .pane_cwds
+            .insert(second, PathBuf::from("/tmp/herdr"));
+
+        let snapshot = capture_from_state(&state);
+        let workspace = &snapshot.workspaces[0];
+        let tab = &workspace.tabs[0];
+        assert_eq!(workspace.identity_cwd, PathBuf::from("/tmp/pion"));
+        assert_eq!(tab.panes[&root.raw()].cwd, PathBuf::from("/tmp/pion"));
+        assert_eq!(tab.panes[&second.raw()].cwd, PathBuf::from("/tmp/herdr"));
     }
 
     #[test]

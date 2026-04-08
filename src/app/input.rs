@@ -3038,6 +3038,24 @@ mod tests {
         }
     }
 
+    fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
+        crate::persist::capture(
+            &state.workspaces,
+            state.active,
+            state.selected,
+            state.agent_panel_scope,
+            state.sidebar_width,
+            state.sidebar_section_split,
+        )
+    }
+
+    fn root_layout_ratio(snapshot: &crate::persist::SessionSnapshot) -> Option<f32> {
+        match &snapshot.workspaces.first()?.tabs.first()?.layout {
+            crate::persist::LayoutSnapshot::Split { ratio, .. } => Some(*ratio),
+            crate::persist::LayoutSnapshot::Pane(_) => None,
+        }
+    }
+
     #[test]
     fn custom_rename_key_enters_rename_mode() {
         let mut state = state_with_workspaces(&["test"]);
@@ -3270,6 +3288,11 @@ mod tests {
         );
         assert_eq!(state.mode, Mode::Terminal);
         assert_eq!(state.workspaces[0].display_name(), "renamed");
+        let snapshot = capture_snapshot(&state);
+        assert_eq!(
+            snapshot.workspaces[0].custom_name.as_deref(),
+            Some("renamed")
+        );
 
         state.view.sidebar_rect = Rect::new(0, 0, 26, 20);
         state.view.terminal_area = Rect::new(26, 0, 80, 20);
@@ -3279,6 +3302,24 @@ mod tests {
         let (save, _, _) = crate::ui::rename_button_rects(inner);
         let action = modal_action_from_buttons(save.x, save.y, &[(save, ModalAction::Save)]);
         assert_eq!(action, Some(ModalAction::Save));
+    }
+
+    #[test]
+    fn tab_rename_updates_captured_snapshot() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameTab;
+        state.name_input = "logs".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        let snapshot = capture_snapshot(&state);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("logs")
+        );
     }
 
     #[test]
@@ -3691,6 +3732,12 @@ mod tests {
             second_pane
         );
         assert_eq!(app.state.mode, Mode::Terminal);
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(snapshot.workspaces[0].active_tab, second_tab);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[second_tab].focused,
+            Some(second_pane.raw())
+        );
     }
 
     #[test]
@@ -3715,6 +3762,8 @@ mod tests {
 
         assert_eq!(app.state.agent_panel_scope, AgentPanelScope::AllWorkspaces);
         assert_eq!(app.state.agent_panel_scroll, 0);
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(snapshot.agent_panel_scope, AgentPanelScope::AllWorkspaces);
     }
 
     #[test]
@@ -3936,6 +3985,9 @@ mod tests {
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.selected, 1);
         assert!(app.state.workspace_press.is_none());
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(snapshot.active, Some(1));
+        assert_eq!(snapshot.selected, 1);
     }
 
     #[test]
@@ -3989,6 +4041,13 @@ mod tests {
         assert_eq!(app.state.selected, 2);
         assert_eq!(app.state.workspaces[0].id, active_id);
         assert_eq!(app.state.workspaces[2].id, selected_id);
+        let snapshot = capture_snapshot(&app.state);
+        let captured_names: Vec<_> = snapshot
+            .workspaces
+            .iter()
+            .map(|ws| ws.custom_name.clone().unwrap())
+            .collect();
+        assert_eq!(captured_names, vec!["b", "a", "c"]);
     }
 
     #[test]
@@ -4034,6 +4093,8 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30, 5));
 
         assert_eq!(app.state.sidebar_width, 31);
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(snapshot.sidebar_width, Some(31));
     }
 
     #[test]
@@ -4056,6 +4117,38 @@ mod tests {
         ));
 
         assert!(app.state.sidebar_section_split > 0.5);
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(
+            snapshot.sidebar_section_split,
+            Some(app.state.sidebar_section_split)
+        );
+    }
+
+    #[test]
+    fn dragging_pane_split_updates_captured_layout_ratio() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let border = app.state.view.split_borders[0].clone();
+        let before = capture_snapshot(&app.state);
+        let drag_row = border.area.y.saturating_add(1);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            border.pos,
+            drag_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            border.pos.saturating_add(6),
+            drag_row,
+        ));
+
+        let after = capture_snapshot(&app.state);
+        assert_ne!(root_layout_ratio(&before), root_layout_ratio(&after));
     }
 
     #[test]
@@ -4070,6 +4163,8 @@ mod tests {
 
         assert_eq!(app.state.sidebar_width, 26);
         assert!(app.state.drag.is_none());
+        let snapshot = capture_snapshot(&app.state);
+        assert_eq!(snapshot.sidebar_width, Some(26));
     }
 
     #[test]
