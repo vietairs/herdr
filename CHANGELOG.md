@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.4] - 2026-04-08
+
 ### Changed
 - The expanded sidebar can now be split into resizable workspace and agent sections with a draggable divider, and that section sizing is preserved across restarts.
 
