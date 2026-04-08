@@ -45,7 +45,7 @@ fn test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("api ping test lock poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn wait_for_socket(path: &Path, timeout: Duration) {
@@ -166,11 +166,23 @@ fn wait_for_event(
     expected: &str,
     timeout: Duration,
 ) -> serde_json::Value {
+    wait_for_event_matching(reader, expected, timeout, |_| true)
+}
+
+fn wait_for_event_matching<F>(
+    reader: &mut JsonLineReader,
+    expected: &str,
+    timeout: Duration,
+    mut matches: F,
+) -> serde_json::Value
+where
+    F: FnMut(&serde_json::Value) -> bool,
+{
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let value = reader.read_json_line(remaining.max(Duration::from_millis(1)));
-        if value["event"] == expected {
+        if value["event"] == expected && matches(&value) {
             return value;
         }
     }
@@ -479,8 +491,7 @@ fn tab_methods_round_trip_over_socket() {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "flaky during ghostty backend epic #000; re-enable before cutover"]
-fn events_subscribe_streams_lifecycle_and_agent_events() {
+fn events_subscribe_streams_workspace_tab_and_agent_events() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -515,11 +526,11 @@ fn events_subscribe_streams_lifecycle_and_agent_events() {
 
     let mut reader = open_subscription(
         &socket_path,
-        r#"{"id":"sub_life","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.created"},{"type":"workspace.focused"},{"type":"tab.created"},{"type":"tab.focused"},{"type":"tab.renamed"},{"type":"tab.closed"},{"type":"pane.created"},{"type":"pane.focused"},{"type":"pane.agent_detected"},{"type":"pane.closed"},{"type":"workspace.closed"}]}}"#,
+        r#"{"id":"sub_life_a","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.created"},{"type":"workspace.focused"},{"type":"tab.created"},{"type":"tab.focused"},{"type":"tab.renamed"},{"type":"pane.created"},{"type":"pane.focused"},{"type":"pane.agent_detected"}]}}"#,
     );
 
     let ack = reader.read_json_line(Duration::from_secs(2));
-    assert_eq!(ack["id"], "sub_life");
+    assert_eq!(ack["id"], "sub_life_a");
     assert_eq!(ack["result"]["type"], "subscription_started");
 
     let created = send_request(
@@ -543,11 +554,13 @@ fn events_subscribe_streams_lifecycle_and_agent_events() {
     let workspace_focused =
         wait_for_event(&mut reader, "workspace_focused", Duration::from_secs(2));
     assert_eq!(workspace_focused["data"]["workspace_id"], workspace_id);
+
     let first_tab_id = format!("{workspace_id}:1");
     let tab_created = wait_for_event(&mut reader, "tab_created", Duration::from_secs(2));
     assert_eq!(tab_created["data"]["tab"]["tab_id"], first_tab_id);
     let tab_focused = wait_for_event(&mut reader, "tab_focused", Duration::from_secs(2));
     assert_eq!(tab_focused["data"]["tab_id"], first_tab_id);
+
     let pane_created = wait_for_event(&mut reader, "pane_created", Duration::from_secs(2));
     let pane_id = pane_created["data"]["pane"]["pane_id"]
         .as_str()
@@ -589,6 +602,7 @@ fn events_subscribe_streams_lifecycle_and_agent_events() {
         .unwrap()
         .to_string();
     assert_eq!(second_tab_id, format!("{workspace_id}:2"));
+
     let created_tab_event = wait_for_event(&mut reader, "tab_created", Duration::from_secs(2));
     assert_eq!(created_tab_event["data"]["tab"]["tab_id"], second_tab_id);
     let focused_tab_event = wait_for_event(&mut reader, "tab_focused", Duration::from_secs(2));
@@ -606,51 +620,149 @@ fn events_subscribe_streams_lifecycle_and_agent_events() {
     assert_eq!(renamed_event["data"]["tab_id"], second_tab_id);
     assert_eq!(renamed_event["data"]["label"], "logs");
 
-    let second_pane_id = format!("{}-1", workspace_id);
+    cleanup_spawned_herdr(child, base);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn events_subscribe_streams_pane_split_and_close_events() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_pc_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pane_id = format!("{workspace_id}-1");
+
+    let mut reader = open_subscription(
+        &socket_path,
+        r#"{"id":"sub_life_b","method":"events.subscribe","params":{"subscriptions":[{"type":"pane.created"},{"type":"pane.closed"}]}}"#,
+    );
+
+    let ack = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(ack["id"], "sub_life_b");
+    assert_eq!(ack["result"]["type"], "subscription_started");
+
     let split = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_l6","method":"pane.split","params":{{"target_pane_id":"{}","direction":"right","focus":true}}}}"#,
-            second_pane_id
+            r#"{{"id":"req_pc_2","method":"pane.split","params":{{"target_pane_id":"{}","direction":"right","focus":true}}}}"#,
+            pane_id
         ),
     );
     let split_pane_id = split["result"]["pane"]["pane_id"]
         .as_str()
         .unwrap()
         .to_string();
-    let split_created = wait_for_event(&mut reader, "pane_created", Duration::from_secs(2));
+
+    let split_created = wait_for_event_matching(
+        &mut reader,
+        "pane_created",
+        Duration::from_secs(2),
+        |value| value["data"]["pane"]["pane_id"] == split_pane_id,
+    );
     assert_eq!(split_created["data"]["pane"]["pane_id"], split_pane_id);
 
     let closed = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_l7","method":"pane.close","params":{{"pane_id":"{}"}}}}"#,
+            r#"{{"id":"req_pc_3","method":"pane.close","params":{{"pane_id":"{}"}}}}"#,
             split_pane_id
         ),
     );
     assert_eq!(closed["result"]["type"], "ok");
-    let pane_closed = wait_for_event(&mut reader, "pane_closed", Duration::from_secs(2));
+
+    let pane_closed = wait_for_event_matching(
+        &mut reader,
+        "pane_closed",
+        Duration::from_secs(2),
+        |value| value["data"]["pane_id"] == split_pane_id,
+    );
     assert_eq!(pane_closed["data"]["pane_id"], split_pane_id);
+
+    cleanup_spawned_herdr(child, base);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn events_subscribe_streams_tab_and_workspace_close_events() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_tc_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let new_tab = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_tc_2","method":"tab.create","params":{{"workspace_id":"{}","focus":true}}}}"#,
+            workspace_id
+        ),
+    );
+    let second_tab_id = new_tab["result"]["tab"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut reader = open_subscription(
+        &socket_path,
+        r#"{"id":"sub_life_c","method":"events.subscribe","params":{"subscriptions":[{"type":"tab.closed"},{"type":"workspace.closed"}]}}"#,
+    );
+
+    let ack = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(ack["id"], "sub_life_c");
+    assert_eq!(ack["result"]["type"], "subscription_started");
 
     let closed_tab = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_l8","method":"tab.close","params":{{"tab_id":"{}"}}}}"#,
+            r#"{{"id":"req_tc_3","method":"tab.close","params":{{"tab_id":"{}"}}}}"#,
             second_tab_id
         ),
     );
     assert_eq!(closed_tab["result"]["type"], "ok");
+
     let tab_closed = wait_for_event(&mut reader, "tab_closed", Duration::from_secs(2));
     assert_eq!(tab_closed["data"]["tab_id"], second_tab_id);
 
     let closed_ws = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_l9","method":"workspace.close","params":{{"workspace_id":"{}"}}}}"#,
+            r#"{{"id":"req_tc_4","method":"workspace.close","params":{{"workspace_id":"{}"}}}}"#,
             workspace_id
         ),
     );
     assert_eq!(closed_ws["result"]["type"], "ok");
+
     let workspace_closed = wait_for_event(&mut reader, "workspace_closed", Duration::from_secs(2));
     assert_eq!(workspace_closed["data"]["workspace_id"], workspace_id);
 
