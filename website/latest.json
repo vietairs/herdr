@@ -1,10 +1,10 @@
 {
-  "version": "0.4.3",
-  "notes": "### Fixed\n- Update checks and in-app **What's New** release notes no longer depend on GitHub\u2019s release API, which avoids the transient 403 failures from the previous update path.\n- `herdr pane run ...` now submits the full command atomically in one request, fixing cases where scripted commands did not reliably execute because the final Enter was sent separately.\n- Bare line-feed input is now preserved in raw terminal input instead of being normalized to Enter, fixing Linux terminal cases where inputs like Shift+Enter or Ctrl+J could be interpreted incorrectly.",
+  "version": "0.4.4",
+  "notes": "### Changed\n- The expanded sidebar can now be split into resizable workspace and agent sections with a draggable divider, and that section sizing is preserved across restarts.\n\n### Fixed\n- IME input now works properly for Chinese and other UTF-8 input methods in pane terminals, so candidate selection no longer falls back to typing raw digit keys. (#9, thanks @Edmund-a7)\n- `herdr pane run ...` now uses the bracketed-paste-aware input path, improving compatibility with shells and terminal apps that expect pasted command text to arrive atomically.\n- The local socket API is more robust and secure: its Unix socket is now restricted to the current user, and long-running output waits and subscriptions stop cleanly on disconnect or shutdown instead of hanging indefinitely.",
   "assets": {
-    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.3/herdr-linux-x86_64",
-    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.3/herdr-linux-aarch64",
-    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.3/herdr-macos-x86_64",
-    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.3/herdr-macos-aarch64"
+    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.4/herdr-linux-x86_64",
+    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.4/herdr-linux-aarch64",
+    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.4/herdr-macos-x86_64",
+    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.4/herdr-macos-aarch64"
   }
 }
