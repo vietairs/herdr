@@ -131,7 +131,9 @@ for that workflow, start with [`SKILL.md`](./SKILL.md) if you want a reusable ag
 
 ## supported agents
 
-herdr detects agent state by identifying the foreground process and reading terminal output patterns. the following agents have been tested:
+herdr detects supported agents automatically with zero setup. it identifies the foreground process in each pane and reads the live bottom of the terminal buffer to infer agent state. for agents that expose hooks or plugins, direct integrations are the more robust path because they forward semantic state to herdr over the local socket api.
+
+the following agents have been tested:
 
 | agent | idle / done | working | blocked |
 |-------|-------------|---------|---------|
@@ -154,7 +156,9 @@ for any other cli agent, herdr still works as a terminal-native multiplexer. you
 
 ## optional direct integrations
 
-herdr also supports optional direct integrations for tools that expose hooks or plugins:
+automatic detection works out of the box. if an agent exposes hooks or plugins, the better path is to let it report state to herdr over the local socket api.
+
+herdr ships one-command integrations for:
 
 - [pi](./INTEGRATIONS.md#pi)
 - [claude code](./INTEGRATIONS.md#claude-code)
@@ -179,7 +183,7 @@ herdr integration uninstall codex
 herdr integration uninstall opencode
 ```
 
-these integrations improve semantic state reporting, but they do not replace herdr's core process detection model. for setup details, file locations, caveats, and uninstall behavior, see [`INTEGRATIONS.md`](./INTEGRATIONS.md).
+these integrations forward semantic state to herdr over the local socket api. that gives you more robust status reporting, but it does not replace herdr's core process detection model. for setup details, installed file locations, caveats, and the exact bundled hook or plugin source files, see [`INTEGRATIONS.md`](./INTEGRATIONS.md).
 
 known codex caveat: codex currently renders hook lifecycle lines in its own tui when hooks are enabled. that noise is upstream codex behavior, not herdr-specific.
 
@@ -290,13 +294,15 @@ use `--no-session` to start fresh.
 
 ## how agent detection works
 
-herdr does not require hooks or agent-side configuration for its built-in detection. it works by:
+herdr does not require hooks or agent-side configuration for built-in detection. automatic detection works by:
 
 1. identifying the foreground process of each pane's pty via `/proc` on linux or `proc_pidinfo` on macos
 2. matching the process name against known agents
 3. reading the live bottom of the terminal buffer and applying per-agent heuristics to determine state
 
 this means detection works with any supported agent, installed any way, with zero setup. if it runs in a terminal, herdr can see it.
+
+when an agent exposes hooks or plugins, the more robust option is to forward state to herdr over the local socket api. that is what the built-in pi, claude code, codex, and opencode integrations do.
 
 the heuristics are matched against each agent's real terminal output: prompt boxes, spinners, waiting-for-input messages, and tool execution indicators. detection runs on a separate async task per pane, polled every 300 to 500 ms, decoupled from terminal rendering.
 

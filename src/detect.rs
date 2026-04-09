@@ -417,7 +417,11 @@ fn has_claude_blocked_prompt(content: &str, lower_content: &str) -> bool {
 
 fn has_claude_yes_no_choice(content: &str) -> bool {
     content.lines().any(|line| {
-        let trimmed = line.trim().trim_start_matches('❯').trim_start().to_lowercase();
+        let trimmed = line
+            .trim()
+            .trim_start_matches('❯')
+            .trim_start()
+            .to_lowercase();
         trimmed == "yes"
             || trimmed == "no"
             || trimmed.starts_with("1. yes")
@@ -700,8 +704,7 @@ mod tests {
 
     #[test]
     fn claude_waiting_selection_prompt() {
-        let screen =
-            "Do you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend";
+        let screen = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend";
         assert_eq!(detect_claude(screen), AgentState::Blocked);
     }
 

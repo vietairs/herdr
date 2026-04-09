@@ -2,16 +2,23 @@
 
 herdr works without any hook or plugin setup.
 
-out of the box, it detects supported agents by combining foreground process detection with screen heuristics. that is enough to give you workspace awareness with zero configuration.
+out of the box, it detects supported agents automatically by combining foreground process detection with screen heuristics. that is enough to give you workspace awareness with zero configuration.
 
-optional integrations improve the semantic signal on top of that.
+when an agent exposes hooks or plugins, the more robust path is to forward semantic state to herdr over the local socket api. the built-in integrations in this document do exactly that.
+
+if you want to inspect the exact files herdr installs, they are versioned in this repo:
+
+- [pi extension](./src/integration/assets/pi/herdr-agent-state.ts)
+- [claude code hook](./src/integration/assets/claude/herdr-agent-state.sh)
+- [codex hook](./src/integration/assets/codex/herdr-agent-state.sh)
+- [opencode plugin](./src/integration/assets/opencode/herdr-agent-state.js)
 
 ## how herdr uses integrations
 
 herdr uses a hybrid model:
 
 - **process detection** owns pane identity, liveness, and "the process is gone"
-- **agent integrations** report semantic state like `working`, `blocked`, and `idle` when the tool exposes those events
+- **agent integrations** report semantic state like `working`, `blocked`, and `idle` over the local socket api when the tool exposes those events
 - **screen heuristics** remain the fallback for gaps, unsupported tools, or incomplete hook surfaces
 
 that means hooks/plugins do **not** become the source of truth for pane ownership. they enrich state reporting; they do not replace process detection.
@@ -48,7 +55,9 @@ this writes the bundled pi extension to:
 ~/.pi/agent/extensions/herdr-agent-state.ts
 ```
 
-pi is the cleanest integration. it already has an authoritative hook model, so herdr can get direct state reports without guessing as much from the terminal.
+pi is the cleanest integration. it already has an authoritative hook model, so herdr can get direct state reports over the socket api without guessing as much from the terminal.
+
+bundled source: [`src/integration/assets/pi/herdr-agent-state.ts`](./src/integration/assets/pi/herdr-agent-state.ts)
 
 uninstall:
 
@@ -74,6 +83,8 @@ this:
 
 - writes the hook script to `~/.claude/hooks/herdr-agent-state.sh`
 - updates `~/.claude/settings.json`
+
+bundled source: [`src/integration/assets/claude/herdr-agent-state.sh`](./src/integration/assets/claude/herdr-agent-state.sh)
 
 current hook mapping:
 
@@ -113,6 +124,8 @@ this:
 - writes the hook script to `~/.codex/herdr-agent-state.sh`
 - updates `~/.codex/hooks.json`
 - ensures `codex_hooks = true` in `~/.codex/config.toml`
+
+bundled source: [`src/integration/assets/codex/herdr-agent-state.sh`](./src/integration/assets/codex/herdr-agent-state.sh)
 
 current hook mapping:
 
@@ -155,6 +168,8 @@ this writes the bundled plugin to:
 ```text
 ~/.config/opencode/plugins/herdr-agent-state.js
 ```
+
+bundled source: [`src/integration/assets/opencode/herdr-agent-state.js`](./src/integration/assets/opencode/herdr-agent-state.js)
 
 current plugin mapping:
 
