@@ -294,6 +294,160 @@ struct GhosttyPaneTerminal {
 struct GhosttyPaneCore {
     terminal: crate::ghostty::Terminal,
     render_state: crate::ghostty::RenderState,
+    host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    transient_default_color_owner_pgid: Option<u32>,
+    default_color_tracker: DefaultColorOscTracker,
+}
+
+#[derive(Debug, Default)]
+struct DefaultColorOscTracker {
+    state: DefaultColorOscTrackerState,
+    body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DefaultColorOscTrackerState {
+    #[default]
+    Ground,
+    Escape,
+    OscBody,
+    OscEscape,
+}
+
+impl DefaultColorOscTracker {
+    fn observe(&mut self, bytes: &[u8]) -> bool {
+        let mut saw_default_color_set = false;
+
+        for &byte in bytes {
+            match self.state {
+                DefaultColorOscTrackerState::Ground => {
+                    if byte == 0x1b {
+                        self.state = DefaultColorOscTrackerState::Escape;
+                    }
+                }
+                DefaultColorOscTrackerState::Escape => {
+                    if byte == b']' {
+                        self.body.clear();
+                        self.state = DefaultColorOscTrackerState::OscBody;
+                    } else if byte == 0x1b {
+                        self.state = DefaultColorOscTrackerState::Escape;
+                    } else {
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    }
+                }
+                DefaultColorOscTrackerState::OscBody => match byte {
+                    0x07 => {
+                        saw_default_color_set |= is_default_color_set_osc(&self.body);
+                        self.body.clear();
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    }
+                    0x1b => self.state = DefaultColorOscTrackerState::OscEscape,
+                    _ => self.body.push(byte),
+                },
+                DefaultColorOscTrackerState::OscEscape => {
+                    if byte == b'\\' {
+                        saw_default_color_set |= is_default_color_set_osc(&self.body);
+                        self.body.clear();
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    } else {
+                        self.body.push(0x1b);
+                        self.body.push(byte);
+                        self.state = DefaultColorOscTrackerState::OscBody;
+                    }
+                }
+            }
+
+            if self.body.len() > 1024 {
+                self.body.clear();
+                self.state = DefaultColorOscTrackerState::Ground;
+            }
+        }
+
+        saw_default_color_set
+    }
+}
+
+fn is_default_color_set_osc(body: &[u8]) -> bool {
+    let Some(separator) = body.iter().position(|byte| *byte == b';') else {
+        return false;
+    };
+    let command = &body[..separator];
+    let value = &body[separator + 1..];
+    matches!(command, b"10" | b"11") && !value.is_empty() && value != b"?"
+}
+
+fn foreground_job_is_shell(job: &crate::platform::ForegroundJob, shell_pid: u32) -> bool {
+    job.processes.iter().any(|process| process.pid == shell_pid)
+}
+
+fn current_transient_default_color_owner(shell_pid: u32) -> Option<u32> {
+    let job = crate::detect::foreground_job(shell_pid)?;
+    (!foreground_job_is_shell(&job, shell_pid)).then_some(job.process_group_id)
+}
+
+fn should_restore_host_terminal_theme(
+    owner_pgid: u32,
+    shell_pid: u32,
+    alternate_screen: bool,
+    foreground_job: Option<&crate::platform::ForegroundJob>,
+) -> bool {
+    if alternate_screen {
+        return false;
+    }
+
+    let Some(foreground_job) = foreground_job else {
+        return false;
+    };
+
+    foreground_job.process_group_id != owner_pgid
+        && foreground_job_is_shell(foreground_job, shell_pid)
+}
+
+fn write_host_terminal_theme(
+    terminal: &mut crate::ghostty::Terminal,
+    theme: crate::terminal_theme::TerminalTheme,
+) {
+    if let Some(color) = theme.foreground {
+        let sequence = crate::terminal_theme::osc_set_default_color_sequence(
+            crate::terminal_theme::DefaultColorKind::Foreground,
+            color,
+        );
+        terminal.write(sequence.as_bytes());
+    }
+    if let Some(color) = theme.background {
+        let sequence = crate::terminal_theme::osc_set_default_color_sequence(
+            crate::terminal_theme::DefaultColorKind::Background,
+            color,
+        );
+        terminal.write(sequence.as_bytes());
+    }
+}
+
+fn restore_host_terminal_theme_if_needed(
+    core: &mut GhosttyPaneCore,
+    pane_id: PaneId,
+    shell_pid: u32,
+    alternate_screen: bool,
+    foreground_job: Option<&crate::platform::ForegroundJob>,
+) -> bool {
+    let Some(owner_pgid) = core.transient_default_color_owner_pgid else {
+        return false;
+    };
+    if core.host_terminal_theme.is_empty() {
+        return false;
+    }
+    if !should_restore_host_terminal_theme(owner_pgid, shell_pid, alternate_screen, foreground_job)
+    {
+        return false;
+    }
+
+    core.transient_default_color_owner_pgid = None;
+    write_host_terminal_theme(&mut core.terminal, core.host_terminal_theme);
+    info!(
+        pane = pane_id.raw(),
+        owner_pgid, "restored host terminal default colors after transient override"
+    );
+    true
 }
 
 struct PaneTerminal {
@@ -304,11 +458,12 @@ impl PaneTerminal {
     fn process_pty_bytes(
         &self,
         pane_id: PaneId,
+        shell_pid: u32,
         bytes: &[u8],
         response_writer: &mpsc::Sender<Bytes>,
     ) -> ProcessBytesResult {
         self.ghostty
-            .process_pty_bytes(pane_id, bytes, response_writer)
+            .process_pty_bytes(pane_id, shell_pid, bytes, response_writer)
     }
 
     fn resize(&self, rows: u16, cols: u16) {
@@ -365,6 +520,15 @@ impl PaneTerminal {
 
     fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.ghostty.apply_host_terminal_theme(theme);
+    }
+
+    fn has_transient_default_color_override(&self) -> bool {
+        self.ghostty.has_transient_default_color_override()
+    }
+
+    fn maybe_restore_host_terminal_theme(&self, pane_id: PaneId, shell_pid: u32) -> bool {
+        self.ghostty
+            .maybe_restore_host_terminal_theme(pane_id, shell_pid)
     }
 
     fn keyboard_protocol(
@@ -425,6 +589,9 @@ impl GhosttyPaneTerminal {
             core: Mutex::new(GhosttyPaneCore {
                 terminal,
                 render_state,
+                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+                transient_default_color_owner_pgid: None,
+                default_color_tracker: DefaultColorOscTracker::default(),
             }),
             key_encoder: Mutex::new(key_encoder),
         })
@@ -432,26 +599,43 @@ impl GhosttyPaneTerminal {
 
     fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         if let Ok(mut core) = self.core.lock() {
-            if let Some(color) = theme.foreground {
-                let sequence = crate::terminal_theme::osc_set_default_color_sequence(
-                    crate::terminal_theme::DefaultColorKind::Foreground,
-                    color,
-                );
-                core.terminal.write(sequence.as_bytes());
-            }
-            if let Some(color) = theme.background {
-                let sequence = crate::terminal_theme::osc_set_default_color_sequence(
-                    crate::terminal_theme::DefaultColorKind::Background,
-                    color,
-                );
-                core.terminal.write(sequence.as_bytes());
-            }
+            core.host_terminal_theme = theme;
+            core.transient_default_color_owner_pgid = None;
+            write_host_terminal_theme(&mut core.terminal, theme);
         }
+    }
+
+    fn has_transient_default_color_override(&self) -> bool {
+        self.core
+            .lock()
+            .map(|core| core.transient_default_color_owner_pgid.is_some())
+            .unwrap_or(false)
+    }
+
+    fn maybe_restore_host_terminal_theme(&self, pane_id: PaneId, shell_pid: u32) -> bool {
+        let foreground_job = crate::detect::foreground_job(shell_pid);
+        let Ok(mut core) = self.core.lock() else {
+            return false;
+        };
+
+        let alternate_screen = core
+            .terminal
+            .active_screen()
+            .map(|screen| screen == crate::ghostty::ActiveScreen::Alternate)
+            .unwrap_or(false);
+        restore_host_terminal_theme_if_needed(
+            &mut core,
+            pane_id,
+            shell_pid,
+            alternate_screen,
+            foreground_job.as_ref(),
+        )
     }
 
     fn process_pty_bytes(
         &self,
         pane_id: PaneId,
+        shell_pid: u32,
         bytes: &[u8],
         response_writer: &mpsc::Sender<Bytes>,
     ) -> ProcessBytesResult {
@@ -461,6 +645,16 @@ impl GhosttyPaneTerminal {
                 request_render: false,
             };
         };
+
+        if shell_pid > 0 && core.default_color_tracker.observe(bytes) {
+            if let Some(owner_pgid) = current_transient_default_color_owner(shell_pid) {
+                core.transient_default_color_owner_pgid = Some(owner_pgid);
+                debug!(
+                    pane = pane_id.raw(),
+                    owner_pgid, "tracked transient default color override"
+                );
+            }
+        }
 
         core.terminal.write(bytes);
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
@@ -689,6 +883,7 @@ impl GhosttyPaneTerminal {
         let GhosttyPaneCore {
             terminal,
             render_state,
+            ..
         } = &mut *core;
         if render_state.update(terminal).is_err() {
             return;
@@ -1053,6 +1248,7 @@ fn ghostty_visible_text(core: &mut GhosttyPaneCore) -> Result<String, crate::gho
     let GhosttyPaneCore {
         terminal,
         render_state,
+        ..
     } = core;
     render_state.update(terminal)?;
     let mut row_iterator = crate::ghostty::RowIterator::new()?;
@@ -1476,6 +1672,7 @@ impl PaneRuntime {
             let response_writer = input_tx.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
+            let child_pid = child_pid.clone();
             tokio::task::spawn_blocking(move || {
                 let mut buf = [0u8; 8192];
                 loop {
@@ -1486,8 +1683,13 @@ impl PaneRuntime {
                             break;
                         }
                         Ok(n) => {
-                            let result =
-                                terminal.process_pty_bytes(pane_id, &buf[..n], &response_writer);
+                            let shell_pid = child_pid.load(Ordering::Acquire);
+                            let result = terminal.process_pty_bytes(
+                                pane_id,
+                                shell_pid,
+                                &buf[..n],
+                                &response_writer,
+                            );
                             if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                                 render_notify.notify_one();
                             }
@@ -1511,6 +1713,8 @@ impl PaneRuntime {
             let child_pid = child_pid.clone();
             let terminal = terminal.clone();
             let state_events = events.clone();
+            let render_notify = render_notify.clone();
+            let render_dirty = render_dirty.clone();
             let detect_reset_notify = Arc::new(Notify::new());
             let detect_reset = detect_reset_notify.clone();
             let pending_release = Arc::new(Mutex::new(None));
@@ -1527,6 +1731,7 @@ impl PaneRuntime {
                 loop {
                     let tick = if active_pending_release(&pending_release_for_task, Instant::now())
                         .is_some()
+                        || terminal.has_transient_default_color_override()
                     {
                         TICK_PENDING_RELEASE
                     } else if agent.is_none() {
@@ -1589,6 +1794,13 @@ impl PaneRuntime {
                                     agent_changed = true;
                                 }
                             }
+                        }
+                    }
+
+                    let pid = child_pid.load(Ordering::Acquire);
+                    if pid > 0 && terminal.maybe_restore_host_terminal_theme(pane_id, pid) {
+                        if !render_dirty.swap(true, Ordering::AcqRel) {
+                            render_notify.notify_one();
                         }
                     }
 
@@ -1906,6 +2118,41 @@ mod tests {
         }
     }
 
+    fn pane_default_theme(pane: &GhosttyPaneTerminal) -> crate::terminal_theme::TerminalTheme {
+        let mut core = pane.core.lock().unwrap();
+        let GhosttyPaneCore {
+            terminal,
+            render_state,
+            ..
+        } = &mut *core;
+        render_state.update(terminal).unwrap();
+        let colors = render_state.colors().unwrap();
+        crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: colors.foreground.r,
+                g: colors.foreground.g,
+                b: colors.foreground.b,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: colors.background.r,
+                g: colors.background.g,
+                b: colors.background.b,
+            }),
+        }
+    }
+
+    fn shell_job(shell_pid: u32) -> crate::platform::ForegroundJob {
+        crate::platform::ForegroundJob {
+            process_group_id: shell_pid,
+            processes: vec![crate::platform::ForegroundProcess {
+                pid: shell_pid,
+                name: "zsh".to_string(),
+                argv0: Some("zsh".to_string()),
+                cmdline: Some("zsh".to_string()),
+            }],
+        }
+    }
+
     #[test]
     fn ghostty_render_can_suppress_cursor_position() {
         let (tx, _rx) = mpsc::channel(4);
@@ -2013,7 +2260,7 @@ mod tests {
         );
         assert_eq!(before, b"\x1b[A");
 
-        pane.process_pty_bytes(pane_id, b"\x1b[?1h", &tx);
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[?1h", &tx);
 
         let after = pane.encode_terminal_key(
             crate::input::TerminalKey::new(
@@ -2037,7 +2284,7 @@ mod tests {
         );
 
         let before = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
-        pane.process_pty_bytes(pane_id, b"\x1b[>1u", &tx);
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[>1u", &tx);
         let after = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
 
         assert_ne!(before, after);
@@ -2058,7 +2305,7 @@ mod tests {
         )
         .unwrap();
 
-        first.process_pty_bytes(PaneId::from_raw(1), b"\x1b[?1h", &tx);
+        first.process_pty_bytes(PaneId::from_raw(1), 0, b"\x1b[?1h", &tx);
 
         let first_encoded = first.encode_terminal_key(
             crate::input::TerminalKey::new(
@@ -2214,14 +2461,111 @@ mod tests {
         let pane_terminal = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
 
-        let begin = pane_terminal.process_pty_bytes(pane_id, b"\x1b[?2026h", &tx);
+        let begin = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
         assert!(!begin.request_render);
 
-        let body = pane_terminal.process_pty_bytes(pane_id, b"hello", &tx);
+        let body = pane_terminal.process_pty_bytes(pane_id, 0, b"hello", &tx);
         assert!(!body.request_render);
 
-        let end = pane_terminal.process_pty_bytes(pane_id, b"\x1b[?2026l", &tx);
+        let end = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l", &tx);
         assert!(end.request_render);
+    }
+
+    #[test]
+    fn default_color_tracker_detects_split_osc_11_sequences() {
+        let mut tracker = DefaultColorOscTracker::default();
+
+        assert!(!tracker.observe(b"\x1b]11;rgb:11/22"));
+        assert!(tracker.observe(b"/33\x1b\\"));
+    }
+
+    #[test]
+    fn default_color_tracker_ignores_osc_queries() {
+        let mut tracker = DefaultColorOscTracker::default();
+
+        assert!(!tracker.observe(b"\x1b]10;?\x1b\\"));
+        assert!(!tracker.observe(b"\x1b]11;?\x07"));
+    }
+
+    #[test]
+    fn host_theme_restore_waits_for_shell_and_non_alternate_screen() {
+        assert!(!should_restore_host_terminal_theme(
+            42,
+            7,
+            true,
+            Some(&shell_job(7)),
+        ));
+        assert!(!should_restore_host_terminal_theme(42, 7, false, None));
+        assert!(!should_restore_host_terminal_theme(
+            42,
+            7,
+            false,
+            Some(&crate::platform::ForegroundJob {
+                process_group_id: 42,
+                processes: vec![crate::platform::ForegroundProcess {
+                    pid: 42,
+                    name: "droid".to_string(),
+                    argv0: Some("droid".to_string()),
+                    cmdline: Some("droid".to_string()),
+                }],
+            }),
+        ));
+        assert!(should_restore_host_terminal_theme(
+            42,
+            7,
+            false,
+            Some(&shell_job(7)),
+        ));
+    }
+
+    #[test]
+    fn restore_host_terminal_theme_reapplies_cached_colors() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        let shell_pid = 7;
+        let host_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 0xaa,
+                g: 0xbb,
+                b: 0xcc,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33,
+            }),
+        };
+
+        pane.apply_host_terminal_theme(host_theme);
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.transient_default_color_owner_pgid = Some(42);
+            core.terminal.write(b"\x1b]11;rgb:dd/ee/ff\x1b\\");
+        }
+        assert_eq!(
+            pane_default_theme(&pane).background,
+            Some(crate::terminal_theme::RgbColor {
+                r: 0xdd,
+                g: 0xee,
+                b: 0xff,
+            })
+        );
+
+        {
+            let mut core = pane.core.lock().unwrap();
+            assert!(restore_host_terminal_theme_if_needed(
+                &mut core,
+                pane_id,
+                shell_pid,
+                false,
+                Some(&shell_job(shell_pid)),
+            ));
+        }
+
+        assert_eq!(pane_default_theme(&pane).background, host_theme.background);
+        assert_eq!(pane_default_theme(&pane).foreground, host_theme.foreground);
     }
 
     #[tokio::test]
