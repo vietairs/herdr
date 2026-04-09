@@ -1737,11 +1737,83 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     );
 }
 
+fn release_notes_inline_spans<'a>(
+    text: &str,
+    base_style: Style,
+    code_style: Style,
+) -> (usize, Vec<Span<'a>>) {
+    let mut spans = Vec::new();
+    let mut width = 0;
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find('`') {
+        let (before, after_start) = remaining.split_at(start);
+        if !before.is_empty() {
+            width += before.chars().count();
+            spans.push(Span::styled(before.to_string(), base_style));
+        }
+
+        let after_start = &after_start[1..];
+        let Some(end) = after_start.find('`') else {
+            let literal = format!("`{after_start}");
+            width += literal.chars().count();
+            spans.push(Span::styled(literal, base_style));
+            remaining = "";
+            break;
+        };
+
+        let (code, after_end) = after_start.split_at(end);
+        width += code.chars().count();
+        if !code.is_empty() {
+            spans.push(Span::styled(code.to_string(), code_style));
+        }
+        remaining = &after_end[1..];
+    }
+
+    if !remaining.is_empty() {
+        width += remaining.chars().count();
+        spans.push(Span::styled(remaining.to_string(), base_style));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), base_style));
+    }
+
+    (width, spans)
+}
+
 pub(crate) fn release_notes_lines<'a>(body: &'a str, p: &Palette) -> Vec<(usize, Line<'a>)> {
     let mut lines = Vec::new();
+    let mut in_fenced_code_block = false;
+    let text_style = Style::default().fg(p.text);
+    let inline_code_style = Style::default()
+        .fg(p.accent)
+        .bg(p.surface0)
+        .add_modifier(Modifier::BOLD);
 
     for raw in body.lines() {
         let trimmed = raw.trim_end();
+        if trimmed.trim_start().starts_with("```") {
+            in_fenced_code_block = !in_fenced_code_block;
+            continue;
+        }
+
+        if in_fenced_code_block {
+            let code_bg = p.surface1;
+            let gutter_style = Style::default().fg(p.accent).bg(code_bg);
+            let code_style = Style::default().fg(p.text).bg(code_bg);
+            let width = 2 + trimmed.chars().count();
+            let mut spans = vec![
+                Span::styled("▏", gutter_style),
+                Span::styled(" ", code_style),
+            ];
+            if !trimmed.is_empty() {
+                spans.push(Span::styled(trimmed.to_string(), code_style));
+            }
+            lines.push((width, Line::from(spans)));
+            continue;
+        }
+
         if trimmed.is_empty() {
             lines.push((0, Line::raw("")));
             continue;
@@ -1764,25 +1836,21 @@ pub(crate) fn release_notes_lines<'a>(body: &'a str, p: &Palette) -> Vec<(usize,
         }
 
         if let Some(rest) = trimmed.strip_prefix("- ") {
-            let width = 3 + rest.chars().count();
-            lines.push((
-                width,
-                Line::from(vec![
-                    Span::styled(" • ", Style::default().fg(p.accent)),
-                    Span::styled(rest.to_string(), Style::default().fg(p.text)),
-                ]),
-            ));
+            let (text_width, mut spans) =
+                release_notes_inline_spans(rest, text_style, inline_code_style);
+            let width = 3 + text_width;
+            let mut line_spans = vec![Span::styled(" • ", Style::default().fg(p.accent))];
+            line_spans.append(&mut spans);
+            lines.push((width, Line::from(line_spans)));
             continue;
         }
 
-        let width = 1 + trimmed.chars().count();
-        lines.push((
-            width,
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(trimmed.to_string(), Style::default().fg(p.text)),
-            ]),
-        ));
+        let (text_width, mut spans) =
+            release_notes_inline_spans(trimmed, text_style, inline_code_style);
+        let width = 1 + text_width;
+        let mut line_spans = vec![Span::raw(" ")];
+        line_spans.append(&mut spans);
+        lines.push((width, Line::from(line_spans)));
     }
 
     lines
@@ -3212,6 +3280,55 @@ mod tests {
         let grab = scrollbar_thumb_grab_offset(metrics, track, row).expect("grab");
 
         assert_eq!(scrollbar_offset_from_drag_row(metrics, track, row, grab), 7);
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn release_notes_inline_code_spans_are_styled_without_backticks() {
+        let palette = Palette::catppuccin();
+        let lines = release_notes_lines("- `herdr pane run ...` now works", &palette);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_text(&lines[0].1), " • herdr pane run ... now works");
+        assert_eq!(lines[0].1.spans[1].content.as_ref(), "herdr pane run ...");
+        assert_eq!(lines[0].1.spans[1].style.fg, Some(palette.accent));
+        assert_eq!(lines[0].1.spans[1].style.bg, Some(palette.surface0));
+    }
+
+    #[test]
+    fn release_notes_fenced_code_blocks_render_as_preformatted_lines() {
+        let palette = Palette::catppuccin();
+        let lines = release_notes_lines(
+            "### Fixed\n```bash\njust check\n- not a bullet\n```\n- after",
+            &palette,
+        );
+
+        assert_eq!(lines.len(), 4);
+        assert_eq!(line_text(&lines[0].1), " fixed");
+        assert_eq!(line_text(&lines[1].1), "▏ just check");
+        assert_eq!(line_text(&lines[2].1), "▏ - not a bullet");
+        assert_eq!(line_text(&lines[3].1), " • after");
+        assert_eq!(lines[1].1.spans[0].style.fg, Some(palette.accent));
+        assert_eq!(lines[1].1.spans[0].style.bg, Some(palette.surface1));
+        assert_eq!(lines[1].1.spans[1].style.bg, Some(palette.surface1));
+        assert_eq!(lines[1].1.spans[2].style.bg, Some(palette.surface1));
+    }
+
+    #[test]
+    fn release_notes_fenced_code_blocks_preserve_blank_lines() {
+        let palette = Palette::catppuccin();
+        let lines = release_notes_lines("```\nfirst\n\nsecond\n```", &palette);
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(line_text(&lines[0].1), "▏ first");
+        assert_eq!(line_text(&lines[1].1), "▏ ");
+        assert_eq!(line_text(&lines[2].1), "▏ second");
     }
 
     #[test]
