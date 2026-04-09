@@ -827,12 +827,19 @@ impl App {
         }
 
         if update.previous_state != update.state {
+            let agent_status = self
+                .state
+                .workspaces
+                .get(update.ws_idx)
+                .and_then(|ws| ws.pane_state(update.pane_id))
+                .map(|pane| pane_agent_status(pane.state, pane.seen))
+                .unwrap_or_else(|| pane_agent_status(update.state, true));
             self.emit_event(crate::api::schema::EventEnvelope {
-                event: crate::api::schema::EventKind::PaneAgentStateChanged,
-                data: crate::api::schema::EventData::PaneAgentStateChanged {
+                event: crate::api::schema::EventKind::PaneAgentStatusChanged,
+                data: crate::api::schema::EventData::PaneAgentStatusChanged {
                     pane_id,
                     workspace_id,
-                    state: pane_agent_state(update.state),
+                    agent_status,
                 },
             });
         }
@@ -2200,7 +2207,7 @@ impl App {
     fn tab_info(&self, ws_idx: usize, tab_idx: usize) -> Option<crate::api::schema::TabInfo> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab = ws.tabs.get(tab_idx)?;
-        let (agg_state, _) = tab
+        let (agg_state, seen) = tab
             .panes
             .values()
             .map(|pane| (pane.state, pane.seen))
@@ -2213,7 +2220,7 @@ impl App {
             label: tab.display_name(),
             focused: self.state.active == Some(ws_idx) && ws.active_tab == tab_idx,
             pane_count: tab.panes.len(),
-            agent_state: pane_agent_state(agg_state),
+            agent_status: pane_agent_status(agg_state, seen),
         })
     }
 
@@ -2240,7 +2247,7 @@ impl App {
                 .and_then(|rt| rt.cwd())
                 .map(|cwd| cwd.display().to_string()),
             agent: pane.detected_agent.map(agent_name),
-            agent_state: pane_agent_state(pane.state),
+            agent_status: pane_agent_status(pane.state, pane.seen),
             revision: 0,
         })
     }
@@ -2266,7 +2273,7 @@ impl App {
 
     fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {
         let ws = &self.state.workspaces[index];
-        let (agg_state, _) = ws.aggregate_state();
+        let (agg_state, seen) = ws.aggregate_state();
         crate::api::schema::WorkspaceInfo {
             workspace_id: self.public_workspace_id(index),
             number: index + 1,
@@ -2277,7 +2284,7 @@ impl App {
             active_tab_id: self
                 .public_tab_id(index, ws.active_tab)
                 .unwrap_or_else(|| format!("{}:{}", ws.id, ws.active_tab + 1)),
-            agent_state: pane_agent_state(agg_state),
+            agent_status: pane_agent_status(agg_state, seen),
         }
     }
 }
@@ -2349,12 +2356,16 @@ fn detect_state_from_api(state: crate::api::schema::PaneAgentState) -> crate::de
     }
 }
 
-fn pane_agent_state(state: crate::detect::AgentState) -> crate::api::schema::PaneAgentState {
-    match state {
-        crate::detect::AgentState::Idle => crate::api::schema::PaneAgentState::Idle,
-        crate::detect::AgentState::Working => crate::api::schema::PaneAgentState::Working,
-        crate::detect::AgentState::Blocked => crate::api::schema::PaneAgentState::Blocked,
-        crate::detect::AgentState::Unknown => crate::api::schema::PaneAgentState::Unknown,
+fn pane_agent_status(
+    state: crate::detect::AgentState,
+    seen: bool,
+) -> crate::api::schema::AgentStatus {
+    match (state, seen) {
+        (crate::detect::AgentState::Idle, false) => crate::api::schema::AgentStatus::Done,
+        (crate::detect::AgentState::Idle, true) => crate::api::schema::AgentStatus::Idle,
+        (crate::detect::AgentState::Working, _) => crate::api::schema::AgentStatus::Working,
+        (crate::detect::AgentState::Blocked, _) => crate::api::schema::AgentStatus::Blocked,
+        (crate::detect::AgentState::Unknown, _) => crate::api::schema::AgentStatus::Unknown,
     }
 }
 

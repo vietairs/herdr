@@ -866,7 +866,7 @@ fn pane_report_agent_updates_effective_state() {
         ),
     );
     assert_eq!(pane["result"]["pane"]["agent"], "pi");
-    assert_eq!(pane["result"]["pane"]["agent_state"], "working");
+    assert_eq!(pane["result"]["pane"]["agent_status"], "working");
 
     cleanup_spawned_herdr(child, base);
 }
@@ -989,7 +989,7 @@ fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
             pane["result"]["pane"]["agent"].is_null(),
             "pane reacquired pi during graceful release: {pane}"
         );
-        assert_eq!(pane["result"]["pane"]["agent_state"], "unknown");
+        assert_eq!(pane["result"]["pane"]["agent_status"], "unknown");
         thread::sleep(Duration::from_millis(50));
     }
 
@@ -1005,7 +1005,7 @@ fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
             ),
         );
         if pane["result"]["pane"]["agent"].is_null()
-            && pane["result"]["pane"]["agent_state"] == "unknown"
+            && pane["result"]["pane"]["agent_status"] == "unknown"
         {
             break;
         }
@@ -1105,7 +1105,7 @@ fn pane_clear_agent_authority_restores_fallback_state() {
             pane_id
         ),
     );
-    let fallback_state = fallback_before_hook["result"]["pane"]["agent_state"]
+    let fallback_status = fallback_before_hook["result"]["pane"]["agent_status"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1136,13 +1136,13 @@ fn pane_clear_agent_authority_restores_fallback_state() {
         ),
     );
     assert_eq!(pane["result"]["pane"]["agent"], "pi");
-    assert_eq!(pane["result"]["pane"]["agent_state"], fallback_state);
+    assert_eq!(pane["result"]["pane"]["agent_status"], fallback_status);
 
     cleanup_spawned_herdr(child, base);
 }
 
 #[test]
-fn events_subscribe_streams_output_and_agent_state_events() {
+fn events_subscribe_streams_output_and_agent_status_events() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -1196,7 +1196,7 @@ fn events_subscribe_streams_output_and_agent_state_events() {
     let mut reader = open_subscription(
         &socket_path,
         &format!(
-            r#"{{"id":"sub_1","method":"events.subscribe","params":{{"subscriptions":[{{"type":"pane.output_matched","pane_id":"{}","source":"recent","lines":40,"match":{{"type":"substring","value":"hello from socket"}}}},{{"type":"pane.agent_state_changed","pane_id":"{}","state":"idle"}}]}}}}"#,
+            r#"{{"id":"sub_1","method":"events.subscribe","params":{{"subscriptions":[{{"type":"pane.output_matched","pane_id":"{}","source":"recent","lines":40,"match":{{"type":"substring","value":"hello from socket"}}}},{{"type":"pane.agent_status_changed","pane_id":"{}","agent_status":"idle"}}]}}}}"#,
             pane_id, pane_id,
         ),
     );
@@ -1252,10 +1252,134 @@ fn events_subscribe_streams_output_and_agent_state_events() {
     assert_eq!(send_enter["result"]["type"], "ok");
 
     let agent_idle = reader.read_json_line(Duration::from_secs(8));
-    assert_eq!(agent_idle["event"], "pane.agent_state_changed");
+    assert_eq!(agent_idle["event"], "pane.agent_status_changed");
     assert_eq!(agent_idle["data"]["pane_id"], pane_id);
-    assert_eq!(agent_idle["data"]["state"], "idle");
+    assert_eq!(agent_idle["data"]["agent_status"], "idle");
     assert_eq!(agent_idle["data"]["agent"], "pi");
+
+    cleanup_spawned_herdr(child, base);
+}
+
+#[test]
+fn pane_info_and_subscriptions_expose_done_agent_status() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin_dir = base.join("bin");
+
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_pi = bin_dir.join("pi");
+    fs::write(
+        &fake_pi,
+        "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_pi, perms).unwrap();
+    }
+
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
+    let child = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
+    );
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_status_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let background_pane_id = format!("{}-1", workspace_id);
+
+    let tab_created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_status_2","method":"tab.create","params":{{"workspace_id":"{}","focus":true}}}}"#,
+            workspace_id
+        ),
+    );
+    assert_eq!(tab_created["result"]["type"], "tab_info");
+
+    let mut reader = open_subscription(
+        &socket_path,
+        &format!(
+            r#"{{"id":"sub_status","method":"events.subscribe","params":{{"subscriptions":[{{"type":"pane.agent_status_changed","pane_id":"{}","agent_status":"done"}}]}}}}"#,
+            background_pane_id,
+        ),
+    );
+    let ack = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(ack["id"], "sub_status");
+    assert_eq!(ack["result"]["type"], "subscription_started");
+
+    let send_pi = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_status_3","method":"pane.send_text","params":{{"pane_id":"{}","text":"pi"}}}}"#,
+            background_pane_id
+        ),
+    );
+    assert_eq!(send_pi["result"]["type"], "ok");
+    let send_enter = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_status_4","method":"pane.send_keys","params":{{"pane_id":"{}","keys":["Enter"]}}}}"#,
+            background_pane_id
+        ),
+    );
+    assert_eq!(send_enter["result"]["type"], "ok");
+
+    let status_event = reader.read_json_line(Duration::from_secs(8));
+    assert_eq!(status_event["event"], "pane.agent_status_changed");
+    assert_eq!(status_event["data"]["pane_id"], background_pane_id);
+    assert_eq!(status_event["data"]["agent_status"], "done");
+    assert_eq!(status_event["data"]["agent"], "pi");
+
+    let pane = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_status_5","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+            background_pane_id
+        ),
+    );
+    assert_eq!(pane["result"]["pane"]["agent_status"], "done");
+
+    let focused_tab_id = created["result"]["workspace"]["active_tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tab_focus = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_status_6","method":"tab.focus","params":{{"tab_id":"{}"}}}}"#,
+            focused_tab_id
+        ),
+    );
+    assert_eq!(tab_focus["result"]["type"], "tab_info");
+
+    let pane_after_focus = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_status_7","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+            background_pane_id
+        ),
+    );
+    assert_eq!(pane_after_focus["result"]["pane"]["agent_status"], "idle");
 
     cleanup_spawned_herdr(child, base);
 }

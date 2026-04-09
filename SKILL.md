@@ -29,12 +29,11 @@ if you need the raw protocol or full api reference, read [`SOCKET_API.md`](./SOC
 
 **panes** are terminal splits inside a tab. each pane runs its own process — a shell, an agent, a server, anything.
 
-**agent state** is detected automatically by herdr. each pane can be:
+**agent status** is detected automatically by herdr. the api exposes one public field for it:
 
-- `idle` — agent finished and the state is calm
-- `working` — agent is actively working
-- `blocked` — agent needs input or approval
-- `unknown` — no recognized agent
+- `agent_status` — `idle`, `working`, `blocked`, `done`, `unknown`
+
+`done` means the agent finished, but you have not looked at that finished pane yet.
 
 plain shells still exist as panes, but herdr's sidebar agent section intentionally focuses on detected agents rather than listing every shell.
 
@@ -141,15 +140,15 @@ herdr wait output 1-3 --match "server.*ready" --regex --timeout 30000
 
 if it times out, exit code is `1`.
 
-## wait for an agent state
+## wait for an agent status
 
-block until another agent reaches a specific state:
+block until another agent reaches a specific status:
 
 ```bash
-herdr wait agent-state 1-1 --state idle --timeout 60000
+herdr wait agent-status 1-1 --status done --timeout 60000
 ```
 
-useful when you need another agent to finish before you proceed.
+use this when you want the same `done` / `idle` distinction the UI shows.
 
 ## send text or keys to a pane
 
@@ -264,13 +263,13 @@ herdr pane run 1-3 "review the test coverage in src/api/"
 ### coordinate with another agent
 
 ```bash
-herdr wait agent-state 1-1 --state idle --timeout 120000
+herdr wait agent-status 1-1 --status done --timeout 120000
 herdr pane read 1-1 --source recent --lines 100
 ```
 
 ## notes
 
-- `workspace list`, `workspace create`, `tab list`, `tab create`, `tab get`, `tab focus`, `tab rename`, `tab close`, `pane list`, `pane get`, `pane split`, `wait output`, and `wait agent-state` print json on success.
+- `workspace list`, `workspace create`, `tab list`, `tab create`, `tab get`, `tab focus`, `tab rename`, `tab close`, `pane list`, `pane get`, `pane split`, `wait output`, and `wait agent-status` print json on success.
 - `pane read` prints text, not json.
 - `pane read --source recent-unwrapped` is useful when you want to inspect the same unwrapped transcript that `wait output --source recent` matches against.
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success.

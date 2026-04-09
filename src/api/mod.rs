@@ -15,7 +15,7 @@ use regex::Regex;
 use tokio::sync::mpsc;
 
 use crate::api::schema::{
-    ErrorBody, ErrorResponse, Method, PaneAgentStateChangedEvent, PaneOutputMatchedEvent, Request,
+    ErrorBody, ErrorResponse, Method, PaneAgentStatusChangedEvent, PaneOutputMatchedEvent, Request,
     ResponseResult, Subscription, SubscriptionEventData, SubscriptionEventEnvelope,
     SubscriptionEventKind, SuccessResponse,
 };
@@ -553,10 +553,10 @@ struct ActiveOutputMatchedSubscription {
     request_prefix: String,
 }
 
-struct ActiveAgentStateChangedSubscription {
+struct ActiveAgentStatusChangedSubscription {
     pane_id: String,
-    state_filter: Option<crate::api::schema::PaneAgentState>,
-    last_state: Option<crate::api::schema::PaneAgentState>,
+    status_filter: Option<crate::api::schema::AgentStatus>,
+    last_status: Option<crate::api::schema::AgentStatus>,
     request_prefix: String,
 }
 
@@ -568,7 +568,7 @@ struct ActiveEventSubscription {
 enum ActiveSubscription {
     Event(ActiveEventSubscription),
     OutputMatched(ActiveOutputMatchedSubscription),
-    AgentStateChanged(ActiveAgentStateChangedSubscription),
+    AgentStatusChanged(ActiveAgentStatusChangedSubscription),
 }
 
 impl ActiveSubscription {
@@ -674,18 +674,21 @@ impl ActiveSubscription {
                     request_prefix: format!("{request_id}:sub:{index}"),
                 }))
             }
-            Subscription::PaneAgentStateChanged { pane_id, state } => {
+            Subscription::PaneAgentStatusChanged {
+                pane_id,
+                agent_status,
+            } => {
                 let probe =
                     match pane_get(format!("{request_id}:sub:{index}:probe"), &pane_id, api_tx) {
                         Ok(probe) => probe,
                         Err(error) => return Err(error),
                     };
 
-                Ok(Self::AgentStateChanged(
-                    ActiveAgentStateChangedSubscription {
+                Ok(Self::AgentStatusChanged(
+                    ActiveAgentStatusChangedSubscription {
                         pane_id,
-                        state_filter: state,
-                        last_state: Some(probe.agent_state),
+                        status_filter: agent_status,
+                        last_status: Some(probe.agent_status),
                         request_prefix: format!("{request_id}:sub:{index}"),
                     },
                 ))
@@ -703,7 +706,7 @@ impl ActiveSubscription {
             Self::OutputMatched(subscription) => {
                 serde_json::to_value(subscription.poll(api_tx)?).ok()
             }
-            Self::AgentStateChanged(subscription) => {
+            Self::AgentStatusChanged(subscription) => {
                 serde_json::to_value(subscription.poll(api_tx)?).ok()
             }
         }
@@ -758,7 +761,7 @@ impl ActiveOutputMatchedSubscription {
     }
 }
 
-impl ActiveAgentStateChangedSubscription {
+impl ActiveAgentStatusChangedSubscription {
     fn poll(&mut self, api_tx: &ApiRequestSender) -> Option<SubscriptionEventEnvelope> {
         let pane = pane_get(
             format!("{}:pane", self.request_prefix),
@@ -766,24 +769,24 @@ impl ActiveAgentStateChangedSubscription {
             api_tx,
         )
         .ok()?;
-        let current_state = pane.agent_state;
-        let previous_state = self.last_state.replace(current_state);
-        if previous_state.is_none() || previous_state == Some(current_state) {
+        let current_status = pane.agent_status;
+        let previous_status = self.last_status.replace(current_status);
+        if previous_status.is_none() || previous_status == Some(current_status) {
             return None;
         }
         if self
-            .state_filter
-            .is_some_and(|wanted| wanted != current_state)
+            .status_filter
+            .is_some_and(|wanted| wanted != current_status)
         {
             return None;
         }
 
         Some(SubscriptionEventEnvelope {
-            event: SubscriptionEventKind::PaneAgentStateChanged,
-            data: SubscriptionEventData::PaneAgentStateChanged(PaneAgentStateChangedEvent {
+            event: SubscriptionEventKind::PaneAgentStatusChanged,
+            data: SubscriptionEventData::PaneAgentStatusChanged(PaneAgentStatusChangedEvent {
                 pane_id: pane.pane_id,
                 workspace_id: pane.workspace_id,
-                state: current_state,
+                agent_status: current_status,
                 agent: pane.agent,
             }),
         })

@@ -253,11 +253,11 @@ pub enum Subscription {
         #[serde(default = "default_true")]
         strip_ansi: bool,
     },
-    #[serde(rename = "pane.agent_state_changed")]
-    PaneAgentStateChanged {
+    #[serde(rename = "pane.agent_status_changed")]
+    PaneAgentStatusChanged {
         pane_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        state: Option<PaneAgentState>,
+        agent_status: Option<AgentStatus>,
     },
 }
 
@@ -348,9 +348,9 @@ pub enum EventMatch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
     },
-    PaneAgentStateChanged {
+    PaneAgentStatusChanged {
         pane_id: String,
-        state: PaneAgentState,
+        agent_status: AgentStatus,
     },
 }
 
@@ -371,7 +371,7 @@ pub enum EventKind {
     PaneOutputChanged,
     PaneExited,
     PaneAgentDetected,
-    PaneAgentStateChanged,
+    PaneAgentStatusChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,7 +441,7 @@ pub struct WorkspaceInfo {
     pub pane_count: usize,
     pub tab_count: usize,
     pub active_tab_id: String,
-    pub agent_state: PaneAgentState,
+    pub agent_status: AgentStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,7 +452,7 @@ pub struct TabInfo {
     pub label: String,
     pub focused: bool,
     pub pane_count: usize,
-    pub agent_state: PaneAgentState,
+    pub agent_status: AgentStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,7 +465,7 @@ pub struct PaneInfo {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    pub agent_state: PaneAgentState,
+    pub agent_status: AgentStatus,
     pub revision: u64,
 }
 
@@ -490,8 +490,8 @@ pub struct EventEnvelope {
 pub enum SubscriptionEventKind {
     #[serde(rename = "pane.output_matched")]
     PaneOutputMatched,
-    #[serde(rename = "pane.agent_state_changed")]
-    PaneAgentStateChanged,
+    #[serde(rename = "pane.agent_status_changed")]
+    PaneAgentStatusChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,7 +504,7 @@ pub struct SubscriptionEventEnvelope {
 #[serde(untagged)]
 pub enum SubscriptionEventData {
     PaneOutputMatched(PaneOutputMatchedEvent),
-    PaneAgentStateChanged(PaneAgentStateChangedEvent),
+    PaneAgentStatusChanged(PaneAgentStatusChangedEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -515,10 +515,10 @@ pub struct PaneOutputMatchedEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneAgentStateChangedEvent {
+pub struct PaneAgentStatusChangedEvent {
     pub pane_id: String,
     pub workspace_id: String,
-    pub state: PaneAgentState,
+    pub agent_status: AgentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 }
@@ -581,10 +581,10 @@ pub enum EventData {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
     },
-    PaneAgentStateChanged {
+    PaneAgentStatusChanged {
         pane_id: String,
         workspace_id: String,
-        state: PaneAgentState,
+        agent_status: AgentStatus,
     },
 }
 
@@ -594,6 +594,16 @@ pub enum PaneAgentState {
     Idle,
     Working,
     Blocked,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Idle,
+    Working,
+    Blocked,
+    Done,
     Unknown,
 }
 
@@ -777,9 +787,9 @@ mod tests {
                         "match": { "type": "substring", "value": "auth: received" }
                     },
                     {
-                        "type": "pane.agent_state_changed",
+                        "type": "pane.agent_status_changed",
                         "pane_id": "p_1_1",
-                        "state": "blocked"
+                        "agent_status": "done"
                     }
                 ]
             }
@@ -803,9 +813,9 @@ mod tests {
         ));
         assert!(matches!(
             &params.subscriptions[1],
-            Subscription::PaneAgentStateChanged {
+            Subscription::PaneAgentStatusChanged {
                 pane_id,
-                state: Some(PaneAgentState::Blocked),
+                agent_status: Some(AgentStatus::Done),
             } if pane_id == "p_1_1"
         ));
     }
@@ -872,9 +882,9 @@ mod tests {
             "method": "events.wait",
             "params": {
                 "match_event": {
-                    "event": "pane_agent_state_changed",
+                    "event": "pane_agent_status_changed",
                     "pane_id": "p_1",
-                    "state": "blocked"
+                    "agent_status": "done"
                 },
                 "timeout_ms": 30000
             }
@@ -887,9 +897,9 @@ mod tests {
         };
         assert_eq!(
             params.match_event,
-            EventMatch::PaneAgentStateChanged {
+            EventMatch::PaneAgentStatusChanged {
                 pane_id: "p_1".into(),
-                state: PaneAgentState::Blocked,
+                agent_status: AgentStatus::Done,
             }
         );
     }

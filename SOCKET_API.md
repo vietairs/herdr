@@ -14,7 +14,7 @@ there are three practical ways to integrate with herdr:
 
 these layers are intentionally stacked on top of the same control surface.
 
-important difference: `pane.run` and `wait agent-state` are **cli conveniences**, not raw socket methods.
+important difference: `pane.run` and `wait agent-status` are **cli conveniences**, not raw socket methods.
 
 ## transport
 
@@ -109,7 +109,7 @@ for backward compatibility, requests also accept the older positional forms like
   "pane_count": 1,
   "tab_count": 1,
   "active_tab_id": "w64e95948145ed1:1",
-  "agent_state": "unknown"
+  "agent_status": "unknown"
 }
 ```
 
@@ -123,7 +123,7 @@ for backward compatibility, requests also accept the older positional forms like
   "label": "1",
   "focused": true,
   "pane_count": 1,
-  "agent_state": "unknown"
+  "agent_status": "unknown"
 }
 ```
 
@@ -137,11 +137,10 @@ for backward compatibility, requests also accept the older positional forms like
   "focused": true,
   "cwd": "/home/can/Projects/herdr",
   "agent": "pi",
-  "agent_state": "working",
+  "agent_status": "working",
   "revision": 0
 }
 ```
-
 `pane_read` responses contain objects like:
 
 ```json
@@ -156,12 +155,15 @@ for backward compatibility, requests also accept the older positional forms like
 }
 ```
 
-agent states are:
+`agent_status` is the public agent field:
 
 - `idle`
 - `working`
 - `blocked`
+- `done`
 - `unknown`
+
+`done` means the agent has finished, but you have not looked at that finished pane yet.
 
 ## methods at a glance
 
@@ -252,7 +254,7 @@ example response:
       "pane_count": 1,
       "tab_count": 1,
       "active_tab_id": "1:1",
-      "agent_state": "unknown"
+      "agent_status": "unknown"
     }
   }
 }
@@ -662,7 +664,7 @@ base lifecycle subscriptions:
 parameterized subscriptions:
 
 - `pane.output_matched`
-- `pane.agent_state_changed`
+- `pane.agent_status_changed`
 
 ### event naming rule
 
@@ -717,13 +719,13 @@ example pushed event:
       "pane_count": 1,
       "tab_count": 1,
       "active_tab_id": "1:1",
-      "agent_state": "unknown"
+      "agent_status": "unknown"
     }
   }
 }
 ```
 
-### example: subscribe to output matches and agent state changes
+### example: subscribe to output matches and agent status changes
 
 request:
 
@@ -741,9 +743,9 @@ request:
         "match": { "type": "substring", "value": "ready" }
       },
       {
-        "type": "pane.agent_state_changed",
+        "type": "pane.agent_status_changed",
         "pane_id": "1-1",
-        "state": "idle"
+        "agent_status": "done"
       }
     ]
   }
@@ -753,7 +755,7 @@ request:
 notes:
 
 - `pane.output_matched` supports `source`, optional `lines`, matcher config, and optional `strip_ansi`
-- `pane.agent_state_changed` accepts an optional `state` filter; if omitted, any state transition for that pane can match
+- `pane.agent_status_changed` accepts an optional `agent_status` filter; if omitted, any status transition for that pane can match
 
 example pushed `pane.output_matched` event:
 
@@ -776,20 +778,19 @@ example pushed `pane.output_matched` event:
 }
 ```
 
-example pushed `pane.agent_state_changed` event:
+example pushed `pane.agent_status_changed` event:
 
 ```json
 {
-  "event": "pane.agent_state_changed",
+  "event": "pane.agent_status_changed",
   "data": {
     "pane_id": "1-1",
     "workspace_id": "1",
-    "state": "idle",
+    "agent_status": "done",
     "agent": "pi"
   }
 }
 ```
-
 ## cli wrappers
 
 these commands talk to the same local socket surface and are usually the easiest starting point for shell scripts and coding agents.
@@ -835,7 +836,7 @@ wait commands:
 
 ```text
 herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]
-herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeout MS]
+herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]
 ```
 
 ### cli behavior notes
@@ -848,7 +849,8 @@ herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeo
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success
 - list/get/create/split/wait commands print json on success
 - `pane run` is a convenience wrapper for `pane.send_input` with the command text followed by a real `Enter` keypress
-- `wait agent-state` is a cli convenience built on top of event subscriptions
+- `wait agent-status` is a cli convenience built on top of event subscriptions
+- use it when you want the same `done` / `idle` distinction the UI shows
 - `--raw` disables ansi stripping for `pane read` and `wait output`
 - `wait output --source recent` matches against unwrapped recent terminal text by default, so pane width and soft wrapping do not break matches
 
@@ -863,10 +865,10 @@ herdr pane run 1-2 "npm run dev"
 herdr wait output 1-2 --match "ready" --timeout 30000
 ```
 
-wait for another agent to finish:
+wait for another agent to finish in the same user-facing sense the UI shows:
 
 ```bash
-herdr wait agent-state 1-1 --state idle --timeout 60000
+herdr wait agent-status 1-1 --status done --timeout 60000
 ```
 
 inspect another pane's output:

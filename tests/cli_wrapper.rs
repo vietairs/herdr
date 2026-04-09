@@ -776,7 +776,7 @@ fn pane_shell_gets_herdr_socket_and_pane_env() {
 }
 
 #[test]
-fn wait_agent_state_exits_when_state_matches() {
+fn wait_agent_status_exits_when_idle_status_matches() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
@@ -851,9 +851,9 @@ fn wait_agent_state_exits_when_state_matches() {
         &socket_path,
         &[
             "wait",
-            "agent-state",
+            "agent-status",
             "1-1",
-            "--state",
+            "--status",
             "idle",
             "--timeout",
             "5000",
@@ -865,8 +865,117 @@ fn wait_agent_state_exits_when_state_matches() {
         String::from_utf8_lossy(&waited.stderr)
     );
     let waited_json: serde_json::Value = serde_json::from_slice(&waited.stdout).unwrap();
-    assert_eq!(waited_json["event"], "pane.agent_state_changed");
-    assert_eq!(waited_json["data"]["state"], "idle");
+    assert_eq!(waited_json["event"], "pane.agent_status_changed");
+    assert_eq!(waited_json["data"]["agent_status"], "idle");
+    assert_eq!(waited_json["data"]["agent"], "pi");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn wait_agent_status_exits_when_done_status_matches() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin_dir = base.join("bin");
+
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_pi = bin_dir.join("pi");
+    fs::write(
+        &fake_pi,
+        "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fake_pi).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_pi, perms).unwrap();
+    }
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(
+        config_home.join("herdr/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    cmd.arg("--no-session");
+    cmd.env("XDG_CONFIG_HOME", &config_home);
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd.env("HERDR_SOCKET_PATH", &socket_path);
+    cmd.env_remove("HERDR_ENV");
+    cmd.env(
+        "PATH",
+        format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    let herdr = SpawnedHerdr {
+        _master: pair.master,
+        child,
+    };
+
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_cli_status_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let tab_created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_cli_status_2","method":"tab.create","params":{{"workspace_id":"{}","focus":true}}}}"#,
+            workspace_id
+        ),
+    );
+    assert_eq!(tab_created["result"]["type"], "tab_info");
+
+    let start_pi = run_cli(&socket_path, &["pane", "run", "1-1", "pi"]);
+    assert!(start_pi.status.success());
+
+    let waited = run_cli(
+        &socket_path,
+        &[
+            "wait",
+            "agent-status",
+            "1-1",
+            "--status",
+            "done",
+            "--timeout",
+            "5000",
+        ],
+    );
+    assert!(
+        waited.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&waited.stderr)
+    );
+    let waited_json: serde_json::Value = serde_json::from_slice(&waited.stdout).unwrap();
+    assert_eq!(waited_json["event"], "pane.agent_status_changed");
+    assert_eq!(waited_json["data"]["agent_status"], "done");
     assert_eq!(waited_json["data"]["agent"], "pi");
 
     cleanup_spawned_herdr(herdr, base);

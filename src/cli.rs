@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::api;
 use crate::api::schema::{
-    EmptyParams, Method, OutputMatch, PaneAgentState, PaneListParams, PaneReadParams,
+    AgentStatus, EmptyParams, Method, OutputMatch, PaneListParams, PaneReadParams,
     PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneTarget,
     PaneWaitForOutputParams, ReadSource, Request, SplitDirection, Subscription, TabCreateParams,
     TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams,
@@ -105,7 +105,7 @@ fn run_wait_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "output" => wait_output(&args[1..]),
-        "agent-state" => wait_agent_state(&args[1..]),
+        "agent-status" => wait_agent_status(&args[1..]),
         _ => {
             print_wait_help();
             Ok(2)
@@ -851,25 +851,25 @@ fn wait_output(args: &[String]) -> std::io::Result<i32> {
     Ok(0)
 }
 
-fn wait_agent_state(args: &[String]) -> std::io::Result<i32> {
+fn wait_agent_status(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeout MS]");
+        eprintln!("usage: herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]");
         return Ok(2);
     };
 
     let pane_id = normalize_pane_id(raw_pane_id);
     let mut timeout_ms = None;
-    let mut desired_state = None;
+    let mut desired_status = None;
 
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
-            "--state" => {
+            "--status" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --state");
+                    eprintln!("missing value for --status");
                     return Ok(2);
                 };
-                desired_state = Some(parse_agent_state(value)?);
+                desired_status = Some(parse_agent_status(value)?);
                 index += 2;
             }
             "--timeout" => {
@@ -887,21 +887,31 @@ fn wait_agent_state(args: &[String]) -> std::io::Result<i32> {
         }
     }
 
-    let Some(state) = desired_state else {
-        eprintln!("missing required --state");
+    let Some(agent_status) = desired_status else {
+        eprintln!("missing required --status");
         return Ok(2);
     };
 
-    let request = Request {
-        id: "cli:wait:agent-state".into(),
-        method: Method::EventsSubscribe(crate::api::schema::EventsSubscribeParams {
-            subscriptions: vec![Subscription::PaneAgentStateChanged {
-                pane_id,
-                state: Some(state),
-            }],
-        }),
-    };
+    wait_for_agent_change(
+        Request {
+            id: "cli:wait:agent-status".into(),
+            method: Method::EventsSubscribe(crate::api::schema::EventsSubscribeParams {
+                subscriptions: vec![Subscription::PaneAgentStatusChanged {
+                    pane_id,
+                    agent_status: Some(agent_status),
+                }],
+            }),
+        },
+        timeout_ms,
+        "timed out waiting for agent status change",
+    )
+}
 
+fn wait_for_agent_change(
+    request: Request,
+    timeout_ms: Option<u64>,
+    timeout_message: &str,
+) -> std::io::Result<i32> {
     let mut stream = UnixStream::connect(api::socket_path())?;
     stream.write_all(serde_json::to_string(&request)?.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -941,7 +951,7 @@ fn wait_agent_state(args: &[String]) -> std::io::Result<i32> {
                 std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
             ) =>
         {
-            eprintln!("timed out waiting for agent state change");
+            eprintln!("{timeout_message}");
             Ok(1)
         }
         Err(err) => Err(err),
@@ -1017,14 +1027,15 @@ fn parse_read_source(value: &str) -> std::io::Result<ReadSource> {
     }
 }
 
-fn parse_agent_state(value: &str) -> std::io::Result<PaneAgentState> {
+fn parse_agent_status(value: &str) -> std::io::Result<AgentStatus> {
     match value {
-        "idle" => Ok(PaneAgentState::Idle),
-        "working" => Ok(PaneAgentState::Working),
-        "blocked" => Ok(PaneAgentState::Blocked),
-        "unknown" => Ok(PaneAgentState::Unknown),
+        "idle" => Ok(AgentStatus::Idle),
+        "working" => Ok(AgentStatus::Working),
+        "blocked" => Ok(AgentStatus::Blocked),
+        "done" => Ok(AgentStatus::Done),
+        "unknown" => Ok(AgentStatus::Unknown),
         _ => Err(std::io::Error::other(format!(
-            "invalid agent state: {value} (expected idle, working, blocked, or unknown)"
+            "invalid agent status: {value} (expected idle, working, blocked, done, or unknown)"
         ))),
     }
 }
@@ -1077,7 +1088,7 @@ fn print_wait_help() {
     eprintln!("herdr wait commands:");
     eprintln!("  herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex]");
     eprintln!(
-        "  herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeout MS]"
+        "  herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]"
     );
 }
 
