@@ -1112,11 +1112,8 @@ fn ghostty_extract_selection(
     selection: &crate::selection::Selection,
 ) -> Result<String, crate::ghostty::Error> {
     let ((start_row, start_col), (end_row, end_col)) = selection.ordered_cells();
-    core.terminal.read_text_viewport(
-        (start_col, u32::from(start_row)),
-        (end_col, u32::from(end_row)),
-        false,
-    )
+    core.terminal
+        .read_text_screen((start_col, start_row), (end_col, end_row), false)
 }
 
 fn ghostty_screen_row(
@@ -1868,9 +1865,19 @@ impl PaneRuntime {
 #[cfg(test)]
 impl PaneRuntime {
     pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
+        Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
+    }
+
+    pub(crate) fn test_with_scrollback_bytes(
+        cols: u16,
+        rows: u16,
+        scrollback_limit_bytes: usize,
+        bytes: &[u8],
+    ) -> Self {
         let (tx, _rx) = mpsc::channel(4);
         let (resize_tx, _resize_rx) = mpsc::channel(1);
-        let mut terminal = crate::ghostty::Terminal::new(cols, rows, 0).unwrap();
+        let mut terminal =
+            crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes).unwrap();
         terminal.write(bytes);
 
         Self {
@@ -2164,6 +2171,29 @@ mod tests {
 
         assert!(pane.visible_text().contains("000000"));
         assert_eq!(pane.detection_text(), bottom_snapshot);
+    }
+
+    #[test]
+    fn extract_selection_reads_screen_rows_not_current_viewport() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(8, 3, 1024).unwrap();
+        write_numbered_lines(&mut terminal, 8);
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        pane.set_scroll_offset_from_bottom(3);
+        let metrics = pane
+            .scroll_metrics()
+            .expect("scroll metrics after initial scroll");
+        let mut selection =
+            crate::selection::Selection::anchor(PaneId::from_raw(1), 0, 0, Some(metrics));
+        selection.drag(5, 2, Rect::new(0, 0, 8, 3), Some(metrics));
+
+        pane.scroll_reset();
+
+        let text = pane
+            .extract_selection(&selection)
+            .expect("selection should extract text");
+        assert_eq!(text, "000003\n000004\n000005");
     }
 
     #[test]

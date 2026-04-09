@@ -2164,7 +2164,12 @@ impl AppState {
                         mouse.row - info.inner_rect.y,
                         mouse.column - info.inner_rect.x,
                     );
-                    self.selection = Some(Selection::anchor(info.id, row, col, info.inner_rect));
+                    self.selection = Some(Selection::anchor(
+                        info.id,
+                        row,
+                        col,
+                        self.pane_scroll_metrics(info.id),
+                    ));
 
                     self.focus_pane(info.id);
                     if self.mode != Mode::Terminal {
@@ -2185,6 +2190,11 @@ impl AppState {
             }
 
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.selection.is_some() {
+                    self.update_selection_drag(mouse.column, mouse.row);
+                    return None;
+                }
+
                 if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
                     if self.forward_pane_mouse_button(&info, mouse) {
                         self.selection = None;
@@ -2273,12 +2283,22 @@ impl AppState {
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::KeybindHelpScrollbar { .. } => {}
                     }
-                } else if let Some(sel) = &mut self.selection {
-                    sel.drag(mouse.column, mouse.row);
                 }
             }
 
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.selection.is_some() {
+                    self.workspace_press = None;
+                    self.drag = None;
+                    let was_click = self.selection.as_ref().is_some_and(|s| s.was_just_click());
+                    if was_click {
+                        self.selection = None;
+                    } else {
+                        self.copy_selection();
+                    }
+                    return None;
+                }
+
                 if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
                     if self.forward_pane_mouse_button(&info, mouse) {
                         self.selection = None;
@@ -2328,8 +2348,10 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !in_sidebar => {
-                self.selection = None;
-                self.handle_terminal_wheel(mouse);
+                if !self.scroll_selection_with_wheel(mouse) {
+                    self.selection = None;
+                    self.handle_terminal_wheel(mouse);
+                }
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
@@ -2769,6 +2791,10 @@ impl AppState {
             .or_else(|| self.pane_frame_at(col, row))
     }
 
+    fn pane_info_by_id(&self, pane_id: crate::layout::PaneId) -> Option<&PaneInfo> {
+        self.view.pane_infos.iter().find(|info| info.id == pane_id)
+    }
+
     fn pane_frame_at(&self, col: u16, row: u16) -> Option<&PaneInfo> {
         self.view.pane_infos.iter().find(|p| {
             col >= p.rect.x
@@ -2801,6 +2827,79 @@ impl AppState {
                 rt.scroll_down(lines);
             }
         }
+    }
+
+    fn pane_scroll_metrics(
+        &self,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<crate::pane::ScrollMetrics> {
+        self.active
+            .and_then(|i| self.workspaces.get(i))
+            .and_then(|ws| ws.runtime(pane_id))
+            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+    }
+
+    fn update_selection_cursor(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        screen_col: u16,
+        screen_row: u16,
+    ) {
+        let Some(info) = self.pane_info_by_id(pane_id).cloned() else {
+            return;
+        };
+        let metrics = self.pane_scroll_metrics(pane_id);
+        if let Some(selection) = self.selection.as_mut() {
+            selection.drag(screen_col, screen_row, info.inner_rect, metrics);
+        }
+    }
+
+    fn selection_edge_scroll_lines(distance: u16) -> usize {
+        usize::from(distance).saturating_mul(3).clamp(3, 15)
+    }
+
+    fn update_selection_drag(&mut self, screen_col: u16, screen_row: u16) {
+        let Some(pane_id) = self.selection.as_ref().map(|selection| selection.pane_id) else {
+            return;
+        };
+        let Some(info) = self.pane_info_by_id(pane_id).cloned() else {
+            return;
+        };
+
+        let bottom = info.inner_rect.y + info.inner_rect.height.saturating_sub(1);
+        if screen_row < info.inner_rect.y {
+            self.scroll_pane_up(
+                pane_id,
+                Self::selection_edge_scroll_lines(info.inner_rect.y - screen_row),
+            );
+        } else if screen_row > bottom {
+            self.scroll_pane_down(
+                pane_id,
+                Self::selection_edge_scroll_lines(screen_row - bottom),
+            );
+        }
+
+        self.update_selection_cursor(pane_id, screen_col, screen_row);
+    }
+
+    fn scroll_selection_with_wheel(&mut self, mouse: MouseEvent) -> bool {
+        const LINES_PER_NOTCH: usize = 3;
+
+        let Some(selection) = self.selection.as_ref() else {
+            return false;
+        };
+        if !selection.is_in_progress() {
+            return false;
+        }
+        let pane_id = selection.pane_id;
+        self.focus_pane(pane_id);
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_pane_up(pane_id, LINES_PER_NOTCH),
+            MouseEventKind::ScrollDown => self.scroll_pane_down(pane_id, LINES_PER_NOTCH),
+            _ => return false,
+        }
+        self.update_selection_cursor(pane_id, mouse.column, mouse.row);
+        true
     }
 
     fn handle_terminal_wheel(&mut self, mouse: MouseEvent) {
@@ -3049,6 +3148,13 @@ mod tests {
             row,
             modifiers: KeyModifiers::empty(),
         }
+    }
+
+    fn numbered_lines_bytes(count: usize) -> Vec<u8> {
+        (0..count)
+            .map(|i| format!("{i:06}\r\n"))
+            .collect::<String>()
+            .into_bytes()
     }
 
     fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
@@ -4058,6 +4164,166 @@ mod tests {
         ));
 
         assert!(!app.state.sidebar_collapsed);
+    }
+
+    #[tokio::test]
+    async fn dragging_selection_above_pane_autoscrolls_and_extends_into_scrollback() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                16 * 1024,
+                &numbered_lines_bytes(64),
+            ),
+        );
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        let start_metrics = app.state.workspaces[0]
+            .runtime(pane_id)
+            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .expect("initial scroll metrics");
+        let start_row = info.inner_rect.y;
+        let start_col = info.inner_rect.x + 2;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start_col,
+            start_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            start_col,
+            info.inner_rect.y.saturating_sub(1),
+        ));
+
+        let end_metrics = app.state.workspaces[0]
+            .runtime(pane_id)
+            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .expect("scroll metrics after drag");
+        assert_eq!(
+            end_metrics.offset_from_bottom,
+            start_metrics.offset_from_bottom + 3
+        );
+
+        let selection = app.state.selection.as_ref().expect("selection after drag");
+        assert!(selection.is_visible());
+        assert_eq!(
+            selection.ordered_cells(),
+            (
+                (
+                    (start_metrics.max_offset_from_bottom - end_metrics.offset_from_bottom) as u32,
+                    2,
+                ),
+                (start_metrics.max_offset_from_bottom as u32, 2),
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_dragged_selection_clears_highlight_after_copy() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                16 * 1024,
+                &numbered_lines_bytes(64),
+            ),
+        );
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        let row = info.inner_rect.y;
+        let start_col = info.inner_rect.x + 1;
+        let end_col = info.inner_rect.x + 4;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start_col,
+            row,
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), end_col, row));
+        assert!(app.state.selection.is_some());
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), end_col, row));
+
+        assert!(app.state.selection.is_none());
+    }
+
+    #[tokio::test]
+    async fn wheel_scroll_keeps_in_progress_selection_and_extends_it() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                16 * 1024,
+                &numbered_lines_bytes(64),
+            ),
+        );
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        let start_metrics = app.state.workspaces[0]
+            .runtime(pane_id)
+            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .expect("initial scroll metrics");
+        let top_row = info.inner_rect.y;
+        let col = info.inner_rect.x + 2;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, top_row));
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, col, top_row));
+
+        let end_metrics = app.state.workspaces[0]
+            .runtime(pane_id)
+            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .expect("scroll metrics after wheel");
+        assert_eq!(
+            end_metrics.offset_from_bottom,
+            start_metrics.offset_from_bottom + 3
+        );
+
+        let selection = app.state.selection.as_ref().expect("selection after wheel");
+        assert!(selection.is_visible());
+        assert_eq!(
+            selection.ordered_cells(),
+            (
+                (
+                    (start_metrics.max_offset_from_bottom - end_metrics.offset_from_bottom) as u32,
+                    2,
+                ),
+                (start_metrics.max_offset_from_bottom as u32, 2),
+            )
+        );
     }
 
     #[test]

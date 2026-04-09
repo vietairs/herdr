@@ -1240,6 +1240,7 @@ fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
                 frame,
                 info.id,
                 info.inner_rect,
+                rt.scroll_metrics(),
                 &app.palette,
             );
         }
@@ -1459,6 +1460,7 @@ fn render_selection_highlight(
     frame: &mut Frame,
     pane_id: crate::layout::PaneId,
     inner: Rect,
+    scroll_metrics: Option<crate::pane::ScrollMetrics>,
     p: &Palette,
 ) {
     if let Some(sel) = selection {
@@ -1466,7 +1468,7 @@ fn render_selection_highlight(
             let buf = frame.buffer_mut();
             for y in 0..inner.height {
                 for x in 0..inner.width {
-                    if sel.contains(y, x) {
+                    if sel.contains(y, x, scroll_metrics) {
                         let cell = &mut buf[(inner.x + x, inner.y + y)];
                         cell.set_style(Style::default().fg(p.panel_bg).bg(p.blue));
                     }

@@ -7,13 +7,13 @@
 //!   MouseUp           → Text extracted, copied via OSC 52, highlight stays
 //!   Next click / key  → Selection cleared
 //!
-//! Coordinates are stored relative to the pane's inner area (the region
-//! where terminal content is rendered, excluding borders).
+//! Rows are stored in screen-buffer coordinates instead of viewport-relative
+//! coordinates. That keeps selection stable while the pane scrolls.
 
 use ratatui::layout::Rect;
 use std::io::Write;
 
-use crate::layout::PaneId;
+use crate::{layout::PaneId, pane::ScrollMetrics};
 
 /// Current phase of a selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,36 +33,44 @@ enum Phase {
 pub struct Selection {
     /// Which pane the selection belongs to.
     pub pane_id: PaneId,
-    /// Anchor position in pane-relative coordinates (row, col).
-    anchor: (u16, u16),
-    /// Current/final position in pane-relative coordinates (row, col).
-    cursor: (u16, u16),
+    /// Anchor position in screen-buffer coordinates (row, col).
+    anchor: (u32, u16),
+    /// Current/final position in screen-buffer coordinates (row, col).
+    cursor: (u32, u16),
     /// Selection phase.
     phase: Phase,
-    /// The inner rect of the pane (for clamping during drag).
-    /// This is the content area, excluding borders.
-    pane_inner: Rect,
 }
 
 impl Selection {
     /// Start a potential selection. This records the anchor but doesn't
     /// make anything visible yet — the user might just be clicking.
-    pub fn anchor(pane_id: PaneId, row: u16, col: u16, pane_inner: Rect) -> Self {
+    pub fn anchor(
+        pane_id: PaneId,
+        viewport_row: u16,
+        col: u16,
+        metrics: Option<ScrollMetrics>,
+    ) -> Self {
+        let anchor = (absolute_row_for_viewport_row(viewport_row, metrics), col);
         Self {
             pane_id,
-            anchor: (row, col),
-            cursor: (row, col),
+            anchor,
+            cursor: anchor,
             phase: Phase::Anchored,
-            pane_inner,
         }
     }
 
     /// Extend the selection as the mouse drags. Activates highlighting
     /// once the cursor moves to a different cell than the anchor.
     /// Screen coordinates are clamped to the pane boundary.
-    pub fn drag(&mut self, screen_col: u16, screen_row: u16) {
-        let (row, col) = self.clamp_to_pane(screen_col, screen_row);
-        self.cursor = (row, col);
+    pub fn drag(
+        &mut self,
+        screen_col: u16,
+        screen_row: u16,
+        pane_inner: Rect,
+        metrics: Option<ScrollMetrics>,
+    ) {
+        let (viewport_row, col) = clamp_to_pane(screen_col, screen_row, pane_inner);
+        self.cursor = (absolute_row_for_viewport_row(viewport_row, metrics), col);
         if self.cursor != self.anchor {
             self.phase = Phase::Dragging;
         }
@@ -89,8 +97,13 @@ impl Selection {
         self.phase == Phase::Anchored
     }
 
+    /// Whether the pointer is still down and the selection can keep extending.
+    pub fn is_in_progress(&self) -> bool {
+        matches!(self.phase, Phase::Anchored | Phase::Dragging)
+    }
+
     /// Returns (start, end) in reading order (top-left to bottom-right).
-    fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+    fn ordered(&self) -> ((u32, u16), (u32, u16)) {
         let (ar, ac) = self.anchor;
         let (cr, cc) = self.cursor;
         if ar < cr || (ar == cr && ac <= cc) {
@@ -100,42 +113,56 @@ impl Selection {
         }
     }
 
-    pub(crate) fn ordered_cells(&self) -> ((u16, u16), (u16, u16)) {
+    pub(crate) fn ordered_cells(&self) -> ((u32, u16), (u32, u16)) {
         self.ordered()
     }
 
     /// Check whether a pane-relative cell (row, col) is inside the selection.
-    pub fn contains(&self, row: u16, col: u16) -> bool {
+    pub fn contains(&self, viewport_row: u16, col: u16, metrics: Option<ScrollMetrics>) -> bool {
         if !self.is_visible() {
             return false;
         }
+        let row = absolute_row_for_viewport_row(viewport_row, metrics);
         let ((sr, sc), (er, ec)) = self.ordered();
         if row < sr || row > er {
             return false;
         }
         if sr == er {
-            // Single-line: from sc to ec (inclusive)
             col >= sc && col <= ec
         } else if row == sr {
-            // First line: from sc to end of line
             col >= sc
         } else if row == er {
-            // Last line: from start to ec
             col <= ec
         } else {
-            // Middle rows: fully selected
             true
         }
     }
+}
 
-    /// Clamp screen coordinates to the pane's inner area and convert
-    /// to pane-relative coordinates.
-    fn clamp_to_pane(&self, screen_col: u16, screen_row: u16) -> (u16, u16) {
-        let r = &self.pane_inner;
-        let clamped_col = screen_col.clamp(r.x, r.x + r.width.saturating_sub(1));
-        let clamped_row = screen_row.clamp(r.y, r.y + r.height.saturating_sub(1));
-        (clamped_row - r.y, clamped_col - r.x)
-    }
+fn viewport_top_row(metrics: Option<ScrollMetrics>) -> u32 {
+    metrics
+        .map(|metrics| {
+            metrics
+                .max_offset_from_bottom
+                .saturating_sub(metrics.offset_from_bottom)
+        })
+        .unwrap_or(0) as u32
+}
+
+fn absolute_row_for_viewport_row(viewport_row: u16, metrics: Option<ScrollMetrics>) -> u32 {
+    viewport_top_row(metrics) + u32::from(viewport_row)
+}
+
+fn clamp_to_pane(screen_col: u16, screen_row: u16, pane_inner: Rect) -> (u16, u16) {
+    let clamped_col = screen_col.clamp(
+        pane_inner.x,
+        pane_inner.x + pane_inner.width.saturating_sub(1),
+    );
+    let clamped_row = screen_row.clamp(
+        pane_inner.y,
+        pane_inner.y + pane_inner.height.saturating_sub(1),
+    );
+    (clamped_row - pane_inner.y, clamped_col - pane_inner.x)
 }
 
 /// Write text to the system clipboard via OSC 52.
@@ -158,8 +185,9 @@ pub fn write_osc52(text: &str) {
 mod tests {
     use super::*;
 
-    fn make_sel(sr: u16, sc: u16, er: u16, ec: u16) -> Selection {
-        let mut sel = Selection::anchor(PaneId::from_raw(0), sr, sc, Rect::new(0, 0, 80, 24));
+    fn make_sel(sr: u32, sc: u16, er: u32, ec: u16) -> Selection {
+        let mut sel = Selection::anchor(PaneId::from_raw(0), sr as u16, sc, None);
+        sel.anchor = (sr, sc);
         sel.cursor = (er, ec);
         sel.phase = Phase::Dragging;
         sel
@@ -180,43 +208,38 @@ mod tests {
     #[test]
     fn single_line_contains() {
         let sel = make_sel(2, 5, 2, 15);
-        assert!(!sel.contains(2, 4));
-        assert!(sel.contains(2, 5));
-        assert!(sel.contains(2, 10));
-        assert!(sel.contains(2, 15)); // inclusive
-        assert!(!sel.contains(2, 16));
-        assert!(!sel.contains(1, 10));
-        assert!(!sel.contains(3, 10));
+        assert!(!sel.contains(2, 4, None));
+        assert!(sel.contains(2, 5, None));
+        assert!(sel.contains(2, 10, None));
+        assert!(sel.contains(2, 15, None));
+        assert!(!sel.contains(2, 16, None));
+        assert!(!sel.contains(1, 10, None));
+        assert!(!sel.contains(3, 10, None));
     }
 
     #[test]
     fn multi_line_contains() {
         let sel = make_sel(2, 5, 4, 10);
-        // Row 2: from col 5 to end
-        assert!(!sel.contains(2, 4));
-        assert!(sel.contains(2, 5));
-        assert!(sel.contains(2, 79));
-
-        // Row 3: fully selected
-        assert!(sel.contains(3, 0));
-        assert!(sel.contains(3, 79));
-
-        // Row 4: from start to col 10
-        assert!(sel.contains(4, 0));
-        assert!(sel.contains(4, 10));
-        assert!(!sel.contains(4, 11));
+        assert!(!sel.contains(2, 4, None));
+        assert!(sel.contains(2, 5, None));
+        assert!(sel.contains(2, 79, None));
+        assert!(sel.contains(3, 0, None));
+        assert!(sel.contains(3, 79, None));
+        assert!(sel.contains(4, 0, None));
+        assert!(sel.contains(4, 10, None));
+        assert!(!sel.contains(4, 11, None));
     }
 
     #[test]
     fn anchored_not_visible() {
-        let sel = Selection::anchor(PaneId::from_raw(0), 5, 10, Rect::new(0, 0, 80, 24));
+        let sel = Selection::anchor(PaneId::from_raw(0), 5, 10, None);
         assert!(!sel.is_visible());
-        assert!(!sel.contains(5, 10));
+        assert!(!sel.contains(5, 10, None));
     }
 
     #[test]
     fn click_without_drag() {
-        let mut sel = Selection::anchor(PaneId::from_raw(0), 5, 10, Rect::new(0, 0, 80, 24));
+        let mut sel = Selection::anchor(PaneId::from_raw(0), 5, 10, None);
         assert!(sel.was_just_click());
         let copied = sel.finish();
         assert!(!copied);
@@ -224,8 +247,8 @@ mod tests {
 
     #[test]
     fn drag_then_finish() {
-        let mut sel = Selection::anchor(PaneId::from_raw(0), 5, 10, Rect::new(10, 5, 80, 24));
-        sel.drag(20, 7); // screen coords → clamped to pane
+        let mut sel = Selection::anchor(PaneId::from_raw(0), 5, 10, None);
+        sel.drag(20, 7, Rect::new(10, 5, 80, 24), None);
         assert!(sel.is_visible());
         assert!(!sel.was_just_click());
         let copied = sel.finish();
@@ -233,15 +256,54 @@ mod tests {
     }
 
     #[test]
-    fn clamp_to_pane_bounds() {
-        let sel = Selection::anchor(PaneId::from_raw(0), 0, 0, Rect::new(10, 5, 80, 24));
-        // Drag way outside pane bounds
-        let (row, col) = sel.clamp_to_pane(200, 100);
-        assert_eq!(row, 23); // clamped to height - 1
-        assert_eq!(col, 79); // clamped to width - 1
+    fn drag_uses_buffer_rows_when_scrolled() {
+        let mut sel = Selection::anchor(
+            PaneId::from_raw(0),
+            0,
+            10,
+            Some(ScrollMetrics {
+                offset_from_bottom: 1,
+                max_offset_from_bottom: 10,
+                viewport_rows: 4,
+            }),
+        );
 
-        // Drag left of pane
-        let (row, col) = sel.clamp_to_pane(0, 0);
+        sel.drag(
+            10,
+            5,
+            Rect::new(10, 5, 80, 4),
+            Some(ScrollMetrics {
+                offset_from_bottom: 2,
+                max_offset_from_bottom: 10,
+                viewport_rows: 4,
+            }),
+        );
+
+        assert_eq!(sel.ordered_cells(), ((8, 0), (9, 10)));
+    }
+
+    #[test]
+    fn contains_tracks_current_viewport_after_scroll() {
+        let sel = make_sel(8, 2, 10, 4);
+        let metrics = Some(ScrollMetrics {
+            offset_from_bottom: 2,
+            max_offset_from_bottom: 10,
+            viewport_rows: 4,
+        });
+
+        assert!(sel.contains(0, 2, metrics));
+        assert!(sel.contains(1, 40, metrics));
+        assert!(sel.contains(2, 4, metrics));
+        assert!(!sel.contains(3, 4, metrics));
+    }
+
+    #[test]
+    fn clamp_to_pane_bounds() {
+        let (row, col) = clamp_to_pane(200, 100, Rect::new(10, 5, 80, 24));
+        assert_eq!(row, 23);
+        assert_eq!(col, 79);
+
+        let (row, col) = clamp_to_pane(0, 0, Rect::new(10, 5, 80, 24));
         assert_eq!(row, 0);
         assert_eq!(col, 0);
     }

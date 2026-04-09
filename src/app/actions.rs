@@ -357,33 +357,45 @@ impl AppState {
     }
 
     pub fn copy_selection(&mut self) {
-        let sel = match self.selection.as_mut() {
-            Some(s) => {
-                if !s.finish() {
+        let text = {
+            let sel = match self.selection.as_mut() {
+                Some(s) => {
+                    if !s.finish() {
+                        self.selection = None;
+                        return;
+                    }
+                    s
+                }
+                None => return,
+            };
+
+            let ws = match self.active.and_then(|i| self.workspaces.get(i)) {
+                Some(ws) => ws,
+                None => {
                     self.selection = None;
                     return;
                 }
-                s
-            }
-            None => return,
+            };
+
+            let rt = match ws.runtime(sel.pane_id) {
+                Some(r) => r,
+                None => {
+                    self.selection = None;
+                    return;
+                }
+            };
+
+            rt.extract_selection(sel)
         };
 
-        let ws = match self.active.and_then(|i| self.workspaces.get(i)) {
-            Some(ws) => ws,
-            None => return,
-        };
-
-        let rt = match ws.runtime(sel.pane_id) {
-            Some(r) => r,
-            None => return,
-        };
-
-        if let Some(text) = rt.extract_selection(sel) {
+        if let Some(text) = text {
             if !text.is_empty() {
                 crate::selection::write_osc52(&text);
                 info!(len = text.len(), "copied selection to clipboard");
             }
         }
+
+        self.selection = None;
     }
 }
 
