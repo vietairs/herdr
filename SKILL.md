@@ -71,6 +71,14 @@ create a new tab:
 herdr tab create --workspace 1
 ```
 
+without `--label`, the new tab keeps the default numbered tab name.
+
+create and name it in one step:
+
+```bash
+herdr tab create --workspace 1 --label "logs"
+```
+
 rename it:
 
 ```bash
@@ -178,6 +186,14 @@ create a new workspace:
 herdr workspace create --cwd /path/to/project
 ```
 
+without `--label`, the new workspace keeps the default cwd-based name.
+
+create and name one in one step:
+
+```bash
+herdr workspace create --cwd /path/to/project --label "api server"
+```
+
 create one without focusing it:
 
 ```bash
@@ -276,4 +292,6 @@ herdr pane read 1-1 --source recent --lines 100
 - parse ids from `workspace create`, `tab create`, and `pane split` responses when you need new ids. for `pane split`, the new pane id is at `result.pane.pane_id`.
 - use `pane read` for current output that already exists. use `wait output` for future output you expect next.
 - `--no-focus` on split, tab create, and workspace create keeps your current terminal context focused.
+- without `--label`, workspace create keeps cwd-based naming and tab create keeps numbered naming.
+- `--label` on tab create and workspace create applies the custom name immediately.
 - if you are running inside herdr, the `HERDR_ENV` environment variable is set to `1`.

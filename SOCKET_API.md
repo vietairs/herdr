@@ -801,7 +801,7 @@ workspace commands:
 
 ```text
 herdr workspace list
-herdr workspace create [--cwd PATH] [--no-focus]
+herdr workspace create [--cwd PATH] [--label TEXT] [--no-focus]
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
@@ -812,7 +812,7 @@ tab commands:
 
 ```text
 herdr tab list [--workspace <workspace_id>]
-herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--no-focus]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--no-focus]
 herdr tab get <tab_id>
 herdr tab focus <tab_id>
 herdr tab rename <tab_id> <label>
@@ -842,7 +842,11 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 ### cli behavior notes
 
 - `workspace create` focuses by default; pass `--no-focus` to keep focus where it is
+- `workspace create` without `--label` keeps the default cwd-based workspace naming
+- `workspace create --label` applies the custom workspace name immediately
 - `tab create` focuses by default; pass `--no-focus` to keep focus where it is
+- `tab create` without `--label` keeps the default numbered tab naming
+- `tab create --label` applies the custom tab name immediately
 - `pane split` focuses the new pane by default; pass `--no-focus` to keep focus on the original pane
 - `pane read` prints **text**, not json
 - `pane read --source recent-unwrapped` returns recent terminal text with soft wraps joined back together
@@ -859,7 +863,7 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 create a workspace, split a pane, run a server, and wait for readiness:
 
 ```bash
-herdr workspace create --cwd /path/to/project
+herdr workspace create --cwd /path/to/project --label "api server"
 herdr pane split 1-1 --direction right --no-focus
 herdr pane run 1-2 "npm run dev"
 herdr wait output 1-2 --match "ready" --timeout 30000

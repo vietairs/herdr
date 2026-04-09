@@ -1069,6 +1069,11 @@ impl App {
                     .unwrap_or_else(|| std::path::PathBuf::from("/"));
                 match self.create_workspace_with_options(cwd, params.focus) {
                     Ok(index) => {
+                        if let Some(label) = params.label {
+                            if let Some(workspace) = self.state.workspaces.get_mut(index) {
+                                workspace.set_custom_name(label);
+                            }
+                        }
                         let workspace = self.workspace_info(index);
                         self.emit_event(crate::api::schema::EventEnvelope {
                             event: crate::api::schema::EventKind::WorkspaceCreated,
@@ -1280,7 +1285,13 @@ impl App {
                 }
             }
             Method::TabCreate(params) => {
-                let ws_idx = if let Some(workspace_id) = params.workspace_id {
+                let crate::api::schema::TabCreateParams {
+                    workspace_id,
+                    cwd,
+                    focus,
+                    label,
+                } = params;
+                let ws_idx = if let Some(workspace_id) = workspace_id {
                     let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
                         return serde_json::to_string(&ErrorResponse {
                             id: request.id,
@@ -1304,8 +1315,7 @@ impl App {
                     })
                     .unwrap();
                 };
-                let cwd = params
-                    .cwd
+                let cwd = cwd
                     .map(std::path::PathBuf::from)
                     .or_else(|| {
                         self.state.workspaces.get(ws_idx).and_then(|ws| {
@@ -1333,7 +1343,17 @@ impl App {
                     });
                 match result {
                     Ok(tab_idx) => {
-                        if params.focus {
+                        if let Some(label) = label {
+                            if let Some(tab) = self
+                                .state
+                                .workspaces
+                                .get_mut(ws_idx)
+                                .and_then(|ws| ws.tabs.get_mut(tab_idx))
+                            {
+                                tab.set_custom_name(label);
+                            }
+                        }
+                        if focus {
                             self.state.switch_workspace(ws_idx);
                             self.state.switch_tab(tab_idx);
                             self.state.mode = Mode::Terminal;
