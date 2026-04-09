@@ -1,6 +1,6 @@
-//! Agent state detection via screen content pattern matching.
+//! Agent state detection via terminal tail pattern matching.
 //!
-//! Each pane's visible terminal content is read periodically and matched
+//! Each pane's live bottom-of-buffer text is read periodically and matched
 //! against known agent output patterns to determine state.
 
 /// The detected state of a terminal pane.
@@ -72,7 +72,7 @@ pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Ag
     best.map(|(_, agent, name)| (agent, name))
 }
 
-/// Detect the state of an agent from the visible screen content.
+/// Detect the state of an agent from the live terminal tail snapshot.
 /// If `agent` is `None`, returns `Unknown`.
 pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
     let Some(agent) = agent else {
@@ -166,7 +166,7 @@ fn detect_codex(content: &str) -> AgentState {
 
     // Blocked patterns
     if lower.contains("press enter to confirm or esc to cancel")
-        || lower.contains("| enter to submit answer")
+        || lower.contains("enter to submit answer")
         || lower.contains("allow command?")
         || lower.contains("[y/n]")
         || lower.contains("yes (y)")
@@ -178,7 +178,7 @@ fn detect_codex(content: &str) -> AgentState {
     }
 
     // Working
-    if has_interrupt_pattern(&lower) {
+    if has_interrupt_pattern(&lower) || has_codex_working_header(content) {
         return AgentState::Working;
     }
 
@@ -453,6 +453,13 @@ fn has_spinner_activity(content: &str) -> bool {
     false
 }
 
+fn has_codex_working_header(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with('•') && trimmed.contains("Working (")
+    })
+}
+
 /// Cursor spinner: ⬡ or ⬢ followed by a word ending in "ing"
 fn has_cursor_spinner(content: &str) -> bool {
     for line in content.lines() {
@@ -721,11 +728,26 @@ mod tests {
     }
 
     #[test]
+    fn codex_waiting_submit_answer_wrapped_footer() {
+        assert_eq!(
+            detect_codex(
+                "Question 1/2\nChoose an option.\nenter to submit answer\nesc to interrupt"
+            ),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
     fn codex_working_interrupt() {
         assert_eq!(
             detect_codex("generating code\nesc to interrupt"),
             AgentState::Working
         );
+    }
+
+    #[test]
+    fn codex_working_truncated_status_header() {
+        assert_eq!(detect_codex("• Working (0s • esc…"), AgentState::Working);
     }
 
     #[test]
@@ -1178,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_screen_content_works_with_detection() {
+    fn terminal_tail_content_works_with_detection() {
         assert_eq!(detect_pi("Working..."), AgentState::Working);
     }
 
