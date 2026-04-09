@@ -294,7 +294,7 @@ herdr does not require hooks or agent-side configuration for its built-in detect
 
 1. identifying the foreground process of each pane's pty via `/proc` on linux or `proc_pidinfo` on macos
 2. matching the process name against known agents
-3. reading terminal screen content and applying per-agent heuristics to determine state
+3. reading the live bottom of the terminal buffer and applying per-agent heuristics to determine state
 
 this means detection works with any supported agent, installed any way, with zero setup. if it runs in a terminal, herdr can see it.
 

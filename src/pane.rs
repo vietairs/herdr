@@ -19,6 +19,7 @@ use crate::layout::PaneId;
 
 const CLAUDE_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
+const DEFAULT_DETECTION_ROWS: usize = 24;
 
 #[derive(Debug, Clone, Copy)]
 struct PendingAgentRelease {
@@ -342,6 +343,10 @@ impl PaneTerminal {
         self.ghostty.visible_text()
     }
 
+    fn detection_text(&self) -> String {
+        self.ghostty.detection_text()
+    }
+
     fn recent_text(&self, lines: usize) -> String {
         self.ghostty.recent_text(lines)
     }
@@ -643,6 +648,14 @@ impl GhosttyPaneTerminal {
             .lock()
             .ok()
             .and_then(|mut core| ghostty_visible_text(&mut core).ok())
+            .unwrap_or_default()
+    }
+
+    fn detection_text(&self) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| ghostty_detection_text(&core).ok())
             .unwrap_or_default()
     }
 
@@ -1052,6 +1065,16 @@ fn ghostty_visible_text(core: &mut GhosttyPaneCore) -> Result<String, crate::gho
     }
     trim_trailing_blank_rows(&mut lines);
     Ok(lines_to_text(lines))
+}
+
+fn ghostty_detection_text(core: &GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
+    let lines = core
+        .terminal
+        .rows()
+        .ok()
+        .map(|rows| usize::from(rows).max(1))
+        .unwrap_or(DEFAULT_DETECTION_ROWS);
+    ghostty_recent_text(core, lines)
 }
 
 fn ghostty_recent_text(
@@ -1572,7 +1595,7 @@ impl PaneRuntime {
                         }
                     }
 
-                    let content = terminal.visible_text();
+                    let content = terminal.detection_text();
                     let raw_state = detect::detect_state(agent, &content);
                     let new_state = stabilize_agent_state(
                         agent,
@@ -2123,6 +2146,24 @@ mod tests {
         let after = pane.scroll_metrics().expect("scroll metrics after scroll");
         assert_eq!(after.offset_from_bottom, after.max_offset_from_bottom);
         assert!(pane.visible_text().contains("000000"));
+    }
+
+    #[test]
+    fn detection_text_stays_at_bottom_when_viewport_is_scrolled() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 3, 100).unwrap();
+        write_numbered_lines(&mut terminal, 10);
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let bottom_snapshot = pane.detection_text();
+        assert_eq!(bottom_snapshot, pane.recent_text(3));
+        assert!(bottom_snapshot.contains("000009"));
+
+        let before = pane.scroll_metrics().expect("scroll metrics before scroll");
+        pane.set_scroll_offset_from_bottom(before.max_offset_from_bottom);
+
+        assert!(pane.visible_text().contains("000000"));
+        assert_eq!(pane.detection_text(), bottom_snapshot);
     }
 
     #[test]
