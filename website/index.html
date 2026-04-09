@@ -3,16 +3,16 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>herdr — herd your agents</title>
-    <meta name="description" content="Terminal-native agent multiplexer. Workspaces, tiled panes, agent detection, and a socket API that lets your agents control herdr too.">
+    <title>herdr — supervise multiple coding agents in one terminal</title>
+    <meta name="description" content="Run Claude Code, Codex, pi, opencode, droid, and amp side by side in your existing terminal. Workspaces, panes, agent detection, and notifications for blocked, done, and working states.">
     <meta name="theme-color" content="#0d1117">
     <link rel="canonical" href="https://herdr.dev/">
 
     <!-- Open Graph -->
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="herdr">
-    <meta property="og:title" content="herdr — herd your agents">
-    <meta property="og:description" content="Terminal-native agent multiplexer. Workspaces, tiled panes, agent detection, and a socket API that lets your agents control herdr too.">
+    <meta property="og:title" content="herdr — supervise multiple coding agents in one terminal">
+    <meta property="og:description" content="Run Claude Code, Codex, pi, opencode, droid, and amp side by side in your existing terminal. Workspaces, panes, agent detection, and notifications for blocked, done, and working states.">
     <meta property="og:url" content="https://herdr.dev/">
     <meta property="og:image" content="https://herdr.dev/assets/og-card.png">
     <meta property="og:image:width" content="1200">
@@ -20,8 +20,8 @@
 
     <!-- Twitter / X -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="herdr — herd your agents">
-    <meta name="twitter:description" content="Terminal-native agent multiplexer. Workspaces, tiled panes, agent detection, and a socket API.">
+    <meta name="twitter:title" content="herdr — supervise multiple coding agents in one terminal">
+    <meta name="twitter:description" content="Run Claude Code, Codex, pi, opencode, droid, and amp side by side in your existing terminal with workspaces, panes, and agent state detection.">
     <meta name="twitter:image" content="https://herdr.dev/assets/og-card.png">
 
     <link rel="icon" type="image/png" href="/assets/logo.png">
@@ -603,10 +603,10 @@
     <section class="hero" id="hero">
         <img src="/assets/logo.png" alt="herdr" class="hero-logo">
         <h1>herdr</h1>
-        <p class="hero-tagline">herd your agents.</p>
+        <p class="hero-tagline">supervise multiple coding agents in one terminal.</p>
         <div class="hero-desc">
-            <p>a terminal-native agent multiplexer. workspaces, tiled panes, automatic agent detection, and a socket API. all inside your existing terminal. no electron, no web dashboard, no gui window.</p>
-            <p>a shared control surface for you and your agents.</p>
+            <p>run Claude Code, Codex, pi, opencode, droid, amp, and plain shells side by side in your existing terminal. see which agent is blocked, done, or still working without leaving the command line.</p>
+            <p>workspaces, tabs, panes, automatic agent detection, and notifications. no electron, no web dashboard, no separate gui window.</p>
         </div>
         <div class="install-box">
             <span class="prompt">$</span>
@@ -667,7 +667,7 @@
     <section class="awareness">
         <div class="awareness-header">
             <h2>ambient awareness</h2>
-            <p class="awareness-desc">the sidebar is split into two layers. scan the workspace list for the most urgent signal, then drill into the agents causing it.</p>
+            <p class="awareness-desc">the sidebar is split into two layers. scan the workspace list for the most urgent signal, then drill into the agents causing it in the selected workspace or across all workspaces.</p>
         </div>
         <div class="awareness-dual">
             <div class="awareness-panel">
@@ -685,7 +685,7 @@
                 </div>
                 <div class="awareness-panel-text">
                     <h3>agents</h3>
-                    <p>the bottom section shows which specific agents are running in the selected workspace, with their individual state. pi is working, droid is idle.</p>
+                    <p>the bottom section shows which specific agents are running in the selected workspace, or across all workspaces when you switch the panel scope. pi is working, droid is idle.</p>
                 </div>
             </div>
         </div>
@@ -799,26 +799,26 @@
             <div>
                 <h2>socket api</h2>
                 <p class="subtitle">agents can use herdr too</p>
-                <p>herdr exposes a local unix socket that agents can talk to directly. create workspaces, split panes, spawn agents, read output, wait for state changes.</p>
-                <p>the same surface is available as CLI commands (<code>herdr workspace</code>, <code>herdr pane</code>, <code>herdr wait</code>) and as a reusable agent skill.</p>
+                <p>herdr exposes a local unix socket that agents can talk to directly. create workspaces and tabs, split panes, spawn agents, read output, and wait for state changes.</p>
+                <p>the same surface is available as CLI commands (<code>herdr workspace</code>, <code>herdr tab</code>, <code>herdr pane</code>, <code>herdr wait</code>) and as a reusable agent skill.</p>
                 <div class="api-doc-links">
                     <a href="https://github.com/ogulcancelik/herdr/blob/master/SOCKET_API.md">socket api docs →</a>
                     <a href="https://github.com/ogulcancelik/herdr/blob/master/SKILL.md">agent skill →</a>
                 </div>
             </div>
             <div class="code-block">
-                <pre><span class="comment"># create a workspace</span>
-<span class="cmd">herdr</span> workspace create <span class="flag">--root</span> <span class="str">~/project</span>
+                <pre><span class="comment"># create a workspace with a label</span>
+<span class="cmd">herdr</span> workspace create <span class="flag">--cwd</span> <span class="str">~/project</span> <span class="flag">--label</span> <span class="str">"api server"</span>
 
 <span class="comment"># split a pane and run a command</span>
-<span class="cmd">herdr</span> pane split <span class="flag">--workspace</span> <span class="str">1</span>
-<span class="cmd">herdr</span> pane send <span class="flag">--pane</span> <span class="str">1-2</span> <span class="flag">--text</span> <span class="str">"npm test"</span>
+<span class="cmd">herdr</span> pane split <span class="str">1-1</span> <span class="flag">--direction</span> <span class="str">right</span>
+<span class="cmd">herdr</span> pane run <span class="str">1-2</span> <span class="str">"npm test"</span>
 
 <span class="comment"># wait for an agent to finish</span>
-<span class="cmd">herdr</span> wait <span class="flag">--pane</span> <span class="str">1-1</span> <span class="flag">--state</span> <span class="str">idle</span>
+<span class="cmd">herdr</span> wait agent-status <span class="str">1-1</span> <span class="flag">--status</span> <span class="str">done</span>
 
 <span class="comment"># read pane output</span>
-<span class="cmd">herdr</span> pane read <span class="flag">--pane</span> <span class="str">1-2</span> <span class="flag">--lines</span> <span class="str">50</span></pre>
+<span class="cmd">herdr</span> pane read <span class="str">1-2</span> <span class="flag">--source</span> <span class="str">recent-unwrapped</span> <span class="flag">--lines</span> <span class="str">50</span></pre>
             </div>
         </div>
     </section>
