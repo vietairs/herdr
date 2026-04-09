@@ -1,10 +1,10 @@
 {
-  "version": "0.4.5",
-  "notes": "### Added\n- `herdr workspace create` and `herdr tab create` now support `--label`, so scripts and agents can name new workspaces and tabs immediately instead of creating them first and renaming them afterward.\n- The global menu now includes a manual **reload keybinds** action, so you can apply `config.toml` keybinding changes without restarting herdr.\n- The socket API and CLI now expose a `done` agent status, including `herdr wait agent-status --status done`, so automation can distinguish finished agent runs from panes that are merely idle.\n\n### Changed\n- Session state is now saved automatically with a debounce while you work, so recent workspace, tab, pane, and sidebar changes are preserved more reliably even if herdr exits unexpectedly.\n\n### Fixed\n- Only the focused pane now owns the terminal cursor, which removes stray cursor blocks from unfocused panes.\n- In-app **What's New** / release notes now render inline code spans and fenced code blocks correctly.\n- Default numbered tabs now stay auto-named when you keep or rename them back to their numeric label, so generated tab numbering stays compact and predictable.",
+  "version": "0.4.6",
+  "notes": "### Fixed\n- Agent state detection is now more reliable when panes are scrolled back, when Codex is running in narrow panes, and when Claude opens slash-command or settings menus, reducing false blocked or idle states.\n- Mouse-driven terminal text selection now autoscrolls into pane scrollback and clears cleanly after copy, so selecting beyond the visible viewport works as expected.\n- Pane terminal colors now return to the outer terminal theme after fullscreen TUIs exit, fixing cases like Droid leaving stale background colors behind. This restore path now also works correctly on macOS.",
   "assets": {
-    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.5/herdr-linux-x86_64",
-    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.5/herdr-linux-aarch64",
-    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.5/herdr-macos-x86_64",
-    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.5/herdr-macos-aarch64"
+    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.6/herdr-linux-x86_64",
+    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.6/herdr-linux-aarch64",
+    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.6/herdr-macos-x86_64",
+    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.6/herdr-macos-aarch64"
   }
 }
