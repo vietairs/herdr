@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+- `herdr workspace create` and `herdr tab create` now support `--label`, so scripts and agents can name new workspaces and tabs immediately instead of creating them first and renaming them afterward.
+- The global menu now includes a manual **reload keybinds** action, so you can apply `config.toml` keybinding changes without restarting herdr.
+- The socket API and CLI now expose a `done` agent status, including `herdr wait agent-status --status done`, so automation can distinguish finished agent runs from panes that are merely idle.
+
+### Changed
+- Session state is now saved automatically with a debounce while you work, so recent workspace, tab, pane, and sidebar changes are preserved more reliably even if herdr exits unexpectedly.
+
+### Fixed
+- Only the focused pane now owns the terminal cursor, which removes stray cursor blocks from unfocused panes.
+- In-app **What's New** / release notes now render inline code spans and fenced code blocks correctly.
+- Default numbered tabs now stay auto-named when you keep or rename them back to their numeric label, so generated tab numbering stays compact and predictable.
+
 ## [0.4.4] - 2026-04-08
 
 ### Changed
