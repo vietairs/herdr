@@ -912,7 +912,7 @@ fn wait_agent_status_exits_when_done_status_matches() {
             workspace_id
         ),
     );
-    assert_eq!(tab_created["result"]["type"], "tab_info");
+    assert_eq!(tab_created["result"]["type"], "tab_created");
 
     let start_pi = run_cli(&socket_path, &["pane", "run", "1-1", "pi"]);
     assert!(start_pi.status.success());
