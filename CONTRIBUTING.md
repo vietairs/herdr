@@ -48,6 +48,14 @@ If you plan to implement the change yourself, say that directly in the issue and
 
 ## Before submitting a PR
 
+Install the repo hook once in your clone.
+
+```bash
+just install-hooks
+```
+
+The pre-commit hook runs `cargo fmt --check` before every commit.
+
 Run the PR checks and make sure they pass.
 
 ```bash

@@ -14,6 +14,12 @@ ci:
 check: ci
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
+# Install repo-local git hooks
+install-hooks:
+    git config core.hooksPath .githooks
+    chmod +x .githooks/pre-commit
+    @echo "installed git hooks from .githooks"
+
 # Build release binary
 build:
     cargo build --release

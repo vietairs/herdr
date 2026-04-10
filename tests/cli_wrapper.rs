@@ -396,8 +396,17 @@ fn pane_close_only_removes_the_target_tab_when_other_tabs_exist() {
     let workspaces = run_cli(&socket_path, &["workspace", "list"]);
     assert!(workspaces.status.success());
     let workspaces_json: serde_json::Value = serde_json::from_slice(&workspaces.stdout).unwrap();
-    assert_eq!(workspaces_json["result"]["workspaces"].as_array().unwrap().len(), 1);
-    assert_eq!(workspaces_json["result"]["workspaces"][0]["workspace_id"], workspace_id);
+    assert_eq!(
+        workspaces_json["result"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        workspaces_json["result"]["workspaces"][0]["workspace_id"],
+        workspace_id
+    );
 
     let tabs = run_cli(&socket_path, &["tab", "list", "--workspace", &workspace_id]);
     assert!(tabs.status.success());
@@ -436,7 +445,10 @@ fn pane_close_removes_the_workspace_when_it_closes_the_last_pane() {
     let workspaces = run_cli(&socket_path, &["workspace", "list"]);
     assert!(workspaces.status.success());
     let workspaces_json: serde_json::Value = serde_json::from_slice(&workspaces.stdout).unwrap();
-    assert!(workspaces_json["result"]["workspaces"].as_array().unwrap().is_empty());
+    assert!(workspaces_json["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     cleanup_spawned_herdr(herdr, base);
 }
