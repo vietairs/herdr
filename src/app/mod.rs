@@ -1876,18 +1876,20 @@ impl App {
                     .unwrap();
                 };
                 let workspace_id = self.state.workspaces[ws_idx].id.clone();
-                let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
-                    return serde_json::to_string(&ErrorResponse {
-                        id: request.id,
-                        error: ErrorBody {
-                            code: "pane_not_found".into(),
-                            message: format!("pane {} not found", target.pane_id),
-                        },
-                    })
-                    .unwrap();
+                let should_close_workspace = {
+                    let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "pane_not_found".into(),
+                                message: format!("pane {} not found", target.pane_id),
+                            },
+                        })
+                        .unwrap();
+                    };
+                    ws.close_pane(pane_id)
                 };
-                let pane_count = ws.layout.pane_count();
-                if pane_count <= 1 {
+                if should_close_workspace {
                     self.state.selected = ws_idx;
                     self.state.close_selected_workspace();
                     self.emit_event(crate::api::schema::EventEnvelope {
@@ -1902,7 +1904,6 @@ impl App {
                         data: crate::api::schema::EventData::WorkspaceClosed { workspace_id },
                     });
                 } else {
-                    ws.close_pane(pane_id);
                     self.schedule_session_save();
                     self.emit_event(crate::api::schema::EventEnvelope {
                         event: crate::api::schema::EventKind::PaneClosed,
@@ -2792,6 +2793,56 @@ mod tests {
 
         assert_eq!(ws_idx, 1);
         assert_eq!(seed_cwd, std::path::PathBuf::from("/tmp/pion"));
+    }
+
+    #[test]
+    fn pane_close_request_closes_only_the_target_tab_when_other_tabs_exist() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("api-pane-close");
+        let second_tab = workspace.test_add_tab(Some("logs"));
+        workspace.switch_tab(second_tab);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let target_pane = app.state.workspaces[0].tabs[second_tab].root_pane;
+        let target_pane_id = app.pane_info(0, target_pane).unwrap().pane_id;
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_close".into(),
+            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
+                pane_id: target_pane_id,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "ok");
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].display_name(), "api-pane-close");
+    }
+
+    #[test]
+    fn pane_close_request_closes_workspace_when_it_removes_the_last_pane() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("api-pane-close-last");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let target_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let target_pane_id = app.pane_info(0, target_pane).unwrap().pane_id;
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_close_last".into(),
+            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
+                pane_id: target_pane_id,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "ok");
+        assert!(app.state.workspaces.is_empty());
     }
 
     #[test]

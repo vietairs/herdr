@@ -357,6 +357,91 @@ fn tab_management_commands_work() {
 }
 
 #[test]
+fn pane_close_only_removes_the_target_tab_when_other_tabs_exist() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    assert!(created.status.success());
+    let created_json: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let workspace_id = created_json["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let created_tab = run_cli(
+        &socket_path,
+        &["tab", "create", "--workspace", &workspace_id],
+    );
+    assert!(created_tab.status.success());
+    let created_tab_json: serde_json::Value = serde_json::from_slice(&created_tab.stdout).unwrap();
+    let second_root_pane_id = created_tab_json["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let closed = run_cli(&socket_path, &["pane", "close", &second_root_pane_id]);
+    assert!(closed.status.success());
+    let closed_json: serde_json::Value = serde_json::from_slice(&closed.stdout).unwrap();
+    assert_eq!(closed_json["result"]["type"], "ok");
+
+    let workspaces = run_cli(&socket_path, &["workspace", "list"]);
+    assert!(workspaces.status.success());
+    let workspaces_json: serde_json::Value = serde_json::from_slice(&workspaces.stdout).unwrap();
+    assert_eq!(workspaces_json["result"]["workspaces"].as_array().unwrap().len(), 1);
+    assert_eq!(workspaces_json["result"]["workspaces"][0]["workspace_id"], workspace_id);
+
+    let tabs = run_cli(&socket_path, &["tab", "list", "--workspace", &workspace_id]);
+    assert!(tabs.status.success());
+    let tabs_json: serde_json::Value = serde_json::from_slice(&tabs.stdout).unwrap();
+    assert_eq!(tabs_json["result"]["tabs"].as_array().unwrap().len(), 1);
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn pane_close_removes_the_workspace_when_it_closes_the_last_pane() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    assert!(created.status.success());
+    let created_json: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let root_pane_id = created_json["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let closed = run_cli(&socket_path, &["pane", "close", &root_pane_id]);
+    assert!(closed.status.success());
+    let closed_json: serde_json::Value = serde_json::from_slice(&closed.stdout).unwrap();
+    assert_eq!(closed_json["result"]["type"], "ok");
+
+    let workspaces = run_cli(&socket_path, &["workspace", "list"]);
+    assert!(workspaces.status.success());
+    let workspaces_json: serde_json::Value = serde_json::from_slice(&workspaces.stdout).unwrap();
+    assert!(workspaces_json["result"]["workspaces"].as_array().unwrap().is_empty());
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn pane_run_read_and_wait_commands_work() {
     let base = unique_test_dir();
     let config_home = base.join("config");
