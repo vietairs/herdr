@@ -165,20 +165,25 @@ fn clamp_to_pane(screen_col: u16, screen_row: u16, pane_inner: Rect) -> (u16, u1
     (clamped_row - pane_inner.y, clamped_col - pane_inner.x)
 }
 
-/// Write text to the system clipboard via OSC 52.
+/// Write clipboard bytes to the system clipboard via OSC 52.
 ///
 /// OSC 52 format: `ESC ] 52 ; c ; <base64> BEL`
 ///
 /// The terminal emulator (Ghostty, kitty, etc.) intercepts this
 /// and sets the system clipboard. Ghostty has `clipboard-write = allow`
 /// by default.
-pub fn write_osc52(text: &str) {
+pub fn write_osc52_bytes(bytes: &[u8]) {
     use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     // Use ST (ESC \) terminator — more widely supported than BEL in some terminals
     let sequence = format!("\x1b]52;c;{encoded}\x1b\\");
     let _ = std::io::stdout().write_all(sequence.as_bytes());
     let _ = std::io::stdout().flush();
+}
+
+/// Write text to the system clipboard via OSC 52.
+pub fn write_osc52(text: &str) {
+    write_osc52_bytes(text.as_bytes());
 }
 
 #[cfg(test)]

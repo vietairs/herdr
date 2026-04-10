@@ -784,10 +784,8 @@ impl App {
     }
 
     fn handle_internal_event(&mut self, ev: AppEvent) {
-        if let AppEvent::ClipboardWrite { bytes } = ev {
-            use std::io::Write;
-            let _ = std::io::stdout().write_all(&bytes);
-            let _ = std::io::stdout().flush();
+        if let AppEvent::ClipboardWrite { content } = ev {
+            crate::selection::write_osc52_bytes(&content);
             return;
         }
 
