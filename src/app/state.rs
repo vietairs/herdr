@@ -334,6 +334,8 @@ pub struct ViewState {
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
+    pub tab_scroll_left_hit_area: Rect,
+    pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
     pub terminal_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
@@ -473,6 +475,11 @@ pub(crate) enum DragTarget {
         source_ws_idx: usize,
         insert_idx: Option<usize>,
     },
+    TabReorder {
+        ws_idx: usize,
+        source_tab_idx: usize,
+        insert_idx: Option<usize>,
+    },
     WorkspaceListScrollbar {
         grab_row_offset: u16,
     },
@@ -505,6 +512,13 @@ pub(crate) struct DragState {
 
 pub(crate) struct WorkspacePressState {
     pub ws_idx: usize,
+    pub start_col: u16,
+    pub start_row: u16,
+}
+
+pub(crate) struct TabPressState {
+    pub ws_idx: usize,
+    pub tab_idx: usize,
     pub start_col: u16,
     pub start_row: u16,
 }
@@ -586,10 +600,13 @@ pub struct AppState {
     pub keybind_help: KeybindHelpState,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
+    pub tab_scroll: usize,
+    pub tab_scroll_follow_active: bool,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
     pub(crate) workspace_press: Option<WorkspacePressState>,
+    pub(crate) tab_press: Option<TabPressState>,
     pub selection: Option<Selection>,
     pub context_menu: Option<ContextMenuState>,
     // Notifications
@@ -700,11 +717,15 @@ impl AppState {
             keybind_help: KeybindHelpState { scroll: 0 },
             workspace_scroll: 0,
             agent_panel_scroll: 0,
+            tab_scroll: 0,
+            tab_scroll_follow_active: true,
             view: ViewState {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
+                tab_scroll_left_hit_area: Rect::default(),
+                tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
                 pane_infos: Vec::new(),
@@ -712,6 +733,7 @@ impl AppState {
             },
             drag: None,
             workspace_press: None,
+            tab_press: None,
             selection: None,
             context_menu: None,
             update_available: None,

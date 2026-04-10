@@ -126,6 +126,8 @@ impl AppState {
             if let Some(ws) = self.workspaces.get_mut(idx) {
                 ws.switch_tab(ws.active_tab);
             }
+            self.tab_scroll_follow_active = true;
+            self.refresh_tab_bar_view();
         }
     }
 
@@ -163,6 +165,8 @@ impl AppState {
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
             ws.switch_tab(idx);
             self.mark_session_dirty();
+            self.tab_scroll_follow_active = true;
+            self.refresh_tab_bar_view();
         }
     }
 
@@ -215,6 +219,28 @@ impl AppState {
         self.ensure_workspace_visible(self.selected);
     }
 
+    pub fn scroll_tabs_left(&mut self) {
+        self.tab_scroll_follow_active = false;
+        self.tab_scroll = self.tab_scroll.saturating_sub(1);
+        self.refresh_tab_bar_view();
+    }
+
+    pub fn scroll_tabs_right(&mut self) {
+        self.tab_scroll_follow_active = false;
+        self.tab_scroll = self.tab_scroll.saturating_add(1);
+        self.refresh_tab_bar_view();
+    }
+
+    pub fn move_tab(&mut self, source_idx: usize, insert_idx: usize) {
+        if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
+            if ws.move_tab(source_idx, insert_idx) {
+                self.mark_session_dirty();
+                self.tab_scroll_follow_active = true;
+                self.refresh_tab_bar_view();
+            }
+        }
+    }
+
     pub fn next_tab(&mut self) {
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if !ws.tabs.is_empty() {
@@ -249,6 +275,8 @@ impl AppState {
             self.active = None;
             self.selected = 0;
             self.workspace_scroll = 0;
+            self.tab_scroll = 0;
+            self.tab_scroll_follow_active = true;
         } else {
             if self.selected >= self.workspaces.len() {
                 self.selected = self.workspaces.len() - 1;
@@ -258,7 +286,33 @@ impl AppState {
                 .workspace_scroll
                 .min(self.workspaces.len().saturating_sub(1));
             self.ensure_workspace_visible(self.selected);
+            self.tab_scroll_follow_active = true;
+            self.refresh_tab_bar_view();
         }
+    }
+
+    fn refresh_tab_bar_view(&mut self) {
+        let area = self.view.tab_bar_rect;
+        let Some(ws) = self.active.and_then(|idx| self.workspaces.get(idx)) else {
+            self.tab_scroll = 0;
+            self.view.tab_hit_areas.clear();
+            self.view.tab_scroll_left_hit_area = ratatui::layout::Rect::default();
+            self.view.tab_scroll_right_hit_area = ratatui::layout::Rect::default();
+            self.view.new_tab_hit_area = ratatui::layout::Rect::default();
+            return;
+        };
+
+        let layout = crate::ui::compute_tab_bar_view(
+            ws,
+            area,
+            self.tab_scroll,
+            self.tab_scroll_follow_active,
+        );
+        self.tab_scroll = layout.scroll;
+        self.view.tab_hit_areas = layout.tab_hit_areas;
+        self.view.tab_scroll_left_hit_area = layout.scroll_left_hit_area;
+        self.view.tab_scroll_right_hit_area = layout.scroll_right_hit_area;
+        self.view.new_tab_hit_area = layout.new_tab_hit_area;
     }
 }
 
@@ -352,6 +406,8 @@ impl AppState {
         }
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
             ws.close_active_tab();
+            self.tab_scroll_follow_active = true;
+            self.refresh_tab_bar_view();
         }
     }
 }

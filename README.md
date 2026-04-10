@@ -239,6 +239,8 @@ mouse support is built in. herdr is not keyboard-only.
 
 - click a workspace in the sidebar to switch
 - click tabs to switch within the active workspace
+- click the tab-bar `<` / `>` buttons to scroll overflowing tabs
+- drag tabs to reorder them
 - click a pane to focus it
 - drag split borders to resize
 - drag in a pane to select text; release to copy it to your system clipboard

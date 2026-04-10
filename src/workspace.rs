@@ -399,6 +399,32 @@ impl Workspace {
         true
     }
 
+    pub fn move_tab(&mut self, source_idx: usize, insert_idx: usize) -> bool {
+        if source_idx >= self.tabs.len() || insert_idx > self.tabs.len() {
+            return false;
+        }
+
+        let target_idx = if source_idx < insert_idx {
+            insert_idx.saturating_sub(1)
+        } else {
+            insert_idx
+        }
+        .min(self.tabs.len().saturating_sub(1));
+
+        if source_idx == target_idx {
+            return false;
+        }
+
+        let active_root_pane = self.tabs.get(self.active_tab).map(|tab| tab.root_pane);
+        let tab = self.tabs.remove(source_idx);
+        self.tabs.insert(target_idx, tab);
+        self.renumber_tabs();
+        self.active_tab = active_root_pane
+            .and_then(|root_pane| self.tabs.iter().position(|tab| tab.root_pane == root_pane))
+            .unwrap_or(target_idx);
+        true
+    }
+
     pub fn close_active_tab(&mut self) -> bool {
         self.close_tab(self.active_tab)
     }
@@ -960,6 +986,26 @@ mod tests {
         let details = ws.pane_details();
         assert_eq!(details.len(), 1);
         assert_eq!(details[0].label, "pi");
+    }
+
+    #[test]
+    fn moving_tab_keeps_active_identity_and_renumbers_auto_tabs() {
+        let mut ws = Workspace::test_new("test");
+        let moved_root = ws.tabs[0].root_pane;
+        ws.test_add_tab(Some("foo"));
+        let final_auto_idx = ws.test_add_tab(None);
+        let active_root = ws.tabs[final_auto_idx].root_pane;
+        ws.switch_tab(final_auto_idx);
+
+        assert!(ws.move_tab(0, ws.tabs.len()));
+
+        let labels: Vec<_> = ws.tabs.iter().map(|tab| tab.display_name()).collect();
+        assert_eq!(labels, vec!["foo", "2", "3"]);
+        assert_eq!(ws.tabs[0].custom_name.as_deref(), Some("foo"));
+        assert!(ws.tabs[1].custom_name.is_none());
+        assert!(ws.tabs[2].custom_name.is_none());
+        assert_eq!(ws.tabs[2].root_pane, moved_root);
+        assert_eq!(ws.tabs[ws.active_tab].root_pane, active_root);
     }
 
     #[test]

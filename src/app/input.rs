@@ -25,10 +25,11 @@ enum WheelRouting {
 }
 
 const WORKSPACE_DRAG_THRESHOLD: u16 = 1;
+const TAB_DRAG_THRESHOLD: u16 = 1;
 
 use super::state::{
     key_matches, AgentPanelScope, AppState, ContextMenuKind, ContextMenuState, DragState,
-    DragTarget, MenuListState, Mode, WorkspacePressState,
+    DragTarget, MenuListState, Mode, TabPressState, WorkspacePressState,
 };
 use super::App;
 
@@ -2051,9 +2052,23 @@ impl AppState {
                     }
                 }
 
-                if let Some(tab_idx) = self.tab_at(mouse.column, mouse.row) {
-                    self.switch_tab(tab_idx);
-                    self.mode = Mode::Terminal;
+                if self.on_tab_scroll_left_button(mouse.column, mouse.row) {
+                    self.scroll_tabs_left();
+                    return None;
+                }
+                if self.on_tab_scroll_right_button(mouse.column, mouse.row) {
+                    self.scroll_tabs_right();
+                    return None;
+                }
+                if let (Some(ws_idx), Some(tab_idx)) =
+                    (self.active, self.tab_at(mouse.column, mouse.row))
+                {
+                    self.tab_press = Some(TabPressState {
+                        ws_idx,
+                        tab_idx,
+                        start_col: mouse.column,
+                        start_row: mouse.row,
+                    });
                     return None;
                 }
                 if self.on_new_tab_button(mouse.column, mouse.row) {
@@ -2203,6 +2218,7 @@ impl AppState {
                 }
 
                 let workspace_drop_index = self.workspace_drop_index_at_row(mouse.row);
+                let tab_drop_index = self.tab_drop_index_at(mouse.column, mouse.row);
                 if self.drag.is_none() {
                     if let Some(press) = &self.workspace_press {
                         let delta_col = mouse.column.abs_diff(press.start_col);
@@ -2215,6 +2231,18 @@ impl AppState {
                                 },
                             });
                         }
+                    } else if let Some(press) = &self.tab_press {
+                        let delta_col = mouse.column.abs_diff(press.start_col);
+                        let delta_row = mouse.row.abs_diff(press.start_row);
+                        if delta_col.max(delta_row) >= TAB_DRAG_THRESHOLD {
+                            self.drag = Some(DragState {
+                                target: DragTarget::TabReorder {
+                                    ws_idx: press.ws_idx,
+                                    source_tab_idx: press.tab_idx,
+                                    insert_idx: tab_drop_index,
+                                },
+                            });
+                        }
                     }
                 }
 
@@ -2223,9 +2251,19 @@ impl AppState {
                 }) = &mut self.drag
                 {
                     *insert_idx = workspace_drop_index;
+                } else if let Some(DragState {
+                    target:
+                        DragTarget::TabReorder {
+                            ws_idx, insert_idx, ..
+                        },
+                }) = &mut self.drag
+                {
+                    if self.active == Some(*ws_idx) {
+                        *insert_idx = tab_drop_index;
+                    }
                 } else if let Some(drag) = &self.drag {
                     match &drag.target {
-                        DragTarget::WorkspaceReorder { .. } => {}
+                        DragTarget::WorkspaceReorder { .. } | DragTarget::TabReorder { .. } => {}
                         DragTarget::WorkspaceListScrollbar { grab_row_offset } => {
                             if let Some(offset_from_bottom) =
                                 self.workspace_list_offset_for_drag_row(mouse.row, *grab_row_offset)
@@ -2289,6 +2327,7 @@ impl AppState {
             MouseEventKind::Up(MouseButton::Left) => {
                 if self.selection.is_some() {
                     self.workspace_press = None;
+                    self.tab_press = None;
                     self.drag = None;
                     let was_click = self.selection.as_ref().is_some_and(|s| s.was_just_click());
                     if was_click {
@@ -2303,12 +2342,14 @@ impl AppState {
                     if self.forward_pane_mouse_button(&info, mouse) {
                         self.selection = None;
                         self.workspace_press = None;
+                        self.tab_press = None;
                         self.drag = None;
                         return None;
                     }
                 }
 
                 let workspace_press = self.workspace_press.take();
+                let tab_press = self.tab_press.take();
                 match self.drag.take() {
                     Some(DragState {
                         target:
@@ -2319,12 +2360,32 @@ impl AppState {
                     }) => {
                         self.move_workspace(source_ws_idx, insert_idx);
                     }
+                    Some(DragState {
+                        target:
+                            DragTarget::TabReorder {
+                                ws_idx,
+                                source_tab_idx,
+                                insert_idx: Some(insert_idx),
+                            },
+                    }) => {
+                        if self.active == Some(ws_idx) {
+                            self.move_tab(source_tab_idx, insert_idx);
+                            self.mode = Mode::Terminal;
+                        }
+                    }
                     Some(_) => {}
                     None => {
                         if let Some(press) = workspace_press {
                             self.switch_workspace(press.ws_idx);
                             self.mode = Mode::Terminal;
                             return None;
+                        }
+                        if let Some(press) = tab_press {
+                            if self.active == Some(press.ws_idx) {
+                                self.switch_tab(press.tab_idx);
+                                self.mode = Mode::Terminal;
+                                return None;
+                            }
                         }
                         let was_click = self.selection.as_ref().is_some_and(|s| s.was_just_click());
                         if was_click {
@@ -2345,7 +2406,13 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !in_sidebar => {
-                if !self.scroll_selection_with_wheel(mouse) {
+                if self.on_tab_bar(mouse.column, mouse.row) {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => self.scroll_tabs_left(),
+                        MouseEventKind::ScrollDown => self.scroll_tabs_right(),
+                        _ => {}
+                    }
+                } else if !self.scroll_selection_with_wheel(mouse) {
                     self.selection = None;
                     self.handle_terminal_wheel(mouse);
                 }
@@ -2519,12 +2586,100 @@ impl AppState {
             .iter()
             .enumerate()
             .find_map(|(idx, area)| {
-                (row >= area.y
+                (area.width > 0
+                    && row >= area.y
                     && row < area.y + area.height
                     && col >= area.x
                     && col < area.x + area.width)
                     .then_some(idx)
             })
+    }
+
+    fn on_tab_bar(&self, col: u16, row: u16) -> bool {
+        let area = self.view.tab_bar_rect;
+        area.width > 0
+            && row >= area.y
+            && row < area.y + area.height
+            && col >= area.x
+            && col < area.x + area.width
+    }
+
+    fn on_tab_scroll_left_button(&self, col: u16, row: u16) -> bool {
+        let area = self.view.tab_scroll_left_hit_area;
+        area.width > 0
+            && row >= area.y
+            && row < area.y + area.height
+            && col >= area.x
+            && col < area.x + area.width
+    }
+
+    fn on_tab_scroll_right_button(&self, col: u16, row: u16) -> bool {
+        let area = self.view.tab_scroll_right_hit_area;
+        area.width > 0
+            && row >= area.y
+            && row < area.y + area.height
+            && col >= area.x
+            && col < area.x + area.width
+    }
+
+    fn tab_drop_index_at(&self, col: u16, row: u16) -> Option<usize> {
+        if !self.on_tab_bar(col, row) {
+            return None;
+        }
+
+        let visible_tabs: Vec<_> = self
+            .view
+            .tab_hit_areas
+            .iter()
+            .enumerate()
+            .filter(|(_, rect)| rect.width > 0)
+            .collect();
+        let (first_idx, first_rect) = *visible_tabs.first()?;
+        let (last_idx, last_rect) = *visible_tabs.last()?;
+
+        if self.on_tab_scroll_left_button(col, row) {
+            return Some(0);
+        }
+        if self.on_tab_scroll_right_button(col, row) {
+            return self
+                .active
+                .and_then(|idx| self.workspaces.get(idx))
+                .map(|ws| ws.tabs.len());
+        }
+
+        let left_edge = if first_idx == 0 {
+            first_rect.x
+        } else {
+            self.view.tab_scroll_left_hit_area.x + self.view.tab_scroll_left_hit_area.width
+        };
+        let right_edge = if self
+            .active
+            .and_then(|idx| self.workspaces.get(idx))
+            .is_some_and(|ws| last_idx + 1 >= ws.tabs.len())
+        {
+            last_rect.x + last_rect.width
+        } else {
+            self.view.tab_scroll_right_hit_area.x.saturating_sub(1)
+        };
+
+        if col <= left_edge {
+            return Some(first_idx);
+        }
+        if col >= right_edge {
+            return Some(last_idx + 1);
+        }
+
+        for (idx, rect) in visible_tabs {
+            let midpoint = rect.x + rect.width / 2;
+            if col < midpoint {
+                return Some(idx);
+            }
+            if col < rect.x + rect.width {
+                return Some(idx + 1);
+            }
+        }
+
+        Some(last_idx + 1)
     }
 
     fn on_new_tab_button(&self, col: u16, row: u16) -> bool {
@@ -4405,6 +4560,165 @@ mod tests {
             .map(|ws| ws.custom_name.clone().unwrap())
             .collect();
         assert_eq!(captured_names, vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn clicking_tab_scroll_button_reveals_hidden_tabs_without_renaming() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        ws.test_add_tab(Some("logs"));
+        ws.test_add_tab(Some("review"));
+        ws.test_add_tab(Some("ops"));
+        ws.test_add_tab(Some("notes"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 52, 20));
+
+        let right = app.state.view.tab_scroll_right_hit_area;
+        assert!(right.width > 0);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            right.x + 1,
+            right.y,
+        ));
+
+        assert_eq!(app.state.tab_scroll, 1);
+        assert!(!app.state.tab_scroll_follow_active);
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        assert_eq!(app.state.view.tab_hit_areas[0].width, 0);
+        assert!(app.state.workspaces[0].tabs[0].custom_name.is_none());
+        assert_eq!(
+            app.state.workspaces[0].tabs[1].custom_name.as_deref(),
+            Some("logs")
+        );
+    }
+
+    #[test]
+    fn clicking_rightmost_visible_tab_recenters_it_when_tabs_overflow() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        for name in [
+            "one", "two", "three", "four", "five", "six", "seven", "eight",
+        ] {
+            ws.test_add_tab(Some(name));
+        }
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.tab_scroll = 2;
+        app.state.tab_scroll_follow_active = false;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 52, 20));
+
+        let clicked_idx = app
+            .state
+            .view
+            .tab_hit_areas
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, rect)| rect.width > 0)
+            .map(|(idx, _)| idx)
+            .expect("rightmost visible tab");
+        let target = app.state.view.tab_hit_areas[clicked_idx];
+        let first_visible_before = app
+            .state
+            .view
+            .tab_hit_areas
+            .iter()
+            .position(|rect| rect.width > 0)
+            .expect("first visible tab before click");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.x + 1,
+            target.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            target.x + 1,
+            target.y,
+        ));
+
+        let last_visible_after = app
+            .state
+            .view
+            .tab_hit_areas
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, rect)| rect.width > 0)
+            .map(|(idx, _)| idx)
+            .expect("rightmost visible tab after click");
+
+        assert_eq!(app.state.workspaces[0].active_tab, clicked_idx);
+        assert!(app.state.tab_scroll > 2);
+        assert!(app.state.view.tab_hit_areas[clicked_idx].width > 0);
+        assert!(last_visible_after > clicked_idx);
+        assert!(app
+            .state
+            .view
+            .tab_hit_areas
+            .iter()
+            .position(|rect| rect.width > 0)
+            .is_some_and(|idx| idx > first_visible_before));
+    }
+
+    #[test]
+    fn dragging_tab_reorders_auto_and_custom_names_without_materializing_numbers() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        ws.test_add_tab(Some("foo"));
+        ws.test_add_tab(None);
+        let moved_root = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let source = app.state.view.tab_hit_areas[0];
+        let last = app.state.view.tab_hit_areas[2];
+        let drop_col = last.x + last.width;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            source.x + 1,
+            source.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            drop_col,
+            source.y,
+        ));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::TabReorder {
+                ws_idx: 0,
+                source_tab_idx: 0,
+                insert_idx: Some(3),
+            })
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            drop_col,
+            source.y,
+        ));
+
+        let labels: Vec<_> = app.state.workspaces[0]
+            .tabs
+            .iter()
+            .map(|tab| tab.display_name())
+            .collect();
+        assert_eq!(labels, vec!["foo", "2", "3"]);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("foo")
+        );
+        assert!(app.state.workspaces[0].tabs[1].custom_name.is_none());
+        assert!(app.state.workspaces[0].tabs[2].custom_name.is_none());
+        assert_eq!(app.state.workspaces[0].tabs[2].root_pane, moved_root);
+        assert_eq!(app.state.workspaces[0].active_tab, 2);
     }
 
     #[test]
