@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.7] - 2026-04-10
+
 ### Added
 - The tab bar now handles large tab sets better: you can scroll overflowing tabs with the mouse controls or wheel, and reorder tabs by dragging them.
 - `workspace create` and `tab create` now return the created root pane in their JSON response, so automation can act on the new pane immediately without an extra lookup.
