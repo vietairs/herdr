@@ -750,10 +750,15 @@ pub struct Keybinds {
 }
 
 /// Parse a color string into a ratatui Color.
-/// Supports: hex (#rrggbb, #rgb), named colors, rgb(r,g,b).
+/// Supports: hex (#rrggbb, #rgb), named colors, rgb(r,g,b), and reset aliases.
 pub fn parse_color(s: &str) -> ratatui::style::Color {
     use ratatui::style::Color;
     let s = s.trim().to_lowercase();
+
+    match s.as_str() {
+        "reset" | "default" | "none" | "transparent" => return Color::Reset,
+        _ => {}
+    }
 
     // Hex: #rrggbb or #rgb
     if let Some(hex) = s.strip_prefix('#') {
@@ -1478,6 +1483,15 @@ name = "dracula"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.theme.name.as_deref(), Some("dracula"));
+    }
+
+    #[test]
+    fn parse_color_accepts_reset_aliases() {
+        use ratatui::style::Color;
+
+        for value in ["reset", "default", "none", "transparent"] {
+            assert_eq!(parse_color(value), Color::Reset, "value: {value}");
+        }
     }
 
     #[test]

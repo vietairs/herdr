@@ -758,7 +758,7 @@ fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
         let active = idx == ws.active_tab;
         let style = if active {
-            let base = Style::default().fg(p.panel_bg).bg(p.accent);
+            let base = Style::default().fg(panel_contrast_fg(p)).bg(p.accent);
             if tab.is_auto_named() {
                 base.add_modifier(Modifier::DIM)
             } else {
@@ -1705,7 +1705,7 @@ fn render_selection_highlight(
                 for x in 0..inner.width {
                     if sel.contains(y, x, scroll_metrics) {
                         let cell = &mut buf[(inner.x + x, inner.y + y)];
-                        cell.set_style(Style::default().fg(p.panel_bg).bg(p.blue));
+                        cell.set_style(Style::default().fg(panel_contrast_fg(p)).bg(p.blue));
                     }
                 }
             }
@@ -1782,6 +1782,13 @@ fn render_panel_shell(
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
     Some(inner)
+}
+
+fn panel_contrast_fg(p: &Palette) -> Color {
+    match p.panel_bg {
+        Color::Reset => p.surface_dim,
+        color => color,
+    }
 }
 
 pub(crate) fn centered_popup_rect(area: Rect, popup_w: u16, popup_h: u16) -> Option<Rect> {
@@ -1926,7 +1933,7 @@ fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         Some("esc"),
         "close",
         Style::default()
-            .fg(app.palette.panel_bg)
+            .fg(panel_contrast_fg(&app.palette))
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
@@ -2224,7 +2231,7 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
         Some("↵"),
         "continue",
         Style::default()
-            .fg(app.palette.panel_bg)
+            .fg(panel_contrast_fg(&app.palette))
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
@@ -2279,7 +2286,7 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
         let prefix = if selected { "›" } else { " " };
         let style = if selected {
             Style::default()
-                .fg(app.palette.panel_bg)
+                .fg(panel_contrast_fg(&app.palette))
                 .bg(app.palette.accent)
         } else {
             Style::default().fg(app.palette.text)
@@ -2308,7 +2315,7 @@ fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect
         Some("↵"),
         "start",
         Style::default()
-            .fg(app.palette.panel_bg)
+            .fg(panel_contrast_fg(&app.palette))
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
@@ -2322,7 +2329,7 @@ fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let dim = Style::default().fg(app.palette.overlay0);
 
     let mode_style = Style::default()
-        .fg(app.palette.panel_bg)
+        .fg(panel_contrast_fg(&app.palette))
         .bg(app.palette.accent)
         .add_modifier(Modifier::BOLD);
 
@@ -2403,7 +2410,7 @@ fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
         let selected = idx == app.global_menu.highlighted;
         let style = if selected {
             Style::default()
-                .fg(app.palette.panel_bg)
+                .fg(panel_contrast_fg(&app.palette))
                 .bg(app.palette.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -2563,7 +2570,7 @@ fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         Some("esc"),
         "close",
         Style::default()
-            .fg(app.palette.panel_bg)
+            .fg(panel_contrast_fg(&app.palette))
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
@@ -2636,7 +2643,7 @@ fn render_resize_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let dim = Style::default().fg(app.palette.overlay0);
 
     let mode_style = Style::default()
-        .fg(app.palette.panel_bg)
+        .fg(panel_contrast_fg(&app.palette))
         .bg(app.palette.mauve)
         .add_modifier(Modifier::BOLD);
 
@@ -2734,7 +2741,7 @@ fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         Some("↵"),
         "save",
         Style::default()
-            .fg(app.palette.panel_bg)
+            .fg(panel_contrast_fg(&app.palette))
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
@@ -2832,7 +2839,7 @@ fn render_confirm_close_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
             Some("↵"),
             "confirm",
             Style::default()
-                .fg(app.palette.panel_bg)
+                .fg(panel_contrast_fg(&app.palette))
                 .bg(app.palette.red)
                 .add_modifier(Modifier::BOLD),
         );
@@ -2991,7 +2998,7 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
         .style(Style::default().fg(p.overlay1))
         .highlight_style(
             Style::default()
-                .fg(p.panel_bg)
+                .fg(panel_contrast_fg(p))
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD),
         )
@@ -3048,7 +3055,7 @@ fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
             Some("↵"),
             "apply",
             Style::default()
-                .fg(p.panel_bg)
+                .fg(panel_contrast_fg(p))
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD),
         );
@@ -3182,7 +3189,7 @@ fn render_context_menu(app: &AppState, frame: &mut Frame) {
         .highlight_style(
             Style::default()
                 .bg(p.accent)
-                .fg(p.panel_bg)
+                .fg(panel_contrast_fg(p))
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(" ");
@@ -3271,7 +3278,7 @@ fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str, p: &Pa
         Paragraph::new(Span::styled(
             text,
             Style::default()
-                .fg(p.panel_bg)
+                .fg(panel_contrast_fg(p))
                 .bg(p.yellow)
                 .add_modifier(Modifier::BOLD),
         )),
@@ -3409,6 +3416,34 @@ mod tests {
         assert_eq!(auto_style.fg, Some(app.palette.overlay0));
         assert!(auto_style.add_modifier.contains(Modifier::DIM));
         assert_eq!(custom_style.fg, Some(app.palette.panel_bg));
+        assert!(custom_style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn tab_bar_uses_surface_dim_when_panel_background_resets() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        let custom_tab = ws.test_add_tab(Some("logs"));
+        ws.switch_tab(custom_tab);
+
+        app.palette.panel_bg = Color::Reset;
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let custom_rect = app.view.tab_hit_areas[1];
+        let custom_style = buffer[(custom_rect.x + 1, custom_rect.y)].style();
+
+        assert_eq!(custom_style.bg, Some(app.palette.accent));
+        assert_eq!(custom_style.fg, Some(app.palette.surface_dim));
         assert!(custom_style.add_modifier.contains(Modifier::BOLD));
     }
 

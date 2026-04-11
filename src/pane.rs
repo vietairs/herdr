@@ -1006,6 +1006,7 @@ impl GhosttyPaneTerminal {
         let Ok(mut core) = self.core.lock() else {
             return;
         };
+        let host_theme = core.host_terminal_theme;
         let GhosttyPaneCore {
             terminal,
             render_state,
@@ -1015,7 +1016,7 @@ impl GhosttyPaneTerminal {
             return;
         }
         let colors = render_state.colors().ok();
-        let default_bg = colors.map(|c| ghostty_color(c.background));
+        let default_bg = colors.and_then(|c| ghostty_default_bg(c.background, host_theme));
         let default_fg = colors.map(|c| ghostty_color(c.foreground));
 
         let mut row_iterator = match crate::ghostty::RowIterator::new() {
@@ -1591,6 +1592,25 @@ fn ghostty_cell_style(
         modifiers |= Modifier::CROSSED_OUT;
     }
     style.add_modifier(modifiers)
+}
+
+fn ghostty_default_bg(
+    color: crate::ghostty::RgbColor,
+    host_theme: crate::terminal_theme::TerminalTheme,
+) -> Option<Color> {
+    if host_theme.background == Some(terminal_theme_color(color)) {
+        None
+    } else {
+        Some(ghostty_color(color))
+    }
+}
+
+fn terminal_theme_color(color: crate::ghostty::RgbColor) -> crate::terminal_theme::RgbColor {
+    crate::terminal_theme::RgbColor {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+    }
 }
 
 fn ghostty_color(color: crate::ghostty::RgbColor) -> Color {
@@ -2866,6 +2886,79 @@ mod tests {
 
         assert_eq!(pane_default_theme(&pane).background, host_theme.background);
         assert_eq!(pane_default_theme(&pane).foreground, host_theme.foreground);
+    }
+
+    #[test]
+    fn render_leaves_host_default_background_transparent() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let host_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 0xaa,
+                g: 0xbb,
+                b: 0xcc,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33,
+            }),
+        };
+        pane.apply_host_terminal_theme(host_theme);
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.terminal.write(b"hi");
+        }
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "h");
+        assert_eq!(buffer[(0, 0)].style().bg, Some(Color::Reset));
+        assert_eq!(buffer[(2, 0)].symbol(), " ");
+        assert_eq!(buffer[(2, 0)].style().bg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn render_keeps_explicit_default_background_when_it_differs_from_host() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let host_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 0xaa,
+                g: 0xbb,
+                b: 0xcc,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33,
+            }),
+        };
+        pane.apply_host_terminal_theme(host_theme);
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.terminal.write(b"\x1b]11;rgb:44/55/66\x1b\\hi");
+        }
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let expected_bg = Some(Color::Rgb(0x44, 0x55, 0x66));
+        assert_eq!(buffer[(0, 0)].symbol(), "h");
+        assert_eq!(buffer[(0, 0)].style().bg, expected_bg);
+        assert_eq!(buffer[(2, 0)].symbol(), " ");
+        assert_eq!(buffer[(2, 0)].style().bg, expected_bg);
     }
 
     #[tokio::test]

@@ -131,6 +131,7 @@ override individual color tokens on top of any base theme:
 name = "dracula"
 
 [theme.custom]
+panel_bg = "reset"
 accent = "#f5c2e7"
 red = "rgb(255, 85, 85)"
 green = "#a6e3a1"
@@ -143,6 +144,7 @@ all tokens are optional — only set what you want to change.
 | token | used for |
 |-------|----------|
 | `accent` | highlights, active borders, navigation UI |
+| `panel_bg` | floating panel, tab bar, and overlay background |
 | `surface0` | selected item background |
 | `surface1` | hover/active backgrounds |
 | `surface_dim` | active workspace background, separators |
@@ -159,6 +161,8 @@ all tokens are optional — only set what you want to change.
 | `peach` | interrupted/warning states |
 
 tokens accept the same color formats as `accent`: hex (`#rrggbb`), named colors, or `rgb(r,g,b)`.
+
+for `panel_bg`, you can also use `reset`, `default`, `none`, or `transparent` to stop herdr from painting an opaque panel background and instead use the host terminal's default background.
 
 ## ui
 
