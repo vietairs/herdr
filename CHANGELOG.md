@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.8] - 2026-04-12
+
 ### Added
 - Themes can now set `panel_bg = "reset"` to let herdr’s panel chrome inherit the host terminal background instead of painting an opaque panel fill. This also accepts the aliases `default`, `none`, and `transparent`.
 - Ghostty-backed panes now preserve the host terminal’s default background when it matches the outer terminal theme, so terminal window transparency can show through pane content instead of being repainted as an opaque color.
