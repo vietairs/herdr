@@ -165,18 +165,24 @@ fn clamp_to_pane(screen_col: u16, screen_row: u16, pane_inner: Rect) -> (u16, u1
     (clamped_row - pane_inner.y, clamped_col - pane_inner.x)
 }
 
+fn osc52_sequence(bytes: &[u8]) -> String {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("\x1b]52;c;{encoded}\x07")
+}
+
 /// Write clipboard bytes to the system clipboard via OSC 52.
 ///
 /// OSC 52 format: `ESC ] 52 ; c ; <base64> BEL`
 ///
-/// The terminal emulator (Ghostty, kitty, etc.) intercepts this
-/// and sets the system clipboard. Ghostty has `clipboard-write = allow`
-/// by default.
+/// Some terminals still only honor BEL-terminated OSC 52 writes, so herdr
+/// emits BEL here even though ST works in newer emulators.
 pub fn write_osc52_bytes(bytes: &[u8]) {
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    // Use ST (ESC \) terminator — more widely supported than BEL in some terminals
-    let sequence = format!("\x1b]52;c;{encoded}\x1b\\");
+    if crate::platform::write_clipboard(bytes) {
+        return;
+    }
+
+    let sequence = osc52_sequence(bytes);
     let _ = std::io::stdout().write_all(sequence.as_bytes());
     let _ = std::io::stdout().flush();
 }
@@ -196,6 +202,11 @@ mod tests {
         sel.cursor = (er, ec);
         sel.phase = Phase::Dragging;
         sel
+    }
+
+    #[test]
+    fn osc52_sequence_uses_bel_terminator() {
+        assert_eq!(osc52_sequence(b"hello"), "\x1b]52;c;aGVsbG8=\x07");
     }
 
     #[test]

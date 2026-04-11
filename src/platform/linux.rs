@@ -1,6 +1,10 @@
-use std::path::PathBuf;
+use std::{
+    io::Write,
+    path::PathBuf,
+    process::{Command, Stdio},
+};
 
-use super::{ForegroundJob, ForegroundProcess, Signal};
+use super::{ClipboardCommand, ForegroundJob, ForegroundProcess, Signal};
 
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -142,9 +146,98 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
+pub fn write_clipboard(bytes: &[u8]) -> bool {
+    for command in clipboard_commands() {
+        if run_clipboard_command(&command, bytes) {
+            return true;
+        }
+    }
+    false
+}
+
+fn clipboard_commands() -> Vec<ClipboardCommand> {
+    let mut commands = Vec::new();
+
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        commands.push(ClipboardCommand {
+            program: "wl-copy",
+            args: &["--type", "text/plain;charset=utf-8"],
+        });
+    }
+
+    if std::env::var_os("DISPLAY").is_some() {
+        commands.push(ClipboardCommand {
+            program: "xclip",
+            args: &["-selection", "clipboard", "-in"],
+        });
+        commands.push(ClipboardCommand {
+            program: "xsel",
+            args: &["--clipboard", "--input"],
+        });
+    }
+
+    commands
+}
+
+fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
+    let mut child = match Command::new(command.program)
+        .args(command.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    };
+
+    if stdin.write_all(bytes).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    }
+    drop(stdin);
+
+    child.wait().map(|status| status.success()).unwrap_or(false)
+}
+
 fn process_session_id(pid: u32) -> Option<i32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rest = stat.get(stat.rfind(')')? + 2..)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
     fields.get(3)?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_commands_prefer_wayland_when_available() {
+        unsafe {
+            std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
+            std::env::remove_var("DISPLAY");
+        }
+        let commands = clipboard_commands();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].program, "wl-copy");
+    }
+
+    #[test]
+    fn clipboard_commands_include_x11_fallbacks() {
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::set_var("DISPLAY", ":0");
+        }
+        let commands = clipboard_commands();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].program, "xclip");
+        assert_eq!(commands[1].program, "xsel");
+    }
 }

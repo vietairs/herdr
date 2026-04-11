@@ -24,3 +24,8 @@ pub fn signal_processes(_pids: &[u32], _signal: Signal) {}
 pub fn process_exists(_pid: u32) -> bool {
     false
 }
+
+/// Unsupported platform stub.
+pub fn write_clipboard(_bytes: &[u8]) -> bool {
+    false
+}

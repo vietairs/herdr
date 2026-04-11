@@ -1,8 +1,10 @@
 use std::ffi::OsStr;
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-use super::{ForegroundJob, ForegroundProcess, Signal};
+use super::{ClipboardCommand, ForegroundJob, ForegroundProcess, Signal};
 
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -180,6 +182,44 @@ fn kern_procargs2(pid: u32) -> Option<Vec<u8>> {
 /// It does NOT reflect `process.title` changes.
 fn process_comm_name(pid: u32) -> Option<String> {
     process_bsdinfo(pid).and_then(|info| comm_from_bsdinfo(&info))
+}
+
+pub fn write_clipboard(bytes: &[u8]) -> bool {
+    run_clipboard_command(
+        &ClipboardCommand {
+            program: "pbcopy",
+            args: &[],
+        },
+        bytes,
+    )
+}
+
+fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
+    let mut child = match Command::new(command.program)
+        .args(command.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    };
+
+    if stdin.write_all(bytes).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    }
+    drop(stdin);
+
+    child.wait().map(|status| status.success()).unwrap_or(false)
 }
 
 fn process_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
