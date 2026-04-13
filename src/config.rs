@@ -96,6 +96,36 @@ pub struct LiveKeybindConfig {
     pub keybinds: Keybinds,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandKeybindType {
+    #[default]
+    Shell,
+    Pane,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CommandKeybindConfig {
+    /// Navigate-mode key that runs a command after pressing the prefix key.
+    pub key: String,
+    /// Command executed either in the background shell or inside a pane.
+    pub command: String,
+    /// Command execution mode. Default: "shell".
+    #[serde(rename = "type")]
+    pub action_type: CommandKeybindType,
+}
+
+impl Default for CommandKeybindConfig {
+    fn default() -> Self {
+        Self {
+            key: String::new(),
+            command: String::new(),
+            action_type: CommandKeybindType::Shell,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct KeysConfig {
@@ -141,6 +171,8 @@ pub struct KeysConfig {
     pub resize_mode: String,
     /// Toggle sidebar collapse. Default: "b"
     pub toggle_sidebar: String,
+    /// Prefix-mode custom command bindings.
+    pub command: Vec<CommandKeybindConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -313,6 +345,7 @@ impl Default for KeysConfig {
             fullscreen: "f".into(),
             resize_mode: "r".into(),
             toggle_sidebar: "b".into(),
+            command: Vec::new(),
         }
     }
 }
@@ -463,13 +496,128 @@ impl Config {
         Vec<String>,
         Keybinds,
     ) {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        enum BindingScope {
+            Navigate,
+            TerminalDirect,
+        }
+
         #[derive(Clone)]
-        struct Binding<'a> {
+        struct RequiredBinding<'a> {
+            scope: BindingScope,
             field: &'a str,
             label: String,
             default_label: &'a str,
             value: (KeyCode, KeyModifiers),
             default: (KeyCode, KeyModifiers),
+        }
+
+        struct OptionalBinding {
+            scope: BindingScope,
+            field: &'static str,
+            value: Option<(KeyCode, KeyModifiers)>,
+            label: Option<String>,
+        }
+
+        #[derive(Default)]
+        struct BindingRegistry {
+            seen: std::collections::HashMap<(BindingScope, KeyCode, KeyModifiers), String>,
+        }
+
+        impl BindingRegistry {
+            fn register(
+                &mut self,
+                scope: BindingScope,
+                binding: (KeyCode, KeyModifiers),
+                field: &str,
+            ) -> Option<String> {
+                self.seen
+                    .insert((scope, binding.0, binding.1), field.to_string())
+            }
+
+            fn conflict(
+                &self,
+                scope: BindingScope,
+                binding: (KeyCode, KeyModifiers),
+            ) -> Option<&str> {
+                self.seen
+                    .get(&(scope, binding.0, binding.1))
+                    .map(String::as_str)
+            }
+
+            fn reserve_if_unbound(
+                &mut self,
+                scope: BindingScope,
+                binding: (KeyCode, KeyModifiers),
+                field: &str,
+            ) {
+                self.seen
+                    .entry((scope, binding.0, binding.1))
+                    .or_insert_with(|| field.to_string());
+            }
+        }
+
+        fn required_binding<'a>(
+            scope: BindingScope,
+            field: &'a str,
+            configured_label: &'a str,
+            default_label: &'a str,
+            default: (KeyCode, KeyModifiers),
+            diagnostics: &mut Vec<String>,
+        ) -> RequiredBinding<'a> {
+            let (value, diag) = parse_key_combo_with_diagnostic(configured_label, field, default);
+            let label = if let Some(diag) = diag {
+                diagnostics.push(diag);
+                default_label.to_string()
+            } else {
+                configured_label.to_string()
+            };
+            RequiredBinding {
+                scope,
+                field,
+                label,
+                default_label,
+                value,
+                default,
+            }
+        }
+
+        fn optional_binding(
+            scope: BindingScope,
+            field: &'static str,
+            configured_label: &str,
+            diagnostics: &mut Vec<String>,
+        ) -> OptionalBinding {
+            if configured_label.trim().is_empty() {
+                return OptionalBinding {
+                    scope,
+                    field,
+                    value: None,
+                    label: None,
+                };
+            }
+            match parse_key_combo(configured_label) {
+                Some(value) => OptionalBinding {
+                    scope,
+                    field,
+                    value: Some(value),
+                    label: Some(configured_label.to_string()),
+                },
+                None => {
+                    let diag = format!(
+                        "invalid keybinding: {field} = {:?}; disabling binding",
+                        configured_label
+                    );
+                    warn!(message = %diag, "config diagnostic");
+                    diagnostics.push(diag);
+                    OptionalBinding {
+                        scope,
+                        field,
+                        value: None,
+                        label: None,
+                    }
+                }
+            }
         }
 
         let mut diagnostics = Vec::new();
@@ -482,115 +630,81 @@ impl Config {
             warn!(message = %diag, "config diagnostic");
         }
 
-        fn binding<'a>(
-            field: &'a str,
-            configured_label: &'a str,
-            default_label: &'a str,
-            default: (KeyCode, KeyModifiers),
-            diagnostics: &mut Vec<String>,
-        ) -> Binding<'a> {
-            let (value, diag) = parse_key_combo_with_diagnostic(configured_label, field, default);
-            let label = if let Some(diag) = diag {
-                diagnostics.push(diag);
-                default_label.to_string()
-            } else {
-                configured_label.to_string()
-            };
-            Binding {
-                field,
-                label,
-                default_label,
-                value,
-                default,
-            }
-        }
-
-        fn optional_binding(
-            field: &'static str,
-            configured_label: &str,
-            diagnostics: &mut Vec<String>,
-        ) -> (Option<(KeyCode, KeyModifiers)>, Option<String>) {
-            if configured_label.trim().is_empty() {
-                return (None, None);
-            }
-            let (value, diag) = parse_key_combo_with_diagnostic(
-                configured_label,
-                field,
-                (KeyCode::Null, KeyModifiers::empty()),
-            );
-            if let Some(diag) = diag {
-                diagnostics.push(diag);
-                (None, None)
-            } else {
-                (Some(value), Some(configured_label.to_string()))
-            }
-        }
-
         let mut bindings = vec![
-            binding(
+            required_binding(
+                BindingScope::Navigate,
                 "keys.new_workspace",
                 &self.keys.new_workspace,
                 "n",
                 (KeyCode::Char('n'), KeyModifiers::empty()),
                 &mut diagnostics,
             ),
-            binding(
+            required_binding(
+                BindingScope::Navigate,
                 "keys.rename_workspace",
                 &self.keys.rename_workspace,
                 "shift+n",
                 (KeyCode::Char('n'), KeyModifiers::SHIFT),
                 &mut diagnostics,
             ),
-            binding(
+            required_binding(
+                BindingScope::Navigate,
                 "keys.close_workspace",
                 &self.keys.close_workspace,
                 "d",
                 (KeyCode::Char('d'), KeyModifiers::empty()),
                 &mut diagnostics,
             ),
-            binding(
+            required_binding(
+                BindingScope::Navigate,
                 "keys.new_tab",
                 &self.keys.new_tab,
                 "c",
                 (KeyCode::Char('c'), KeyModifiers::empty()),
                 &mut diagnostics,
             ),
-            binding(
+            required_binding(
+                BindingScope::Navigate,
                 "keys.split_vertical",
                 &self.keys.split_vertical,
                 "v",
                 (KeyCode::Char('v'), KeyModifiers::empty()),
                 &mut diagnostics,
             ),
-            binding(
+            required_binding(
+                BindingScope::Navigate,
                 "keys.split_horizontal",
                 &self.keys.split_horizontal,
                 "-",
                 (KeyCode::Char('-'), KeyModifiers::empty()),
                 &mut diagnostics,
             ),
-            binding(
+            required_binding(
+                BindingScope::Navigate,
                 "keys.close_pane",
                 &self.keys.close_pane,
                 "x",
                 (KeyCode::Char('x'), KeyModifiers::empty()),
                 &mut diagnostics,
             ),
-            binding(
+            required_binding(
+                BindingScope::Navigate,
                 "keys.fullscreen",
                 &self.keys.fullscreen,
                 "f",
                 (KeyCode::Char('f'), KeyModifiers::empty()),
                 &mut diagnostics,
             ),
-            binding(
+            required_binding(
+                BindingScope::Navigate,
                 "keys.resize_mode",
                 &self.keys.resize_mode,
                 "r",
                 (KeyCode::Char('r'), KeyModifiers::empty()),
                 &mut diagnostics,
             ),
-            binding(
+            required_binding(
+                BindingScope::Navigate,
                 "keys.toggle_sidebar",
                 &self.keys.toggle_sidebar,
                 "b",
@@ -599,51 +713,72 @@ impl Config {
             ),
         ];
 
-        let optional_bindings = [
+        let mut optional_bindings = vec![
             optional_binding(
+                BindingScope::Navigate,
                 "keys.previous_workspace",
                 &self.keys.previous_workspace,
                 &mut diagnostics,
             ),
             optional_binding(
+                BindingScope::Navigate,
                 "keys.next_workspace",
                 &self.keys.next_workspace,
                 &mut diagnostics,
             ),
-            optional_binding("keys.rename_tab", &self.keys.rename_tab, &mut diagnostics),
             optional_binding(
+                BindingScope::Navigate,
+                "keys.rename_tab",
+                &self.keys.rename_tab,
+                &mut diagnostics,
+            ),
+            optional_binding(
+                BindingScope::Navigate,
                 "keys.previous_tab",
                 &self.keys.previous_tab,
                 &mut diagnostics,
             ),
-            optional_binding("keys.next_tab", &self.keys.next_tab, &mut diagnostics),
-            optional_binding("keys.close_tab", &self.keys.close_tab, &mut diagnostics),
             optional_binding(
+                BindingScope::Navigate,
+                "keys.next_tab",
+                &self.keys.next_tab,
+                &mut diagnostics,
+            ),
+            optional_binding(
+                BindingScope::Navigate,
+                "keys.close_tab",
+                &self.keys.close_tab,
+                &mut diagnostics,
+            ),
+            optional_binding(
+                BindingScope::TerminalDirect,
                 "keys.focus_pane_left",
                 &self.keys.focus_pane_left,
                 &mut diagnostics,
             ),
             optional_binding(
+                BindingScope::TerminalDirect,
                 "keys.focus_pane_down",
                 &self.keys.focus_pane_down,
                 &mut diagnostics,
             ),
             optional_binding(
+                BindingScope::TerminalDirect,
                 "keys.focus_pane_up",
                 &self.keys.focus_pane_up,
                 &mut diagnostics,
             ),
             optional_binding(
+                BindingScope::TerminalDirect,
                 "keys.focus_pane_right",
                 &self.keys.focus_pane_right,
                 &mut diagnostics,
             ),
         ];
 
-        use std::collections::HashMap;
-        let mut seen: HashMap<(KeyCode, KeyModifiers), &str> = HashMap::new();
+        let mut registry = BindingRegistry::default();
         for binding in &mut bindings {
-            if let Some(first_field) = seen.get(&binding.value) {
+            if let Some(first_field) = registry.conflict(binding.scope, binding.value) {
                 let diag = format!(
                     "duplicate keybinding: {} conflicts with {}; using default {}",
                     binding.field, first_field, binding.default_label
@@ -652,9 +787,165 @@ impl Config {
                 diagnostics.push(diag);
                 binding.value = binding.default;
                 binding.label = binding.default_label.to_string();
-            } else {
-                seen.insert(binding.value, binding.field);
             }
+            registry.register(binding.scope, binding.value, binding.field);
+        }
+
+        for binding in &mut optional_bindings {
+            let Some(value) = binding.value else {
+                continue;
+            };
+            if let Some(first_field) = registry.conflict(binding.scope, value) {
+                let diag = format!(
+                    "duplicate keybinding: {} conflicts with {}; disabling binding",
+                    binding.field, first_field
+                );
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+                binding.value = None;
+                binding.label = None;
+                continue;
+            }
+            registry.register(binding.scope, value, binding.field);
+        }
+
+        registry.reserve_if_unbound(BindingScope::Navigate, prefix, "keys.prefix");
+        for (field, binding) in [
+            ("navigate.quit", (KeyCode::Char('q'), KeyModifiers::empty())),
+            (
+                "navigate.open_workspace",
+                (KeyCode::Enter, KeyModifiers::empty()),
+            ),
+            (
+                "navigate.settings",
+                (KeyCode::Char('s'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.keybind_help",
+                (KeyCode::Char('?'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_up",
+                (KeyCode::Up, KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_down",
+                (KeyCode::Down, KeyModifiers::empty()),
+            ),
+            (
+                "navigate.focus_left",
+                (KeyCode::Char('h'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.focus_down",
+                (KeyCode::Char('j'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.focus_up",
+                (KeyCode::Char('k'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.focus_right",
+                (KeyCode::Char('l'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.arrow_left",
+                (KeyCode::Left, KeyModifiers::empty()),
+            ),
+            (
+                "navigate.arrow_right",
+                (KeyCode::Right, KeyModifiers::empty()),
+            ),
+            ("navigate.tab_next", (KeyCode::Tab, KeyModifiers::empty())),
+            (
+                "navigate.tab_prev",
+                (KeyCode::BackTab, KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_1",
+                (KeyCode::Char('1'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_2",
+                (KeyCode::Char('2'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_3",
+                (KeyCode::Char('3'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_4",
+                (KeyCode::Char('4'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_5",
+                (KeyCode::Char('5'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_6",
+                (KeyCode::Char('6'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_7",
+                (KeyCode::Char('7'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_8",
+                (KeyCode::Char('8'), KeyModifiers::empty()),
+            ),
+            (
+                "navigate.workspace_9",
+                (KeyCode::Char('9'), KeyModifiers::empty()),
+            ),
+            ("navigate.back", (KeyCode::Esc, KeyModifiers::empty())),
+        ] {
+            registry.reserve_if_unbound(BindingScope::Navigate, binding, field);
+        }
+
+        let mut custom_commands = Vec::new();
+        for (index, command) in self.keys.command.iter().enumerate() {
+            let key_field = format!("keys.command[{index}].key");
+            let command_field = format!("keys.command[{index}].command");
+
+            if command.command.trim().is_empty() {
+                let diag =
+                    format!("empty custom command: {command_field}; disabling custom command");
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+                continue;
+            }
+
+            let Some(binding) = parse_key_combo(&command.key) else {
+                let diag = format!(
+                    "invalid keybinding: {} = {:?}; disabling custom command",
+                    key_field, command.key
+                );
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+                continue;
+            };
+
+            if let Some(first_field) = registry.conflict(BindingScope::Navigate, binding) {
+                let diag = format!(
+                    "duplicate custom keybinding: {} conflicts with {}; disabling custom command",
+                    key_field, first_field
+                );
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+                continue;
+            }
+
+            registry.register(BindingScope::Navigate, binding, &key_field);
+            let action = match command.action_type {
+                CommandKeybindType::Shell => CustomCommandAction::Shell,
+                CommandKeybindType::Pane => CustomCommandAction::Pane,
+            };
+            custom_commands.push(CustomCommandKeybind {
+                key: binding,
+                label: format_key_combo(binding),
+                command: command.command.clone(),
+                action,
+            });
         }
 
         let keybinds = Keybinds {
@@ -664,28 +955,28 @@ impl Config {
             rename_workspace_label: bindings[1].label.clone(),
             close_workspace: bindings[2].value,
             close_workspace_label: bindings[2].label.clone(),
-            previous_workspace: optional_bindings[0].0,
-            previous_workspace_label: optional_bindings[0].1.clone(),
-            next_workspace: optional_bindings[1].0,
-            next_workspace_label: optional_bindings[1].1.clone(),
+            previous_workspace: optional_bindings[0].value,
+            previous_workspace_label: optional_bindings[0].label.clone(),
+            next_workspace: optional_bindings[1].value,
+            next_workspace_label: optional_bindings[1].label.clone(),
             new_tab: bindings[3].value,
             new_tab_label: bindings[3].label.clone(),
-            rename_tab: optional_bindings[2].0,
-            rename_tab_label: optional_bindings[2].1.clone(),
-            previous_tab: optional_bindings[3].0,
-            previous_tab_label: optional_bindings[3].1.clone(),
-            next_tab: optional_bindings[4].0,
-            next_tab_label: optional_bindings[4].1.clone(),
-            close_tab: optional_bindings[5].0,
-            close_tab_label: optional_bindings[5].1.clone(),
-            focus_pane_left: optional_bindings[6].0,
-            focus_pane_left_label: optional_bindings[6].1.clone(),
-            focus_pane_down: optional_bindings[7].0,
-            focus_pane_down_label: optional_bindings[7].1.clone(),
-            focus_pane_up: optional_bindings[8].0,
-            focus_pane_up_label: optional_bindings[8].1.clone(),
-            focus_pane_right: optional_bindings[9].0,
-            focus_pane_right_label: optional_bindings[9].1.clone(),
+            rename_tab: optional_bindings[2].value,
+            rename_tab_label: optional_bindings[2].label.clone(),
+            previous_tab: optional_bindings[3].value,
+            previous_tab_label: optional_bindings[3].label.clone(),
+            next_tab: optional_bindings[4].value,
+            next_tab_label: optional_bindings[4].label.clone(),
+            close_tab: optional_bindings[5].value,
+            close_tab_label: optional_bindings[5].label.clone(),
+            focus_pane_left: optional_bindings[6].value,
+            focus_pane_left_label: optional_bindings[6].label.clone(),
+            focus_pane_down: optional_bindings[7].value,
+            focus_pane_down_label: optional_bindings[7].label.clone(),
+            focus_pane_up: optional_bindings[8].value,
+            focus_pane_up_label: optional_bindings[8].label.clone(),
+            focus_pane_right: optional_bindings[9].value,
+            focus_pane_right_label: optional_bindings[9].label.clone(),
             split_vertical: bindings[4].value,
             split_vertical_label: bindings[4].label.clone(),
             split_horizontal: bindings[5].value,
@@ -698,10 +989,25 @@ impl Config {
             resize_mode_label: bindings[8].label.clone(),
             toggle_sidebar: bindings[9].value,
             toggle_sidebar_label: bindings[9].label.clone(),
+            custom_commands,
         };
 
         (prefix_diag, prefix, diagnostics, keybinds)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomCommandAction {
+    Shell,
+    Pane,
+}
+
+#[derive(Debug, Clone)]
+pub struct CustomCommandKeybind {
+    pub key: (KeyCode, KeyModifiers),
+    pub label: String,
+    pub command: String,
+    pub action: CustomCommandAction,
 }
 
 /// Parsed keybinds for navigate mode actions.
@@ -747,6 +1053,7 @@ pub struct Keybinds {
     pub resize_mode_label: String,
     pub toggle_sidebar: (KeyCode, KeyModifiers),
     pub toggle_sidebar_label: String,
+    pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
 /// Parse a color string into a ratatui Color.
@@ -1171,6 +1478,7 @@ mod tests {
         assert_eq!(kb.fullscreen.0, KeyCode::Char('f'));
         assert_eq!(kb.resize_mode.0, KeyCode::Char('r'));
         assert_eq!(kb.toggle_sidebar.0, KeyCode::Char('b'));
+        assert!(kb.custom_commands.is_empty());
     }
 
     #[test]
@@ -1323,6 +1631,103 @@ rename_workspace = "g"
             (KeyCode::Char('n'), KeyModifiers::SHIFT)
         );
         assert_eq!(kb.rename_workspace_label, "shift+n");
+    }
+
+    #[test]
+    fn duplicate_optional_keybinding_is_disabled_with_diagnostic() {
+        let toml = r#"
+[keys]
+new_workspace = "g"
+rename_tab = "g"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let diagnostics = config.collect_diagnostics();
+        let kb = config.keybinds();
+
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.contains("keys.rename_tab") && d.contains("disabling binding")));
+        assert_eq!(
+            kb.new_workspace,
+            (KeyCode::Char('g'), KeyModifiers::empty())
+        );
+        assert_eq!(kb.rename_tab, None);
+    }
+
+    #[test]
+    fn custom_command_keybinds_parse_from_toml() {
+        let toml = r#"
+[[keys.command]]
+key = "g"
+command = "echo hi"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let kb = config.keybinds();
+
+        assert_eq!(kb.custom_commands.len(), 1);
+        assert_eq!(
+            kb.custom_commands[0].key,
+            (KeyCode::Char('g'), KeyModifiers::empty())
+        );
+        assert_eq!(kb.custom_commands[0].label, "g");
+        assert_eq!(kb.custom_commands[0].command, "echo hi");
+        assert_eq!(kb.custom_commands[0].action, CustomCommandAction::Shell);
+    }
+
+    #[test]
+    fn pane_custom_command_keybinds_parse_from_toml() {
+        let toml = r#"
+[[keys.command]]
+key = "g"
+type = "pane"
+command = "lazygit"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let kb = config.keybinds();
+
+        assert_eq!(kb.custom_commands.len(), 1);
+        assert_eq!(kb.custom_commands[0].action, CustomCommandAction::Pane);
+    }
+
+    #[test]
+    fn custom_command_conflicting_with_builtin_is_disabled_with_diagnostic() {
+        let toml = r#"
+[keys]
+new_workspace = "g"
+
+[[keys.command]]
+key = "g"
+command = "echo hi"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let diagnostics = config.collect_diagnostics();
+        let kb = config.keybinds();
+
+        assert!(diagnostics.iter().any(|d| {
+            d.contains("duplicate custom keybinding")
+                && d.contains("keys.command[0].key")
+                && d.contains("keys.new_workspace")
+        }));
+        assert!(kb.custom_commands.is_empty());
+    }
+
+    #[test]
+    fn custom_command_conflicting_with_reserved_navigate_key_is_disabled_with_diagnostic() {
+        let toml = r#"
+[[keys.command]]
+key = "q"
+command = "echo hi"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let diagnostics = config.collect_diagnostics();
+        let kb = config.keybinds();
+
+        assert!(diagnostics.iter().any(|d| {
+            d.contains("duplicate custom keybinding")
+                && d.contains("keys.command[0].key")
+                && d.contains("navigate.quit")
+        }));
+        assert!(kb.custom_commands.is_empty());
     }
 
     #[test]

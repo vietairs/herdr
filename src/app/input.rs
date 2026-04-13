@@ -1,5 +1,7 @@
 //! Input handling — translates crossterm key/mouse events into state mutations.
 
+use std::process::{Command, Stdio};
+
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
@@ -103,7 +105,7 @@ impl App {
                 match self.state.mode {
                     Mode::Onboarding => self.handle_onboarding_key(key),
                     Mode::ReleaseNotes => self.handle_release_notes_key(key),
-                    Mode::Navigate => handle_navigate_key(&mut self.state, key),
+                    Mode::Navigate => self.handle_navigate_key(key),
                     Mode::RenameWorkspace | Mode::RenameTab => {
                         handle_rename_key(&mut self.state, key)
                     }
@@ -193,6 +195,164 @@ impl App {
                 SettingsAction::SaveToast(enabled) => self.save_toast(enabled),
             }
         }
+    }
+
+    fn handle_navigate_key(&mut self, key: KeyEvent) {
+        self.state.update_dismissed = true;
+
+        if self.state.is_prefix(&key) || key.code == KeyCode::Esc {
+            leave_navigate_mode(&mut self.state);
+            return;
+        }
+
+        if let Some(action) = navigate_action_for_key(&self.state, &key) {
+            execute_navigate_action(&mut self.state, action);
+            return;
+        }
+
+        if handle_navigate_reserved_key(&mut self.state, key) {
+            return;
+        }
+
+        if let Some(binding) = navigate_custom_command_for_key(&self.state, &key) {
+            self.launch_custom_command(binding);
+        }
+    }
+
+    fn launch_custom_command(&mut self, binding: crate::config::CustomCommandKeybind) {
+        let previous_toast = self.state.toast.clone();
+        let result = match binding.action {
+            crate::config::CustomCommandAction::Shell => self.spawn_custom_command(&binding),
+            crate::config::CustomCommandAction::Pane => self.spawn_pane_command(&binding.command),
+        };
+        match result {
+            Ok(()) => leave_navigate_mode(&mut self.state),
+            Err(err) => {
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: crate::app::state::ToastKind::NeedsAttention,
+                    title: "custom command failed".to_string(),
+                    context: err.to_string(),
+                });
+                self.sync_toast_deadline(previous_toast);
+            }
+        }
+    }
+
+    fn custom_command_env(&self) -> (Vec<(String, String)>, Option<std::path::PathBuf>) {
+        let mut env = vec![(
+            crate::api::SOCKET_PATH_ENV_VAR.to_string(),
+            crate::api::socket_path().display().to_string(),
+        )];
+        if let Ok(current_exe) = std::env::current_exe() {
+            env.push((
+                "HERDR_BIN_PATH".to_string(),
+                current_exe.display().to_string(),
+            ));
+        }
+
+        let mut cwd = None;
+        if let Some(ws_idx) = self.state.active {
+            env.push((
+                "HERDR_ACTIVE_WORKSPACE_ID".to_string(),
+                self.public_workspace_id(ws_idx),
+            ));
+            if let Some(workspace) = self.state.workspaces.get(ws_idx) {
+                let tab_idx = workspace.active_tab_index();
+                if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
+                    env.push(("HERDR_ACTIVE_TAB_ID".to_string(), tab_id));
+                }
+                if let Some(pane_id) = workspace.focused_pane_id() {
+                    if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                        env.push(("HERDR_ACTIVE_PANE_ID".to_string(), public_pane_id));
+                    }
+                    if let Some(pane_cwd) = workspace
+                        .active_tab()
+                        .and_then(|tab| tab.cwd_for_pane(pane_id))
+                    {
+                        env.push((
+                            "HERDR_ACTIVE_PANE_CWD".to_string(),
+                            pane_cwd.display().to_string(),
+                        ));
+                        if pane_cwd.is_dir() {
+                            cwd = Some(pane_cwd);
+                        }
+                    }
+                }
+            }
+        }
+        (env, cwd)
+    }
+
+    fn spawn_custom_command(
+        &self,
+        binding: &crate::config::CustomCommandKeybind,
+    ) -> std::io::Result<()> {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-lc")
+            .arg(&binding.command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let (env, cwd) = self.custom_command_env();
+        command.envs(env);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        command.spawn()?;
+        Ok(())
+    }
+
+    fn spawn_pane_command(&mut self, command: &str) -> std::io::Result<()> {
+        let Some(ws_idx) = self.state.active else {
+            return Err(std::io::Error::other("no active workspace"));
+        };
+        let (rows, cols) = self.state.estimate_pane_size();
+        let new_rows = rows.max(4);
+        let new_cols = cols.max(10);
+        let (env, _) = self.custom_command_env();
+
+        let ws = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .ok_or_else(|| std::io::Error::other("active workspace disappeared"))?;
+        let tab_idx = ws.active_tab_index();
+        let previous_focus = ws
+            .focused_pane_id()
+            .ok_or_else(|| std::io::Error::other("no focused pane"))?;
+        let previous_zoomed = ws.active_tab().map(|tab| tab.zoomed).unwrap_or(false);
+        let cwd = ws
+            .active_tab()
+            .and_then(|tab| tab.cwd_for_pane(previous_focus));
+        let new_pane_id = ws.split_focused_command(
+            Direction::Horizontal,
+            new_rows,
+            new_cols,
+            cwd,
+            command,
+            &env,
+            self.state.pane_scrollback_limit_bytes,
+            self.state.host_terminal_theme,
+        )?;
+        ws.active_tab_mut()
+            .expect("workspace must have an active tab")
+            .layout
+            .focus_pane(new_pane_id);
+        ws.active_tab_mut()
+            .expect("workspace must have an active tab")
+            .zoomed = true;
+        self.overlay_panes.insert(
+            new_pane_id,
+            super::OverlayPaneState {
+                ws_idx,
+                tab_idx,
+                previous_focus,
+                previous_zoomed,
+            },
+        );
+        self.state.mode = Mode::Terminal;
+        Ok(())
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -688,6 +848,90 @@ fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+fn navigate_custom_command_for_key(
+    state: &AppState,
+    key: &KeyEvent,
+) -> Option<crate::config::CustomCommandKeybind> {
+    state
+        .keybinds
+        .custom_commands
+        .iter()
+        .find(|binding| key_matches(key, binding.key.0, binding.key.1))
+        .cloned()
+}
+
+fn handle_navigate_reserved_key(state: &mut AppState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('q') => {
+            state.should_quit = true;
+            true
+        }
+        KeyCode::Enter => {
+            if !state.workspaces.is_empty() {
+                state.switch_workspace(state.selected);
+                leave_navigate_mode(state);
+            }
+            true
+        }
+        KeyCode::Char(c @ '1'..='9') => {
+            let idx = (c as usize) - ('1' as usize);
+            if idx < state.workspaces.len() {
+                state.switch_workspace(idx);
+                leave_navigate_mode(state);
+            }
+            true
+        }
+        KeyCode::Char('s') => {
+            open_settings(state);
+            true
+        }
+        KeyCode::Char('?') => {
+            open_keybind_help(state);
+            true
+        }
+        KeyCode::Up => {
+            if state.selected > 0 {
+                state.selected -= 1;
+                state.ensure_workspace_visible(state.selected);
+            }
+            true
+        }
+        KeyCode::Down => {
+            if !state.workspaces.is_empty() && state.selected < state.workspaces.len() - 1 {
+                state.selected += 1;
+                state.ensure_workspace_visible(state.selected);
+            }
+            true
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            state.navigate_pane(NavDirection::Left);
+            true
+        }
+        KeyCode::Char('j') => {
+            state.navigate_pane(NavDirection::Down);
+            true
+        }
+        KeyCode::Char('k') => {
+            state.navigate_pane(NavDirection::Up);
+            true
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            state.navigate_pane(NavDirection::Right);
+            true
+        }
+        KeyCode::Tab => {
+            state.cycle_pane(false);
+            true
+        }
+        KeyCode::BackTab => {
+            state.cycle_pane(true);
+            true
+        }
+        _ => false,
+    }
+}
+
+#[allow(dead_code)] // exercised in input unit tests; production uses App::handle_navigate_key
 fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     state.update_dismissed = true;
 
@@ -701,45 +945,7 @@ fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
         return;
     }
 
-    match key.code {
-        KeyCode::Char('q') => state.should_quit = true,
-        KeyCode::Enter => {
-            if !state.workspaces.is_empty() {
-                state.switch_workspace(state.selected);
-                leave_navigate_mode(state);
-            }
-        }
-        KeyCode::Char(c @ '1'..='9') => {
-            let idx = (c as usize) - ('1' as usize);
-            if idx < state.workspaces.len() {
-                state.switch_workspace(idx);
-                leave_navigate_mode(state);
-            }
-        }
-        KeyCode::Char('s') => {
-            open_settings(state);
-        }
-        KeyCode::Char('?') => open_keybind_help(state),
-        KeyCode::Up => {
-            if state.selected > 0 {
-                state.selected -= 1;
-                state.ensure_workspace_visible(state.selected);
-            }
-        }
-        KeyCode::Down => {
-            if !state.workspaces.is_empty() && state.selected < state.workspaces.len() - 1 {
-                state.selected += 1;
-                state.ensure_workspace_visible(state.selected);
-            }
-        }
-        KeyCode::Char('h') | KeyCode::Left => state.navigate_pane(NavDirection::Left),
-        KeyCode::Char('j') => state.navigate_pane(NavDirection::Down),
-        KeyCode::Char('k') => state.navigate_pane(NavDirection::Up),
-        KeyCode::Char('l') | KeyCode::Right => state.navigate_pane(NavDirection::Right),
-        KeyCode::Tab => state.cycle_pane(false),
-        KeyCode::BackTab => state.cycle_pane(true),
-        _ => {}
-    }
+    let _ = handle_navigate_reserved_key(state, key);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3252,6 +3458,12 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        path::Path,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
     use crate::{config::Config, detect::Agent, workspace::Workspace};
     use crossterm::event::{KeyModifiers, MouseEvent};
     use ratatui::layout::Rect;
@@ -3310,6 +3522,25 @@ mod tests {
             state.sidebar_width,
             state.sidebar_section_split,
         )
+    }
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn wait_for_file(path: &Path) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if let Ok(content) = fs::read_to_string(path) {
+                return content;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("timed out waiting for {}", path.display());
     }
 
     fn root_layout_ratio(snapshot: &crate::persist::SessionSnapshot) -> Option<f32> {
@@ -3437,6 +3668,119 @@ mod tests {
 
         assert_ne!(app.state.workspaces[0].layout.focused(), focused_before);
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn custom_command_runs_from_prefix_key_in_navigate_mode() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let output_path = unique_temp_path("custom-command-keybind");
+        let command = format!(
+            "printf '%s\\n%s\\n%s\\n' \"$HERDR_ACTIVE_WORKSPACE_ID\" \"$HERDR_ACTIVE_TAB_ID\" \"$HERDR_ACTIVE_PANE_ID\" > '{}'",
+            output_path.display()
+        );
+        app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
+            key: (KeyCode::Char('g'), KeyModifiers::empty()),
+            label: "g".into(),
+            command,
+            action: crate::config::CustomCommandAction::Shell,
+        }];
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        assert_eq!(app.state.mode, Mode::Navigate);
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
+            .await;
+
+        let content = wait_for_file(&output_path);
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], app.state.workspaces[0].id);
+        assert_eq!(lines[1], format!("{}:1", app.state.workspaces[0].id));
+        assert_eq!(lines[2], format!("{}-1", app.state.workspaces[0].id));
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[tokio::test]
+    async fn pane_overlay_command_opens_and_closes_after_exit() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = Workspace::new(
+            std::env::current_dir().unwrap_or_else(|_| "/".into()),
+            24,
+            80,
+            app.state.pane_scrollback_limit_bytes,
+            app.state.host_terminal_theme,
+            app.event_tx.clone(),
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )
+        .expect("workspace should spawn");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let output_path = unique_temp_path("custom-pane-command");
+        let command = format!("printf done > '{}'", output_path.display());
+        app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
+            key: (KeyCode::Char('g'), KeyModifiers::empty()),
+            label: "g".into(),
+            command,
+            action: crate::config::CustomCommandAction::Pane,
+        }];
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert!(app.state.workspaces[0].tabs[0].zoomed);
+
+        let _ = wait_for_file(&output_path);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if app.drain_internal_events()
+                && app.state.workspaces[0].tabs[0].layout.pane_count() == 1
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        assert!(!app.state.workspaces[0].tabs[0].zoomed);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        let _ = fs::remove_file(output_path);
     }
 
     #[test]

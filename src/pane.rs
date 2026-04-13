@@ -1823,10 +1823,77 @@ impl PaneRuntime {
         cols: u16,
         cwd: std::path::PathBuf,
         scrollback_limit_bytes: usize,
-        _host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let mut cmd = CommandBuilder::new(&shell);
+        cmd.cwd(cwd);
+        cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
+        crate::integration::apply_pane_env(&mut cmd, pane_id);
+        Self::spawn_command_builder(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            events,
+            render_notify,
+            render_dirty,
+            cmd,
+            "failed to spawn shell",
+        )
+    }
+
+    pub fn spawn_shell_command(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        cwd: std::path::PathBuf,
+        command: &str,
+        extra_env: &[(String, String)],
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg(command);
+        cmd.cwd(cwd);
+        cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
+        crate::integration::apply_pane_env(&mut cmd, pane_id);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        Self::spawn_command_builder(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            events,
+            render_notify,
+            render_dirty,
+            cmd,
+            "failed to spawn command pane",
+        )
+    }
+
+    fn spawn_command_builder(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+        cmd: CommandBuilder,
+        spawn_error_message: &'static str,
     ) -> std::io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -1849,17 +1916,11 @@ impl PaneRuntime {
         let terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         let pane_terminal = GhosttyPaneTerminal::new(terminal, input_tx.clone())?;
-        pane_terminal.apply_host_terminal_theme(_host_terminal_theme);
+        pane_terminal.apply_host_terminal_theme(host_terminal_theme);
         let terminal = Arc::new(PaneTerminal {
             ghostty: pane_terminal,
         });
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
-
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let mut cmd = CommandBuilder::new(&shell);
-        cmd.cwd(cwd);
-        cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
-        crate::integration::apply_pane_env(&mut cmd, pane_id);
 
         let reader = pair
             .master
@@ -1889,7 +1950,7 @@ impl PaneRuntime {
                             Err(e) => error!(pane = pane_id.raw(), err = %e, "child wait failed"),
                         }
                     }
-                    Err(e) => error!(pane = pane_id.raw(), err = %e, "failed to spawn shell"),
+                    Err(e) => error!(pane = pane_id.raw(), err = %e, "{spawn_error_message}"),
                 }
                 // Use blocking send — PaneDied is critical, must not be dropped
                 if let Err(e) = rt.block_on(events.send(AppEvent::PaneDied { pane_id })) {

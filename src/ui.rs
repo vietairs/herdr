@@ -2541,6 +2541,16 @@ fn keybind_help_groups(app: &AppState) -> Vec<(&'static str, Vec<(String, &'stat
     ];
     groups.push(("panes", panes));
 
+    if !kb.custom_commands.is_empty() {
+        groups.push((
+            "custom",
+            kb.custom_commands
+                .iter()
+                .map(|binding| (binding.label.clone(), "custom command"))
+                .collect(),
+        ));
+    }
+
     groups
 }
 

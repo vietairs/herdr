@@ -8,7 +8,7 @@ mod actions;
 mod input;
 pub mod state;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::pending;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +36,14 @@ use crate::workspace::Workspace;
 pub use state::{AppState, Mode, ToastKind, ViewState};
 
 /// Full application: AppState + runtime concerns (event channels, async I/O).
+#[derive(Debug, Clone, Copy)]
+struct OverlayPaneState {
+    ws_idx: usize,
+    tab_idx: usize,
+    previous_focus: crate::layout::PaneId,
+    previous_zoomed: bool,
+}
+
 pub struct App {
     pub state: AppState,
     pub event_tx: mpsc::Sender<AppEvent>,
@@ -58,6 +66,7 @@ pub struct App {
     suppressed_repeat_keys: HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
+    overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
 }
 
 enum LoopEvent {
@@ -355,6 +364,7 @@ impl App {
             last_terminal_size: terminal::size().ok(),
             render_notify,
             render_dirty,
+            overlay_panes: HashMap::new(),
         }
     }
 
@@ -789,6 +799,12 @@ impl App {
             return;
         }
 
+        let overlay_state = if let AppEvent::PaneDied { pane_id } = &ev {
+            self.overlay_panes.remove(pane_id)
+        } else {
+            None
+        };
+
         if let AppEvent::PaneDied { pane_id } = &ev {
             if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
                 if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
@@ -823,7 +839,30 @@ impl App {
                 }
             }
         }
+        if let Some(overlay) = overlay_state {
+            self.restore_overlay_after_exit(overlay);
+        }
         self.sync_toast_deadline(previous_toast);
+    }
+
+    fn restore_overlay_after_exit(&mut self, overlay: OverlayPaneState) {
+        let Some(ws) = self.state.workspaces.get_mut(overlay.ws_idx) else {
+            return;
+        };
+        if overlay.tab_idx >= ws.tabs.len() {
+            return;
+        }
+
+        ws.active_tab = overlay.tab_idx;
+        let tab = &mut ws.tabs[overlay.tab_idx];
+        if tab.panes.contains_key(&overlay.previous_focus) {
+            tab.layout.focus_pane(overlay.previous_focus);
+        }
+        tab.zoomed = overlay.previous_zoomed;
+
+        if self.state.active == Some(overlay.ws_idx) {
+            self.state.mode = Mode::Terminal;
+        }
     }
 
     fn emit_pane_state_update(&self, update: &crate::app::actions::PaneStateUpdate) {

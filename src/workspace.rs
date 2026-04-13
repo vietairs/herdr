@@ -122,20 +122,79 @@ impl Tab {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
     ) -> std::io::Result<PaneId> {
+        self.split_focused_with_runtime(
+            direction,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            None,
+        )
+    }
+
+    pub fn split_focused_command(
+        &mut self,
+        direction: Direction,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        command: &str,
+        extra_env: &[(String, String)],
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<PaneId> {
+        self.split_focused_with_runtime(
+            direction,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            Some((command, extra_env)),
+        )
+    }
+
+    fn split_focused_with_runtime(
+        &mut self,
+        direction: Direction,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        command: Option<(&str, &[(String, String)])>,
+    ) -> std::io::Result<PaneId> {
         let new_id = self.layout.split_focused(direction);
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        let runtime = PaneRuntime::spawn(
-            new_id,
-            rows,
-            cols,
-            actual_cwd.clone(),
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            self.events.clone(),
-            self.render_notify.clone(),
-            self.render_dirty.clone(),
-        )?;
+        let runtime = if let Some((command, extra_env)) = command {
+            PaneRuntime::spawn_shell_command(
+                new_id,
+                rows,
+                cols,
+                actual_cwd.clone(),
+                command,
+                extra_env,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                self.events.clone(),
+                self.render_notify.clone(),
+                self.render_dirty.clone(),
+            )?
+        } else {
+            PaneRuntime::spawn(
+                new_id,
+                rows,
+                cols,
+                actual_cwd.clone(),
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                self.events.clone(),
+                self.render_notify.clone(),
+                self.render_dirty.clone(),
+            )?
+        };
         self.panes.insert(new_id, PaneState::new());
         self.pane_cwds.insert(new_id, actual_cwd);
         self.runtimes.insert(new_id, runtime);
@@ -323,6 +382,10 @@ impl Workspace {
 
     pub fn active_tab(&self) -> Option<&Tab> {
         self.tabs.get(self.active_tab)
+    }
+
+    pub fn active_tab_index(&self) -> usize {
+        self.active_tab
     }
 
     pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {

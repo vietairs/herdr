@@ -798,6 +798,7 @@ impl AppState {
                 resize_mode_label: "r".into(),
                 toggle_sidebar: (KeyCode::Char('b'), KeyModifiers::empty()),
                 toggle_sidebar_label: "b".into(),
+                custom_commands: Vec::new(),
             },
             spinner_tick: 0,
             palette: Palette::catppuccin(),
