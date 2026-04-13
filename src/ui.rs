@@ -991,18 +991,23 @@ fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
         let (agg_state, agg_seen) = ws.aggregate_state();
         let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
         let is_selected = visible_idx == app.selected && is_navigating;
+        let is_active = Some(visible_idx) == app.active;
         let row_style = if is_selected {
             Style::default().bg(p.surface0)
+        } else if is_active {
+            Style::default().bg(p.surface_dim)
         } else {
             Style::default()
         };
         let num_style = if is_selected {
             Style::default().fg(p.overlay1).bg(p.surface0)
+        } else if is_active {
+            Style::default().fg(p.text).bg(p.surface_dim)
         } else {
             Style::default().fg(p.overlay0)
         };
 
-        if is_selected {
+        if is_selected || is_active {
             let buf = frame.buffer_mut();
             for x in ws_area.x..ws_area.x + ws_area.width {
                 buf[(x, y)].set_style(row_style);
@@ -3432,6 +3437,29 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position((focused.inner_rect.x + 4, focused.inner_rect.y));
+    }
+
+    #[test]
+    fn collapsed_sidebar_keeps_active_workspace_highlight_in_terminal_mode() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_collapsed = true;
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.active = Some(1);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let (ws_area, _, _) = collapsed_sidebar_sections(app.view.sidebar_rect);
+        let active_row = ws_area.y + 1;
+        let active_style = buffer[(ws_area.x, active_row)].style();
+
+        assert_eq!(active_style.bg, Some(app.palette.surface_dim));
     }
 
     #[test]
