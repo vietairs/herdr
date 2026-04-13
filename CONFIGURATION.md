@@ -71,6 +71,35 @@ focus_pane_up = "alt+k"
 focus_pane_right = "alt+l"
 ```
 
+### custom command bindings
+
+custom commands also live under `[keys]`, but use repeated `[[keys.command]]` tables.
+
+each binding runs after pressing the prefix key and then the configured command key.
+
+actions:
+- `type = "shell"` launches a detached `/bin/sh -lc ...` command in the background
+- `type = "pane"` opens a temporary overlay pane, runs the command there, then restores the previous pane focus when it exits
+
+example:
+
+```toml
+[[keys.command]]
+key = "g"
+type = "pane"
+command = "lazygit"
+
+[[keys.command]]
+key = "o"
+command = "~/bin/herdr-open-current \"$HERDR_ACTIVE_WORKSPACE_ID\" \"$HERDR_ACTIVE_TAB_ID\" \"$HERDR_ACTIVE_PANE_ID\" \"$HERDR_ACTIVE_PANE_CWD\""
+```
+
+notes:
+- `type` defaults to `"shell"`
+- custom command keys share the same navigate-mode key namespace as built-in actions, so conflicts are rejected as config errors
+- `pane` commands require an active workspace and focused pane
+- shell commands inherit useful context through environment variables listed below
+
 ### key reference
 
 | key | default | action |
@@ -269,6 +298,12 @@ notes:
 | variable | description |
 |----------|-------------|
 | `HERDR_LOG` | log level filter (default: `herdr=info`) |
+| `HERDR_SOCKET_PATH` | socket path for `herdr` cli subcommands and scripts started from inside herdr |
+| `HERDR_BIN_PATH` | absolute path to the running herdr binary |
+| `HERDR_ACTIVE_WORKSPACE_ID` | active workspace id when a custom command is launched |
+| `HERDR_ACTIVE_TAB_ID` | active tab id when a custom command is launched |
+| `HERDR_ACTIVE_PANE_ID` | focused pane id when a custom command is launched |
+| `HERDR_ACTIVE_PANE_CWD` | focused pane cwd when available; shell commands also use it as their working directory |
 
 logs are written to:
 

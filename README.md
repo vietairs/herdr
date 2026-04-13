@@ -209,6 +209,8 @@ common defaults:
 
 optional direct bindings are available but **unset by default**. you can bind workspace, tab, and pane switching directly in terminal mode without going through the prefix first.
 
+prefix mode also supports custom commands with `[[keys.command]]`. that lets you launch detached shell helpers or temporary overlay panes. two common examples are opening `lazygit` in a pane and running your own script with the active herdr ids and cwd.
+
 example:
 
 ```toml
@@ -221,6 +223,15 @@ focus_pane_left = "alt+h"
 focus_pane_down = "alt+j"
 focus_pane_up = "alt+k"
 focus_pane_right = "alt+l"
+
+[[keys.command]]
+key = "g"
+type = "pane"
+command = "lazygit"
+
+[[keys.command]]
+key = "o"
+command = "~/bin/herdr-open-current \"$HERDR_ACTIVE_WORKSPACE_ID\" \"$HERDR_ACTIVE_TAB_ID\" \"$HERDR_ACTIVE_PANE_ID\" \"$HERDR_ACTIVE_PANE_CWD\""
 ```
 
 full keybinding and config reference: [`CONFIGURATION.md`](./CONFIGURATION.md)
