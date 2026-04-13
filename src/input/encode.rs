@@ -151,15 +151,6 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Plain Ctrl+letter is well-represented in legacy (bytes 1-26)
-    if mods == KeyModifiers::CONTROL {
-        if let KeyCode::Char(c) = key.code {
-            if c.is_ascii_alphabetic() {
-                return None; // let legacy handle it
-            }
-        }
-    }
-
     // Special keys (arrows, F-keys, etc.) have well-established legacy
     // xterm modified formats (\x1b[1;3A for Alt+Up, etc.) that are universally
     // understood. Even Ghostty sends these in legacy format with kitty mode on.

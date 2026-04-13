@@ -295,12 +295,20 @@ fn kitty_alt_enter() {
 }
 
 #[test]
-fn kitty_plain_ctrl_c_uses_legacy() {
-    // Plain Ctrl+letter is well-represented in legacy
+fn kitty_plain_ctrl_c_uses_csi_u() {
     let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(
         encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
-        vec![3]
+        b"\x1b[99;5u"
+    );
+}
+
+#[test]
+fn kitty_plain_ctrl_c_includes_press_event_when_requested() {
+    let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(
+        encode_key(key, KeyboardProtocol::Kitty { flags: 3 }),
+        b"\x1b[99;5:1u"
     );
 }
 
