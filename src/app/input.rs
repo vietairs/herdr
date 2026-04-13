@@ -4596,7 +4596,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_rightmost_visible_tab_recenters_it_when_tabs_overflow() {
+    fn clicking_last_visible_tab_at_right_edge_does_not_overscroll() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         for name in [
@@ -4607,28 +4607,14 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.tab_scroll = 2;
+        app.state.tab_scroll = usize::MAX;
         app.state.tab_scroll_follow_active = false;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 52, 20));
 
-        let clicked_idx = app
-            .state
-            .view
-            .tab_hit_areas
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, rect)| rect.width > 0)
-            .map(|(idx, _)| idx)
-            .expect("rightmost visible tab");
-        let target = app.state.view.tab_hit_areas[clicked_idx];
-        let first_visible_before = app
-            .state
-            .view
-            .tab_hit_areas
-            .iter()
-            .position(|rect| rect.width > 0)
-            .expect("first visible tab before click");
+        let last_idx = app.state.workspaces[0].tabs.len() - 1;
+        let target = app.state.view.tab_hit_areas[last_idx];
+        let clamped_scroll = app.state.tab_scroll;
+        assert!(target.width > 0, "last tab should already be visible");
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -4641,28 +4627,9 @@ mod tests {
             target.y,
         ));
 
-        let last_visible_after = app
-            .state
-            .view
-            .tab_hit_areas
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, rect)| rect.width > 0)
-            .map(|(idx, _)| idx)
-            .expect("rightmost visible tab after click");
-
-        assert_eq!(app.state.workspaces[0].active_tab, clicked_idx);
-        assert!(app.state.tab_scroll > 2);
-        assert!(app.state.view.tab_hit_areas[clicked_idx].width > 0);
-        assert!(last_visible_after > clicked_idx);
-        assert!(app
-            .state
-            .view
-            .tab_hit_areas
-            .iter()
-            .position(|rect| rect.width > 0)
-            .is_some_and(|idx| idx > first_visible_before));
+        assert_eq!(app.state.workspaces[0].active_tab, last_idx);
+        assert_eq!(app.state.tab_scroll, clamped_scroll);
+        assert!(app.state.view.tab_hit_areas[last_idx].width > 0);
     }
 
     #[test]

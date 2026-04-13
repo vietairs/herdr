@@ -573,6 +573,25 @@ fn centered_tab_scroll(ws: &crate::workspace::Workspace, area: Rect) -> usize {
     best_scroll
 }
 
+fn trailing_tab_controls_x(tab_hit_areas: &[Rect], fallback_x: u16) -> u16 {
+    tab_hit_areas
+        .iter()
+        .rev()
+        .find(|rect| rect.width > 0)
+        .map(|rect| rect.x + rect.width)
+        .unwrap_or(fallback_x)
+}
+
+fn max_tab_scroll(ws: &crate::workspace::Workspace, area: Rect) -> usize {
+    (0..ws.tabs.len())
+        .find(|&scroll| {
+            layout_tab_hit_areas(ws, area, scroll)
+                .last()
+                .is_some_and(|rect| rect.width > 0)
+        })
+        .unwrap_or(0)
+}
+
 pub(crate) fn compute_tab_bar_view(
     ws: &crate::workspace::Workspace,
     area: Rect,
@@ -583,13 +602,7 @@ pub(crate) fn compute_tab_bar_view(
         return TabBarView::default();
     }
 
-    let new_tab_hit_area = Rect::new(
-        area.x + area.width.saturating_sub(NEW_TAB_WIDTH),
-        area.y,
-        NEW_TAB_WIDTH.min(area.width),
-        1,
-    );
-
+    let area_right = area.x + area.width;
     let all_tabs_area = Rect::new(
         area.x,
         area.y,
@@ -599,6 +612,13 @@ pub(crate) fn compute_tab_bar_view(
     let all_tabs = layout_tab_hit_areas(ws, all_tabs_area, 0);
     let overflow = all_tabs.iter().any(|rect| rect.width == 0);
     if !overflow {
+        let new_tab_x = trailing_tab_controls_x(&all_tabs, area.x);
+        let new_tab_hit_area = Rect::new(
+            new_tab_x,
+            area.y,
+            area_right.saturating_sub(new_tab_x).min(NEW_TAB_WIDTH),
+            1,
+        );
         return TabBarView {
             scroll: 0,
             tab_hit_areas: all_tabs,
@@ -609,14 +629,9 @@ pub(crate) fn compute_tab_bar_view(
     }
 
     let left_hit_area = Rect::new(area.x, area.y, TAB_SCROLL_BUTTON_WIDTH.min(area.width), 1);
-    let right_hit_area = Rect::new(
-        new_tab_hit_area.x.saturating_sub(TAB_SCROLL_BUTTON_WIDTH),
-        area.y,
-        TAB_SCROLL_BUTTON_WIDTH.min(new_tab_hit_area.x.saturating_sub(area.x)),
-        1,
-    );
     let tab_area_x = left_hit_area.x + left_hit_area.width;
-    let tab_area_right = right_hit_area.x;
+    let reserved_trailing_width = NEW_TAB_WIDTH.saturating_add(TAB_SCROLL_BUTTON_WIDTH);
+    let tab_area_right = area_right.saturating_sub(reserved_trailing_width);
     let tab_area = Rect::new(
         tab_area_x,
         area.y,
@@ -624,15 +639,33 @@ pub(crate) fn compute_tab_bar_view(
         area.height,
     );
 
+    let max_scroll = max_tab_scroll(ws, tab_area);
     let scroll = if follow_active {
-        centered_tab_scroll(ws, tab_area)
+        centered_tab_scroll(ws, tab_area).min(max_scroll)
     } else {
-        current_scroll.min(ws.tabs.len().saturating_sub(1))
+        current_scroll.min(max_scroll)
     };
+    let tab_hit_areas = layout_tab_hit_areas(ws, tab_area, scroll);
+    let trailing_x = trailing_tab_controls_x(&tab_hit_areas, tab_area_x).min(tab_area_right);
+    let right_hit_area = Rect::new(
+        trailing_x,
+        area.y,
+        area_right
+            .saturating_sub(trailing_x)
+            .min(TAB_SCROLL_BUTTON_WIDTH),
+        1,
+    );
+    let new_tab_x = right_hit_area.x + right_hit_area.width;
+    let new_tab_hit_area = Rect::new(
+        new_tab_x,
+        area.y,
+        area_right.saturating_sub(new_tab_x).min(NEW_TAB_WIDTH),
+        1,
+    );
 
     TabBarView {
         scroll,
-        tab_hit_areas: layout_tab_hit_areas(ws, tab_area, scroll),
+        tab_hit_areas,
         scroll_left_hit_area: left_hit_area,
         scroll_right_hit_area: right_hit_area,
         new_tab_hit_area,
@@ -3450,6 +3483,34 @@ mod tests {
     }
 
     #[test]
+    fn new_tab_button_tracks_rightmost_tab_when_tabs_fit() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        ws.test_add_tab(Some("logs"));
+
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let last_visible = app
+            .view
+            .tab_hit_areas
+            .iter()
+            .rev()
+            .find(|rect| rect.width > 0)
+            .copied()
+            .expect("last visible tab");
+
+        assert_eq!(
+            app.view.new_tab_hit_area.x,
+            last_visible.x + last_visible.width
+        );
+    }
+
+    #[test]
     fn tab_bar_shows_scroll_controls_when_tabs_overflow() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
@@ -3472,6 +3533,53 @@ mod tests {
         assert_eq!(app.view.tab_hit_areas[1].width, 0);
         assert!(app.view.tab_hit_areas[2].width > 0);
         assert!(app.view.new_tab_hit_area.width > 0);
+
+        let last_visible = app
+            .view
+            .tab_hit_areas
+            .iter()
+            .rev()
+            .find(|rect| rect.width > 0)
+            .copied()
+            .expect("last visible tab");
+
+        assert_eq!(
+            app.view.tab_scroll_right_hit_area.x,
+            last_visible.x + last_visible.width
+        );
+        assert_eq!(
+            app.view.new_tab_hit_area.x,
+            app.view.tab_scroll_right_hit_area.x + app.view.tab_scroll_right_hit_area.width
+        );
+    }
+
+    #[test]
+    fn tab_bar_clamps_manual_scroll_at_last_visible_tab() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        for name in [
+            "one", "two", "three", "four", "five", "six", "seven", "eight",
+        ] {
+            ws.test_add_tab(Some(name));
+        }
+
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.tab_scroll_follow_active = false;
+        app.tab_scroll = usize::MAX;
+
+        compute_view(&mut app, Rect::new(0, 0, 52, 20));
+
+        let last_idx = app.workspaces[0].tabs.len() - 1;
+        assert!(app.view.tab_hit_areas[last_idx].width > 0);
+        let clamped_scroll = app.tab_scroll;
+
+        app.scroll_tabs_right();
+
+        assert_eq!(app.tab_scroll, clamped_scroll);
+        assert!(app.view.tab_hit_areas[last_idx].width > 0);
     }
 
     #[test]
