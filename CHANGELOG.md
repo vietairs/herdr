@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.10] - 2026-04-14
+
 ### Added
 - Prefix mode now supports custom command keybindings via `[[keys.command]]`, so you can launch detached shell helpers or open temporary overlay panes from inside herdr using the active workspace, tab, pane, and cwd context.
 - Pressing the prefix key twice now forwards a literal prefix keystroke into the focused pane, which makes nested tools and terminal apps that use the same prefix easier to control.
