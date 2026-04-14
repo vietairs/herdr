@@ -1,10 +1,10 @@
 {
-  "version": "0.4.9",
-  "notes": "### Fixed\n- Droid's primary-screen redraws no longer erase pane scrollback inside herdr, while normal scrollback-clear behavior is preserved elsewhere.\n- `q` is now dedicated to quitting in navigate mode instead of also acting as a generic cancel key in modals and overlays, reducing accidental quits.\n- Tab bar scrolling is tighter: the scroll-right button and new-tab button now sit directly adjacent to the last visible tab without a gap, and manual scroll no longer overscrolls past the last tab.",
+  "version": "0.4.10",
+  "notes": "### Added\n- Prefix mode now supports custom command keybindings via `[[keys.command]]`, so you can launch detached shell helpers or open temporary overlay panes from inside herdr using the active workspace, tab, pane, and cwd context.\n- Pressing the prefix key twice now forwards a literal prefix keystroke into the focused pane, which makes nested tools and terminal apps that use the same prefix easier to control.\n\n### Fixed\n- App-level key handling now normalizes enhanced keyboard reporting consistently, so shifted bindings and text like `?` and uppercase characters work correctly in navigate mode and text-entry UI.\n- Ctrl+letter input is now encoded correctly when pane apps enable kitty keyboard mode, improving compatibility with terminal programs that expect CSI-u style key reporting.\n- The collapsed sidebar now keeps the active workspace visibly highlighted even while you stay in terminal mode.\n- Droid Mission Control screens are now treated as idle instead of active work, reducing false busy-state detection.",
   "assets": {
-    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.9/herdr-linux-x86_64",
-    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.9/herdr-linux-aarch64",
-    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.9/herdr-macos-x86_64",
-    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.9/herdr-macos-aarch64"
+    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.10/herdr-linux-x86_64",
+    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.10/herdr-linux-aarch64",
+    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.10/herdr-macos-x86_64",
+    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.4.10/herdr-macos-aarch64"
   }
 }
