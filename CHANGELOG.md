@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+- Prefix mode now supports custom command keybindings via `[[keys.command]]`, so you can launch detached shell helpers or open temporary overlay panes from inside herdr using the active workspace, tab, pane, and cwd context.
+- Pressing the prefix key twice now forwards a literal prefix keystroke into the focused pane, which makes nested tools and terminal apps that use the same prefix easier to control.
+
+### Fixed
+- App-level key handling now normalizes enhanced keyboard reporting consistently, so shifted bindings and text like `?` and uppercase characters work correctly in navigate mode and text-entry UI.
+- Ctrl+letter input is now encoded correctly when pane apps enable kitty keyboard mode, improving compatibility with terminal programs that expect CSI-u style key reporting.
+- The collapsed sidebar now keeps the active workspace visibly highlighted even while you stay in terminal mode.
+- Droid Mission Control screens are now treated as idle instead of active work, reducing false busy-state detection.
+
 ## [0.4.9] - 2026-04-13
 
 ### Fixed
