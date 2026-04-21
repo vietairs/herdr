@@ -223,7 +223,7 @@ fn iter_worktree_server_pids() -> std::io::Result<Vec<u32>> {
             continue;
         }
 
-        if is_worktree_herdr_server_process(pid) {
+        if is_test_herdr_server_process(pid) {
             pids.push(pid);
         }
     }
@@ -231,12 +231,12 @@ fn iter_worktree_server_pids() -> std::io::Result<Vec<u32>> {
     Ok(pids)
 }
 
-fn is_worktree_herdr_server_process(pid: u32) -> bool {
+fn is_test_herdr_server_process(pid: u32) -> bool {
     let Some(exe_path) = proc_link_target(pid, "exe") else {
         return false;
     };
 
-    if !is_worktree_herdr_binary(&exe_path) {
+    if !is_test_herdr_binary(&exe_path) {
         return false;
     }
 
@@ -296,11 +296,12 @@ fn runtime_dir_owner_alive(runtime_dir: &Path) -> bool {
     process_exists(owner_pid)
 }
 
-fn is_worktree_herdr_binary(path: &Path) -> bool {
-    path.ends_with("target/debug/herdr")
-        && path
-            .components()
-            .any(|component| component.as_os_str() == "herdr-worktrees")
+fn current_checkout_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn is_test_herdr_binary(path: &Path) -> bool {
+    path.ends_with("target/debug/herdr") && path.starts_with(current_checkout_root())
 }
 
 extern "C" fn run_atexit_cleanup() {
@@ -419,6 +420,23 @@ mod tests {
         assert!(
             should_terminate_runtime_dir(&runtime_dir, &registered_runtime_dirs),
             "missing runtime dirs that are session-owned should be considered killable"
+        );
+    }
+
+    #[test]
+    fn test_binary_matcher_accepts_current_checkout_debug_binary() {
+        let binary = current_checkout_root().join("target/debug/herdr");
+        assert!(
+            is_test_herdr_binary(&binary),
+            "current checkout debug binary should be considered test-owned"
+        );
+    }
+
+    #[test]
+    fn test_binary_matcher_rejects_installed_binary() {
+        assert!(
+            !is_test_herdr_binary(Path::new("/home/can/.local/bin/herdr")),
+            "installed binaries must not be considered test-owned"
         );
     }
 }
