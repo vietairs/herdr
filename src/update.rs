@@ -528,8 +528,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "herdr-update-{name}-{}-{nanos}.sock",
+        std::path::PathBuf::from(format!(
+            "/tmp/hu-{name}-{}-{nanos}.sock",
             std::process::id()
         ))
     }

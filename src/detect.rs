@@ -582,19 +582,36 @@ pub fn foreground_job(child_pid: u32) -> Option<crate::platform::ForegroundJob> 
 fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> String {
     let effective = process.argv0.as_deref().unwrap_or(&process.name);
     let lower_effective = effective.to_lowercase();
-    let lower_cmdline = process
-        .cmdline
-        .as_deref()
-        .unwrap_or_default()
-        .to_lowercase();
 
-    if lower_effective == "node"
-        && (lower_cmdline.contains("/codex") || lower_cmdline.contains("@openai/codex"))
-    {
-        return "codex".to_string();
+    if is_generic_runtime_or_shell(&lower_effective) {
+        if let Some(wrapped_agent) =
+            wrapped_agent_name_from_cmdline(process.cmdline.as_deref().unwrap_or_default())
+        {
+            return wrapped_agent;
+        }
     }
 
     effective.to_string()
+}
+
+fn wrapped_agent_name_from_cmdline(cmdline: &str) -> Option<String> {
+    for token in cmdline.split_whitespace() {
+        let trimmed = token.trim_matches(|c| matches!(c, '"' | '\''));
+        if trimmed.is_empty() || trimmed.starts_with('-') {
+            continue;
+        }
+
+        let basename = std::path::Path::new(trimmed)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(trimmed);
+        let Some(agent) = parse_agent_label(basename) else {
+            continue;
+        };
+        return Some(agent_label(agent).to_string());
+    }
+
+    None
 }
 
 fn process_priority(process: &crate::platform::ForegroundProcess, normalized_name: &str) -> u8 {
@@ -697,6 +714,29 @@ mod tests {
             identify_agent_in_job(&job),
             Some((Agent::Codex, "codex".to_string()))
         );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_shell_wrapped_pi() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![crate::platform::ForegroundProcess {
+                pid: 1,
+                name: "sh".to_string(),
+                argv0: None,
+                cmdline: Some("/bin/sh /tmp/test-bin/pi".to_string()),
+            }],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Pi, "pi".to_string()))
+        );
+    }
+
+    #[test]
+    fn wrapped_agent_name_from_cmdline_ignores_plain_shell_flags() {
+        assert_eq!(wrapped_agent_name_from_cmdline("bash -lc"), None);
     }
 
     // ---- Workspace state rollup ----

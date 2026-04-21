@@ -189,40 +189,37 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
 
-    fn temp_socket_path(name: &str) -> std::path::PathBuf {
-        let unique = format!(
-            "herdr-autodetect-test-{}-{}-{}",
-            name,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        std::env::temp_dir().join(unique).join("test.sock")
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::path::PathBuf::from(format!("/tmp/ha-{name}-{}-{nanos}", std::process::id()))
     }
 
     #[test]
     fn is_server_listening_returns_false_for_nonexistent_path() {
-        let path = temp_socket_path("nonexistent");
+        let dir = unique_test_dir("nonexistent");
+        let path = dir.join("s.sock");
         assert!(!is_server_listening_at(&path));
     }
 
     #[test]
     fn is_server_listening_returns_true_for_live_socket() {
-        let dir = temp_socket_path("live");
+        let dir = unique_test_dir("live");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.sock");
+        let path = dir.join("s.sock");
 
         let _listener = UnixListener::bind(&path).unwrap();
         assert!(is_server_listening_at(&path));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn is_server_listening_returns_false_for_stale_socket() {
-        let dir = temp_socket_path("stale");
+        let dir = unique_test_dir("stale");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.sock");
+        let path = dir.join("s.sock");
 
         // Create a socket and immediately drop the listener.
         // This leaves a stale socket file with nobody listening.
@@ -232,13 +229,14 @@ mod tests {
 
         // The socket file exists but nobody is listening.
         assert!(!is_server_listening_at(&path));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn is_server_listening_returns_false_when_listener_dropped() {
-        let dir = temp_socket_path("dropped");
+        let dir = unique_test_dir("dropped");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.sock");
+        let path = dir.join("s.sock");
 
         // Bind and immediately drop the listener.
         drop(UnixListener::bind(&path).unwrap());
@@ -251,34 +249,36 @@ mod tests {
 
     #[test]
     fn wait_for_server_socket_succeeds_immediately() {
-        let dir = temp_socket_path("wait-ok");
+        let dir = unique_test_dir("wait-ok");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.sock");
+        let path = dir.join("s.sock");
 
         let _listener = UnixListener::bind(&path).unwrap();
 
         // Should succeed immediately (socket is already ready).
         let result = wait_for_server_socket(&path, Duration::from_millis(100));
         assert!(result.is_ok());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn wait_for_server_socket_times_out() {
-        let dir = temp_socket_path("wait-timeout");
+        let dir = unique_test_dir("wait-timeout");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.sock");
+        let path = dir.join("s.sock");
 
         // No listener — should time out.
         let result = wait_for_server_socket(&path, Duration::from_millis(50));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn wait_for_server_socket_succeeds_after_delay() {
-        let dir = temp_socket_path("wait-delay");
+        let dir = unique_test_dir("wait-delay");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.sock");
+        let path = dir.join("s.sock");
 
         // Spawn a thread that will create the listener after a short delay.
         let path_clone = path.clone();
@@ -292,5 +292,6 @@ mod tests {
         // Wait with a generous timeout — should succeed.
         let result = wait_for_server_socket(&path, Duration::from_secs(2));
         assert!(result.is_ok());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

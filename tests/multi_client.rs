@@ -63,7 +63,13 @@ fn cleanup_spawned_herdr(spawned: SpawnedHerdr, base: PathBuf) {
 
 fn wait_for_child_exit(child: &mut Box<dyn Child + Send + Sync>) {
     let _ = child.kill();
-    let _ = child.wait();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn test_lock() -> MutexGuard<'static, ()> {

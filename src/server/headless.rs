@@ -91,6 +91,15 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 /// Maximum input payload size (bytes) for a single `ClientMessage::Input`.
 const MAX_INPUT_PAYLOAD: usize = 1024 * 1024; // 1 MB
 
+/// How often the idle headless loop wakes to poll the std UnixListener for new
+/// client connections.
+///
+/// The listener is non-blocking and not integrated into `tokio::select!`, so
+/// a low-frequency wake is required to notice new thin-client attaches while
+/// otherwise idle. Keep this much slower than the old resize-poll cadence to
+/// avoid reintroducing the idle CPU spin.
+const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
 // ---------------------------------------------------------------------------
 // Socket path helpers
 // ---------------------------------------------------------------------------
@@ -479,7 +488,11 @@ impl HeadlessServer {
             }
 
             // 8. Wait for next event.
-            let next_deadline = self.app.next_headless_loop_deadline(now, needs_render);
+            let next_deadline = self
+                .app
+                .next_headless_loop_deadline(now, needs_render)
+                .map(|deadline| deadline.min(now + CLIENT_ACCEPT_POLL_INTERVAL))
+                .or(Some(now + CLIENT_ACCEPT_POLL_INTERVAL));
             let event = {
                 tokio::select! {
                     maybe_api = self.app.api_rx.recv() => match maybe_api {
@@ -1018,6 +1031,13 @@ impl HeadlessServer {
             }
             ServerEvent::ClientInput { client_id, data } => {
                 debug!(client_id, len = data.len(), "client input received");
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    // Ensure the next render after client input is delivered even if the
+                    // current frame buffer still compares equal. Input can change cursor or
+                    // PTY state asynchronously, and thin clients should not stall waiting for
+                    // a post-input frame behind identical-frame dedupe.
+                    client.last_frame = None;
+                }
                 let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
                 let interaction = Self::events_include_interaction(&events);
                 let foreground_changed = if interaction {
@@ -1862,6 +1882,7 @@ mod tests {
         ));
         let _ = fs::create_dir_all(&dir);
         let socket_path = dir.join("client.sock");
+        let _ = fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path).expect("bind test listener");
         listener
             .set_nonblocking(true)
@@ -1962,8 +1983,8 @@ mod tests {
 
     #[test]
     fn prepare_socket_path_removes_stale_socket() {
-        let dir = std::env::temp_dir().join(format!(
-            "hs-{}-{}",
+        let dir = PathBuf::from(format!(
+            "/tmp/hs-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1974,8 +1995,17 @@ mod tests {
         let socket_path = dir.join("stale.sock");
 
         // Create a socket file that nobody is listening on.
-        let _ = UnixListener::bind(&socket_path);
-        // The listener goes out of scope, so the socket becomes stale.
+        {
+            let _listener = UnixListener::bind(&socket_path).expect("bind stale socket");
+        }
+        // The listener scope ended, so the socket is now stale.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            if std::os::unix::net::UnixStream::connect(&socket_path).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
         // prepare_socket_path should remove it without error.
         let result = prepare_socket_path(&socket_path);
@@ -1989,8 +2019,8 @@ mod tests {
 
     #[test]
     fn prepare_socket_path_rejects_live_socket() {
-        let dir = std::env::temp_dir().join(format!(
-            "hl-{}-{}",
+        let dir = PathBuf::from(format!(
+            "/tmp/hl-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

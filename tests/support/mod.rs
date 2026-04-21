@@ -206,7 +206,13 @@ fn iter_worktree_server_pids() -> std::io::Result<Vec<u32>> {
     let own_pid = std::process::id();
     let mut pids = Vec::new();
 
-    for entry in fs::read_dir("/proc")? {
+    let proc_entries = match fs::read_dir("/proc") {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+
+    for entry in proc_entries {
         let entry = entry?;
         let file_name = entry.file_name();
         let Some(pid) = file_name.to_str().and_then(|name| name.parse::<u32>().ok()) else {
