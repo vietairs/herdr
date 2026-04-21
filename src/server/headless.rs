@@ -559,6 +559,13 @@ impl HeadlessServer {
         let (cols, rows) = self.effective_size;
         let area = Rect::new(0, 0, cols, rows);
         crate::ui::compute_view(&mut self.app.state, area);
+
+        // Shared runtime size changes affect pane wrapping and foreground-driven
+        // rendering semantics. Force one fresh frame to every remaining client
+        // even if the next rendered buffer compares equal to its cached frame.
+        for client in self.clients.values_mut() {
+            client.last_frame = None;
+        }
     }
 
     fn sync_foreground_client_state(&mut self) {
