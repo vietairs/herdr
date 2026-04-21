@@ -311,6 +311,7 @@ mod tests {
         ws.identity_cwd = repo.clone();
         let root_pane = ws.tabs[0].root_pane;
         ws.tabs[0].pane_cwds.insert(root_pane, repo.clone());
+        ws.refresh_git_ahead_behind();
 
         app.workspaces = vec![ws];
         app.selected = 0;
