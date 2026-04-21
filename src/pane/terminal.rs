@@ -554,6 +554,7 @@ impl GhosttyPaneTerminal {
         let colors = render_state.colors().ok();
         let default_bg = colors.and_then(|c| ghostty_default_bg(c.background, host_theme));
         let default_fg = colors.map(|c| ghostty_color(c.foreground));
+        let resolved_bg = colors.map(|c| ghostty_color(c.background));
 
         let mut row_iterator = match crate::ghostty::RowIterator::new() {
             Ok(iterator) => iterator,
@@ -580,7 +581,7 @@ impl GhosttyPaneTerminal {
                 let mut x = 0u16;
                 while x < area.width && cells.next() {
                     let wide = cells.wide().unwrap_or(crate::ghostty::CellWide::Narrow);
-                    let style = ghostty_cell_style(&cells, default_fg, default_bg);
+                    let style = ghostty_cell_style(&cells, default_fg, default_bg, resolved_bg);
                     let symbol = match ghostty_buffer_symbol_into(
                         &cells,
                         wide,
@@ -836,6 +837,7 @@ fn ghostty_cell_style(
     cells: &crate::ghostty::RowCellIter<'_>,
     default_fg: Option<Color>,
     default_bg: Option<Color>,
+    resolved_bg: Option<Color>,
 ) -> Style {
     let style_data = cells.style().unwrap_or_default();
     let mut fg = cells
@@ -854,6 +856,17 @@ fn ghostty_cell_style(
         fg = bg.or(default_bg);
     }
     if style_data.inverse {
+        // When the background is transparent (None), resolve it to the
+        // actual terminal background color before swapping.  Otherwise
+        // the swapped fg becomes None (Color::Reset) which the host
+        // terminal renders as its default foreground — the same hue as
+        // the new bg, making inverse text invisible.
+        if bg.is_none() {
+            bg = resolved_bg;
+        }
+        if fg.is_none() {
+            fg = default_fg;
+        }
         std::mem::swap(&mut fg, &mut bg);
     }
 
@@ -1437,6 +1450,45 @@ mod tests {
         assert_eq!(buffer[(0, 0)].style().bg, expected_bg);
         assert_eq!(buffer[(2, 0)].symbol(), " ");
         assert_eq!(buffer[(2, 0)].style().bg, expected_bg);
+    }
+
+    #[test]
+    fn render_inverse_text_swaps_fg_and_resolved_bg_when_bg_is_transparent() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let host_theme = crate::terminal_theme::TerminalTheme {
+            foreground: Some(crate::terminal_theme::RgbColor {
+                r: 0xaa,
+                g: 0xbb,
+                b: 0xcc,
+            }),
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33,
+            }),
+        };
+        pane.apply_host_terminal_theme(host_theme);
+        {
+            let mut core = pane.core.lock().unwrap();
+            // SGR 7 enables inverse/reverse video
+            core.terminal.write(b"\x1b[7mhi\x1b[27m");
+        }
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell = &buffer[(0, 0)];
+        assert_eq!(cell.symbol(), "h");
+        // After inverse: fg should be the resolved bg, bg should be the original fg.
+        // fg must NOT be Color::Reset (which would be the same hue as bg).
+        assert_eq!(cell.style().fg, Some(Color::Rgb(0x11, 0x22, 0x33)));
+        assert_eq!(cell.style().bg, Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
     }
 
     #[test]
