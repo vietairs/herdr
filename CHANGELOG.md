@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.0] - 2026-04-21
+
 ### Breaking Changes Please Read
 - herdr now defaults to a persistent server/client session model. running `herdr` starts or reattaches to a background session server instead of launching the old single-process UI.
 - quitting the UI in default mode now detaches the current client and leaves the shared session running. use `herdr server stop` to stop the background server explicitly.
