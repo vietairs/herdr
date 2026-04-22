@@ -258,6 +258,7 @@ pub fn run_client() -> io::Result<()> {
     let toast_config = loaded_config.config.ui.toast;
 
     let socket_path = client_socket_path();
+    crate::logging::startup("client");
     info!(path = %socket_path.display(), "connecting to server");
 
     // Try to connect to the server.
@@ -320,7 +321,7 @@ pub fn run_client() -> io::Result<()> {
     if let Err(err) = result {
         eprintln!("herdr: {err}");
         rt.shutdown_timeout(Duration::from_millis(100));
-        info!("herdr client exiting");
+        crate::logging::shutdown("client");
 
         if matches!(
             err,
@@ -335,7 +336,7 @@ pub fn run_client() -> io::Result<()> {
     }
 
     rt.shutdown_timeout(Duration::from_millis(100));
-    info!("herdr client exiting");
+    crate::logging::shutdown("client");
     Ok(())
 }
 

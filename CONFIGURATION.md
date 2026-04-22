@@ -283,8 +283,25 @@ notes:
 |----------|-------------|
 | `HERDR_LOG` | log level filter (default: `herdr=info`) |
 
-logs are written to:
+## logs
+
+herdr writes local file logs under:
+
+```text
+~/.config/herdr/
+```
+
+common files:
 
 ```text
 ~/.config/herdr/herdr.log
+~/.config/herdr/herdr-client.log
+~/.config/herdr/herdr-server.log
 ```
+
+notes:
+- `herdr.log` is used by monolithic `--no-session` mode and some top-level startup paths
+- persistent session mode mainly uses `herdr-client.log` and `herdr-server.log`
+- logs rotate automatically by size and keep a few older files as `.1`, `.2`, and so on
+- default logs are metadata-focused and are intended to be shareable for issue diagnosis
+- `HERDR_LOG` can increase verbosity when you need a local repro or deeper debugging

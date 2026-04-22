@@ -335,10 +335,7 @@ impl PaneRuntime {
         // --- Writer channel ---
         let (input_tx, mut input_rx) = mpsc::channel::<Bytes>(32);
 
-        info!(
-            pane = pane_id.raw(),
-            rows, cols, scrollback_limit_bytes, "spawning pane terminal"
-        );
+        crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
         let terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -368,11 +365,16 @@ impl PaneRuntime {
                     Ok(mut child) => {
                         if let Some(pid) = child.process_id() {
                             child_pid.store(pid, Ordering::Release);
-                            info!(pane = pane_id.raw(), pid, "child spawned");
+                            crate::logging::pane_spawned(pane_id.raw(), pid);
                         }
                         match child.wait() {
-                            Ok(status) => info!(pane = pane_id.raw(), ?status, "child exited"),
-                            Err(e) => error!(pane = pane_id.raw(), err = %e, "child wait failed"),
+                            Ok(status) => {
+                                let status_text = format!("{status:?}");
+                                crate::logging::pane_exited(pane_id.raw(), &status_text);
+                            }
+                            Err(e) => {
+                                crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string())
+                            }
                         }
                     }
                     Err(e) => error!(pane = pane_id.raw(), err = %e, "{spawn_error_message}"),

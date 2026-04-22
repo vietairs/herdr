@@ -105,6 +105,8 @@ impl AppState {
         if idx < self.workspaces.len() {
             self.active = Some(idx);
             self.selected = idx;
+            let workspace_id = self.workspaces[idx].id.clone();
+            crate::logging::workspace_focused(&workspace_id);
             self.mark_session_dirty();
             if matches!(
                 self.agent_panel_scope,
@@ -114,7 +116,10 @@ impl AppState {
             }
             self.ensure_workspace_visible(idx);
             if let Some(ws) = self.workspaces.get_mut(idx) {
-                ws.switch_tab(ws.active_tab);
+                let active_tab = ws.active_tab;
+                ws.switch_tab(active_tab);
+                let tab_id = format!("{}:{}", workspace_id, active_tab + 1);
+                crate::logging::tab_focused(&workspace_id, &tab_id);
             }
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
@@ -152,8 +157,14 @@ impl AppState {
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
-        if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
+        if let Some(ws_idx) = self.active {
+            let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+                return;
+            };
             ws.switch_tab(idx);
+            let workspace_id = ws.id.clone();
+            let tab_id = format!("{}:{}", workspace_id, idx + 1);
+            crate::logging::tab_focused(&workspace_id, &tab_id);
             self.mark_session_dirty();
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
@@ -258,8 +269,8 @@ impl AppState {
             return;
         }
         self.mark_session_dirty();
-        let name = self.workspaces[self.selected].display_name();
-        info!(workspace = %name, "workspace closed");
+        let workspace_id = self.workspaces[self.selected].id.clone();
+        crate::logging::workspace_closed(&workspace_id);
         self.workspaces.remove(self.selected);
         if self.workspaces.is_empty() {
             self.active = None;
@@ -394,8 +405,14 @@ impl AppState {
             self.close_selected_workspace();
             return;
         }
-        if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
+        if let Some(ws_idx) = self.active {
+            let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+                return;
+            };
+            let workspace_id = ws.id.clone();
+            let closing_tab_id = format!("{}:{}", workspace_id, ws.active_tab + 1);
             ws.close_active_tab();
+            crate::logging::tab_closed(&workspace_id, &closing_tab_id);
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
         }

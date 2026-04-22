@@ -393,7 +393,7 @@ impl HeadlessServer {
     /// - Handles scheduled tasks (resize poll, animation, session save, etc.)
     /// - Renders virtually and streams frames to clients
     pub async fn run(&mut self) -> io::Result<()> {
-        info!("headless server starting");
+        crate::logging::startup("server");
 
         // Register SIGINT handler for graceful shutdown.
         let should_quit = self.should_quit.clone();
@@ -2015,6 +2015,7 @@ pub fn run_server() -> io::Result<()> {
     });
 
     rt.shutdown_timeout(Duration::from_millis(100));
+    crate::logging::shutdown("server");
     result
 }
 

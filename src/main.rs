@@ -5,7 +5,6 @@ use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
-use tracing::info;
 
 pub(crate) const HERDR_ENV_VAR: &str = "HERDR_ENV";
 pub(crate) const HERDR_ENV_VALUE: &str = "1";
@@ -218,10 +217,7 @@ fn main() -> io::Result<()> {
         println!("  --help, -h          Show this help");
         println!();
         println!("Config: {}", config::config_path().display());
-        println!(
-            "Logs:   {}",
-            config::config_dir().join("herdr.log").display()
-        );
+        println!("Logs:   {}", logging::help_log_paths_summary());
         println!("Env:    HERDR_CONFIG_PATH overrides config file path");
         println!("Home:   https://herdr.dev");
         return Ok(());
@@ -285,7 +281,6 @@ fn main() -> io::Result<()> {
     // Auto-detect launch: when --no-session is NOT set, use server/client mode.
     // Check if a server is running, spawn one if needed, then attach as client.
     if !no_session {
-        init_logging();
         return server::autodetect::auto_detect_launch();
     }
 
@@ -338,7 +333,7 @@ fn main() -> io::Result<()> {
             loaded_config.diagnostics.len() - 1
         ))
     };
-    info!("herdr starting (monolithic), pid={}", std::process::id());
+    logging::startup("app");
 
     // Background update check (non-blocking, best-effort)
     // Only checks for newer versions and notifies the TUI.
@@ -411,7 +406,7 @@ fn main() -> io::Result<()> {
     // Shut down runtime immediately — kills lingering PTY reader/writer tasks
     rt.shutdown_timeout(std::time::Duration::from_millis(100));
 
-    info!("herdr exiting");
+    logging::shutdown("app");
     result
 }
 

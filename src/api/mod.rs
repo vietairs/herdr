@@ -218,26 +218,70 @@ fn handle_connection(
         }
     };
 
+    let request_id = request.id.clone();
+    let method = api_method_name(&request.method);
+    crate::logging::api_request_started(&request_id, method, request_changes_ui(&request));
+
     match request.method {
         Method::EventsSubscribe(params) => {
-            stream_subscriptions(stream, request.id, params, api_tx, event_hub, running)
+            let result = stream_subscriptions(
+                stream,
+                request_id.clone(),
+                params,
+                api_tx,
+                event_hub,
+                running,
+            );
+            match &result {
+                Ok(()) => {
+                    crate::logging::api_request_completed(&request_id, method, "stream_closed")
+                }
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
         }
         Method::PaneWaitForOutput(params) => {
-            let Some(response) = wait_for_output(request.id, params, &mut stream, api_tx, running)?
+            let Some(response) =
+                wait_for_output(request_id.clone(), params, &mut stream, api_tx, running)?
             else {
+                crate::logging::api_request_completed(&request_id, method, "client_disconnected");
                 return Ok(());
             };
-            write_text_line_allow_disconnect(&mut stream, &response)
+            let result = write_text_line_allow_disconnect(&mut stream, &response);
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    api_response_outcome(&response),
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
         }
-        method => {
+        method_body => {
             let response = handle_request(
                 Request {
-                    id: request.id,
-                    method,
+                    id: request_id.clone(),
+                    method: method_body,
                 },
                 api_tx,
             );
-            write_text_line_allow_disconnect(&mut stream, &response)
+            let result = write_text_line_allow_disconnect(&mut stream, &response);
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    api_response_outcome(&response),
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
         }
     }
 }
@@ -258,6 +302,57 @@ fn handle_request(request: Request, api_tx: &ApiRequestSender) -> String {
     }
 }
 
+fn api_method_name(method: &Method) -> &'static str {
+    match method {
+        Method::Ping(_) => "ping",
+        Method::ServerStop(_) => "server.stop",
+        Method::WorkspaceCreate(_) => "workspace.create",
+        Method::WorkspaceList(_) => "workspace.list",
+        Method::WorkspaceGet(_) => "workspace.get",
+        Method::WorkspaceFocus(_) => "workspace.focus",
+        Method::WorkspaceRename(_) => "workspace.rename",
+        Method::WorkspaceClose(_) => "workspace.close",
+        Method::TabCreate(_) => "tab.create",
+        Method::TabList(_) => "tab.list",
+        Method::TabGet(_) => "tab.get",
+        Method::TabFocus(_) => "tab.focus",
+        Method::TabRename(_) => "tab.rename",
+        Method::TabClose(_) => "tab.close",
+        Method::PaneSplit(_) => "pane.split",
+        Method::PaneList(_) => "pane.list",
+        Method::PaneGet(_) => "pane.get",
+        Method::PaneSendText(_) => "pane.send_text",
+        Method::PaneSendKeys(_) => "pane.send_keys",
+        Method::PaneSendInput(_) => "pane.send_input",
+        Method::PaneRead(_) => "pane.read",
+        Method::PaneReportAgent(_) => "pane.report_agent",
+        Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
+        Method::PaneReleaseAgent(_) => "pane.release_agent",
+        Method::PaneClose(_) => "pane.close",
+        Method::EventsSubscribe(_) => "events.subscribe",
+        Method::EventsWait(_) => "events.wait",
+        Method::PaneWaitForOutput(_) => "pane.wait_for_output",
+        Method::IntegrationInstall(_) => "integration.install",
+        Method::IntegrationUninstall(_) => "integration.uninstall",
+    }
+}
+
+fn api_response_outcome(response: &str) -> &'static str {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(response) else {
+        return "error";
+    };
+
+    match value
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(|code| code.as_str())
+    {
+        Some("timeout") => "timeout",
+        Some(_) => "error",
+        None => "ok",
+    }
+}
+
 fn output_match_read_source(
     source: &crate::api::schema::ReadSource,
 ) -> crate::api::schema::ReadSource {
@@ -274,6 +369,7 @@ fn wait_for_output(
     api_tx: &ApiRequestSender,
     running: &Arc<AtomicBool>,
 ) -> std::io::Result<Option<String>> {
+    crate::logging::api_wait_started(&request_id, &params.pane_id, params.timeout_ms);
     let deadline = params
         .timeout_ms
         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
@@ -299,6 +395,7 @@ fn wait_for_output(
 
     loop {
         if should_stop_connection(stream, running)? {
+            crate::logging::api_wait_completed(&request_id, &params.pane_id, "client_disconnected");
             return Ok(None);
         }
 
@@ -340,6 +437,7 @@ fn wait_for_output(
         let matched_line = match_output(&read.text, &params.r#match, regex.as_ref());
         if matched_line.is_some() {
             let revision = read.revision;
+            crate::logging::api_wait_completed(&request_id, &params.pane_id, "matched");
             return Ok(Some(
                 serde_json::to_string(&SuccessResponse {
                     id: request_id,
@@ -355,6 +453,7 @@ fn wait_for_output(
         }
 
         if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            crate::logging::api_wait_timed_out(&request_id, &params.pane_id);
             return Ok(Some(
                 serde_json::to_string(&ErrorResponse {
                     id: request_id,
@@ -989,6 +1088,19 @@ mod tests {
         drop(_listener);
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn api_response_outcome_uses_top_level_error_shape() {
+        let ok_with_error_text = r#"{"id":"req","result":{"read":{"text":"user said \"error\": \"timeout\"","revision":1}}}"#;
+        assert_eq!(api_response_outcome(ok_with_error_text), "ok");
+
+        let timeout = r#"{"id":"req","error":{"code":"timeout","message":"timed out waiting for output match"}}"#;
+        assert_eq!(api_response_outcome(timeout), "timeout");
+
+        let generic_error =
+            r#"{"id":"req","error":{"code":"server_unavailable","message":"boom"}}"#;
+        assert_eq!(api_response_outcome(generic_error), "error");
     }
 
     #[test]

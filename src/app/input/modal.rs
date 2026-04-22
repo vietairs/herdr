@@ -263,7 +263,9 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             match state.mode {
                 Mode::RenameWorkspace if !state.workspaces.is_empty() => {
                     if !new_name.is_empty() {
+                        let workspace_id = state.workspaces[state.selected].id.clone();
                         state.workspaces[state.selected].set_custom_name(new_name);
+                        crate::logging::workspace_renamed(&workspace_id);
                         state.mark_session_dirty();
                     }
                 }
@@ -278,13 +280,19 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         };
                 }
                 Mode::RenameTab => {
-                    if let Some(ws) = state.active.and_then(|i| state.workspaces.get_mut(i)) {
-                        if let Some(tab) = ws.active_tab_mut() {
-                            let keep_auto_name =
-                                tab.is_auto_named() && new_name == tab.number.to_string();
-                            if !new_name.is_empty() && !keep_auto_name {
-                                tab.set_custom_name(new_name);
-                                state.mark_session_dirty();
+                    if let Some(ws_idx) = state.active {
+                        if let Some(ws) = state.workspaces.get_mut(ws_idx) {
+                            let workspace_id = ws.id.clone();
+                            let active_tab = ws.active_tab;
+                            if let Some(tab) = ws.active_tab_mut() {
+                                let keep_auto_name =
+                                    tab.is_auto_named() && new_name == tab.number.to_string();
+                                if !new_name.is_empty() && !keep_auto_name {
+                                    tab.set_custom_name(new_name);
+                                    let tab_id = format!("{}:{}", workspace_id, active_tab + 1);
+                                    crate::logging::tab_renamed(&workspace_id, &tab_id);
+                                    state.mark_session_dirty();
+                                }
                             }
                         }
                     }

@@ -182,7 +182,7 @@ impl App {
                     render_dirty.clone(),
                 );
                 if ws.is_empty() {
-                    info!("session file found but no workspaces restored");
+                    crate::logging::session_restored(0, "empty");
                     (
                         Vec::new(),
                         None,
@@ -192,7 +192,7 @@ impl App {
                         snap.sidebar_section_split.unwrap_or(0.5),
                     )
                 } else {
-                    info!(count = ws.len(), "session restored");
+                    crate::logging::session_restored(ws.len(), "ok");
                     let active = snap.active.filter(|&i| i < ws.len());
                     let selected = snap.selected.min(ws.len().saturating_sub(1));
                     (

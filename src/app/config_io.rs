@@ -8,6 +8,7 @@ impl App {
         let path = crate::config::config_path();
         if let Some(parent) = path.parent() {
             if let Err(err) = std::fs::create_dir_all(parent) {
+                crate::logging::config_write_failed(&path, error_context, &err.to_string());
                 self.state.config_diagnostic =
                     Some(format!("failed to save {error_context}: {err}"));
                 self.config_diagnostic_deadline =
@@ -19,6 +20,7 @@ impl App {
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let new_content = update(&content);
         if let Err(err) = std::fs::write(&path, new_content) {
+            crate::logging::config_write_failed(&path, error_context, &err.to_string());
             self.state.config_diagnostic = Some(format!("failed to save {error_context}: {err}"));
             self.config_diagnostic_deadline =
                 Some(std::time::Instant::now() + std::time::Duration::from_secs(5));

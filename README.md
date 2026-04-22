@@ -191,6 +191,30 @@ herdr --default-config   # print full default config
 
 in-app settings screen for theme, sound, and toast preferences. full reference: [`CONFIGURATION.md`](./CONFIGURATION.md).
 
+## logs
+
+herdr writes logs under `~/.config/herdr/`.
+
+common files:
+
+```text
+~/.config/herdr/herdr.log
+~/.config/herdr/herdr-client.log
+~/.config/herdr/herdr-server.log
+```
+
+in persistent session mode, the client and server logs are usually the useful ones. logs rotate automatically and keep a few older files like `.1` and `.2`.
+
+for issue reports, include the relevant current log plus rotated siblings if they exist. default logs are metadata-focused and avoid pane contents by default.
+
+use a higher log level only when needed:
+
+```bash
+HERDR_LOG=herdr=debug herdr
+```
+
+full logging and environment variable details: [`CONFIGURATION.md`](./CONFIGURATION.md).
+
 ## docs
 
 - [`CONFIGURATION.md`](./CONFIGURATION.md) — keybindings, themes, notifications, environment variables
