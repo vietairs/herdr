@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- Config can now be reloaded in the running app/server from the global menu or with `herdr server reload-config`, applying safe live settings without restarting the persistent server.
+
+### Fixed
+- Persistent server startup now surfaces config diagnostics in attached clients instead of silently hiding parse or validation errors.
+
 ## [0.5.1] - 2026-04-25
 
 ### Added

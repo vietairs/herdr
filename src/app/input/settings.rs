@@ -125,7 +125,6 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 let enabled = state.settings.list.selected == 0;
-                state.sound.enabled = enabled;
                 return Some(SettingsAction::SaveSound(enabled));
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
@@ -146,8 +145,6 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
             KeyCode::Down | KeyCode::Char('j') => state.settings.list.move_next(3),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 let delivery = toast_delivery_for_index(state.settings.list.selected);
-                state.toast_config.delivery = delivery;
-                state.toast = None;
                 return Some(SettingsAction::SaveToastDelivery(delivery));
             }
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
@@ -271,13 +268,10 @@ impl AppState {
                         }
                         SettingsSection::Sound => {
                             let enabled = idx == 0;
-                            self.sound.enabled = enabled;
                             Some(SettingsAction::SaveSound(enabled))
                         }
                         SettingsSection::Toast => {
                             let delivery = toast_delivery_for_index(idx);
-                            self.toast_config.delivery = delivery;
-                            self.toast = None;
                             Some(SettingsAction::SaveToastDelivery(delivery))
                         }
                     };
@@ -362,7 +356,7 @@ mod tests {
         );
 
         assert_eq!(action, Some(SettingsAction::SaveSound(true)));
-        assert!(state.sound.enabled);
+        assert!(!state.sound.enabled);
         assert_eq!(state.mode, Mode::Settings);
     }
 

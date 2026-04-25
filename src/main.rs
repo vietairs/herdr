@@ -83,6 +83,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # previous_workspace = "" # optional, unset by default
 # next_workspace = ""     # optional, unset by default
 # detach = ""             # optional explicit detach shortcut in server/client mode
+# reload_config = ""      # optional shortcut to reload config.toml without restarting
 # new_tab = "c"
 # rename_tab = ""         # optional, unset by default
 # previous_tab = ""       # optional, unset by default
@@ -190,6 +191,7 @@ fn main() -> io::Result<()> {
         println!("Usage: herdr [options]");
         println!("       herdr update");
         println!("       herdr server stop");
+        println!("       herdr server reload-config");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
@@ -199,6 +201,7 @@ fn main() -> io::Result<()> {
         println!("Commands:");
         println!("  server              Run as headless server (no terminal, persists after client disconnect)");
         println!("  server stop         Stop the running server via the API socket");
+        println!("  server reload-config  Reload config.toml in the running server");
         println!("  client             Connect to a running server as a thin client");
         println!(
             "  update              Download and install the latest version (run outside herdr)"
@@ -322,17 +325,7 @@ fn main() -> io::Result<()> {
     }));
 
     let config = &loaded_config.config;
-    let config_diagnostic = if loaded_config.diagnostics.is_empty() {
-        None
-    } else if loaded_config.diagnostics.len() == 1 {
-        Some(loaded_config.diagnostics[0].clone())
-    } else {
-        Some(format!(
-            "{} (and {} more)",
-            loaded_config.diagnostics[0],
-            loaded_config.diagnostics.len() - 1
-        ))
-    };
+    let config_diagnostic = config::config_diagnostic_summary(&loaded_config.diagnostics);
     logging::startup("app");
 
     // Background update check (non-blocking, best-effort)

@@ -14,6 +14,8 @@ pub enum Method {
     Ping(PingParams),
     #[serde(rename = "server.stop")]
     ServerStop(EmptyParams),
+    #[serde(rename = "server.reload_config")]
+    ServerReloadConfig(EmptyParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]
@@ -475,6 +477,10 @@ pub enum ResponseResult {
         target: IntegrationTarget,
         details: IntegrationUninstallResult,
     },
+    ConfigReload {
+        status: crate::config::ConfigReloadStatus,
+        diagnostics: Vec<String>,
+    },
     Ok {},
 }
 
@@ -761,6 +767,19 @@ mod tests {
 
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["method"], "server.stop");
+        let restored: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn request_round_trips_for_server_reload_config() {
+        let request = Request {
+            id: "req_reload".into(),
+            method: Method::ServerReloadConfig(EmptyParams::default()),
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["method"], "server.reload_config");
         let restored: Request = serde_json::from_value(json).unwrap();
         assert_eq!(restored, request);
     }

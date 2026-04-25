@@ -467,6 +467,16 @@ fn workspace_and_pane_management_commands_work() {
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));
 
+    let reloaded = run_cli(&socket_path, &["server", "reload-config"]);
+    assert!(
+        reloaded.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&reloaded.stderr)
+    );
+    let reload_json: serde_json::Value = serde_json::from_slice(&reloaded.stdout).unwrap();
+    assert_eq!(reload_json["result"]["type"], "config_reload");
+    assert_eq!(reload_json["result"]["status"], "applied");
+
     let listed = run_cli(&socket_path, &["workspace", "list"]);
     assert!(listed.status.success());
     let listed_json: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();

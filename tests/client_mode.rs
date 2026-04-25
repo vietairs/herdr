@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use serde::Deserialize;
 use support::{
     cleanup_test_base, client_handshake, encode_varint_u16, encode_varint_u32, frame_message,
     read_server_message, register_runtime_dir, register_spawned_herdr_pid,
@@ -157,6 +158,71 @@ fn ping_socket(socket_path: &PathBuf) -> String {
     response.trim().to_string()
 }
 
+#[derive(Debug, Deserialize)]
+struct FrameWire {
+    cells: Vec<CellWire>,
+    width: u16,
+    height: u16,
+    cursor: Option<CursorWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CellWire {
+    symbol: String,
+    fg: u32,
+    bg: u32,
+    modifier: u16,
+    skip: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CursorWire {
+    x: u16,
+    y: u16,
+    visible: bool,
+}
+
+fn decode_frame_payload(payload: &[u8]) -> std::io::Result<FrameWire> {
+    bincode::serde::decode_from_slice(payload, bincode::config::standard())
+        .map(|(frame, consumed)| (frame, consumed))
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))
+        .and_then(|(frame, consumed): (FrameWire, usize)| {
+            if consumed != payload.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "frame payload had trailing bytes: consumed={}, len={}",
+                        consumed,
+                        payload.len()
+                    ),
+                ));
+            }
+            Ok(frame)
+        })
+}
+
+fn frame_contains_text(frame: &FrameWire, needle: &str) -> bool {
+    if frame.cells.is_empty() {
+        return false;
+    }
+
+    let width = frame.width.max(1) as usize;
+    let mut text = String::new();
+    for row in frame.cells.chunks(width) {
+        for cell in row {
+            let _ = (cell.fg, cell.bg, cell.modifier, cell.skip);
+            text.push_str(&cell.symbol);
+        }
+        text.push('\n');
+    }
+    let _ = frame.height;
+    if let Some(cursor) = frame.cursor.as_ref() {
+        let _ = (cursor.x, cursor.y, cursor.visible);
+    }
+
+    text.contains(needle)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -201,6 +267,91 @@ fn client_connects_and_receives_frame() {
     assert_eq!(
         variant, 1,
         "expected Frame message (variant 1), got variant {variant}"
+    );
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+#[test]
+fn client_sees_headless_startup_config_diagnostic() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let app_dir = if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    };
+    fs::create_dir_all(config_home.join(app_dir)).unwrap();
+    fs::write(
+        config_home.join(app_dir).join("config.toml"),
+        "[keys\nprefix = \"ctrl+a\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    register_runtime_dir(&runtime_dir);
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    cmd.arg("server");
+    cmd.env("XDG_CONFIG_HOME", &config_home);
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd.env("HERDR_SOCKET_PATH", &api_socket);
+    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env("SHELL", "/bin/sh");
+    cmd.env_remove("HERDR_ENV");
+
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    register_spawned_herdr_pid(child.process_id());
+    drop(pair.slave);
+
+    let spawned = SpawnedHerdr {
+        _master: pair.master,
+        child,
+    };
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
+    let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
+    let (version, error) =
+        client_handshake(&mut stream, 1, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 1);
+    assert!(error.is_none(), "{:?}", error);
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut found_diagnostic = false;
+    while Instant::now() < deadline {
+        match read_server_message(&mut stream) {
+            Ok((1, payload)) => {
+                let frame = decode_frame_payload(&payload).expect("decode frame");
+                if frame_contains_text(&frame, "config parse error") {
+                    found_diagnostic = true;
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        found_diagnostic,
+        "attached client should see startup config parse diagnostic"
     );
 
     cleanup_spawned_herdr(spawned, base);

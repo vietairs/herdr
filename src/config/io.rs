@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
-use super::{model::LoadedConfig, Config, LiveKeybindConfig, CONFIG_PATH_ENV_VAR};
+use super::{model::LoadedConfig, Config, CONFIG_PATH_ENV_VAR};
 
 pub fn app_dir_name() -> &'static str {
     if cfg!(debug_assertions) {
@@ -77,23 +77,37 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-pub fn load_live_keybinds() -> Result<LiveKeybindConfig, Vec<String>> {
+pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
+    if diagnostics.is_empty() {
+        None
+    } else if diagnostics.len() == 1 {
+        Some(diagnostics[0].clone())
+    } else {
+        Some(format!(
+            "{} (and {} more)",
+            diagnostics[0],
+            diagnostics.len() - 1
+        ))
+    }
+}
+
+pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
     let path = config_path();
     if !path.exists() {
-        return Config::default().live_keybinds();
+        return Ok(LoadedConfig {
+            config: Config::default(),
+            diagnostics: Vec::new(),
+        });
     }
 
-    let content = std::fs::read_to_string(&path).map_err(|err| {
-        vec![format!(
-            "config read error: {err}; keeping current keybinds"
-        )]
-    })?;
-    let config = toml::from_str::<Config>(&content).map_err(|err| {
-        vec![format!(
-            "config parse error: {err}; keeping current keybinds"
-        )]
-    })?;
-    config.live_keybinds()
+    let content = std::fs::read_to_string(&path)
+        .map_err(|err| vec![format!("config read error: {err}; keeping current config")])?;
+    let config = toml::from_str::<Config>(&content)
+        .map_err(|err| vec![format!("config parse error: {err}; keeping current config")])?;
+    Ok(LoadedConfig {
+        config,
+        diagnostics: Vec::new(),
+    })
 }
 
 pub(crate) fn upsert_top_level_bool(content: &str, key: &str, value: bool) -> String {

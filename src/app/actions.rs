@@ -587,7 +587,7 @@ impl AppState {
             pane.seen = false;
         }
 
-        if self.sound.allows(change.known_agent) {
+        if self.local_sound_playback && self.sound.allows(change.known_agent) {
             if let Some(sound) = notification_sound_for_state_change(
                 is_active_tab,
                 change.previous_state,

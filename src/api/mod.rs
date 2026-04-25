@@ -30,7 +30,8 @@ const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) fn request_changes_ui(request: &Request) -> bool {
     matches!(
         &request.method,
-        Method::WorkspaceCreate(_)
+        Method::ServerReloadConfig(_)
+            | Method::WorkspaceCreate(_)
             | Method::WorkspaceFocus(_)
             | Method::WorkspaceRename(_)
             | Method::WorkspaceClose(_)
@@ -317,6 +318,7 @@ fn api_method_name(method: &Method) -> &'static str {
     match method {
         Method::Ping(_) => "ping",
         Method::ServerStop(_) => "server.stop",
+        Method::ServerReloadConfig(_) => "server.reload_config",
         Method::WorkspaceCreate(_) => "workspace.create",
         Method::WorkspaceList(_) => "workspace.list",
         Method::WorkspaceGet(_) => "workspace.get",

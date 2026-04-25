@@ -512,9 +512,9 @@ impl HeadlessServer {
                 needs_render = true;
             }
 
-            if self.app.state.request_reload_keybinds {
-                self.app.state.request_reload_keybinds = false;
-                self.app.reload_keybinds();
+            if self.app.state.request_reload_config {
+                self.app.state.request_reload_config = false;
+                self.app.reload_config();
                 needs_render = true;
             }
 
@@ -800,17 +800,11 @@ impl HeadlessServer {
                     .unwrap_or(crate::detect::AgentState::Unknown);
 
                 // Handle the state change (updates pane state, sets toast on AppState).
-                // Note: apply_pane_state_change inside handle_internal_event will try
-                // to play sounds, but sound.enabled=false in the headless server, so
-                // sound::play is never called. Toast may still be set on AppState if
-                // toast_config.enabled is true.
+                // Headless mode disables local sound playback separately from the
+                // sound policy so reloads can keep server-side notification policy live.
                 self.app.handle_internal_event(ev);
 
-                // Forward sound notification to clients.
-                // We check the agent-specific sound setting but NOT sound.enabled,
-                // because the server sets enabled=false to prevent local playback —
-                // clients should still receive sound notifications and decide
-                // locally whether to play them based on their own config.
+                // Forward sound notification to clients when server-side sound policy allows it.
                 let is_active_tab = self
                     .app
                     .state
@@ -821,10 +815,7 @@ impl HeadlessServer {
                             .is_some_and(|tab_idx| ws.active_tab_index() == tab_idx)
                     });
 
-                if !matches!(
-                    self.app.state.sound.agents.for_agent(agent_val),
-                    crate::config::AgentSoundSetting::Off
-                ) {
+                if self.app.state.sound.allows(agent_val) {
                     if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
                         is_active_tab,
                         prev_state,
@@ -906,9 +897,10 @@ impl HeadlessServer {
 
                 self.app.handle_internal_event(ev);
 
-                // Forward sound notification based on hook state transition.
-                // This ensures API-reported state changes (pane.report_agent)
-                // produce notifications even before fallback detection confirms.
+                // Forward sound notification based on hook state transition when
+                // server-side sound policy allows it. This ensures API-reported state
+                // changes (pane.report_agent) produce notifications even before
+                // fallback detection confirms.
                 let is_active_tab = self
                     .app
                     .state
@@ -919,10 +911,7 @@ impl HeadlessServer {
                             .is_some_and(|tab_idx| ws.active_tab_index() == tab_idx)
                     });
 
-                if !matches!(
-                    self.app.state.sound.agents.for_agent(agent_val),
-                    crate::config::AgentSoundSetting::Off
-                ) {
+                if self.app.state.sound.allows(agent_val) {
                     if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
                         is_active_tab,
                         prev_hook_state,
@@ -1261,8 +1250,8 @@ impl HeadlessServer {
         // forward any resulting notifications to connected clients.
         // API requests like pane.report_agent trigger handle_internal_event
         // internally, which bypasses drain_internal_events_with_forwarding.
-        // Since sound.enabled=false in the headless server, sounds would be
-        // silently dropped; toasts may be set but not forwarded.
+        // Headless mode disables local sound playback, so sound notifications
+        // need to be forwarded to clients here; toasts may be set but not forwarded.
         //
         // Note: pane.report_agent sets hook_authority on the pane, but the
         // effective state may not change until the fallback detector confirms
@@ -1411,13 +1400,9 @@ impl HeadlessServer {
                     }
                 }
 
-                // Check agent-specific sound setting but NOT sound.enabled,
-                // because the server sets enabled=false to prevent local playback.
-                // Clients decide locally whether to play sounds.
-                if !matches!(
-                    self.app.state.sound.agents.for_agent(agent),
-                    crate::config::AgentSoundSetting::Off
-                ) {
+                // Forward sound notification when server-side sound policy allows it.
+                // Clients still decide locally whether they can execute the side effect.
+                if self.app.state.sound.allows(agent) {
                     if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
                         is_active_tab,
                         prev_state,
@@ -1957,7 +1942,7 @@ pub fn run_server() -> io::Result<()> {
         let mut app = app::App::new(
             &loaded_config.config,
             no_session,
-            None, // config_diagnostic
+            config::config_diagnostic_summary(&loaded_config.diagnostics),
             None, // startup_release_notes
             api_rx,
             event_hub,
@@ -1966,7 +1951,7 @@ pub fn run_server() -> io::Result<()> {
         // The server runs headless — disable local sound playback.
         // Sound notifications are forwarded to connected clients as
         // ServerMessage::Notify instead of played locally.
-        app.state.sound.enabled = false;
+        app.state.local_sound_playback = false;
 
         // Create the headless server.
         let mut server = match HeadlessServer::new(app) {

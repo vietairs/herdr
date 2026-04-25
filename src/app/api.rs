@@ -282,6 +282,16 @@ impl App {
                     result: ResponseResult::Ok {},
                 }
             }
+            Method::ServerReloadConfig(_) => {
+                let report = self.reload_config();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::ConfigReload {
+                        status: report.status,
+                        diagnostics: report.diagnostics,
+                    },
+                }
+            }
             Method::WorkspaceList(_) => SuccessResponse {
                 id: request.id,
                 result: ResponseResult::WorkspaceList {

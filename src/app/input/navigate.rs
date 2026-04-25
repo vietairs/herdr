@@ -350,6 +350,7 @@ pub(crate) enum NavigateAction {
     Fullscreen,
     EnterResizeMode,
     ToggleSidebar,
+    ReloadConfig,
     Detach,
 }
 
@@ -420,6 +421,12 @@ fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateA
     }
     if key_matches(key, kb.toggle_sidebar.0, kb.toggle_sidebar.1) {
         return Some(NavigateAction::ToggleSidebar);
+    }
+    if kb
+        .reload_config
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::ReloadConfig);
     }
     if kb
         .detach
@@ -496,6 +503,10 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
         NavigateAction::ToggleSidebar => {
             state.sidebar_collapsed = !state.sidebar_collapsed;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ReloadConfig => {
+            state.request_reload_config = true;
             leave_navigate_mode(state);
         }
         NavigateAction::Detach => {
@@ -580,6 +591,21 @@ mod tests {
         );
 
         assert_eq!(state.mode, Mode::Resize);
+    }
+
+    #[test]
+    fn custom_reload_config_key_requests_reload_and_exits_navigate() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.reload_config = Some((KeyCode::Char('g'), KeyModifiers::empty()));
+        state.keybinds.reload_config_label = Some("g".into());
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert!(state.request_reload_config);
+        assert_eq!(state.mode, Mode::Terminal);
     }
 
     #[test]

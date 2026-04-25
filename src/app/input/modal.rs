@@ -69,7 +69,7 @@ pub(crate) enum GlobalMenuAction {
     Quit,
     WhatsNew,
     Keybinds,
-    ReloadKeybinds,
+    ReloadConfig,
     Settings,
 }
 
@@ -77,7 +77,7 @@ pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
     let mut actions = vec![
         GlobalMenuAction::Settings,
         GlobalMenuAction::Keybinds,
-        GlobalMenuAction::ReloadKeybinds,
+        GlobalMenuAction::ReloadConfig,
     ];
     if state.update_available.is_some() || state.latest_release_notes_available {
         actions.push(GlobalMenuAction::WhatsNew);
@@ -126,8 +126,8 @@ pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuA
         }
         GlobalMenuAction::WhatsNew => open_update_release_notes(state),
         GlobalMenuAction::Keybinds => open_keybind_help(state),
-        GlobalMenuAction::ReloadKeybinds => {
-            state.request_reload_keybinds = true;
+        GlobalMenuAction::ReloadConfig => {
+            state.request_reload_config = true;
             leave_modal(state);
         }
         GlobalMenuAction::Settings => super::settings::open_settings(state),

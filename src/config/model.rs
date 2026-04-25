@@ -16,6 +16,20 @@ pub struct ToastConfig {
     pub delivery: ToastDelivery,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigReloadStatus {
+    Applied,
+    Partial,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ConfigReloadReport {
+    pub status: ConfigReloadStatus,
+    pub diagnostics: Vec<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -45,6 +59,8 @@ pub struct KeysConfig {
     pub close_workspace: String,
     /// Optional explicit detach shortcut in server/client mode. Unset by default.
     pub detach: String,
+    /// Reload config.toml in the running app/server. Unset by default.
+    pub reload_config: String,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: String,
     /// Select the next workspace. Unset by default.
@@ -116,6 +132,7 @@ impl Default for KeysConfig {
             rename_workspace: "shift+n".into(),
             close_workspace: "shift+d".into(),
             detach: "".into(),
+            reload_config: "".into(),
             previous_workspace: "".into(),
             next_workspace: "".into(),
             new_tab: "c".into(),

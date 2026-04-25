@@ -14,6 +14,35 @@ herdr --default-config
 
 if a config value is invalid, or two navigate actions use the same keybinding, herdr falls back to a safe default and shows a startup warning in the UI.
 
+## live reload
+
+After editing `config.toml`, reload the running app without restarting the persistent server:
+
+```bash
+herdr server reload-config
+```
+
+You can also use the global menu inside herdr and choose `reload config`.
+
+Reload is server-owned. In persistent mode the CLI sends a request to the running server, and the server reads, parses, validates, and applies `config.toml`.
+
+Reloadable now:
+- keybindings and prefix
+- theme, custom theme colors, and legacy `ui.accent`
+- `ui.confirm_close`
+- `ui.toast.delivery`
+- server-side `ui.sound` policy
+- `advanced.scrollback_limit_bytes` for panes created after reload
+- `ui.sidebar_width` as the default width
+
+Startup-only or special-case:
+- `onboarding` does not reopen onboarding during reload
+- `advanced.allow_nested` is checked before launch and needs a restart
+- existing pane scrollback buffers are not resized during reload
+- already-attached thin clients may need to reconnect before client-local sound file/path changes are picked up
+
+If the TOML cannot be read or parsed, reload applies nothing and keeps the current running state. If keybindings are invalid, herdr keeps the current keybindings while applying other valid reloadable settings where possible.
+
 ## onboarding
 
 ```toml
@@ -54,6 +83,7 @@ prefix = "ctrl+b"
 new_workspace = "n"
 rename_workspace = "shift+n"
 close_workspace = "shift+d"
+reload_config = ""      # optional, unset by default
 new_tab = "c"
 split_vertical = "v"
 split_horizontal = "-"
@@ -80,6 +110,7 @@ focus_pane_right = "alt+l"
 | `rename_workspace` | `shift+n` | rename selected workspace |
 | `close_workspace` | `shift+d` | close selected workspace |
 | `detach` | unset | optional explicit detach shortcut in the persistent session |
+| `reload_config` | unset | reload `config.toml` in the running app/server |
 | `previous_workspace` | unset | switch to the previous workspace directly from terminal mode |
 | `next_workspace` | unset | switch to the next workspace directly from terminal mode |
 | `new_tab` | `c` | create a new tab |

@@ -49,6 +49,7 @@ fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>> {
 
     match subcommand {
         "stop" => server_stop(&args[1..]).map(Some),
+        "reload-config" => server_reload_config(&args[1..]).map(Some),
         "help" | "--help" | "-h" => {
             print_server_help();
             Ok(Some(0))
@@ -161,6 +162,18 @@ fn server_stop(args: &[String]) -> std::io::Result<i32> {
     }
 
     send_ok_request(Method::ServerStop(EmptyParams::default()))
+}
+
+fn server_reload_config(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: herdr server reload-config");
+        return Ok(2);
+    }
+
+    print_response(&send_request(&Request {
+        id: "cli:server:reload-config".into(),
+        method: Method::ServerReloadConfig(EmptyParams::default()),
+    })?)
 }
 
 fn workspace_list(args: &[String]) -> std::io::Result<i32> {
@@ -1041,6 +1054,7 @@ fn print_server_help() {
     eprintln!("herdr server commands:");
     eprintln!("  herdr server                run as headless server");
     eprintln!("  herdr server stop           stop the running server via the api socket");
+    eprintln!("  herdr server reload-config  reload config.toml in the running server");
 }
 
 fn print_workspace_help() {
