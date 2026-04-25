@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Added
+- Toast notifications can now be delivered through the outer terminal as desktop notifications. Configure this with `ui.toast.delivery = "terminal"`; see `CONFIGURATION.md` for details.
+- Herdr now writes separate capped support logs for app, client, and server modes, making persistent-session issue reports easier to diagnose without unbounded log growth.
+- The bundled opencode plugin now reports question prompts as blocked while waiting for user input, then returns to working or idle when answered or dismissed. Question prompts are also detected by the default terminal-screen heuristics. (#51, thanks @mspiegel31)
+
+### Changed
+- Routine API request traces now log at debug level by default, making normal support logs smaller and easier to read while preserving detailed traces when debug logging is enabled.
+
+### Fixed
+- Pasted text and other reverse-video terminal content now stays readable when pane backgrounds are transparent. (#45, thanks @EYH0602)
+- Panes now advertise a stable `TERM=xterm-256color` and `COLORTERM=truecolor` by default, improving redraw and cursor behavior in shells and remote sessions.
+- Pane scrollbars once again reserve their own rightmost column instead of overlaying terminal content in persistent session mode.
+- Terminal-delivered toast notifications now use the server-approved delivery decision in persistent session mode, so attaching clients do not incorrectly suppress them.
+- In-app toast delivery now stays inside herdr instead of also forwarding a terminal/desktop notification.
+
 ## [0.5.0] - 2026-04-21
 
 ### Breaking Changes Please Read
