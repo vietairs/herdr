@@ -972,6 +972,13 @@ mod tests {
         }
     }
 
+    fn write_wrapped_contract_lines(terminal: &mut crate::ghostty::Terminal, count: usize) {
+        for i in 0..count {
+            terminal.write(format!("WRAP-{i:03}-abcdefghijklmnopqrstuvwxyz\r\n").as_bytes());
+        }
+        terminal.write(b"END");
+    }
+
     #[test]
     fn host_terminal_theme_restore_probe_skips_when_no_transient_override() {
         let (tx, _rx) = mpsc::channel(4);
@@ -1360,6 +1367,36 @@ mod tests {
 
         assert_eq!(pane.recent_text(3), "ABCDE\nFGHIJ\n");
         assert_eq!(pane.recent_unwrapped_text(3), "ABCDEFGHIJ");
+    }
+
+    #[test]
+    fn resize_reflow_keeps_scrolled_viewport_and_bottom_detection_sane() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(12, 4, 10_000).unwrap();
+        write_wrapped_contract_lines(&mut terminal, 40);
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let bottom_snapshot = pane.detection_text();
+        assert!(bottom_snapshot.contains("END"));
+
+        let initial = pane.scroll_metrics().expect("initial scroll metrics");
+        assert!(initial.max_offset_from_bottom > 0);
+        pane.set_scroll_offset_from_bottom(initial.max_offset_from_bottom / 2);
+        assert!(!pane.visible_text().trim().is_empty());
+
+        for (rows, cols) in [(4, 10), (4, 7), (6, 18), (3, 9), (5, 12)] {
+            pane.resize(rows, cols);
+
+            let metrics = pane.scroll_metrics().expect("scroll metrics after resize");
+            assert_eq!(metrics.viewport_rows, rows as usize);
+            assert!(metrics.offset_from_bottom <= metrics.max_offset_from_bottom);
+            assert!(metrics.max_offset_from_bottom > 0);
+            assert!(!pane.visible_text().trim().is_empty());
+            assert!(
+                pane.detection_text().contains("END"),
+                "bottom detection should remain independent from the scrolled viewport after resize"
+            );
+        }
     }
 
     #[test]
