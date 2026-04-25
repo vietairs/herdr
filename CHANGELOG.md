@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.1] - 2026-04-25
+
 ### Added
 - Toast notifications can now be delivered through the outer terminal as desktop notifications. Configure this with `ui.toast.delivery = "terminal"`; see `CONFIGURATION.md` for details.
 - Herdr now writes separate capped support logs for app, client, and server modes, making persistent-session issue reports easier to diagnose without unbounded log growth.
