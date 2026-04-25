@@ -7,7 +7,7 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
-const DEFAULT_RETAINED_LOG_FILES: usize = 4;
+const DEFAULT_RETAINED_LOG_FILES: usize = 0;
 
 pub(crate) fn init_file_logging(file_name: &str) {
     let Ok(make_writer) = RotatingFileMakeWriter::new(
@@ -59,26 +59,59 @@ pub(crate) fn shutdown(role: &'static str) {
 }
 
 pub(crate) fn api_request_started(request_id: &str, method: &'static str, changes_ui: bool) {
-    tracing::info!(
-        event = "api.request.start",
-        subsystem = "api",
-        outcome = "started",
-        request_id,
-        method,
-        changes_ui,
-        "api request received"
-    );
+    let event = "api.request.start";
+    let subsystem = "api";
+    let outcome = "started";
+    let message = "api request received";
+    if changes_ui && !is_routine_api_method(method) {
+        tracing::info!(
+            event,
+            subsystem,
+            outcome,
+            request_id,
+            method,
+            changes_ui,
+            "{message}"
+        );
+    } else {
+        tracing::debug!(
+            event,
+            subsystem,
+            outcome,
+            request_id,
+            method,
+            changes_ui,
+            "{message}"
+        );
+    }
 }
 
-pub(crate) fn api_request_completed(request_id: &str, method: &'static str, outcome: &'static str) {
-    tracing::info!(
-        event = "api.request.complete",
-        subsystem = "api",
-        outcome,
-        request_id,
+pub(crate) fn api_request_completed(
+    request_id: &str,
+    method: &'static str,
+    outcome: &'static str,
+    changes_ui: bool,
+) {
+    let event = "api.request.complete";
+    let subsystem = "api";
+    let message = "api request completed";
+    if outcome != "ok" || (changes_ui && !is_routine_api_method(method)) {
+        tracing::info!(event, subsystem, outcome, request_id, method, "{message}");
+    } else {
+        tracing::debug!(event, subsystem, outcome, request_id, method, "{message}");
+    }
+}
+
+fn is_routine_api_method(method: &str) -> bool {
+    matches!(
         method,
-        "api request completed"
-    );
+        "pane.get"
+            | "pane.read"
+            | "pane.list"
+            | "workspace.list"
+            | "tab.list"
+            | "pane.report_agent"
+    )
 }
 
 pub(crate) fn api_request_failed(request_id: &str, method: &'static str, err: &str) {
@@ -598,5 +631,25 @@ mod tests {
         assert!(!path.exists());
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn write_replaces_log_without_retained_files_when_size_limit_is_reached() {
+        let path = temp_log_path("replace");
+        let dir = path.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+
+        let writer = RotatingFileMakeWriter::new(dir.clone(), "herdr.log", 8, 0).unwrap();
+        {
+            let mut guard = writer.make_writer();
+            guard.write_all(b"12345678").unwrap();
+            guard.write_all(b"abc").unwrap();
+            guard.flush().unwrap();
+        }
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "abc");
+        assert!(!rotated_log_path(&path, 1).exists());
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

@@ -220,7 +220,8 @@ fn handle_connection(
 
     let request_id = request.id.clone();
     let method = api_method_name(&request.method);
-    crate::logging::api_request_started(&request_id, method, request_changes_ui(&request));
+    let changes_ui = request_changes_ui(&request);
+    crate::logging::api_request_started(&request_id, method, changes_ui);
 
     match request.method {
         Method::EventsSubscribe(params) => {
@@ -233,9 +234,12 @@ fn handle_connection(
                 running,
             );
             match &result {
-                Ok(()) => {
-                    crate::logging::api_request_completed(&request_id, method, "stream_closed")
-                }
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "stream_closed",
+                    changes_ui,
+                ),
                 Err(err) => {
                     crate::logging::api_request_failed(&request_id, method, &err.to_string())
                 }
@@ -246,7 +250,12 @@ fn handle_connection(
             let Some(response) =
                 wait_for_output(request_id.clone(), params, &mut stream, api_tx, running)?
             else {
-                crate::logging::api_request_completed(&request_id, method, "client_disconnected");
+                crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "client_disconnected",
+                    changes_ui,
+                );
                 return Ok(());
             };
             let result = write_text_line_allow_disconnect(&mut stream, &response);
@@ -255,6 +264,7 @@ fn handle_connection(
                     &request_id,
                     method,
                     api_response_outcome(&response),
+                    changes_ui,
                 ),
                 Err(err) => {
                     crate::logging::api_request_failed(&request_id, method, &err.to_string())
@@ -276,6 +286,7 @@ fn handle_connection(
                     &request_id,
                     method,
                     api_response_outcome(&response),
+                    changes_ui,
                 ),
                 Err(err) => {
                     crate::logging::api_request_failed(&request_id, method, &err.to_string())
