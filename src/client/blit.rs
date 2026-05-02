@@ -252,10 +252,9 @@ fn blit_frame_to_with_cursor_memory(
     // Some native IMEs track candidate-window placement from normal terminal
     // cursor updates and may not observe cursor moves emitted inside synchronized
     // output. Re-emit only the resolved final cursor anchor after the sync block;
-    // intermediate paint cursor positions remain hidden. When the focused pane
-    // explicitly reports a hidden cursor, expose that anchor to the host terminal
-    // so IMEs can attach to it instead of an older visible cursor position.
-    write_ime_anchor_cursor_state(&mut writer, host_cursor, frame.cursor.is_some());
+    // intermediate paint cursor positions remain hidden and the focused pane's
+    // requested cursor visibility is preserved.
+    write_ime_anchor_cursor_state(&mut writer, host_cursor);
     let _ = writer.flush();
 }
 
@@ -329,13 +328,9 @@ fn write_host_cursor_state(writer: &mut impl Write, cursor: HostCursorState) {
     }
 }
 
-fn write_ime_anchor_cursor_state(
-    writer: &mut impl Write,
-    cursor: HostCursorState,
-    expose_hidden_anchor: bool,
-) {
+fn write_ime_anchor_cursor_state(writer: &mut impl Write, cursor: HostCursorState) {
     write_cursor_position(writer, cursor.position);
-    if cursor.visible || expose_hidden_anchor {
+    if cursor.visible {
         let _ = writer.write_all(b"\x1b[?25h");
     } else {
         let _ = writer.write_all(b"\x1b[?25l");
@@ -641,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn blit_frame_exposes_explicit_hidden_cursor_anchor_after_synchronized_output() {
+    fn blit_frame_repeats_explicit_hidden_cursor_anchor_after_synchronized_output() {
         let visible = FrameData {
             cells: vec![make_cell("A", 0, 0, 0); 9],
             width: 3,
@@ -680,8 +675,8 @@ mod tests {
             .expect("should end synchronized output");
         let trailing_cursor = &output_str[sync_end + "\x1b[?2026l".len()..];
         assert_eq!(
-            trailing_cursor, "\x1b[2;3H\x1b[?25h",
-            "should expose the explicit hidden cursor position for IME anchoring"
+            trailing_cursor, "\x1b[2;3H\x1b[?25l",
+            "should repeat the explicit hidden cursor position while preserving visibility"
         );
     }
 
