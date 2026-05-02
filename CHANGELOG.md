@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+- Visible active-tab panes that finish while the outer terminal is unfocused are now marked as seen when you return to herdr, preventing stale done/attention indicators.
+- IME candidate windows and mobile SSH cursor tracking now stay anchored to the focused pane during client redraws, including apps that hide the cursor, instead of drifting to sidebar or repaint positions.
+
 ## [0.5.3] - 2026-04-30
 
 ### Added
