@@ -229,6 +229,11 @@ pub(crate) fn flush_incomplete_input_bytes(buffer: &mut Vec<u8>) -> Option<Vec<u
         }
     }
 
+    if starts_with_incomplete_utf8_char(buffer) {
+        tracing::trace!(bytes = ?buffer, "waiting for UTF-8 continuation bytes");
+        return None;
+    }
+
     tracing::debug!(bytes = ?buffer, "dropping incomplete raw input buffer after timeout");
     buffer.clear();
     None
@@ -317,12 +322,42 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
         return Some((RawInputEvent::Unsupported, seq_len));
     }
 
-    let ch = std::str::from_utf8(buffer).ok()?.chars().next()?;
-    let consumed = ch.len_utf8();
-    let seq = &buffer[..consumed];
-    let text = std::str::from_utf8(seq).ok()?;
+    let consumed = first_complete_utf8_char_len(buffer)?;
+    let text = std::str::from_utf8(&buffer[..consumed]).ok()?;
     let key = parse_terminal_key_sequence(text)?;
     Some((RawInputEvent::Key(key), consumed))
+}
+
+fn first_complete_utf8_char_len(buffer: &[u8]) -> Option<usize> {
+    let width = utf8_char_width(*buffer.first()?)?;
+
+    if buffer.len() < width {
+        return None;
+    }
+
+    std::str::from_utf8(&buffer[..width]).ok()?;
+    Some(width)
+}
+
+fn starts_with_incomplete_utf8_char(buffer: &[u8]) -> bool {
+    match std::str::from_utf8(buffer) {
+        Ok(_) => false,
+        Err(err) => err.valid_up_to() == 0 && err.error_len().is_none(),
+    }
+}
+
+fn utf8_char_width(first: u8) -> Option<usize> {
+    if first < 0x80 {
+        Some(1)
+    } else if first & 0b1110_0000 == 0b1100_0000 {
+        Some(2)
+    } else if first & 0b1111_0000 == 0b1110_0000 {
+        Some(3)
+    } else if first & 0b1111_1000 == 0b1111_0000 {
+        Some(4)
+    } else {
+        None
+    }
 }
 
 fn complete_escape_sequence_len(buffer: &[u8]) -> Option<usize> {
@@ -915,6 +950,49 @@ mod tests {
             panic!("expected paste");
         };
         assert_eq!(text, "hello\nworld");
+    }
+
+    #[test]
+    fn complete_utf8_char_before_incomplete_char_is_drained() {
+        let mut buffer = "你".as_bytes().to_vec();
+        buffer.push("好".as_bytes()[0]);
+
+        let chunks = drain_complete_input_bytes(&mut buffer);
+
+        assert_eq!(chunks, vec!["你".as_bytes().to_vec()]);
+        assert_eq!(buffer, vec!["好".as_bytes()[0]]);
+    }
+
+    #[test]
+    fn incomplete_utf8_prefix_is_not_flushed_on_timeout() {
+        let mut buffer = vec!["好".as_bytes()[0]];
+
+        assert_eq!(flush_incomplete_input_bytes(&mut buffer), None);
+        assert_eq!(buffer, vec!["好".as_bytes()[0]]);
+    }
+
+    #[test]
+    fn invalid_utf8_lead_byte_is_flushed_instead_of_buffered_forever() {
+        let mut buffer = vec![0xC0];
+
+        assert_eq!(flush_incomplete_input_bytes(&mut buffer), None);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn complete_utf8_char_before_incomplete_char_survives_timeout_and_next_chunk() {
+        let mut buffer = "你".as_bytes().to_vec();
+        buffer.push("好".as_bytes()[0]);
+
+        let chunks = drain_complete_input_bytes(&mut buffer);
+        assert_eq!(chunks, vec!["你".as_bytes().to_vec()]);
+        assert_eq!(flush_incomplete_input_bytes(&mut buffer), None);
+        assert_eq!(buffer, vec!["好".as_bytes()[0]]);
+
+        buffer.extend_from_slice(&"好".as_bytes()[1..]);
+        let chunks = drain_complete_input_bytes(&mut buffer);
+        assert_eq!(chunks, vec!["好".as_bytes().to_vec()]);
+        assert!(buffer.is_empty());
     }
 
     #[test]
