@@ -8,7 +8,7 @@ use crate::events::AppEvent;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
 use crate::pane::EffectiveStateChange;
 
-use super::state::{AppState, Mode, ToastKind, ToastNotification};
+use super::state::{AppState, Mode, ToastKind, ToastNotification, ViewLayout};
 
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
     matches!(new_state, AgentState::Idle)
@@ -135,7 +135,16 @@ impl AppState {
     }
 
     pub(crate) fn ensure_workspace_visible(&mut self, idx: usize) {
-        if self.sidebar_collapsed || idx >= self.workspaces.len() {
+        if idx >= self.workspaces.len() {
+            return;
+        }
+
+        if self.view.layout == ViewLayout::Mobile && self.mode == Mode::Navigate {
+            self.ensure_mobile_workspace_visible(idx);
+            return;
+        }
+
+        if self.sidebar_collapsed {
             return;
         }
 
@@ -162,6 +171,25 @@ impl AppState {
                 break;
             }
         }
+    }
+
+    fn ensure_mobile_workspace_visible(&mut self, idx: usize) {
+        let viewport = crate::ui::mobile_switcher_areas(self).viewport;
+        if viewport.height == 0 {
+            return;
+        }
+
+        let row_range = crate::ui::mobile_switcher_workspace_doc_range(idx);
+        let visible_start = self.mobile_switcher_scroll;
+        let visible_end = visible_start.saturating_add(viewport.height as usize);
+        if row_range.start < visible_start {
+            self.mobile_switcher_scroll = row_range.start;
+        } else if row_range.end > visible_end {
+            self.mobile_switcher_scroll = row_range.end.saturating_sub(viewport.height as usize);
+        }
+        self.mobile_switcher_scroll = self
+            .mobile_switcher_scroll
+            .min(crate::ui::mobile_switcher_max_scroll(self));
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
@@ -747,10 +775,10 @@ mod tests {
     #[test]
     fn switch_workspace_keeps_selected_visible_in_scrolled_sidebar() {
         let mut state = app_with_workspaces(&["a", "b", "c", "d", "e", "f", "g", "h"]);
-        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 26, 14));
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
 
         state.switch_workspace(7);
-        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 26, 14));
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
 
         assert!(state
             .view

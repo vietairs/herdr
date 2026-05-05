@@ -329,7 +329,14 @@ pub struct WorkspaceCardArea {
 
 /// Computed view geometry — derived from AppState + terminal size.
 /// Updated before each render, consumed by render and mouse handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewLayout {
+    Desktop,
+    Mobile,
+}
+
 pub struct ViewState {
+    pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
@@ -338,6 +345,8 @@ pub struct ViewState {
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
     pub terminal_area: Rect,
+    pub mobile_header_rect: Rect,
+    pub mobile_menu_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
 }
@@ -618,6 +627,7 @@ pub struct AppState {
     pub agent_panel_scroll: usize,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
+    pub mobile_switcher_scroll: usize,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
@@ -746,7 +756,9 @@ impl AppState {
             agent_panel_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
+            mobile_switcher_scroll: 0,
             view: ViewState {
+                layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
@@ -755,6 +767,8 @@ impl AppState {
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
+                mobile_header_rect: Rect::default(),
+                mobile_menu_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
             },

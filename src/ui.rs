@@ -8,6 +8,7 @@ use ratatui::{
 mod dialogs;
 mod keybind_help;
 mod menus;
+mod mobile;
 mod onboarding;
 mod panes;
 mod release_notes;
@@ -23,6 +24,10 @@ use self::keybind_help::render_keybind_help_overlay;
 use self::menus::{
     render_context_menu, render_global_launcher_menu, render_navigate_overlay,
     render_resize_overlay,
+};
+use self::mobile::{
+    compute_mobile_header_hit_areas, is_mobile_width, mobile_switcher_max_scroll_for_height,
+    render_mobile_header, render_mobile_panel, render_mobile_toast_banner,
 };
 pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
 use self::onboarding::render_onboarding_overlay;
@@ -53,9 +58,14 @@ pub(crate) use self::{
 };
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
+    mobile::{
+        mobile_switcher_areas, mobile_switcher_max_scroll, mobile_switcher_target_at,
+        mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
+    },
     tabs::compute_tab_bar_view,
     widgets::{centered_popup_rect, modal_stack_areas},
 };
+use crate::app::state::ViewLayout;
 use crate::app::{AppState, Mode};
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
@@ -87,6 +97,11 @@ pub(crate) fn compute_view_without_resizing_panes(app: &mut AppState, area: Rect
 }
 
 fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
+    if is_mobile_width(area) {
+        compute_mobile_view(app, area, resize_panes);
+        return;
+    }
+
     let sidebar_w = if app.sidebar_collapsed {
         COLLAPSED_WIDTH
     } else {
@@ -146,6 +161,7 @@ fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
     let pane_infos = compute_pane_infos(app, terminal_area, resize_panes);
 
     app.view = crate::app::ViewState {
+        layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
         workspace_card_areas,
         tab_bar_rect,
@@ -154,6 +170,50 @@ fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
         tab_scroll_right_hit_area: tab_bar_view.scroll_right_hit_area,
         new_tab_hit_area: tab_bar_view.new_tab_hit_area,
         terminal_area,
+        mobile_header_rect: Rect::default(),
+        mobile_menu_hit_area: Rect::default(),
+        pane_infos,
+        split_borders,
+    };
+}
+
+fn compute_mobile_view(app: &mut AppState, area: Rect, resize_panes: bool) {
+    let header_h = area.height.min(2);
+    let (header_rect, terminal_area) = if area.height > header_h {
+        let [header_rect, terminal_area] =
+            Layout::vertical([Constraint::Length(header_h), Constraint::Min(1)]).areas(area);
+        (header_rect, terminal_area)
+    } else {
+        (area, Rect::default())
+    };
+
+    if app.mode == Mode::Navigate {
+        let switcher_viewport_h = area.height.saturating_sub(header_h + 1);
+        let max_scroll = mobile_switcher_max_scroll_for_height(app, switcher_viewport_h);
+        app.mobile_switcher_scroll = app.mobile_switcher_scroll.min(max_scroll);
+    }
+
+    let split_borders = app
+        .active
+        .and_then(|i| app.workspaces.get(i))
+        .map(|ws| ws.layout.splits(terminal_area))
+        .unwrap_or_default();
+
+    let pane_infos = compute_pane_infos(app, terminal_area, resize_panes);
+    let header_hits = compute_mobile_header_hit_areas(app, header_rect);
+
+    app.view = crate::app::ViewState {
+        layout: ViewLayout::Mobile,
+        sidebar_rect: Rect::default(),
+        workspace_card_areas: Vec::new(),
+        tab_bar_rect: Rect::default(),
+        tab_hit_areas: Vec::new(),
+        tab_scroll_left_hit_area: Rect::default(),
+        tab_scroll_right_hit_area: Rect::default(),
+        new_tab_hit_area: Rect::default(),
+        terminal_area,
+        mobile_header_rect: header_rect,
+        mobile_menu_hit_area: header_hits.menu,
         pane_infos,
         split_borders,
     };
@@ -165,17 +225,24 @@ pub fn render(app: &AppState, frame: &mut Frame) {
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
 
-    if app.sidebar_collapsed {
+    if app.view.layout == ViewLayout::Mobile {
+        render_mobile_header(app, frame, app.view.mobile_header_rect);
+    } else if app.sidebar_collapsed {
         render_sidebar_collapsed(app, frame, sidebar_area);
     } else {
         render_sidebar(app, frame, sidebar_area);
     }
-    render_tab_bar(app, frame, tab_bar_area);
+    if app.view.layout != ViewLayout::Mobile {
+        render_tab_bar(app, frame, tab_bar_area);
+    }
     render_panes(app, frame, terminal_area);
 
     match app.mode {
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
         Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
+        Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
+            render_mobile_panel(app, frame, frame.area())
+        }
         Mode::Navigate => render_navigate_overlay(app, frame, terminal_area),
         Mode::Resize => render_resize_overlay(app, frame, terminal_area),
         Mode::ConfirmClose => render_confirm_close_overlay(app, frame, terminal_area),
@@ -195,13 +262,23 @@ pub fn render(app: &AppState, frame: &mut Frame) {
         render_config_diagnostic(frame, terminal_area, message, &app.palette);
     }
     if let Some(toast) = &app.toast {
-        render_toast_notification(
-            frame,
-            terminal_area,
-            toast,
-            has_config_diagnostic,
-            &app.palette,
-        );
+        if app.view.layout == ViewLayout::Mobile {
+            render_mobile_toast_banner(
+                frame,
+                frame.area(),
+                toast,
+                has_config_diagnostic,
+                &app.palette,
+            );
+        } else {
+            render_toast_notification(
+                frame,
+                terminal_area,
+                toast,
+                has_config_diagnostic,
+                &app.palette,
+            );
+        }
     }
 }
 
@@ -235,7 +312,11 @@ mod tests {
     use super::release_notes::{release_notes_lines, release_notes_preview_lines};
     use super::scrollbar::scrollbar_thumb;
     use super::*;
-    use crate::{app::state::Palette, layout::PaneInfo, workspace::Workspace};
+    use crate::{
+        app::state::{Palette, ViewLayout},
+        layout::PaneInfo,
+        workspace::Workspace,
+    };
     use ratatui::{backend::TestBackend, Terminal};
     use ratatui::{style::Color, text::Line};
 
@@ -276,6 +357,28 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position((focused.inner_rect.x + 4, focused.inner_rect.y));
+    }
+
+    #[test]
+    fn mobile_width_uses_header_and_full_width_terminal() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 44, 20));
+
+        assert_eq!(app.view.layout, ViewLayout::Mobile);
+        assert_eq!(app.view.sidebar_rect, Rect::default());
+        assert_eq!(app.view.tab_bar_rect, Rect::default());
+        assert_eq!(app.view.mobile_header_rect, Rect::new(0, 0, 44, 2));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 2, 44, 18));
+        assert_eq!(app.view.mobile_menu_hit_area.height, 2);
+        assert_eq!(
+            app.view.mobile_menu_hit_area.x + app.view.mobile_menu_hit_area.width,
+            44
+        );
     }
 
     #[test]
@@ -423,7 +526,7 @@ mod tests {
     fn tab_bar_shows_scroll_controls_when_tabs_overflow() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
-        for name in ["alpha", "beta", "gamma", "delta"] {
+        for name in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"] {
             ws.test_add_tab(Some(name));
         }
 
@@ -434,7 +537,7 @@ mod tests {
         app.tab_scroll_follow_active = false;
         app.tab_scroll = 2;
 
-        compute_view(&mut app, Rect::new(0, 0, 44, 20));
+        compute_view(&mut app, Rect::new(0, 0, 65, 20));
 
         assert!(app.view.tab_scroll_left_hit_area.width > 0);
         assert!(app.view.tab_scroll_right_hit_area.width > 0);
@@ -479,7 +582,7 @@ mod tests {
         app.tab_scroll_follow_active = false;
         app.tab_scroll = usize::MAX;
 
-        compute_view(&mut app, Rect::new(0, 0, 52, 20));
+        compute_view(&mut app, Rect::new(0, 0, 65, 20));
 
         let last_idx = app.workspaces[0].tabs.len() - 1;
         assert!(app.view.tab_hit_areas[last_idx].width > 0);

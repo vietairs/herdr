@@ -650,6 +650,24 @@ mod tests {
     }
 
     #[test]
+    fn mobile_workspace_keyboard_navigation_keeps_selected_row_visible() {
+        let mut state = state_with_workspaces(&["a", "b", "c", "d"]);
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Navigate;
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 44, 8));
+        assert_eq!(state.mobile_switcher_scroll, 0);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.mobile_switcher_scroll, 1);
+    }
+
+    #[test]
     fn terminal_direct_focus_pane_shortcut_maps_to_navigation_action() {
         let mut state = state_with_workspaces(&["test"]);
         state.keybinds.focus_pane_left = Some((KeyCode::Left, KeyModifiers::ALT));

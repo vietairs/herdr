@@ -46,6 +46,7 @@ impl App {
         }
 
         if self.state.is_prefix(&key_event) {
+            self.state.mobile_switcher_scroll = 0;
             self.state.mode = Mode::Navigate;
             return None;
         }
