@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.5] - 2026-05-06
+
 ### Added
 - Added a mobile layout for narrow terminals, making it practical to SSH into your machine and run herdr from your phone.
 
