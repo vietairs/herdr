@@ -1,10 +1,10 @@
 {
-  "version": "0.5.4",
-  "notes": "### Fixed\n- Visible active-tab panes that finish while the outer terminal is unfocused are now marked as seen when you return to herdr, preventing stale done/attention indicators.\n- IME candidate windows and mobile SSH cursor tracking now stay anchored to the focused pane during client redraws, including apps that hide the cursor, instead of drifting to sidebar or repaint positions.",
+  "version": "0.5.5",
+  "notes": "### Added\n- Added a mobile layout for narrow terminals, making it practical to SSH into your machine and run herdr from your phone.\n\n### Fixed\n- Non-ASCII terminal input is no longer dropped when UTF-8 characters arrive split across multiple reads.\n- Native agent detection now clears agents after their foreground process exits and control returns to the shell, preventing stale agent status in the sidebar.\n- Pane contents no longer shift horizontally when scrollback appears, keeping the scrollbar gutter stable.",
   "assets": {
-    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.4/herdr-linux-x86_64",
-    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.4/herdr-linux-aarch64",
-    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.4/herdr-macos-x86_64",
-    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.4/herdr-macos-aarch64"
+    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.5/herdr-linux-x86_64",
+    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.5/herdr-linux-aarch64",
+    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.5/herdr-macos-x86_64",
+    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.5/herdr-macos-aarch64"
   }
 }
