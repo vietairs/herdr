@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+- Added a mobile layout for narrow terminals, making it practical to SSH into your machine and run herdr from your phone.
+
+### Fixed
+- Non-ASCII terminal input is no longer dropped when UTF-8 characters arrive split across multiple reads.
+- Native agent detection now clears agents after their foreground process exits and control returns to the shell, preventing stale agent status in the sidebar.
+- Pane contents no longer shift horizontally when scrollback appears, keeping the scrollbar gutter stable.
+
 ## [0.5.4] - 2026-05-03
 
 ### Fixed
