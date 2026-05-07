@@ -707,6 +707,28 @@ impl Default for GhosttyGridRef {
         }
     }
 }
+#[doc = " A selection range defined by two grid references."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct GhosttySelection {
+    pub size: usize,
+    pub start: GhosttyGridRef,
+    pub end: GhosttyGridRef,
+    pub rectangle: bool,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of GhosttySelection"][::std::mem::size_of::<GhosttySelection>() - 64usize];
+    ["Alignment of GhosttySelection"][::std::mem::align_of::<GhosttySelection>() - 8usize];
+    ["Offset of field: GhosttySelection::size"]
+        [::std::mem::offset_of!(GhosttySelection, size) - 0usize];
+    ["Offset of field: GhosttySelection::start"]
+        [::std::mem::offset_of!(GhosttySelection, start) - 8usize];
+    ["Offset of field: GhosttySelection::end"]
+        [::std::mem::offset_of!(GhosttySelection, end) - 32usize];
+    ["Offset of field: GhosttySelection::rectangle"]
+        [::std::mem::offset_of!(GhosttySelection, rectangle) - 56usize];
+};
 unsafe extern "C" {
     #[doc = " Get the cell from a grid reference.\n\n @param ref Pointer to the grid reference\n @param[out] out_cell On success, set to the cell at the ref's position (may be NULL)\n @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if the ref's\n         node is NULL\n\n @ingroup grid_ref"]
     pub fn ghostty_grid_ref_cell(
@@ -726,6 +748,15 @@ unsafe extern "C" {
     pub fn ghostty_grid_ref_graphemes(
         ref_: *const GhosttyGridRef,
         buf: *mut u32,
+        buf_len: usize,
+        out_len: *mut usize,
+    ) -> GhosttyResult;
+}
+unsafe extern "C" {
+    #[doc = " Get the hyperlink URI for the cell at the grid reference's position."]
+    pub fn ghostty_grid_ref_hyperlink_uri(
+        ref_: *const GhosttyGridRef,
+        buf: *mut u8,
         buf_len: usize,
         out_len: *mut usize,
     ) -> GhosttyResult;
@@ -1250,11 +1281,13 @@ pub struct GhosttyFormatterTerminalOptions {
     pub trim: bool,
     #[doc = " Extra terminal state to include in styled output."]
     pub extra: GhosttyFormatterTerminalExtra,
+    #[doc = " Optional selection to restrict output to a range."]
+    pub selection: *const GhosttySelection,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of GhosttyFormatterTerminalOptions"]
-        [::std::mem::size_of::<GhosttyFormatterTerminalOptions>() - 48usize];
+        [::std::mem::size_of::<GhosttyFormatterTerminalOptions>() - 56usize];
     ["Alignment of GhosttyFormatterTerminalOptions"]
         [::std::mem::align_of::<GhosttyFormatterTerminalOptions>() - 8usize];
     ["Offset of field: GhosttyFormatterTerminalOptions::size"]
@@ -1267,6 +1300,8 @@ const _: () = {
         [::std::mem::offset_of!(GhosttyFormatterTerminalOptions, trim) - 13usize];
     ["Offset of field: GhosttyFormatterTerminalOptions::extra"]
         [::std::mem::offset_of!(GhosttyFormatterTerminalOptions, extra) - 16usize];
+    ["Offset of field: GhosttyFormatterTerminalOptions::selection"]
+        [::std::mem::offset_of!(GhosttyFormatterTerminalOptions, selection) - 48usize];
 };
 impl Default for GhosttyFormatterTerminalOptions {
     fn default() -> Self {

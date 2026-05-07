@@ -48,10 +48,11 @@ class VendorLibghosttyVtTests(unittest.TestCase):
     def test_embedded_libghostty_logging_is_silenced(self) -> None:
         root = Path(__file__).resolve().parent.parent / "vendor" / "libghostty-vt"
         lib_vt = root / "src" / "lib_vt.zig"
-        text = lib_vt.read_text()
-        self.assertIn("fn silentLog(", text)
-        self.assertIn(".log_level = .err", text)
-        self.assertIn(".logFn = silentLog", text)
+        sys_zig = root / "src" / "terminal" / "c" / "sys.zig"
+        lib_text = lib_vt.read_text()
+        sys_text = sys_zig.read_text()
+        self.assertIn('.logFn = @import("terminal/c/sys.zig").logFn', lib_text)
+        self.assertIn("if (global.log == null) return;", sys_text)
 
 
 if __name__ == "__main__":

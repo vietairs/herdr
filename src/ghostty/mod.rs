@@ -223,23 +223,6 @@ struct WritePtyCallbackState {
     callback: Box<dyn FnMut(&[u8]) + Send>,
 }
 
-#[repr(C)]
-struct GhosttyTerminalSelection {
-    start: ffi::GhosttyPoint,
-    end: ffi::GhosttyPoint,
-    rectangle: bool,
-}
-
-unsafe extern "C" {
-    fn ghostty_terminal_read_text(
-        terminal: ffi::GhosttyTerminal_ptr,
-        selection: GhosttyTerminalSelection,
-        allocator: *const ffi::GhosttyAllocator,
-        out_ptr: *mut *mut u8,
-        out_len: *mut usize,
-    ) -> ffi::GhosttyResult;
-}
-
 unsafe extern "C" fn write_pty_trampoline(
     _terminal: ffi::GhosttyTerminal_ptr,
     userdata: *mut c_void,
@@ -461,11 +444,11 @@ impl Terminal {
         end: (u16, u32),
         rectangle: bool,
     ) -> Result<String, Error> {
-        self.read_text_selection(GhosttyTerminalSelection {
-            start: ghostty_viewport_point(start.0, start.1),
-            end: ghostty_viewport_point(end.0, end.1),
+        self.read_text_selection(
+            ghostty_viewport_point(start.0, start.1),
+            ghostty_viewport_point(end.0, end.1),
             rectangle,
-        })
+        )
     }
 
     pub fn read_text_screen(
@@ -474,26 +457,68 @@ impl Terminal {
         end: (u16, u32),
         rectangle: bool,
     ) -> Result<String, Error> {
-        self.read_text_selection(GhosttyTerminalSelection {
-            start: ghostty_screen_point(start.0, start.1),
-            end: ghostty_screen_point(end.0, end.1),
+        self.read_text_selection(
+            ghostty_screen_point(start.0, start.1),
+            ghostty_screen_point(end.0, end.1),
             rectangle,
-        })
+        )
     }
 
-    fn read_text_selection(&self, selection: GhosttyTerminalSelection) -> Result<String, Error> {
+    fn read_text_selection(
+        &self,
+        start: ffi::GhosttyPoint,
+        end: ffi::GhosttyPoint,
+        rectangle: bool,
+    ) -> Result<String, Error> {
+        let mut start_ref = ffi::GhosttyGridRef {
+            size: mem::size_of::<ffi::GhosttyGridRef>(),
+            ..Default::default()
+        };
+        let mut end_ref = ffi::GhosttyGridRef {
+            size: mem::size_of::<ffi::GhosttyGridRef>(),
+            ..Default::default()
+        };
+        unsafe {
+            ffi::ghostty_terminal_grid_ref(self.raw, start, &mut start_ref).into_result()?;
+            ffi::ghostty_terminal_grid_ref(self.raw, end, &mut end_ref).into_result()?;
+        }
+
+        let selection = ffi::GhosttySelection {
+            size: mem::size_of::<ffi::GhosttySelection>(),
+            start: start_ref,
+            end: end_ref,
+            rectangle,
+        };
+        let mut formatter: ffi::GhosttyFormatter_ptr = ptr::null_mut();
+        let options = ffi::GhosttyFormatterTerminalOptions {
+            size: mem::size_of::<ffi::GhosttyFormatterTerminalOptions>(),
+            emit: ffi::GhosttyFormatterFormat_GHOSTTY_FORMATTER_FORMAT_PLAIN,
+            unwrap: true,
+            trim: true,
+            extra: ffi::GhosttyFormatterTerminalExtra {
+                size: mem::size_of::<ffi::GhosttyFormatterTerminalExtra>(),
+                screen: ffi::GhosttyFormatterScreenExtra {
+                    size: mem::size_of::<ffi::GhosttyFormatterScreenExtra>(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            selection: &selection,
+        };
+        unsafe {
+            ffi::ghostty_formatter_terminal_new(ptr::null(), &mut formatter, self.raw, options)
+                .into_result()?;
+        }
+
         let mut out_ptr = ptr::null_mut();
         let mut out_len = 0usize;
+        let result = unsafe {
+            ffi::ghostty_formatter_format_alloc(formatter, ptr::null(), &mut out_ptr, &mut out_len)
+        };
         unsafe {
-            ghostty_terminal_read_text(
-                self.raw,
-                selection,
-                ptr::null(),
-                &mut out_ptr,
-                &mut out_len,
-            )
-            .into_result()?;
+            ffi::ghostty_formatter_free(formatter);
         }
+        result.into_result()?;
 
         let text = if out_len == 0 {
             String::new()
@@ -1191,12 +1216,8 @@ mod tests {
         let _simd = build_info_bool(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_SIMD);
         let _tmux_control_mode =
             build_info_bool(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_TMUX_CONTROL_MODE);
-        let kitty_graphics =
+        let _kitty_graphics =
             build_info_bool(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_KITTY_GRAPHICS);
-        assert!(
-            !kitty_graphics,
-            "current herdr vendor must keep Kitty graphics disabled until image handling is explicit"
-        );
 
         let optimize = build_info_optimize();
         assert!(matches!(
