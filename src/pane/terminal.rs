@@ -153,6 +153,10 @@ impl PaneTerminal {
         self.ghostty.render(frame, area, show_cursor);
     }
 
+    pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
+        self.ghostty.visible_hyperlinks(area)
+    }
+
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.ghostty.apply_host_terminal_theme(theme);
     }
@@ -573,6 +577,14 @@ impl GhosttyPaneTerminal {
             .and_then(|mut core| ghostty_extract_selection(&mut core, selection).ok())
     }
 
+    pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|mut core| ghostty_visible_hyperlinks(&mut core, area).ok())
+            .unwrap_or_default()
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
         let Ok(mut core) = self.core.lock() else {
             return;
@@ -662,6 +674,37 @@ impl GhosttyPaneTerminal {
             }
         }
     }
+}
+
+fn ghostty_visible_hyperlinks(
+    core: &mut GhosttyPaneCore,
+    area: Rect,
+) -> Result<Vec<((u16, u16), String, String)>, crate::ghostty::Error> {
+    let GhosttyPaneCore {
+        terminal,
+        render_state,
+        ..
+    } = core;
+    render_state.update(terminal)?;
+    let mut row_iterator = crate::ghostty::RowIterator::new()?;
+    let mut row_cells = crate::ghostty::RowCells::new()?;
+    let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
+    let mut links = Vec::new();
+    let mut y = 0u16;
+    while y < area.height && rows.next() {
+        let mut cells = rows.populate_cells(&mut row_cells)?;
+        let mut x = 0u16;
+        while x < area.width && cells.next() {
+            if cells.has_hyperlink()? {
+                if let Some(uri) = terminal.viewport_hyperlink_uri(x, y.into())? {
+                    links.push(((area.x + x, area.y + y), ghostty_cell_symbol(&cells)?, uri));
+                }
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+    Ok(links)
 }
 
 fn ghostty_visible_text(core: &mut GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {

@@ -178,7 +178,11 @@ fn build_sgr(fg: u32, bg: u32, modifier: u16) -> String {
 /// Checks if two cells are visually identical.
 #[cfg(test)]
 fn cells_equal(a: &CellData, b: &CellData) -> bool {
-    a.symbol == b.symbol && a.fg == b.fg && a.bg == b.bg && a.modifier == b.modifier
+    a.symbol == b.symbol
+        && a.fg == b.fg
+        && a.bg == b.bg
+        && a.modifier == b.modifier
+        && a.hyperlink == b.hyperlink
     // Skip flag is only for ratatui internal use, not visual.
 }
 
@@ -225,6 +229,11 @@ fn blit_frame_to_with_cursor_memory(
     // Hide cursor before any cell writes to avoid stray cursor artifacts
     // on terminals that render the hardware cursor at intermediate CUP positions.
     let _ = writer.write_all(b"\x1b[?25l");
+
+    // Start each frame from a known OSC 8 state. If a previous write was
+    // interrupted or the outer terminal had an active hyperlink, unlinked cells
+    // must not inherit it.
+    let _ = writer.write_all(b"\x1b]8;;\x1b\\");
 
     if full_redraw {
         // Clear the screen and write all cells.
@@ -338,6 +347,7 @@ fn write_ime_anchor_cursor_state(writer: &mut impl Write, cursor: HostCursorStat
 }
 
 fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
+    let mut active_hyperlink = None;
     for row in 0..frame.height {
         let mut to_skip = 0usize;
         for col in 0..frame.width {
@@ -360,17 +370,87 @@ fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
             let sgr = build_sgr(cell.fg, cell.bg, cell.modifier);
             let _ = writer.write_all(sgr.as_bytes());
 
+            write_hyperlink_if_changed(
+                writer,
+                &mut active_hyperlink,
+                cell_hyperlink_uri(frame, cell),
+            );
+
             // Write the symbol.
             let _ = writer.write_all(cell.symbol.as_bytes());
             to_skip = cell_width(cell).saturating_sub(1);
         }
     }
 
+    close_hyperlink(writer, &mut active_hyperlink);
+
     // Reset style at the end.
     let _ = writer.write_all(b"\x1b[0m");
 }
 
-fn write_cell(writer: &mut impl Write, row: u16, col: u16, cell: &CellData, last_sgr: &mut String) {
+fn cell_hyperlink_uri<'a>(frame: &'a FrameData, cell: &CellData) -> Option<&'a str> {
+    let index = cell.hyperlink? as usize;
+    frame.hyperlinks.get(index).map(String::as_str)
+}
+
+fn sanitized_hyperlink_uri(uri: &str) -> Option<String> {
+    let sanitized: String = uri
+        .chars()
+        .filter(|ch| *ch != '\x1b' && *ch != '\x07' && !ch.is_control())
+        .collect();
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
+fn sanitized_frame_hyperlinks(frame: &FrameData) -> Vec<Option<String>> {
+    frame
+        .hyperlinks
+        .iter()
+        .map(|uri| sanitized_hyperlink_uri(uri))
+        .collect()
+}
+
+fn sanitized_cell_hyperlink_uri<'a>(
+    sanitized_hyperlinks: &'a [Option<String>],
+    cell: &CellData,
+) -> Option<&'a str> {
+    let index = cell.hyperlink? as usize;
+    sanitized_hyperlinks.get(index)?.as_deref()
+}
+
+fn write_hyperlink_if_changed(
+    writer: &mut impl Write,
+    active: &mut Option<String>,
+    requested: Option<&str>,
+) {
+    let requested = requested.and_then(sanitized_hyperlink_uri);
+    if active.as_deref() == requested.as_deref() {
+        return;
+    }
+
+    if active.is_some() {
+        let _ = writer.write_all(b"\x1b]8;;\x1b\\");
+    }
+    *active = requested;
+    if let Some(uri) = active.as_deref() {
+        let _ = write!(writer, "\x1b]8;;{uri}\x1b\\");
+    }
+}
+
+fn close_hyperlink(writer: &mut impl Write, active: &mut Option<String>) {
+    if active.take().is_some() {
+        let _ = writer.write_all(b"\x1b]8;;\x1b\\");
+    }
+}
+
+fn write_cell(
+    writer: &mut impl Write,
+    row: u16,
+    col: u16,
+    cell: &CellData,
+    last_sgr: &mut String,
+    active_hyperlink: &mut Option<String>,
+    frame: &FrameData,
+) {
     if cell.skip {
         return;
     }
@@ -383,12 +463,31 @@ fn write_cell(writer: &mut impl Write, row: u16, col: u16, cell: &CellData, last
         *last_sgr = sgr;
     }
 
+    write_hyperlink_if_changed(writer, active_hyperlink, cell_hyperlink_uri(frame, cell));
     let _ = writer.write_all(cell.symbol.as_bytes());
 }
 
 /// Writes only the cells that changed between the previous and current frame.
+fn cells_visually_equal(
+    sanitized_hyperlinks: &[Option<String>],
+    cell: &CellData,
+    prev_sanitized_hyperlinks: &[Option<String>],
+    prev_cell: &CellData,
+) -> bool {
+    cell.symbol == prev_cell.symbol
+        && cell.fg == prev_cell.fg
+        && cell.bg == prev_cell.bg
+        && cell.modifier == prev_cell.modifier
+        && sanitized_cell_hyperlink_uri(sanitized_hyperlinks, cell)
+            == sanitized_cell_hyperlink_uri(prev_sanitized_hyperlinks, prev_cell)
+    // Skip flag is only for ratatui internal use, not visual.
+}
+
 fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameData) {
     let mut last_sgr = String::new(); // Track last SGR to avoid redundant style changes.
+    let mut active_hyperlink = None;
+    let sanitized_hyperlinks = sanitized_frame_hyperlinks(frame);
+    let prev_sanitized_hyperlinks = sanitized_frame_hyperlinks(prev);
 
     for row in 0..frame.height {
         let mut invalidated = 0usize;
@@ -399,8 +498,24 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
             let cell = &frame.cells[idx];
             let prev_cell = &prev.cells[idx];
 
-            if !cell.skip && (cell != prev_cell || invalidated > 0) && to_skip == 0 {
-                write_cell(writer, row, col, cell, &mut last_sgr);
+            if !cell.skip
+                && (!cells_visually_equal(
+                    &sanitized_hyperlinks,
+                    cell,
+                    &prev_sanitized_hyperlinks,
+                    prev_cell,
+                ) || invalidated > 0)
+                && to_skip == 0
+            {
+                write_cell(
+                    writer,
+                    row,
+                    col,
+                    cell,
+                    &mut last_sgr,
+                    &mut active_hyperlink,
+                    frame,
+                );
             }
 
             to_skip = cell_width(cell).saturating_sub(1);
@@ -408,6 +523,8 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
             invalidated = cmp::max(affected_width, invalidated).saturating_sub(1);
         }
     }
+
+    close_hyperlink(writer, &mut active_hyperlink);
 
     // Reset style if we wrote anything.
     if !last_sgr.is_empty() {
@@ -433,6 +550,7 @@ mod tests {
             bg,
             modifier,
             skip: false,
+            hyperlink: None,
         }
     }
 
@@ -442,7 +560,14 @@ mod tests {
             width,
             height,
             cursor: None,
+            hyperlinks: Vec::new(),
         }
+    }
+
+    fn linked_cell(symbol: &str, index: u32) -> CellData {
+        let mut cell = make_cell(symbol, 0, 0, 0);
+        cell.hyperlink = Some(index);
+        cell
     }
 
     #[test]
@@ -619,6 +744,7 @@ mod tests {
                 y: 1,
                 visible: true,
             }),
+            hyperlinks: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -646,6 +772,7 @@ mod tests {
                 y: 0,
                 visible: true,
             }),
+            hyperlinks: Vec::new(),
         };
         let hidden = FrameData {
             cells: vec![make_cell("B", 0, 0, 0); 9],
@@ -656,6 +783,7 @@ mod tests {
                 y: 1,
                 visible: false,
             }),
+            hyperlinks: Vec::new(),
         };
         let mut last_visible_cursor = None;
         let mut output = Vec::new();
@@ -678,6 +806,42 @@ mod tests {
             trailing_cursor, "\x1b[2;3H\x1b[?25l",
             "should repeat the explicit hidden cursor position while preserving visibility"
         );
+    }
+
+    #[test]
+    fn blit_frame_emits_osc8_for_linked_cells() {
+        let mut frame = make_frame(
+            3,
+            1,
+            vec![
+                linked_cell("L", 0),
+                linked_cell("i", 0),
+                make_cell("!", 0, 0, 0),
+            ],
+        );
+        frame.hyperlinks.push("https://example.com".to_owned());
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &frame, None);
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("\x1b]8;;https://example.com\x1b\\L"));
+        assert!(output_str.contains('i'));
+        assert!(output_str.contains("\x1b]8;;\x1b\\"));
+    }
+
+    #[test]
+    fn blit_frame_sanitizes_hyperlink_uris() {
+        let mut frame = make_frame(1, 1, vec![linked_cell("L", 0)]);
+        frame
+            .hyperlinks
+            .push("https://exa\x1b\x07mple.com".to_owned());
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &frame, None);
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains("\x1b]8;;https://example.com\x1b\\L"));
     }
 
     #[test]
@@ -773,6 +937,7 @@ mod tests {
                 y: 0,
                 visible: true,
             }),
+            hyperlinks: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -796,6 +961,7 @@ mod tests {
                 y: 0,
                 visible: false,
             }),
+            hyperlinks: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -815,6 +981,7 @@ mod tests {
             width: 1,
             height: 1,
             cursor: None,
+            hyperlinks: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -839,6 +1006,7 @@ mod tests {
                 y: 0,
                 visible: false,
             }),
+            hyperlinks: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -858,6 +1026,7 @@ mod tests {
                 y: 0,
                 visible: true,
             }),
+            hyperlinks: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -884,6 +1053,7 @@ mod tests {
                 y: 0,
                 visible: true,
             }),
+            hyperlinks: Vec::new(),
         };
         let mut curr = prev.clone();
         curr.cells[0] = make_cell("B", 0, 0, 0);
@@ -920,12 +1090,14 @@ mod tests {
                 y: 1,
                 visible: true,
             }),
+            hyperlinks: Vec::new(),
         };
         let hidden = FrameData {
             cells: vec![make_cell("B", 0, 0, 0); 9],
             width: 3,
             height: 3,
             cursor: None,
+            hyperlinks: Vec::new(),
         };
         let mut last_visible_cursor = None;
         let mut output = Vec::new();
@@ -956,6 +1128,7 @@ mod tests {
             width: 3,
             height: 2,
             cursor: None,
+            hyperlinks: Vec::new(),
         };
         let mut last_visible_cursor = None;
         let mut output = Vec::new();
@@ -980,12 +1153,14 @@ mod tests {
                 y: 0,
                 visible: true,
             }),
+            hyperlinks: Vec::new(),
         };
         let curr = FrameData {
             cells: vec![make_cell("B", 0, 0, 0)],
             width: 1,
             height: 1,
             cursor: None,
+            hyperlinks: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -1008,6 +1183,7 @@ mod tests {
             width: 3,
             height: 1,
             cursor: None,
+            hyperlinks: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -1030,6 +1206,7 @@ mod tests {
             width: 3,
             height: 1,
             cursor: None,
+            hyperlinks: Vec::new(),
         };
         let curr = FrameData {
             cells: vec![
@@ -1040,6 +1217,7 @@ mod tests {
             width: 3,
             height: 1,
             cursor: None,
+            hyperlinks: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -1064,6 +1242,7 @@ mod tests {
             width: 3,
             height: 1,
             cursor: None,
+            hyperlinks: Vec::new(),
         };
         let curr = FrameData {
             cells: vec![
@@ -1074,6 +1253,7 @@ mod tests {
             width: 3,
             height: 1,
             cursor: None,
+            hyperlinks: Vec::new(),
         };
 
         let mut output = Vec::new();

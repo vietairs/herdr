@@ -368,6 +368,27 @@ fn render_virtual(
     (buffer, cursor)
 }
 
+fn visible_hyperlinks(app_state: &AppState) -> Vec<((u16, u16), String, String)> {
+    let Some(ws_idx) = app_state.active else {
+        return Vec::new();
+    };
+    let Some(tab) = app_state
+        .workspaces
+        .get(ws_idx)
+        .and_then(crate::workspace::Workspace::active_tab)
+    else {
+        return Vec::new();
+    };
+
+    let mut links = Vec::new();
+    for info in &app_state.view.pane_infos {
+        if let Some(runtime) = tab.runtimes.get(&info.id) {
+            links.extend(runtime.visible_hyperlinks(info.inner_rect));
+        }
+    }
+    links
+}
+
 fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
     if app_state.mode != Mode::Terminal {
         return None;
@@ -1120,6 +1141,13 @@ impl HeadlessServer {
     fn frame_server_message(msg: &ServerMessage) -> Result<Vec<u8>, protocol::FramingError> {
         let mut framed = Vec::new();
         protocol::write_message(&mut framed, msg)?;
+        let payload_len = framed.len().saturating_sub(4);
+        if payload_len > MAX_FRAME_SIZE {
+            return Err(protocol::FramingError::Oversized {
+                claimed: payload_len,
+                max: MAX_FRAME_SIZE,
+            });
+        }
         Ok(framed)
     }
 
@@ -1568,7 +1596,9 @@ impl HeadlessServer {
         for (client_id, (cols, rows), is_foreground) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
             let (buffer, cursor) = render_virtual(&mut self.app.state, area, is_foreground);
-            let frame = FrameData::from_ratatui_buffer(&buffer, cursor);
+            let hyperlinks = visible_hyperlinks(&self.app.state);
+            let frame =
+                FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks);
 
             let Some(client) = self.clients.get_mut(&client_id) else {
                 continue;
@@ -1584,6 +1614,14 @@ impl HeadlessServer {
             let message = ServerMessage::Frame(frame.clone());
             let serialized = match Self::frame_server_message(&message) {
                 Ok(framed) => framed,
+                Err(protocol::FramingError::Oversized { claimed, max }) => {
+                    warn!(
+                        client_id,
+                        claimed, max, "skipping oversized frame for client"
+                    );
+                    client.last_frame = Some(frame);
+                    continue;
+                }
                 Err(err) => {
                     warn!(client_id, err = %err, "failed to serialize frame for client");
                     broken_clients.push(client_id);

@@ -401,12 +401,16 @@ impl Terminal {
     }
 
     pub fn screen_graphemes(&self, x: u16, y: u32) -> Result<Vec<u32>, Error> {
-        let point = ffi::GhosttyPoint {
-            tag: ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN,
-            value: ffi::GhosttyPointValue {
-                coordinate: ffi::GhosttyPointCoordinate { x, y },
-            },
-        };
+        let grid_ref = self.grid_ref(ghostty_screen_point(x, y))?;
+        grid_ref_graphemes(&grid_ref)
+    }
+
+    pub fn viewport_hyperlink_uri(&self, x: u16, y: u32) -> Result<Option<String>, Error> {
+        let grid_ref = self.grid_ref(ghostty_viewport_point(x, y))?;
+        grid_ref_hyperlink_uri(&grid_ref)
+    }
+
+    fn grid_ref(&self, point: ffi::GhosttyPoint) -> Result<ffi::GhosttyGridRef, Error> {
         let mut grid_ref = ffi::GhosttyGridRef {
             size: mem::size_of::<ffi::GhosttyGridRef>(),
             ..Default::default()
@@ -414,28 +418,7 @@ impl Terminal {
         unsafe {
             ffi::ghostty_terminal_grid_ref(self.raw, point, &mut grid_ref).into_result()?;
         }
-        let mut required = 0usize;
-        let result = unsafe {
-            ffi::ghostty_grid_ref_graphemes(&grid_ref, ptr::null_mut(), 0, &mut required)
-        };
-        if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
-            result.into_result()?;
-        }
-        let mut buffer = vec![0u32; required];
-        if required == 0 {
-            return Ok(buffer);
-        }
-        unsafe {
-            ffi::ghostty_grid_ref_graphemes(
-                &grid_ref,
-                buffer.as_mut_ptr(),
-                buffer.len(),
-                &mut required,
-            )
-            .into_result()?;
-        }
-        buffer.truncate(required);
-        Ok(buffer)
+        Ok(grid_ref)
     }
 
     pub fn read_text_viewport(
@@ -618,6 +601,49 @@ fn ghostty_screen_point(x: u16, y: u32) -> ffi::GhosttyPoint {
             coordinate: ffi::GhosttyPointCoordinate { x, y },
         },
     }
+}
+
+fn grid_ref_graphemes(grid_ref: &ffi::GhosttyGridRef) -> Result<Vec<u32>, Error> {
+    let mut required = 0usize;
+    let result =
+        unsafe { ffi::ghostty_grid_ref_graphemes(grid_ref, ptr::null_mut(), 0, &mut required) };
+    if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
+        result.into_result()?;
+    }
+    let mut buffer = vec![0u32; required];
+    if required == 0 {
+        return Ok(buffer);
+    }
+    unsafe {
+        ffi::ghostty_grid_ref_graphemes(grid_ref, buffer.as_mut_ptr(), buffer.len(), &mut required)
+            .into_result()?;
+    }
+    buffer.truncate(required);
+    Ok(buffer)
+}
+
+fn grid_ref_hyperlink_uri(grid_ref: &ffi::GhosttyGridRef) -> Result<Option<String>, Error> {
+    let mut required = 0usize;
+    let result =
+        unsafe { ffi::ghostty_grid_ref_hyperlink_uri(grid_ref, ptr::null_mut(), 0, &mut required) };
+    if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
+        result.into_result()?;
+    }
+    if required == 0 {
+        return Ok(None);
+    }
+    let mut buffer = vec![0u8; required];
+    unsafe {
+        ffi::ghostty_grid_ref_hyperlink_uri(
+            grid_ref,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut required,
+        )
+        .into_result()?;
+    }
+    buffer.truncate(required);
+    Ok(Some(String::from_utf8_lossy(&buffer).into_owned()))
 }
 
 pub struct RenderState {
@@ -1083,6 +1109,20 @@ impl<'a> RowCellIter<'a> {
         Ok(CellWide::from_raw(wide))
     }
 
+    pub fn has_hyperlink(&self) -> Result<bool, Error> {
+        let raw = self.raw_cell()?;
+        let mut has_hyperlink = false;
+        unsafe {
+            ffi::ghostty_cell_get(
+                raw,
+                ffi::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK,
+                (&mut has_hyperlink as *mut bool).cast(),
+            )
+            .into_result()?;
+        }
+        Ok(has_hyperlink)
+    }
+
     pub fn style(&self) -> Result<CellStyle, Error> {
         let mut style = ffi::GhosttyStyle {
             size: mem::size_of::<ffi::GhosttyStyle>(),
@@ -1290,6 +1330,18 @@ mod tests {
 
         let text = terminal.read_text_viewport((0, 1), (2, 2), false).unwrap();
         assert_eq!(text, "2EFGH3IJ");
+    }
+
+    #[test]
+    fn terminal_extracts_viewport_hyperlink_uri() {
+        let mut terminal = Terminal::new(20, 3, 0).unwrap();
+        terminal.write(b"\x1b]8;;https://example.com\x1b\\Link\x1b]8;;\x1b\\");
+
+        assert_eq!(
+            terminal.viewport_hyperlink_uri(0, 0).unwrap().as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(terminal.viewport_hyperlink_uri(4, 0).unwrap(), None);
     }
 
     #[test]

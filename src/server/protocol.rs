@@ -3,6 +3,7 @@
 //! Defines the message types, framing, version negotiation, and safety
 //! constraints for the binary protocol over Unix domain sockets.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -74,6 +75,8 @@ pub struct CellData {
     pub modifier: u16,
     /// Whether this cell should be skipped during diff-based rendering.
     pub skip: bool,
+    /// Index into `FrameData::hyperlinks` for this cell's OSC 8 target, if any.
+    pub hyperlink: Option<u32>,
 }
 
 /// Cursor position within a rendered frame.
@@ -98,6 +101,8 @@ pub struct FrameData {
     pub height: u16,
     /// Cursor state for this frame, if applicable.
     pub cursor: Option<CursorState>,
+    /// OSC 8 hyperlink URIs referenced by cells.
+    pub hyperlinks: Vec<String>,
 }
 
 impl FrameData {
@@ -106,24 +111,52 @@ impl FrameData {
     /// This converts ratatui's internal cell representation into the
     /// wire-protocol cell format. The conversion is lossless for all
     /// commonly used cell attributes.
+    #[cfg(test)]
     pub fn from_ratatui_buffer(
         buffer: &ratatui::buffer::Buffer,
         cursor: Option<CursorState>,
+    ) -> Self {
+        Self::from_ratatui_buffer_with_hyperlinks(buffer, cursor, &[])
+    }
+
+    pub fn from_ratatui_buffer_with_hyperlinks(
+        buffer: &ratatui::buffer::Buffer,
+        cursor: Option<CursorState>,
+        hyperlinks: &[((u16, u16), String, String)],
     ) -> Self {
         let area = buffer.area;
         let width = area.width;
         let height = area.height;
 
+        let mut hyperlink_uris = Vec::<String>::new();
+        let mut hyperlink_indices = HashMap::<&str, u32>::new();
+        let mut hyperlink_by_position = HashMap::<(u16, u16), (&str, &str)>::new();
+        for ((x, y), symbol, uri) in hyperlinks {
+            hyperlink_by_position.insert((*x, *y), (symbol.as_str(), uri.as_str()));
+        }
         let mut cells = Vec::with_capacity((width as usize) * (height as usize));
         for row in 0..height {
             for col in 0..width {
                 let cell = buffer.cell((col, row)).expect("cell within bounds");
+                let hyperlink = hyperlink_by_position
+                    .get(&(col, row))
+                    .and_then(|(symbol, uri)| {
+                        if *symbol != cell.symbol() {
+                            return None;
+                        }
+                        Some(*hyperlink_indices.entry(*uri).or_insert_with(|| {
+                            let index = hyperlink_uris.len() as u32;
+                            hyperlink_uris.push((*uri).to_owned());
+                            index
+                        }))
+                    });
                 cells.push(CellData {
                     symbol: cell.symbol().to_owned(),
                     fg: color_to_u32(cell.fg),
                     bg: color_to_u32(cell.bg),
                     modifier: modifier_to_u16(cell.modifier),
                     skip: cell.skip,
+                    hyperlink,
                 });
             }
         }
@@ -133,6 +166,7 @@ impl FrameData {
             width,
             height,
             cursor,
+            hyperlinks: hyperlink_uris,
         }
     }
 
@@ -555,6 +589,7 @@ mod tests {
                     bg: color_to_u32(Color::Black),
                     modifier: Modifier::BOLD.bits(),
                     skip: false,
+                    hyperlink: None,
                 },
                 CellData {
                     symbol: "i".into(),
@@ -562,6 +597,7 @@ mod tests {
                     bg: color_to_u32(Color::Reset),
                     modifier: Modifier::ITALIC.bits(),
                     skip: false,
+                    hyperlink: None,
                 },
                 CellData {
                     symbol: "!".into(),
@@ -569,6 +605,7 @@ mod tests {
                     bg: color_to_u32(Color::Indexed(220)),
                     modifier: (Modifier::BOLD | Modifier::UNDERLINED).bits(),
                     skip: false,
+                    hyperlink: Some(0),
                 },
                 CellData {
                     symbol: " ".into(),
@@ -576,6 +613,7 @@ mod tests {
                     bg: color_to_u32(Color::Reset),
                     modifier: Modifier::empty().bits(),
                     skip: true,
+                    hyperlink: None,
                 },
                 CellData {
                     symbol: "→".into(), // multi-byte grapheme
@@ -583,6 +621,7 @@ mod tests {
                     bg: color_to_u32(Color::Blue),
                     modifier: Modifier::REVERSED.bits(),
                     skip: false,
+                    hyperlink: None,
                 },
                 CellData {
                     symbol: "🦀".into(), // emoji, wide grapheme cluster
@@ -590,6 +629,7 @@ mod tests {
                     bg: color_to_u32(Color::Magenta),
                     modifier: Modifier::empty().bits(),
                     skip: false,
+                    hyperlink: None,
                 },
             ],
             width: 3,
@@ -599,12 +639,20 @@ mod tests {
                 y: 0,
                 visible: true,
             }),
+            hyperlinks: vec!["https://example.com".to_owned()],
         };
         let msg = ServerMessage::Frame(frame.clone());
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
+        match decoded {
+            ServerMessage::Frame(frame) => {
+                assert_eq!(frame.cells[2].hyperlink, Some(0));
+                assert_eq!(frame.hyperlinks, vec!["https://example.com".to_owned()]);
+            }
+            other => panic!("expected frame, got {other:?}"),
+        }
     }
 
     #[test]
@@ -683,6 +731,7 @@ mod tests {
                 bg: color_to_u32(Color::Indexed((i % 256) as u8)),
                 modifier: ((i % 16) as u16),
                 skip: i % 100 == 0,
+                hyperlink: None,
             })
             .collect();
 
@@ -695,6 +744,7 @@ mod tests {
                 y: 5,
                 visible: true,
             }),
+            hyperlinks: Vec::new(),
         };
         let msg = ServerMessage::Frame(frame);
 
@@ -983,6 +1033,17 @@ mod tests {
         assert_eq!(frame.cells[2].fg, color_to_u32(Color::Rgb(255, 128, 0)));
         assert_eq!(frame.cells[2].bg, color_to_u32(Color::Indexed(220)));
 
+        let with_links = FrameData::from_ratatui_buffer_with_hyperlinks(
+            &buffer,
+            None,
+            &[((1, 0), "i".to_owned(), "https://example.com".to_owned())],
+        );
+        assert_eq!(with_links.cells[1].hyperlink, Some(0));
+        assert_eq!(
+            with_links.hyperlinks,
+            vec!["https://example.com".to_owned()]
+        );
+
         // Convert back to ratatui buffer and compare.
         let restored = frame.to_ratatui_buffer().expect("should reconstruct");
         assert_eq!(restored.area, area);
@@ -1004,12 +1065,14 @@ mod tests {
                     bg: 0,
                     modifier: 0,
                     skip: false,
+                    hyperlink: None,
                 };
                 5
             ], // 5 cells but 3×2 = 6 expected
             width: 3,
             height: 2,
             cursor: None,
+            hyperlinks: Vec::new(),
         };
         assert!(frame.to_ratatui_buffer().is_none());
     }
