@@ -51,8 +51,17 @@ impl PaneState {
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
+        let previous_detected_agent = self.detected_agent;
         self.detected_agent = agent;
         self.fallback_state = fallback_state;
+        if previous_detected_agent.is_some()
+            && agent != previous_detected_agent
+            && self.hook_authority.as_ref().is_some_and(|authority| {
+                crate::detect::parse_agent_label(&authority.agent_label) == previous_detected_agent
+            })
+        {
+            self.hook_authority = None;
+        }
         self.recompute_effective_state(previous_agent_label, previous_known_agent, previous_state)
     }
 
@@ -279,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_authority_survives_detected_agent_changes() {
+    fn hook_authority_survives_unrelated_detected_agent_clear() {
         let mut pane = PaneState::new();
         pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         pane.set_hook_authority(
@@ -294,6 +303,40 @@ mod tests {
         assert!(pane.hook_authority.is_some());
         assert_eq!(pane.detected_agent, None);
         assert_eq!(pane.effective_agent_label(), Some("hermes"));
+        assert_eq!(pane.state, AgentState::Working);
+    }
+
+    #[test]
+    fn detected_agent_clear_clears_matching_hook_authority() {
+        let mut pane = PaneState::new();
+        pane.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        pane.set_hook_authority(
+            "herdr:opencode".into(),
+            "opencode".into(),
+            AgentState::Idle,
+            None,
+        );
+
+        pane.set_detected_state(None, AgentState::Unknown);
+
+        assert!(pane.hook_authority.is_none());
+        assert_eq!(pane.detected_agent, None);
+        assert_eq!(pane.fallback_state, AgentState::Unknown);
+        assert_eq!(pane.effective_agent_label(), None);
+        assert_eq!(pane.state, AgentState::Unknown);
+    }
+
+    #[test]
+    fn detected_agent_change_clears_previous_matching_hook_authority() {
+        let mut pane = PaneState::new();
+        pane.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        pane.set_hook_authority("herdr:codex".into(), "codex".into(), AgentState::Idle, None);
+
+        pane.set_detected_state(Some(Agent::OpenCode), AgentState::Working);
+
+        assert!(pane.hook_authority.is_none());
+        assert_eq!(pane.detected_agent, Some(Agent::OpenCode));
+        assert_eq!(pane.effective_agent_label(), Some("opencode"));
         assert_eq!(pane.state, AgentState::Working);
     }
 
