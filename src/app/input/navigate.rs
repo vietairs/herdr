@@ -130,6 +130,7 @@ impl App {
                     kind: crate::app::state::ToastKind::NeedsAttention,
                     title: "custom command failed".to_string(),
                     context: err.to_string(),
+                    target: None,
                 });
                 self.sync_toast_deadline(previous_toast);
             }

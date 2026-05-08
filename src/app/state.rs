@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
 
-use crate::layout::{PaneInfo, SplitBorder};
+use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
 use crate::terminal_theme::TerminalTheme;
 use crate::workspace::Workspace;
@@ -370,6 +370,7 @@ pub struct ViewState {
     pub terminal_area: Rect,
     pub mobile_header_rect: Rect,
     pub mobile_menu_hit_area: Rect,
+    pub toast_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
 }
@@ -594,10 +595,17 @@ pub enum ToastKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastTarget {
+    pub workspace_id: String,
+    pub pane_id: PaneId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToastNotification {
     pub kind: ToastKind,
     pub title: String,
     pub context: String,
+    pub target: Option<ToastTarget>,
 }
 
 pub struct ReleaseNotesState {
@@ -793,6 +801,7 @@ impl AppState {
                 terminal_area: Rect::default(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
+                toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
             },

@@ -8,7 +8,7 @@ use crate::events::AppEvent;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
 use crate::pane::EffectiveStateChange;
 
-use super::state::{AppState, Mode, ToastKind, ToastNotification, ViewLayout};
+use super::state::{AppState, Mode, ToastKind, ToastNotification, ToastTarget, ViewLayout};
 
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
     matches!(new_state, AgentState::Idle)
@@ -552,6 +552,7 @@ impl AppState {
                         kind: ToastKind::UpdateInstalled,
                         title: format!("v{version} available"),
                         context: "detach, then run `herdr update`".to_string(),
+                        target: None,
                     });
                 }
                 Vec::new()
@@ -679,6 +680,10 @@ impl AppState {
                     kind,
                     title: format!("{} {}", toast_agent_label(agent_label), event_text),
                     context,
+                    target: Some(ToastTarget {
+                        workspace_id: self.workspaces[ws_idx].id.clone(),
+                        pane_id,
+                    }),
                 });
             }
         }
@@ -1086,6 +1091,9 @@ mod tests {
         assert_eq!(toast.kind, ToastKind::Finished);
         assert_eq!(toast.title, "droid finished");
         assert_eq!(toast.context, "background · 2");
+        let target = toast.target.as_ref().expect("toast target");
+        assert_eq!(&target.workspace_id, &state.workspaces[1].id);
+        assert_eq!(target.pane_id, bg_pane_id);
     }
 
     #[test]

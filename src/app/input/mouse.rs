@@ -31,6 +31,19 @@ impl AppState {
             return None;
         }
 
+        if self.clickable_toast_at(mouse.column, mouse.row)
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            self.focus_toast_target();
+            return None;
+        }
+
+        if self.clickable_toast_at(mouse.column, mouse.row)
+            && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+        {
+            return None;
+        }
+
         if self.mode == Mode::Settings {
             return self.handle_settings_mouse(mouse);
         }
@@ -977,6 +990,34 @@ impl AppState {
         }
     }
 
+    fn clickable_toast_at(&self, col: u16, row: u16) -> bool {
+        self.toast
+            .as_ref()
+            .is_some_and(|toast| toast.target.is_some())
+            && rect_contains(self.view.toast_hit_area, col, row)
+    }
+
+    fn focus_toast_target(&mut self) {
+        let Some(target) = self.toast.as_ref().and_then(|toast| toast.target.clone()) else {
+            return;
+        };
+        let Some(ws_idx) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == target.workspace_id)
+        else {
+            return;
+        };
+        let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(target.pane_id) else {
+            return;
+        };
+
+        self.switch_workspace(ws_idx);
+        self.switch_tab(tab_idx);
+        self.focus_pane(target.pane_id);
+        self.mode = Mode::Terminal;
+    }
+
     pub(super) fn scroll_pane_up(&self, pane_id: crate::layout::PaneId, lines: usize) {
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) {
             if let Some(rt) = ws.runtimes.get(&pane_id) {
@@ -1205,6 +1246,7 @@ mod tests {
     use super::*;
     use crate::{
         app::state::{ContextMenuKind, ContextMenuState, MenuListState, Mode, ViewLayout},
+        detect::{Agent, AgentState},
         workspace::Workspace,
     };
 
@@ -1223,6 +1265,45 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Moved, menu.x + 2, menu.y + 2));
 
         assert_eq!(app.state.context_menu.unwrap().list.highlighted, 1);
+    }
+
+    #[test]
+    fn clicking_agent_toast_focuses_target_pane() {
+        let mut app = app_for_mouse_test();
+        let active = Workspace::test_new("active");
+        let mut background = Workspace::test_new("background");
+        let first_pane = background.tabs[0].root_pane;
+        let target_pane = background.test_split(Direction::Horizontal);
+        background.tabs[0].layout.focus_pane(first_pane);
+
+        app.state.workspaces = vec![active, background];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.workspaces[1]
+            .panes
+            .get_mut(&target_pane)
+            .unwrap()
+            .state = AgentState::Working;
+
+        app.state
+            .handle_app_event(crate::events::AppEvent::StateChanged {
+                pane_id: target_pane,
+                agent: Some(Agent::Pi),
+                state: AgentState::Idle,
+            });
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let hit = app.state.view.toast_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            hit.x + 1,
+            hit.y + 1,
+        ));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target_pane));
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]

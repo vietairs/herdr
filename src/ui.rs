@@ -27,7 +27,8 @@ use self::menus::{
 };
 use self::mobile::{
     compute_mobile_header_hit_areas, is_mobile_width, mobile_switcher_max_scroll_for_height,
-    render_mobile_header, render_mobile_panel, render_mobile_toast_banner,
+    mobile_toast_banner_rect, render_mobile_header, render_mobile_panel,
+    render_mobile_toast_banner,
 };
 pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
 use self::onboarding::render_onboarding_overlay;
@@ -43,7 +44,7 @@ pub(crate) use self::scrollbar::{
 };
 use self::settings::render_settings_overlay;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
-use self::status::{render_config_diagnostic, render_toast_notification};
+use self::status::{render_config_diagnostic, render_toast_notification, toast_notification_rect};
 use self::tabs::render_tab_bar;
 pub(crate) use self::{
     dialogs::{confirm_close_button_rects, confirm_close_popup_rect, rename_button_rects},
@@ -160,6 +161,12 @@ fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
 
     let pane_infos = compute_pane_infos(app, terminal_area, resize_panes);
 
+    let toast_hit_area = app
+        .toast
+        .as_ref()
+        .map(|toast| toast_notification_rect(terminal_area, toast, app.config_diagnostic.is_some()))
+        .unwrap_or_default();
+
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
@@ -172,6 +179,7 @@ fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
         terminal_area,
         mobile_header_rect: Rect::default(),
         mobile_menu_hit_area: Rect::default(),
+        toast_hit_area,
         pane_infos,
         split_borders,
     };
@@ -202,6 +210,12 @@ fn compute_mobile_view(app: &mut AppState, area: Rect, resize_panes: bool) {
     let pane_infos = compute_pane_infos(app, terminal_area, resize_panes);
     let header_hits = compute_mobile_header_hit_areas(app, header_rect);
 
+    let toast_hit_area = app
+        .toast
+        .as_ref()
+        .map(|_| mobile_toast_banner_rect(area, app.config_diagnostic.is_some()))
+        .unwrap_or_default();
+
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
@@ -214,6 +228,7 @@ fn compute_mobile_view(app: &mut AppState, area: Rect, resize_panes: bool) {
         terminal_area,
         mobile_header_rect: header_rect,
         mobile_menu_hit_area: header_hits.menu,
+        toast_hit_area,
         pane_infos,
         split_borders,
     };

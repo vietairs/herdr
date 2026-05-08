@@ -318,6 +318,7 @@ impl App {
                 terminal_area: Rect::default(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
+                toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
             },
@@ -684,6 +685,7 @@ impl App {
                     kind: crate::app::state::ToastKind::UpdateInstalled,
                     title: "reloaded config".to_string(),
                     context: "using config.toml".to_string(),
+                    target: None,
                 });
             }
         } else {
@@ -694,6 +696,7 @@ impl App {
                     kind: crate::app::state::ToastKind::UpdateInstalled,
                     title: "reloaded config".to_string(),
                     context: "with warnings".to_string(),
+                    target: None,
                 });
             }
         }

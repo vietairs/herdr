@@ -172,6 +172,18 @@ pub(crate) fn render_mobile_header(app: &AppState, frame: &mut Frame, area: Rect
     render_switch_button(app, frame, switch);
 }
 
+pub(crate) fn mobile_toast_banner_rect(area: Rect, offset_for_warning: bool) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return Rect::default();
+    }
+
+    let y = area.y
+        + area
+            .height
+            .saturating_sub(1 + if offset_for_warning { 1 } else { 0 });
+    Rect::new(area.x, y, area.width, 1)
+}
+
 pub(crate) fn render_mobile_toast_banner(
     frame: &mut Frame,
     area: Rect,
@@ -188,11 +200,7 @@ pub(crate) fn render_mobile_toast_banner(
         ToastKind::Finished => p.blue,
         ToastKind::UpdateInstalled => p.accent,
     };
-    let y = area.y
-        + area
-            .height
-            .saturating_sub(1 + if offset_for_warning { 1 } else { 0 });
-    let banner = Rect::new(area.x, y, area.width, 1);
+    let banner = mobile_toast_banner_rect(area, offset_for_warning);
     let bg = p.surface0;
 
     frame.render_widget(Clear, banner);

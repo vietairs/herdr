@@ -12,6 +12,22 @@ use crate::{
     detect::AgentState,
 };
 
+pub(crate) fn toast_notification_rect(
+    area: Rect,
+    toast: &ToastNotification,
+    offset_for_warning: bool,
+) -> Rect {
+    let content_width = (toast.title.len().max(toast.context.len()) as u16) + 4;
+    let width = content_width.saturating_add(2).min(area.width);
+    let height = 4u16.min(area.height);
+    let x = area.x + area.width.saturating_sub(width);
+    let y = area.y
+        + area
+            .height
+            .saturating_sub(height + if offset_for_warning { 1 } else { 0 });
+    Rect::new(x, y, width, height)
+}
+
 pub(super) fn render_toast_notification(
     frame: &mut Frame,
     area: Rect,
@@ -24,15 +40,7 @@ pub(super) fn render_toast_notification(
         ToastKind::Finished => p.blue,
         ToastKind::UpdateInstalled => p.accent,
     };
-    let content_width = (toast.title.len().max(toast.context.len()) as u16) + 4;
-    let width = content_width.saturating_add(2).min(area.width);
-    let height = 4u16.min(area.height);
-    let x = area.x + area.width.saturating_sub(width);
-    let y = area.y
-        + area
-            .height
-            .saturating_sub(height + if offset_for_warning { 1 } else { 0 });
-    let toast_area = Rect::new(x, y, width, height);
+    let toast_area = toast_notification_rect(area, toast, offset_for_warning);
 
     frame.render_widget(Clear, toast_area);
     let block = Block::default()
