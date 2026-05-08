@@ -23,8 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
-use ratatui::layout::{Position, Rect, Size};
+use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -33,16 +32,15 @@ use base64::Engine;
 use crate::api;
 use crate::app;
 use crate::app::state::AppState;
-use crate::app::Mode;
-use crate::client::blit::BlitEncoder;
 use crate::config;
 use crate::detect::AgentState;
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::server::client_transport::{self, ClientWriter, ServerEvent};
 use crate::server::protocol::{
-    self, CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame, MAX_FRAME_SIZE,
+    self, CursorState, FrameData, RenderEncoding, ServerMessage, MAX_FRAME_SIZE,
 };
+use crate::server::render_stream::ClientRenderState;
 
 // ---------------------------------------------------------------------------
 // Loop event enum for the headless server event loop
@@ -191,47 +189,6 @@ fn derive_client_socket_from_api_socket(api_socket_path: &Path) -> PathBuf {
 // Connected client state
 // ---------------------------------------------------------------------------
 
-/// Per-client render baseline for the negotiated render encoding.
-enum ClientRenderState {
-    /// Semantic clients compare full frame data and skip identical frames.
-    Semantic { last_frame: Option<FrameData> },
-    /// Terminal-ANSI clients keep a terminal diff encoder and sequence number.
-    TerminalAnsi { blit_encoder: BlitEncoder, seq: u64 },
-}
-
-impl ClientRenderState {
-    fn new(render_encoding: RenderEncoding) -> Self {
-        match render_encoding {
-            RenderEncoding::SemanticFrame => Self::Semantic { last_frame: None },
-            RenderEncoding::TerminalAnsi => Self::TerminalAnsi {
-                blit_encoder: BlitEncoder::new(),
-                seq: 0,
-            },
-        }
-    }
-
-    fn reset_baseline(&mut self) {
-        match self {
-            Self::Semantic { last_frame } => *last_frame = None,
-            Self::TerminalAnsi { blit_encoder, .. } => *blit_encoder = BlitEncoder::new(),
-        }
-    }
-
-    fn reset_semantic_input_baseline(&mut self) {
-        if let Self::Semantic { last_frame } = self {
-            *last_frame = None;
-        }
-    }
-
-    #[cfg(test)]
-    fn terminal_seq(&self) -> Option<u64> {
-        match self {
-            Self::Semantic { .. } => None,
-            Self::TerminalAnsi { seq, .. } => Some(*seq),
-        }
-    }
-}
-
 /// A connected client tracked by the server.
 struct ClientConnection {
     /// The client's terminal size (after clamping).
@@ -290,166 +247,6 @@ fn prepare_socket_path(path: &Path) -> io::Result<()> {
 /// Restricts socket file permissions to owner-only (0o600).
 fn restrict_socket_permissions(path: &Path) -> io::Result<()> {
     crate::ipc::restrict_socket_permissions(path, SOCKET_PERMISSION_MODE)
-}
-
-// ---------------------------------------------------------------------------
-// Virtual rendering
-// ---------------------------------------------------------------------------
-
-struct CursorTrackingBackend {
-    inner: TestBackend,
-    rendered_cursor: Option<Position>,
-}
-
-impl CursorTrackingBackend {
-    fn new(width: u16, height: u16) -> Self {
-        Self {
-            inner: TestBackend::new(width, height),
-            rendered_cursor: None,
-        }
-    }
-
-    fn buffer(&self) -> &ratatui::buffer::Buffer {
-        self.inner.buffer()
-    }
-
-    fn rendered_cursor(&self) -> Option<CursorState> {
-        self.rendered_cursor.map(|pos| CursorState {
-            x: pos.x,
-            y: pos.y,
-            visible: true,
-        })
-    }
-}
-
-impl Backend for CursorTrackingBackend {
-    type Error = std::convert::Infallible;
-
-    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
-    where
-        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
-    {
-        self.inner.draw(content)
-    }
-
-    fn append_lines(&mut self, n: u16) -> Result<(), Self::Error> {
-        self.inner.append_lines(n)
-    }
-
-    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
-        self.inner.hide_cursor()?;
-        self.rendered_cursor = None;
-        Ok(())
-    }
-
-    fn show_cursor(&mut self) -> Result<(), Self::Error> {
-        self.inner.show_cursor()
-    }
-
-    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
-        self.inner.get_cursor_position()
-    }
-
-    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
-        let position = position.into();
-        self.inner.set_cursor_position(position)?;
-        self.rendered_cursor = Some(position);
-        Ok(())
-    }
-
-    fn clear(&mut self) -> Result<(), Self::Error> {
-        self.inner.clear()
-    }
-
-    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
-        self.inner.clear_region(clear_type)
-    }
-
-    fn size(&self) -> Result<Size, Self::Error> {
-        self.inner.size()
-    }
-
-    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
-        self.inner.window_size()
-    }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        self.inner.flush()
-    }
-}
-
-/// Renders the AppState to an in-memory ratatui Buffer.
-///
-/// This produces the same output as the monolithic binary's terminal draw,
-/// but writes to a `Buffer` instead of stdout. Cursor visibility is captured
-/// from explicit frame cursor intent rather than incidental backend state.
-fn render_virtual(
-    app_state: &mut AppState,
-    area: Rect,
-    resize_panes: bool,
-) -> (ratatui::buffer::Buffer, Option<CursorState>) {
-    if resize_panes {
-        crate::ui::compute_view(app_state, area);
-    } else {
-        crate::ui::compute_view_without_resizing_panes(app_state, area);
-    }
-
-    let backend = CursorTrackingBackend::new(area.width, area.height);
-    let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
-
-    terminal
-        .draw(|frame| {
-            crate::ui::render(app_state, frame);
-        })
-        .expect("render to TestBackend should never fail");
-
-    let buffer = terminal.backend().buffer().clone();
-    let cursor =
-        focused_terminal_cursor(app_state).or_else(|| terminal.backend().rendered_cursor());
-
-    (buffer, cursor)
-}
-
-fn visible_hyperlinks(app_state: &AppState) -> Vec<((u16, u16), String, String)> {
-    let Some(ws_idx) = app_state.active else {
-        return Vec::new();
-    };
-    let Some(tab) = app_state
-        .workspaces
-        .get(ws_idx)
-        .and_then(crate::workspace::Workspace::active_tab)
-    else {
-        return Vec::new();
-    };
-
-    let mut links = Vec::new();
-    for info in &app_state.view.pane_infos {
-        if let Some(runtime) = tab.runtimes.get(&info.id) {
-            links.extend(runtime.visible_hyperlinks(info.inner_rect));
-        }
-    }
-    links
-}
-
-fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
-    if app_state.mode != Mode::Terminal {
-        return None;
-    }
-
-    let ws_idx = app_state.active?;
-    let ws = app_state.workspaces.get(ws_idx)?;
-    let info = app_state
-        .view
-        .pane_infos
-        .iter()
-        .find(|info| info.is_focused)?;
-    let rt = ws.runtimes.get(&info.id)?;
-    let cursor = rt.cursor_state(info.inner_rect, true)?;
-    Some(CursorState {
-        x: cursor.x,
-        y: cursor.y,
-        visible: cursor.visible,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1638,7 +1435,11 @@ impl HeadlessServer {
             let (cols, rows) = self.effective_size;
             let area = Rect::new(0, 0, cols, rows);
             let resize_panes = self.app.state.view.pane_infos.is_empty();
-            let _ = render_virtual(&mut self.app.state, area, resize_panes);
+            let _ = crate::server::render_stream::render_virtual(
+                &mut self.app.state,
+                area,
+                resize_panes,
+            );
             debug!(
                 cols,
                 rows, resize_panes, "rendered virtual frame with no attached clients"
@@ -1649,8 +1450,12 @@ impl HeadlessServer {
         let mut broken_clients: Vec<u64> = Vec::new();
         for (client_id, (cols, rows), is_foreground) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
-            let (buffer, cursor) = render_virtual(&mut self.app.state, area, is_foreground);
-            let hyperlinks = visible_hyperlinks(&self.app.state);
+            let (buffer, cursor) = crate::server::render_stream::render_virtual(
+                &mut self.app.state,
+                area,
+                is_foreground,
+            );
+            let hyperlinks = crate::server::render_stream::visible_hyperlinks(&self.app.state);
             let frame =
                 FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks);
 
@@ -1661,43 +1466,19 @@ impl HeadlessServer {
                 continue;
             };
 
-            let mut terminal_encoded = None;
-            let message = match &mut client.render_state {
-                ClientRenderState::Semantic { last_frame } => {
-                    if last_frame.as_ref() == Some(&frame) {
-                        client.render_pending = false;
-                        continue;
-                    }
-                    ServerMessage::Frame(frame.clone())
-                }
-                ClientRenderState::TerminalAnsi { blit_encoder, seq } => {
-                    if blit_encoder.is_current(&frame) {
-                        client.render_pending = false;
-                        continue;
-                    }
-                    let encoded = blit_encoder.encode(&frame, false);
-                    let message = ServerMessage::Terminal(TerminalFrame {
-                        seq: *seq + 1,
-                        width: frame.width,
-                        height: frame.height,
-                        full: encoded.full,
-                        bytes: encoded.bytes.clone(),
-                    });
-                    terminal_encoded = Some(encoded);
-                    message
-                }
+            let Some(prepared) = client.render_state.prepare_frame(&frame) else {
+                client.render_pending = false;
+                continue;
             };
 
-            let serialized = match Self::frame_server_message(&message) {
+            let serialized = match Self::frame_server_message(prepared.message()) {
                 Ok(framed) => framed,
                 Err(protocol::FramingError::Oversized { claimed, max }) => {
                     warn!(
                         client_id,
                         claimed, max, "skipping oversized frame for client"
                     );
-                    if let ClientRenderState::Semantic { last_frame } = &mut client.render_state {
-                        *last_frame = Some(frame);
-                    }
+                    client.render_state.note_oversized_frame(frame);
                     continue;
                 }
                 Err(err) => {
@@ -1710,21 +1491,7 @@ impl HeadlessServer {
             match writer.render.try_send(serialized) {
                 Ok(()) => {
                     client.render_pending = false;
-                    match (&mut client.render_state, message) {
-                        (ClientRenderState::Semantic { last_frame }, ServerMessage::Frame(_)) => {
-                            *last_frame = Some(frame);
-                        }
-                        (
-                            ClientRenderState::TerminalAnsi { blit_encoder, seq },
-                            ServerMessage::Terminal(_),
-                        ) => {
-                            if let Some(encoded) = terminal_encoded {
-                                blit_encoder.commit(frame, encoded);
-                                *seq += 1;
-                            }
-                        }
-                        _ => {}
-                    }
+                    client.render_state.commit_sent_frame(frame, prepared);
                 }
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
                     client.render_pending = true;
@@ -2180,7 +1947,8 @@ mod tests {
     fn virtual_render_produces_nonempty_buffer() {
         let mut state = AppState::test_new();
         let area = Rect::new(0, 0, 80, 24);
-        let (buffer, _cursor) = render_virtual(&mut state, area, true);
+        let (buffer, _cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, true);
         assert_eq!(buffer.area.width, 80);
         assert_eq!(buffer.area.height, 24);
     }
@@ -2189,7 +1957,8 @@ mod tests {
     fn virtual_render_without_frame_cursor_keeps_cursor_hidden() {
         let mut state = AppState::test_new();
         let area = Rect::new(0, 0, 80, 24);
-        let (_buffer, cursor) = render_virtual(&mut state, area, true);
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, true);
 
         assert_eq!(cursor, None);
     }
@@ -2210,7 +1979,8 @@ mod tests {
         state.mode = crate::app::Mode::Terminal;
 
         let area = Rect::new(0, 0, 80, 24);
-        let (_buffer, cursor) = render_virtual(&mut state, area, true);
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, true);
         let pane = state
             .view
             .pane_infos
@@ -2244,7 +2014,8 @@ mod tests {
         state.mode = crate::app::Mode::Terminal;
 
         let area = Rect::new(0, 0, 80, 24);
-        let (_buffer, cursor) = render_virtual(&mut state, area, true);
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, true);
         let pane = state
             .view
             .pane_infos
