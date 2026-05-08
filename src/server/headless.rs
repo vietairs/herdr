@@ -16,8 +16,8 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -39,9 +39,9 @@ use crate::config;
 use crate::detect::AgentState;
 use crate::events::AppEvent;
 use crate::layout::PaneId;
+use crate::server::client_transport::{self, ClientWriter, ServerEvent};
 use crate::server::protocol::{
-    self, ClientMessage, CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame,
-    MAX_FRAME_SIZE, PROTOCOL_VERSION,
+    self, CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame, MAX_FRAME_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -65,14 +65,6 @@ enum LoopEvent {
 const MIN_COLS: u16 = 80;
 const MIN_ROWS: u16 = 24;
 
-/// Minimum accepted attached client size.
-///
-/// Narrow observers must be allowed to drive narrow renders, otherwise the
-/// server wraps pane content against a wider width and the client sees the
-/// right edge clipped.
-const MIN_CLIENT_COLS: u16 = 1;
-const MIN_CLIENT_ROWS: u16 = 1;
-
 /// Legacy environment variable for overriding the client socket path.
 ///
 /// Contractual override behavior for auto-detect uses `HERDR_SOCKET_PATH`.
@@ -86,15 +78,6 @@ const SOCKET_PERMISSION_MODE: u32 = 0o600;
 /// Timeout for in-flight API requests during shutdown.
 #[allow(dead_code)]
 const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long to wait for a client handshake before closing the connection.
-/// Set to 4 seconds (rather than 5) to guarantee the connection is closed
-/// within the 5-second deadline, even with
-/// OS timer slack, thread scheduling, and cleanup overhead.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
-
-/// Maximum input payload size (bytes) for a single `ClientMessage::Input`.
-const MAX_INPUT_PAYLOAD: usize = 1024 * 1024; // 1 MB
 
 /// How often the idle headless loop wakes to poll the std UnixListener for new
 /// client connections.
@@ -204,24 +187,49 @@ fn derive_client_socket_from_api_socket(api_socket_path: &Path) -> PathBuf {
     parent.join(format!("{stem}-client.sock"))
 }
 
-/// Clamp client-reported terminal dimensions to a minimum viable size.
-pub fn clamp_terminal_size(cols: u16, rows: u16) -> (u16, u16) {
-    let clamped_cols = cols.max(MIN_CLIENT_COLS);
-    let clamped_rows = rows.max(MIN_CLIENT_ROWS);
-    (clamped_cols, clamped_rows)
-}
-
 // ---------------------------------------------------------------------------
 // Connected client state
 // ---------------------------------------------------------------------------
 
-/// Channels owned by the server side of a client writer thread.
-#[derive(Clone, Debug)]
-pub(crate) struct ClientWriter {
-    /// Reliable control messages such as shutdown, notifications, and clipboard writes.
-    control: std::sync::mpsc::Sender<Vec<u8>>,
-    /// Droppable render messages. Capacity is one so slow clients cannot build lag.
-    render: std::sync::mpsc::SyncSender<Vec<u8>>,
+/// Per-client render baseline for the negotiated render encoding.
+enum ClientRenderState {
+    /// Semantic clients compare full frame data and skip identical frames.
+    Semantic { last_frame: Option<FrameData> },
+    /// Terminal-ANSI clients keep a terminal diff encoder and sequence number.
+    TerminalAnsi { blit_encoder: BlitEncoder, seq: u64 },
+}
+
+impl ClientRenderState {
+    fn new(render_encoding: RenderEncoding) -> Self {
+        match render_encoding {
+            RenderEncoding::SemanticFrame => Self::Semantic { last_frame: None },
+            RenderEncoding::TerminalAnsi => Self::TerminalAnsi {
+                blit_encoder: BlitEncoder::new(),
+                seq: 0,
+            },
+        }
+    }
+
+    fn reset_baseline(&mut self) {
+        match self {
+            Self::Semantic { last_frame } => *last_frame = None,
+            Self::TerminalAnsi { blit_encoder, .. } => *blit_encoder = BlitEncoder::new(),
+        }
+    }
+
+    fn reset_semantic_input_baseline(&mut self) {
+        if let Self::Semantic { last_frame } = self {
+            *last_frame = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn terminal_seq(&self) -> Option<u64> {
+        match self {
+            Self::Semantic { .. } => None,
+            Self::TerminalAnsi { seq, .. } => Some(*seq),
+        }
+    }
 }
 
 /// A connected client tracked by the server.
@@ -234,18 +242,33 @@ struct ClientConnection {
     outer_terminal_focus: Option<bool>,
     /// Monotonic activity stamp used to choose the fallback foreground client.
     last_activity: u64,
-    /// Render encoding negotiated for this client.
-    render_encoding: RenderEncoding,
-    /// Last semantic frame sent to this client. Used to skip identical frame sends.
-    last_frame: Option<FrameData>,
-    /// Terminal-ANSI encoder and baseline for this client.
-    blit_encoder: BlitEncoder,
-    /// Monotonic render sequence for this client.
-    frame_seq: u64,
+    /// Render baseline for the negotiated client encoding.
+    render_state: ClientRenderState,
     /// Whether a render was skipped because the render channel was full.
     render_pending: bool,
     /// Channels for sending framed ServerMessage data to the client writer thread.
     writer: Option<ClientWriter>,
+}
+
+impl ClientConnection {
+    fn new(
+        terminal_size: (u16, u16),
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        outer_terminal_focus: Option<bool>,
+        last_activity: u64,
+        render_encoding: RenderEncoding,
+        writer: Option<ClientWriter>,
+    ) -> Self {
+        Self {
+            terminal_size,
+            host_terminal_theme,
+            outer_terminal_focus,
+            last_activity,
+            render_state: ClientRenderState::new(render_encoding),
+            render_pending: false,
+            writer,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -680,8 +703,7 @@ impl HeadlessServer {
         // rendering semantics. Force one fresh frame to every remaining client
         // even if the next rendered buffer compares equal to its cached frame.
         for client in self.clients.values_mut() {
-            client.last_frame = None;
-            client.blit_encoder = BlitEncoder::new();
+            client.render_state.reset_baseline();
         }
     }
 
@@ -838,7 +860,7 @@ impl HeadlessServer {
                     let should_quit = self.should_quit.clone();
                     let server_event_tx = self.server_event_tx.clone();
                     std::thread::spawn(move || {
-                        if let Err(err) = handle_client_handshake(
+                        if let Err(err) = client_transport::handle_client_handshake(
                             stream,
                             client_id,
                             &server_event_tx,
@@ -1254,18 +1276,14 @@ impl HeadlessServer {
                 let last_activity = self.allocate_activity_stamp();
                 self.clients.insert(
                     client_id,
-                    ClientConnection {
-                        terminal_size: (cols, rows),
-                        host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                        outer_terminal_focus: None,
+                    ClientConnection::new(
+                        (cols, rows),
+                        crate::terminal_theme::TerminalTheme::default(),
+                        None,
                         last_activity,
                         render_encoding,
-                        last_frame: None,
-                        blit_encoder: BlitEncoder::new(),
-                        frame_seq: 0,
-                        render_pending: false,
-                        writer: Some(writer),
-                    },
+                        Some(writer),
+                    ),
                 );
                 self.foreground_client_id = Some(client_id);
                 self.sync_foreground_client_state();
@@ -1279,9 +1297,7 @@ impl HeadlessServer {
                     // semantic buffer compares equal. Terminal-ANSI clients must keep their
                     // server-side blit baseline; resetting it here forces a full redraw on
                     // every keypress and makes remote sessions feel extremely slow.
-                    if client.render_encoding == RenderEncoding::SemanticFrame {
-                        client.last_frame = None;
-                    }
+                    client.render_state.reset_semantic_input_baseline();
                 }
                 let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
                 self.update_client_outer_focus_from_events(client_id, &events);
@@ -1646,22 +1662,22 @@ impl HeadlessServer {
             };
 
             let mut terminal_encoded = None;
-            let message = match client.render_encoding {
-                RenderEncoding::SemanticFrame => {
-                    if client.last_frame.as_ref() == Some(&frame) {
+            let message = match &mut client.render_state {
+                ClientRenderState::Semantic { last_frame } => {
+                    if last_frame.as_ref() == Some(&frame) {
                         client.render_pending = false;
                         continue;
                     }
                     ServerMessage::Frame(frame.clone())
                 }
-                RenderEncoding::TerminalAnsi => {
-                    if client.blit_encoder.is_current(&frame) {
+                ClientRenderState::TerminalAnsi { blit_encoder, seq } => {
+                    if blit_encoder.is_current(&frame) {
                         client.render_pending = false;
                         continue;
                     }
-                    let encoded = client.blit_encoder.encode(&frame, false);
+                    let encoded = blit_encoder.encode(&frame, false);
                     let message = ServerMessage::Terminal(TerminalFrame {
-                        seq: client.frame_seq + 1,
+                        seq: *seq + 1,
                         width: frame.width,
                         height: frame.height,
                         full: encoded.full,
@@ -1679,8 +1695,8 @@ impl HeadlessServer {
                         client_id,
                         claimed, max, "skipping oversized frame for client"
                     );
-                    if client.render_encoding == RenderEncoding::SemanticFrame {
-                        client.last_frame = Some(frame);
+                    if let ClientRenderState::Semantic { last_frame } = &mut client.render_state {
+                        *last_frame = Some(frame);
                     }
                     continue;
                 }
@@ -1694,15 +1710,17 @@ impl HeadlessServer {
             match writer.render.try_send(serialized) {
                 Ok(()) => {
                     client.render_pending = false;
-                    match message {
-                        ServerMessage::Frame(_) => {
-                            client.last_frame = Some(frame);
-                            client.frame_seq += 1;
+                    match (&mut client.render_state, message) {
+                        (ClientRenderState::Semantic { last_frame }, ServerMessage::Frame(_)) => {
+                            *last_frame = Some(frame);
                         }
-                        ServerMessage::Terminal(_) => {
+                        (
+                            ClientRenderState::TerminalAnsi { blit_encoder, seq },
+                            ServerMessage::Terminal(_),
+                        ) => {
                             if let Some(encoded) = terminal_encoded {
-                                client.blit_encoder.commit(frame, encoded);
-                                client.frame_seq += 1;
+                                blit_encoder.commit(frame, encoded);
+                                *seq += 1;
                             }
                         }
                         _ => {}
@@ -1886,312 +1904,6 @@ impl Drop for HeadlessServer {
 }
 
 // ---------------------------------------------------------------------------
-// Client handshake
-// ---------------------------------------------------------------------------
-
-/// Internal event sent from the handshake thread to the main event loop.
-#[derive(Debug)]
-pub enum ServerEvent {
-    /// A new client completed the handshake.
-    ClientConnected {
-        client_id: u64,
-        cols: u16,
-        rows: u16,
-        render_encoding: RenderEncoding,
-        writer: ClientWriter,
-    },
-    /// A client sent an input message.
-    ClientInput { client_id: u64, data: Vec<u8> },
-    /// A client sent a resize message.
-    ClientResize {
-        client_id: u64,
-        cols: u16,
-        rows: u16,
-    },
-    /// A client detached gracefully.
-    ClientDetach { client_id: u64 },
-    /// A client connection was lost.
-    ClientDisconnected { client_id: u64 },
-    /// A client writer drained its render slot and can accept another render.
-    ClientWriterDrained { client_id: u64 },
-    /// Ctrl+C or external shutdown signal received.
-    QuitSignal,
-}
-
-/// Handles the client handshake on a blocking thread.
-///
-/// Reads the `Hello` message, validates the version, sends `Welcome`,
-/// and then enters a read loop forwarding messages to the server event channel.
-fn handle_client_handshake(
-    mut stream: UnixStream,
-    client_id: u64,
-    server_event_tx: &mpsc::Sender<ServerEvent>,
-    should_quit: &Arc<AtomicBool>,
-) -> io::Result<()> {
-    // Reset to blocking mode — the accept loop sets nonblocking but
-    // the handshake thread needs blocking I/O for read_message/write_message.
-    stream.set_nonblocking(false)?;
-
-    // Set a read timeout for the handshake.
-    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-
-    // Read the Hello message.
-    let hello: ClientMessage = match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
-        Ok(msg) => msg,
-        Err(protocol::FramingError::UnexpectedEof) => {
-            debug!(client_id, "client disconnected before handshake");
-            return Ok(());
-        }
-        Err(protocol::FramingError::Oversized { claimed, max }) => {
-            warn!(client_id, claimed, max, "oversized handshake from client");
-            return Ok(());
-        }
-        Err(err) => {
-            debug!(client_id, err = %err, "failed to read client hello");
-            return Ok(());
-        }
-    };
-
-    let (client_cols, client_rows, render_encoding) = match hello {
-        ClientMessage::Hello {
-            version,
-            cols,
-            rows,
-            requested_encoding,
-        } => {
-            // Version check.
-            match protocol::check_client_version(version) {
-                protocol::VersionCheck::Compatible => {}
-                protocol::VersionCheck::Incompatible(reason) => {
-                    // Send rejection Welcome.
-                    let welcome = ServerMessage::Welcome {
-                        version: PROTOCOL_VERSION,
-                        encoding: RenderEncoding::SemanticFrame,
-                        error: Some(reason),
-                    };
-                    let _ = protocol::write_message(&mut stream, &welcome);
-                    return Ok(());
-                }
-            }
-
-            // Clamp size.
-            let (clamped_cols, clamped_rows) = clamp_terminal_size(cols, rows);
-            (clamped_cols, clamped_rows, requested_encoding)
-        }
-        _ => {
-            // First message must be Hello.
-            debug!(client_id, "first message was not Hello, closing");
-            let welcome = ServerMessage::Welcome {
-                version: PROTOCOL_VERSION,
-                encoding: RenderEncoding::SemanticFrame,
-                error: Some("expected Hello as first message".to_owned()),
-            };
-            let _ = protocol::write_message(&mut stream, &welcome);
-            return Ok(());
-        }
-    };
-
-    // Send Welcome.
-    let welcome = ServerMessage::Welcome {
-        version: PROTOCOL_VERSION,
-        encoding: render_encoding,
-        error: None,
-    };
-    protocol::write_message(&mut stream, &welcome)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-    // Clear read timeout for normal operation.
-    stream.set_read_timeout(None)?;
-
-    // Create separate channels for reliable control messages and droppable renders.
-    let (control_tx, control_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
-    let writer = ClientWriter {
-        control: control_tx,
-        render: render_tx,
-    };
-
-    // Notify the main loop about the new client.
-    let _ = server_event_tx.blocking_send(ServerEvent::ClientConnected {
-        client_id,
-        cols: client_cols,
-        rows: client_rows,
-        render_encoding,
-        writer,
-    });
-
-    // Spawn a writer thread that forwards messages from the channels to the stream.
-    let write_stream = stream.try_clone()?;
-    let write_quit = should_quit.clone();
-    let writer_event_tx = server_event_tx.clone();
-    std::thread::spawn(move || {
-        client_writer_loop(
-            write_stream,
-            client_id,
-            control_rx,
-            render_rx,
-            writer_event_tx,
-            &write_quit,
-        );
-    });
-
-    // Enter read loop — read client messages and forward to main loop.
-    client_read_loop(stream, client_id, server_event_tx, should_quit)
-}
-
-/// The client writer loop — prioritizes control messages over render frames.
-fn client_writer_loop(
-    mut stream: UnixStream,
-    client_id: u64,
-    control_rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    render_rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    server_event_tx: mpsc::Sender<ServerEvent>,
-    should_quit: &Arc<AtomicBool>,
-) {
-    let mut control_closed = false;
-    let mut render_closed = false;
-
-    while !should_quit.load(Ordering::Acquire) {
-        match control_rx.try_recv() {
-            Ok(data) => {
-                if !write_framed_bytes(&mut stream, &data) {
-                    break;
-                }
-                continue;
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => control_closed = true,
-        }
-
-        match render_rx.try_recv() {
-            Ok(data) => {
-                let _ =
-                    server_event_tx.blocking_send(ServerEvent::ClientWriterDrained { client_id });
-                if !write_framed_bytes(&mut stream, &data) {
-                    break;
-                }
-                continue;
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => render_closed = true,
-        }
-
-        if control_closed && render_closed {
-            break;
-        }
-
-        if control_closed {
-            match render_rx.recv_timeout(Duration::from_millis(5)) {
-                Ok(data) => {
-                    let _ = server_event_tx
-                        .blocking_send(ServerEvent::ClientWriterDrained { client_id });
-                    if !write_framed_bytes(&mut stream, &data) {
-                        break;
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => render_closed = true,
-            }
-            continue;
-        }
-
-        match control_rx.recv_timeout(Duration::from_millis(5)) {
-            Ok(data) => {
-                if !write_framed_bytes(&mut stream, &data) {
-                    break;
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => control_closed = true,
-        }
-    }
-    debug!("client writer thread exiting");
-}
-
-fn write_framed_bytes(stream: &mut UnixStream, data: &[u8]) -> bool {
-    if let Err(err) = stream.write_all(data) {
-        debug!(err = %err, "client write failed, closing writer");
-        return false;
-    }
-    if let Err(err) = stream.flush() {
-        debug!(err = %err, "client flush failed, closing writer");
-        return false;
-    }
-    true
-}
-
-/// The client read loop — reads messages from the client and forwards to the server event channel.
-fn client_read_loop(
-    mut stream: UnixStream,
-    client_id: u64,
-    server_event_tx: &mpsc::Sender<ServerEvent>,
-    should_quit: &Arc<AtomicBool>,
-) -> io::Result<()> {
-    while !should_quit.load(Ordering::Acquire) {
-        let msg: ClientMessage = match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
-            Ok(msg) => msg,
-            Err(protocol::FramingError::UnexpectedEof) => {
-                // Client disconnected.
-                let _ =
-                    server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
-                break;
-            }
-            Err(protocol::FramingError::Oversized { claimed, max }) => {
-                warn!(
-                    client_id,
-                    claimed, max, "oversized message from client, closing"
-                );
-                let _ =
-                    server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
-                break;
-            }
-            Err(err) => {
-                debug!(client_id, err = %err, "client read error, closing");
-                let _ =
-                    server_event_tx.blocking_send(ServerEvent::ClientDisconnected { client_id });
-                break;
-            }
-        };
-
-        let event = match msg {
-            ClientMessage::Input { data } => {
-                // Validate input size.
-                if data.len() > MAX_INPUT_PAYLOAD {
-                    warn!(
-                        client_id,
-                        size = data.len(),
-                        "oversized input from client, closing"
-                    );
-                    ServerEvent::ClientDisconnected { client_id }
-                } else {
-                    ServerEvent::ClientInput { client_id, data }
-                }
-            }
-            ClientMessage::Resize { cols, rows } => {
-                let (clamped_cols, clamped_rows) = clamp_terminal_size(cols, rows);
-                ServerEvent::ClientResize {
-                    client_id,
-                    cols: clamped_cols,
-                    rows: clamped_rows,
-                }
-            }
-            ClientMessage::Detach => ServerEvent::ClientDetach { client_id },
-            ClientMessage::Hello { .. } => {
-                // Duplicate Hello — ignore.
-                continue;
-            }
-        };
-
-        if server_event_tx.blocking_send(event).is_err() {
-            break; // Main loop gone.
-        }
-    }
-
-    debug!(client_id, "client read thread exiting");
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -2368,37 +2080,6 @@ mod tests {
             control_rx,
             render_rx,
         )
-    }
-
-    #[test]
-    fn clamp_terminal_size_zero_zero() {
-        assert_eq!(
-            clamp_terminal_size(0, 0),
-            (MIN_CLIENT_COLS, MIN_CLIENT_ROWS)
-        );
-    }
-
-    #[test]
-    fn clamp_terminal_size_one_one() {
-        assert_eq!(clamp_terminal_size(1, 1), (1, 1));
-    }
-
-    #[test]
-    fn clamp_terminal_size_preserves_narrow_client_size() {
-        assert_eq!(clamp_terminal_size(40, 12), (40, 12));
-    }
-
-    #[test]
-    fn clamp_terminal_size_valid() {
-        assert_eq!(clamp_terminal_size(120, 40), (120, 40));
-    }
-
-    #[test]
-    fn clamp_terminal_size_exact_minimum() {
-        assert_eq!(
-            clamp_terminal_size(MIN_CLIENT_COLS, MIN_CLIENT_ROWS),
-            (MIN_CLIENT_COLS, MIN_CLIENT_ROWS)
-        );
     }
 
     #[test]
@@ -2587,9 +2268,9 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (160, 45),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme {
+            ClientConnection::new(
+                (160, 45),
+                crate::terminal_theme::TerminalTheme {
                     foreground: Some(crate::terminal_theme::RgbColor {
                         r: 0xaa,
                         g: 0xbb,
@@ -2601,21 +2282,17 @@ mod tests {
                         b: 0x33,
                     }),
                 },
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: None,
-            },
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
         );
         server.clients.insert(
             2,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme {
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme {
                     foreground: Some(crate::terminal_theme::RgbColor {
                         r: 0x10,
                         g: 0x20,
@@ -2627,15 +2304,11 @@ mod tests {
                         b: 0xff,
                     }),
                 },
-                outer_terminal_focus: None,
-                last_activity: 2,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: None,
-            },
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
         );
 
         assert!(server.promote_client_to_foreground(1));
@@ -2669,33 +2342,25 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (120, 40),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: None,
-            },
+            ClientConnection::new(
+                (120, 40),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
         );
         server.clients.insert(
             2,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: Some(true),
-                last_activity: 2,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: None,
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                2,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
         );
         server.foreground_client_id = Some(2);
         server.sync_foreground_client_state();
@@ -2717,33 +2382,25 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (120, 40),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: None,
-            },
+            ClientConnection::new(
+                (120, 40),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
         );
         server.clients.insert(
             2,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: Some(true),
-                last_activity: 2,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: None,
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                2,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
         );
         server.foreground_client_id = Some(2);
         server.sync_foreground_client_state();
@@ -2765,18 +2422,14 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (120, 40),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: Some(true),
-                last_activity: 1,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: None,
-            },
+            ClientConnection::new(
+                (120, 40),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
         );
         server.foreground_client_id = Some(1);
         server.sync_foreground_client_state();
@@ -2804,33 +2457,25 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (120, 40),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(desktop_tx),
-            },
+            ClientConnection::new(
+                (120, 40),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(desktop_tx),
+            ),
         );
         server.clients.insert(
             2,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 2,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(phone_tx),
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(phone_tx),
+            ),
         );
         server.foreground_client_id = Some(1);
         server.sync_foreground_client_state();
@@ -2852,18 +2497,14 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::TerminalAnsi,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(client_tx),
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::TerminalAnsi,
+                Some(client_tx),
+            ),
         );
         server.foreground_client_id = Some(1);
 
@@ -2882,7 +2523,16 @@ mod tests {
             }
             other => panic!("expected terminal frame, got {other:?}"),
         }
-        assert_eq!(server.clients.get(&1).unwrap().frame_seq, 1);
+        assert_eq!(
+            server
+                .clients
+                .get(&1)
+                .unwrap()
+                .render_state
+                .terminal_seq()
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -2892,18 +2542,14 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::TerminalAnsi,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(client_tx),
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::TerminalAnsi,
+                Some(client_tx),
+            ),
         );
         server.foreground_client_id = Some(1);
 
@@ -2911,7 +2557,16 @@ mod tests {
         let _ = client_rx
             .recv_timeout(Duration::from_millis(100))
             .expect("initial terminal frame");
-        assert_eq!(server.clients.get(&1).unwrap().frame_seq, 1);
+        assert_eq!(
+            server
+                .clients
+                .get(&1)
+                .unwrap()
+                .render_state
+                .terminal_seq()
+                .unwrap(),
+            1
+        );
 
         assert!(!server.handle_server_event(ServerEvent::ClientInput {
             client_id: 1,
@@ -2919,7 +2574,16 @@ mod tests {
         }));
         server.render_and_stream();
 
-        assert_eq!(server.clients.get(&1).unwrap().frame_seq, 1);
+        assert_eq!(
+            server
+                .clients
+                .get(&1)
+                .unwrap()
+                .render_state
+                .terminal_seq()
+                .unwrap(),
+            1
+        );
         assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
     }
 
@@ -2936,24 +2600,29 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::TerminalAnsi,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(client_tx),
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::TerminalAnsi,
+                Some(client_tx),
+            ),
         );
         server.foreground_client_id = Some(1);
 
         server.render_and_stream();
 
-        assert_eq!(server.clients.get(&1).unwrap().frame_seq, 0);
+        assert_eq!(
+            server
+                .clients
+                .get(&1)
+                .unwrap()
+                .render_state
+                .terminal_seq()
+                .unwrap(),
+            0
+        );
         assert!(matches!(
             read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
             ServerMessage::ReloadSoundConfig
@@ -2974,18 +2643,14 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::TerminalAnsi,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(client_tx),
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::TerminalAnsi,
+                Some(client_tx),
+            ),
         );
         server.foreground_client_id = Some(1);
 
@@ -3003,7 +2668,16 @@ mod tests {
             ServerMessage::Terminal(frame) => assert_eq!(frame.seq, 1),
             other => panic!("expected terminal frame, got {other:?}"),
         }
-        assert_eq!(server.clients.get(&1).unwrap().frame_seq, 1);
+        assert_eq!(
+            server
+                .clients
+                .get(&1)
+                .unwrap()
+                .render_state
+                .terminal_seq()
+                .unwrap(),
+            1
+        );
         assert!(!server.clients.get(&1).unwrap().render_pending);
     }
 
@@ -3019,18 +2693,14 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(client_tx),
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
         );
         server.foreground_client_id = Some(1);
         server.sync_foreground_client_state();
@@ -3054,18 +2724,14 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(client_tx),
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
         );
         server.app.state.request_client_sound_config_reload = true;
 
@@ -3090,33 +2756,25 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (120, 40),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(background_tx),
-            },
+            ClientConnection::new(
+                (120, 40),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(background_tx),
+            ),
         );
         server.clients.insert(
             2,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 2,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(foreground_tx),
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(foreground_tx),
+            ),
         );
         server.foreground_client_id = Some(2);
         server.sync_foreground_client_state();
@@ -3150,33 +2808,25 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (120, 40),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(background_tx),
-            },
+            ClientConnection::new(
+                (120, 40),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(background_tx),
+            ),
         );
         server.clients.insert(
             2,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 2,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(foreground_tx),
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                2,
+                RenderEncoding::SemanticFrame,
+                Some(foreground_tx),
+            ),
         );
         server.foreground_client_id = Some(2);
         server.sync_foreground_client_state();
@@ -3212,18 +2862,14 @@ mod tests {
 
         server.clients.insert(
             1,
-            ClientConnection {
-                terminal_size: (80, 24),
-                host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
-                outer_terminal_focus: None,
-                last_activity: 1,
-                render_encoding: RenderEncoding::SemanticFrame,
-                last_frame: None,
-                blit_encoder: BlitEncoder::new(),
-                frame_seq: 0,
-                render_pending: false,
-                writer: Some(client_tx),
-            },
+            ClientConnection::new(
+                (80, 24),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
         );
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
 
@@ -3238,19 +2884,6 @@ mod tests {
                 .recv_timeout(Duration::from_millis(50))
                 .is_err(),
             "herdr delivery should render in-frame instead of forwarding a terminal notification"
-        );
-    }
-
-    #[test]
-    fn handshake_timeout_is_within_five_second_deadline() {
-        // The handshake timeout must be short enough that
-        // the connection is guaranteed to close within 5 seconds even with
-        // OS overhead (thread scheduling, timer slack, cleanup).
-        assert!(
-            HANDSHAKE_TIMEOUT < Duration::from_secs(5),
-            "HANDSHAKE_TIMEOUT ({:?}) must be less than 5 seconds to guarantee \
-             connection close within the 5-second deadline",
-            HANDSHAKE_TIMEOUT
         );
     }
 
