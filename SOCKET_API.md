@@ -273,7 +273,7 @@ notes:
 - `cwd` is optional
 - if `cwd` is omitted, herdr uses its current working directory and falls back to `/` if needed
 - `focus` is optional in raw socket requests and defaults to `false`
-- the cli wrapper is more ergonomic here: `herdr workspace create` focuses by default unless you pass `--no-focus`
+- the cli wrapper also defaults to no focus; pass `--focus` to switch to the new workspace
 
 example response:
 
@@ -399,7 +399,7 @@ notes:
 - `workspace_id` is optional and defaults to the active workspace
 - `cwd` is optional; if omitted, herdr uses the focused pane cwd in that workspace when available
 - `focus` is optional in raw socket requests and defaults to `false`
-- the cli wrapper focuses by default unless you pass `--no-focus`
+- the cli wrapper also defaults to no focus; pass `--focus` to switch to the new tab
 
 returns `tab_info` for the new tab.
 
@@ -542,7 +542,7 @@ notes:
 - `direction` must be `right` or `down`
 - `cwd` is optional
 - `focus` is optional in raw socket requests and defaults to `false`
-- the cli wrapper is more ergonomic here too: `herdr pane split ...` focuses by default unless you pass `--no-focus`
+- the cli wrapper also defaults to no focus; pass `--focus` to switch to the new pane
 
 returns `pane_info` for the new pane.
 
@@ -918,7 +918,7 @@ workspace commands:
 
 ```text
 herdr workspace list
-herdr workspace create [--cwd PATH] [--label TEXT] [--no-focus]
+herdr workspace create [--cwd PATH] [--label TEXT] [--focus] [--no-focus]
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
@@ -929,7 +929,7 @@ tab commands:
 
 ```text
 herdr tab list [--workspace <workspace_id>]
-herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--no-focus]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--focus] [--no-focus]
 herdr tab get <tab_id>
 herdr tab focus <tab_id>
 herdr tab rename <tab_id> <label>
@@ -942,7 +942,7 @@ pane commands:
 herdr pane list [--workspace <workspace_id>]
 herdr pane get <pane_id>
 herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--raw]
-herdr pane split <pane_id> --direction right|down [--cwd PATH] [--no-focus]
+herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]
 herdr pane close <pane_id>
 herdr pane send-text <pane_id> <text>
 herdr pane send-keys <pane_id> <key> [key ...]
@@ -961,15 +961,15 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 - `status` prints local client version/protocol, running server version/protocol when reachable, socket path, compatibility, and whether a restart is needed
 - `status server` prints only the running server side; if no server is reachable it exits successfully and prints `status: not running`
 - `status client` prints only the local executable version/protocol and binary path without contacting the server
-- `workspace create` focuses by default; pass `--no-focus` to keep focus where it is
+- `workspace create` keeps focus where it is by default; pass `--focus` to switch to the new workspace
 - `workspace create` without `--label` keeps the default cwd-based workspace naming
 - `workspace create --label` applies the custom workspace name immediately
 - `workspace create` returns `result.workspace`, `result.tab`, and `result.root_pane`
-- `tab create` focuses by default; pass `--no-focus` to keep focus where it is
+- `tab create` keeps focus where it is by default; pass `--focus` to switch to the new tab
 - `tab create` without `--label` keeps the default numbered tab naming
 - `tab create --label` applies the custom tab name immediately
 - `tab create` returns `result.tab` and `result.root_pane`
-- `pane split` focuses the new pane by default; pass `--no-focus` to keep focus on the original pane
+- `pane split` keeps focus where it is by default; pass `--focus` to switch to the new pane
 - `pane read` prints **text**, not json
 - `pane read --source recent-unwrapped` returns recent terminal text with soft wraps joined back together
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success

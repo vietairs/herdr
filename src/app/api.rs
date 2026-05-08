@@ -819,7 +819,6 @@ impl App {
                     })
                     .unwrap();
                 };
-                ws.layout.focus_pane(target_pane_id);
                 let direction = match params.direction {
                     crate::api::schema::SplitDirection::Right => {
                         ratatui::layout::Direction::Horizontal
@@ -828,16 +827,18 @@ impl App {
                         ratatui::layout::Direction::Vertical
                     }
                 };
-                let new_pane_id = match ws.split_focused(
+                let (target_tab_idx, new_pane_id) = match ws.split_pane(
+                    target_pane_id,
                     direction,
                     rows,
                     cols,
                     params.cwd.map(std::path::PathBuf::from),
                     self.state.pane_scrollback_limit_bytes,
                     self.state.host_terminal_theme,
+                    params.focus,
                 ) {
-                    Ok(new_pane_id) => new_pane_id,
-                    Err(err) => {
+                    Some(Ok(result)) => result,
+                    Some(Err(err)) => {
                         return serde_json::to_string(&ErrorResponse {
                             id: request.id,
                             error: ErrorBody {
@@ -847,9 +848,21 @@ impl App {
                         })
                         .unwrap();
                     }
+                    None => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "pane_not_found".into(),
+                                message: format!("pane {} not found", params.target_pane_id),
+                            },
+                        })
+                        .unwrap();
+                    }
                 };
-                if !params.focus {
-                    ws.layout.focus_pane(target_pane_id);
+                if params.focus {
+                    self.state.switch_workspace(ws_idx);
+                    self.state.switch_tab(target_tab_idx);
+                    self.state.mode = Mode::Terminal;
                 }
                 self.schedule_session_save();
                 let pane = self.pane_info(ws_idx, new_pane_id).unwrap();

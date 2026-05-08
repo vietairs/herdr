@@ -244,6 +244,42 @@ impl Workspace {
         Ok(new_id)
     }
 
+    pub fn split_pane(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        focus_new_pane: bool,
+    ) -> Option<std::io::Result<(usize, PaneId)>> {
+        let tab_idx = self.find_tab_index_for_pane(pane_id)?;
+        let tab = &mut self.tabs[tab_idx];
+        let previous_focus = tab.layout.focused();
+        tab.layout.focus_pane(pane_id);
+        let new_id = match tab.split_focused(
+            direction,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+        ) {
+            Ok(new_id) => new_id,
+            Err(err) => {
+                tab.layout.focus_pane(previous_focus);
+                return Some(Err(err));
+            }
+        };
+        if !focus_new_pane {
+            tab.layout.focus_pane(previous_focus);
+        }
+        self.register_new_pane(new_id);
+        Some(Ok((tab_idx, new_id)))
+    }
+
     /// Close the focused pane. Returns true if the workspace should close.
     pub fn close_focused(&mut self) -> bool {
         let pane_count = self
