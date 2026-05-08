@@ -1015,6 +1015,7 @@ impl AppState {
         self.switch_workspace(ws_idx);
         self.switch_tab(tab_idx);
         self.focus_pane(target.pane_id);
+        self.toast = None;
         self.mode = Mode::Terminal;
     }
 
@@ -1303,6 +1304,7 @@ mod tests {
 
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target_pane));
+        assert!(app.state.toast.is_none());
         assert_eq!(app.state.mode, Mode::Terminal);
     }
 
