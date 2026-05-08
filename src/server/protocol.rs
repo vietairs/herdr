@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -26,6 +26,15 @@ const LENGTH_PREFIX_BYTES: usize = 4;
 // Client → Server messages
 // ---------------------------------------------------------------------------
 
+/// Render payload encoding negotiated during client handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RenderEncoding {
+    /// Send full semantic FrameData values. This is the local/default mode.
+    SemanticFrame,
+    /// Send already-diffed terminal ANSI byte streams.
+    TerminalAnsi,
+}
+
 /// Messages sent from the client to the server over the client protocol socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -37,6 +46,8 @@ pub enum ClientMessage {
         cols: u16,
         /// Terminal height in rows.
         rows: u16,
+        /// Render encoding requested by the client.
+        requested_encoding: RenderEncoding,
     },
 
     /// Raw input bytes read from the client's stdin.
@@ -200,6 +211,21 @@ impl FrameData {
     }
 }
 
+/// Terminal ANSI bytes encoded by the server for network-efficient clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalFrame {
+    /// Monotonic per-client frame sequence.
+    pub seq: u64,
+    /// Frame width in columns.
+    pub width: u16,
+    /// Frame height in rows.
+    pub height: u16,
+    /// Whether bytes contain a full redraw rather than an incremental diff.
+    pub full: bool,
+    /// Terminal escape bytes ready to write directly to stdout.
+    pub bytes: Vec<u8>,
+}
+
 /// Notification kind forwarded from server to client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NotifyKind {
@@ -216,13 +242,18 @@ pub enum ServerMessage {
     Welcome {
         /// Protocol version the server speaks.
         version: u32,
+        /// Render encoding selected by the server for this connection.
+        encoding: RenderEncoding,
         /// If present, the handshake failed and this describes why.
         /// The client should exit with a clear error message.
         error: Option<String>,
     },
 
-    /// A rendered frame to be displayed by the client.
+    /// A rendered frame to be displayed by a semantic-frame client.
     Frame(FrameData),
+
+    /// Terminal bytes to write directly for a terminal-ANSI client.
+    Terminal(TerminalFrame),
 
     /// Server is shutting down. Clients should exit gracefully.
     ServerShutdown {
@@ -464,10 +495,9 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<(), Fram
 /// Result of checking a client's protocol version against the server's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionCheck {
-    /// Versions are compatible. The server should reply `Welcome { version, error: None }`.
+    /// Versions are compatible. The server should reply with a successful Welcome.
     Compatible,
-    /// Versions are incompatible. The server should reply
-    /// `Welcome { version, error: Some(reason) }` and close the connection.
+    /// Versions are incompatible. The server should reply with a Welcome error and close.
     Incompatible(String),
 }
 
@@ -516,6 +546,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             cols: 80,
             rows: 24,
+            requested_encoding: RenderEncoding::SemanticFrame,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ClientMessage, _) =
@@ -558,6 +589,7 @@ mod tests {
     fn server_welcome_roundtrip() {
         let msg = ServerMessage::Welcome {
             version: PROTOCOL_VERSION,
+            encoding: RenderEncoding::SemanticFrame,
             error: None,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
@@ -570,6 +602,7 @@ mod tests {
     fn server_welcome_with_error_roundtrip() {
         let msg = ServerMessage::Welcome {
             version: PROTOCOL_VERSION,
+            encoding: RenderEncoding::SemanticFrame,
             error: Some("incompatible version".to_owned()),
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
@@ -690,6 +723,21 @@ mod tests {
     }
 
     #[test]
+    fn server_terminal_frame_roundtrip() {
+        let msg = ServerMessage::Terminal(TerminalFrame {
+            seq: 7,
+            width: 120,
+            height: 40,
+            full: false,
+            bytes: b"\x1b[1;1Hhello".to_vec(),
+        });
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
     fn server_reload_sound_config_roundtrip() {
         let msg = ServerMessage::ReloadSoundConfig;
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
@@ -706,6 +754,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             cols: 80,
             rows: 24,
+            requested_encoding: RenderEncoding::SemanticFrame,
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -773,6 +822,7 @@ mod tests {
                     version: PROTOCOL_VERSION,
                     cols: (80 + (i % 40) as u16),
                     rows: (24 + (i % 20) as u16),
+                    requested_encoding: RenderEncoding::SemanticFrame,
                 },
                 1 => ClientMessage::Input {
                     data: vec![(i % 256) as u8; (i as usize % 50) + 1],
@@ -929,10 +979,12 @@ mod tests {
         let response = match check {
             VersionCheck::Compatible => ServerMessage::Welcome {
                 version: PROTOCOL_VERSION,
+                encoding: RenderEncoding::SemanticFrame,
                 error: None,
             },
             VersionCheck::Incompatible(reason) => ServerMessage::Welcome {
                 version: PROTOCOL_VERSION,
+                encoding: RenderEncoding::SemanticFrame,
                 error: Some(reason),
             },
         };
@@ -1194,6 +1246,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             cols: 80,
             rows: 24,
+            requested_encoding: RenderEncoding::SemanticFrame,
         };
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -1224,6 +1277,7 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 cols: 200,
                 rows: 60,
+                requested_encoding: RenderEncoding::SemanticFrame,
             },
             ClientMessage::Input {
                 data: b"hello world".to_vec(),

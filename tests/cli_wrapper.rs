@@ -871,7 +871,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
-        full_stdout.contains("  protocol: 3"),
+        full_stdout.contains("  protocol: 4"),
         "stdout: {full_stdout}"
     );
     assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
@@ -904,7 +904,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {server_stdout}"
     );
     assert!(
-        server_stdout.contains("protocol: 3"),
+        server_stdout.contains("protocol: 4"),
         "stdout: {server_stdout}"
     );
 
@@ -916,7 +916,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {client_stdout}"
     );
     assert!(
-        client_stdout.contains("protocol: 3"),
+        client_stdout.contains("protocol: 4"),
         "stdout: {client_stdout}"
     );
     assert!(
@@ -1666,11 +1666,17 @@ fn pane_shell_gets_herdr_socket_and_pane_env() {
     assert!(ran.status.success());
 
     let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline && !env_capture.exists() {
+    let mut text = String::new();
+    while Instant::now() < deadline {
+        if env_capture.exists() {
+            text = fs::read_to_string(&env_capture).unwrap();
+            if text.contains(&socket_path.display().to_string()) && text.contains("p_") {
+                break;
+            }
+        }
         thread::sleep(Duration::from_millis(25));
     }
     assert!(env_capture.exists(), "env capture file was not created");
-    let text = fs::read_to_string(&env_capture).unwrap();
     assert!(
         text.contains(&socket_path.display().to_string()),
         "env file was: {text:?}"

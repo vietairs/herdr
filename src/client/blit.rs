@@ -24,11 +24,61 @@
 //! and minimize cursor movement.
 
 use std::cmp;
-use std::io::{self, Write};
+use std::io::Write;
 
 use unicode_width::UnicodeWidthStr;
 
 use crate::server::protocol::{CellData, FrameData};
+
+/// Bytes produced by a [`BlitEncoder`] for one terminal frame.
+pub(crate) struct EncodedBlit {
+    /// Terminal escape bytes ready to write to the host terminal.
+    pub(crate) bytes: Vec<u8>,
+    /// Whether this frame was encoded as a full redraw.
+    pub(crate) full: bool,
+    next_last_visible_cursor: Option<(u16, u16)>,
+}
+
+/// Stateful encoder that diffs semantic frames into terminal ANSI bytes.
+#[derive(Default)]
+pub(crate) struct BlitEncoder {
+    last_frame: Option<FrameData>,
+    last_visible_cursor: Option<(u16, u16)>,
+}
+
+impl BlitEncoder {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn encode(&self, frame: &FrameData, force_full: bool) -> EncodedBlit {
+        let prev = if force_full {
+            None
+        } else {
+            self.last_frame.as_ref()
+        };
+        let full = force_full
+            || prev.is_none()
+            || prev.is_some_and(|p| p.width != frame.width || p.height != frame.height);
+        let mut bytes = Vec::new();
+        let mut next_last_visible_cursor = self.last_visible_cursor;
+        blit_frame_to_with_cursor_memory(&mut bytes, frame, prev, &mut next_last_visible_cursor);
+        EncodedBlit {
+            bytes,
+            full,
+            next_last_visible_cursor,
+        }
+    }
+
+    pub(crate) fn commit(&mut self, frame: FrameData, encoded: EncodedBlit) {
+        self.last_visible_cursor = encoded.next_last_visible_cursor;
+        self.last_frame = Some(frame);
+    }
+
+    pub(crate) fn is_current(&self, frame: &FrameData) -> bool {
+        self.last_frame.as_ref() == Some(frame)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Color → escape sequence
@@ -189,20 +239,6 @@ fn cells_equal(a: &CellData, b: &CellData) -> bool {
 // ---------------------------------------------------------------------------
 // Blitting
 // ---------------------------------------------------------------------------
-
-/// Blits a frame to the terminal, diffing against the previous frame.
-///
-/// On the first frame (no previous), does a full redraw.
-/// On subsequent frames, only writes cells that changed.
-/// After writing cells, positions the cursor.
-pub fn blit_frame_with_cursor_memory(
-    frame: &FrameData,
-    prev: Option<&FrameData>,
-    last_visible_cursor: &mut Option<(u16, u16)>,
-) {
-    let mut stdout = io::stdout();
-    blit_frame_to_with_cursor_memory(&mut stdout, frame, prev, last_visible_cursor);
-}
 
 /// Blits a frame to a writer, diffing against the previous frame.
 #[cfg(test)]

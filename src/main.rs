@@ -36,6 +36,7 @@ mod persist;
 mod platform;
 mod raw_input;
 mod release_notes;
+mod remote;
 mod selection;
 mod server;
 mod session;
@@ -173,12 +174,38 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
+    let (args, remote_launch) = match remote::extract_remote_args(&args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            eprintln!("error: {err}");
+            eprintln!("run 'herdr --help' for usage");
+            std::process::exit(2);
+        }
+    };
+
+    if remote_launch.is_some()
+        && args.get(1).is_some()
+        && !args.iter().any(|a| {
+            matches!(
+                a.as_str(),
+                "--help" | "-h" | "--version" | "-V" | "--default-config"
+            )
+        })
+    {
+        eprintln!("error: --remote can only be used with the default launch command");
+        eprintln!("run 'herdr --help' for usage");
+        std::process::exit(2);
+    }
 
     if let cli::CommandOutcome::Handled(code) = cli::maybe_run(&args)? {
         std::process::exit(code);
     }
 
     // Subcommands and flags (no TUI, no logging needed)
+    if args.get(1).map(|s| s.as_str()) == Some("remote-client-bridge") {
+        return remote::run_remote_client_bridge();
+    }
+
     if args.get(1).map(|s| s.as_str()) == Some("server") {
         return server::headless::run_server();
     }
@@ -203,6 +230,7 @@ fn main() -> io::Result<()> {
         println!();
         println!("Usage: herdr [options]");
         println!("       herdr --session <name> [options]");
+        println!("       herdr --remote <ssh-target> [--session <name>]");
         println!("       herdr session attach <name>");
         println!("       herdr update");
         println!("       herdr server stop");
@@ -270,6 +298,7 @@ fn main() -> io::Result<()> {
         println!("Options:");
         println!("  --no-session        Run monolithically (no server/client, escape hatch)");
         println!("  --session <name>    Use or create a named persistent session");
+        println!("  --remote <target>   Attach through SSH to a remote Herdr server");
         println!("  --default-config    Print default configuration and exit");
         println!("  --version, -V       Print version and exit");
         println!("  --help, -h          Show this help");
@@ -295,6 +324,7 @@ fn main() -> io::Result<()> {
     let known_flags = [
         "--no-session",
         "--session",
+        "--remote",
         "--version",
         "-V",
         "--default-config",
@@ -311,6 +341,7 @@ fn main() -> io::Result<()> {
             && ![
                 "server",
                 "client",
+                "remote-client-bridge",
                 "update",
                 "status",
                 "workspace",
@@ -325,6 +356,10 @@ fn main() -> io::Result<()> {
             eprintln!("run 'herdr --help' for usage");
             std::process::exit(1);
         }
+    }
+
+    if let Some(remote_launch) = remote_launch {
+        return remote::run_remote(remote_launch);
     }
 
     let loaded_config = config::Config::load();

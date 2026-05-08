@@ -177,6 +177,9 @@ fn decode_welcome(payload: &[u8]) -> Result<(u32, Option<String>), String> {
     let (version, consumed) = decode_varint_u32(payload, offset)?;
     offset += consumed;
 
+    let (_encoding, consumed) = decode_varint_u32(payload, offset)?;
+    offset += consumed;
+
     if offset >= payload.len() {
         return Err("payload too short for Option tag".into());
     }
@@ -217,6 +220,7 @@ pub fn client_handshake(
             &encode_varint_u32(version),
             &encode_varint_u16(cols),
             &encode_varint_u16(rows),
+            &encode_varint_u32(0), // RenderEncoding::SemanticFrame
         ],
     );
     let framed = frame_message(&hello_payload);

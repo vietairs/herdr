@@ -495,6 +495,7 @@ fn client_handshake(
             &encode_varint_u32(version),
             &encode_varint_u16(cols),
             &encode_varint_u16(rows),
+            &encode_varint_u32(0), // RenderEncoding::SemanticFrame
         ],
     );
     stream
@@ -517,6 +518,9 @@ fn client_handshake(
     }
 
     let (_server_version, consumed) = decode_varint_u32(&payload, offset)?;
+    offset += consumed;
+
+    let (_encoding, consumed) = decode_varint_u32(&payload, offset)?;
     offset += consumed;
 
     if offset >= payload.len() {
@@ -542,7 +546,7 @@ fn client_handshake(
 
 fn connect_raw_client(client_socket: &Path, cols: u16, rows: u16) -> UnixStream {
     let mut stream = UnixStream::connect(client_socket).expect("should connect to client socket");
-    client_handshake(&mut stream, 3, cols, rows).expect("handshake should succeed");
+    client_handshake(&mut stream, 4, cols, rows).expect("handshake should succeed");
     stream
 }
 

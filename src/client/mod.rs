@@ -12,7 +12,7 @@
 //! - Forwards OSC 52 clipboard writes from server to its own stdout
 //! - Displays sound/toast notifications forwarded from server
 
-mod blit;
+pub(crate) mod blit;
 mod input;
 
 use std::io::{self, Write as _};
@@ -31,7 +31,8 @@ use tracing::{debug, info, warn};
 
 use crate::server::headless::client_socket_path;
 use crate::server::protocol::{
-    self, ClientMessage, FrameData, NotifyKind, ServerMessage, MAX_FRAME_SIZE, PROTOCOL_VERSION,
+    self, ClientMessage, NotifyKind, RenderEncoding, ServerMessage, MAX_FRAME_SIZE,
+    PROTOCOL_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,11 +41,8 @@ use crate::server::protocol::{
 
 /// State tracking for the thin client.
 struct ClientState {
-    /// The last frame we rendered, used for diff-based blitting.
-    last_frame: Option<FrameData>,
-    /// Last visible cursor exported by the focused pane, used as the hidden
-    /// cursor parking position when the pane temporarily hides its cursor.
-    last_visible_cursor: Option<(u16, u16)>,
+    /// Stateful semantic-frame encoder used when the server sends FrameData.
+    blit_encoder: blit::BlitEncoder,
     /// The terminal size we reported to the server in our last Hello/Resize.
     reported_size: (u16, u16),
     /// Client-local sound playback config, refreshed on server request.
@@ -198,16 +196,33 @@ impl Drop for TerminalGuard {
 // Handshake
 // ---------------------------------------------------------------------------
 
+fn requested_render_encoding() -> RenderEncoding {
+    match std::env::var("HERDR_RENDER_ENCODING").ok().as_deref() {
+        Some("terminal-ansi" | "terminal_ansi" | "ansi") => RenderEncoding::TerminalAnsi,
+        _ => RenderEncoding::SemanticFrame,
+    }
+}
+
 /// Performs the client→server handshake.
 ///
 /// Sends Hello with the terminal size and protocol version, reads the Welcome
 /// response. Returns Ok(()) on success, or an error if the server rejects us.
-fn do_handshake(stream: &mut UnixStream, cols: u16, rows: u16) -> Result<(), ClientError> {
+fn do_handshake(
+    stream: &mut UnixStream,
+    cols: u16,
+    rows: u16,
+    requested_encoding: RenderEncoding,
+) -> Result<RenderEncoding, ClientError> {
+    stream
+        .set_nonblocking(false)
+        .map_err(ClientError::ConnectionFailed)?;
+
     // Send Hello.
     let hello = ClientMessage::Hello {
         version: PROTOCOL_VERSION,
         cols,
         rows,
+        requested_encoding,
     };
     protocol::write_message(stream, &hello).map_err(|e| {
         ClientError::ConnectionFailed(io::Error::new(io::ErrorKind::Other, e.to_string()))
@@ -223,12 +238,16 @@ fn do_handshake(stream: &mut UnixStream, cols: u16, rows: u16) -> Result<(), Cli
         .map_err(ClientError::ConnectionFailed)?;
 
     match welcome {
-        ServerMessage::Welcome { version, error } => {
+        ServerMessage::Welcome {
+            version,
+            encoding,
+            error,
+        } => {
             if let Some(error) = error {
                 return Err(ClientError::HandshakeRejected { version, error });
             }
-            info!(version, "handshake succeeded");
-            Ok(())
+            info!(version, ?encoding, "handshake succeeded");
+            Ok(encoding)
         }
         _ => Err(ClientError::Protocol(protocol::FramingError::Io(
             io::Error::new(io::ErrorKind::InvalidData, "expected Welcome message"),
@@ -282,11 +301,16 @@ pub fn run_client() -> io::Result<()> {
     // Get the terminal size before handshake (before raw mode).
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
+    let requested_encoding = requested_render_encoding();
+
     // Perform handshake while the stream is still in blocking mode.
-    if let Err(err) = do_handshake(&mut stream, cols, rows) {
-        eprintln!("herdr: {err}");
-        std::process::exit(1);
-    }
+    let negotiated_encoding = match do_handshake(&mut stream, cols, rows, requested_encoding) {
+        Ok(encoding) => encoding,
+        Err(err) => {
+            eprintln!("herdr: {err}");
+            std::process::exit(1);
+        }
+    };
 
     // Now set up the terminal (raw mode, mouse, keyboard enhancements).
     // This must happen AFTER the handshake succeeds, so we don't leave
@@ -318,8 +342,17 @@ pub fn run_client() -> io::Result<()> {
         quit_flag.store(true, Ordering::Release);
     });
 
-    let result =
-        rt.block_on(async { run_client_loop(stream, cols, rows, should_quit, sound_config).await });
+    let result = rt.block_on(async {
+        run_client_loop(
+            stream,
+            cols,
+            rows,
+            should_quit,
+            sound_config,
+            negotiated_encoding,
+        )
+        .await
+    });
 
     // Restore the terminal before printing any final status message.
     drop(_guard);
@@ -359,13 +392,14 @@ async fn run_client_loop(
     rows: u16,
     should_quit: Arc<AtomicBool>,
     sound_config: crate::config::SoundConfig,
+    negotiated_encoding: RenderEncoding,
 ) -> Result<(), ClientError> {
     let mut state = ClientState {
-        last_frame: None,
-        last_visible_cursor: None,
+        blit_encoder: blit::BlitEncoder::new(),
         reported_size: (cols, rows),
         sound_config,
     };
+    debug!(?negotiated_encoding, "client render encoding active");
 
     // Channel for events from the stdin, resize, and server reader threads.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
@@ -428,13 +462,16 @@ async fn run_client_loop(
             }
             ClientLoopEvent::ServerMessage(msg) => match msg {
                 ServerMessage::Frame(frame_data) => {
-                    blit::blit_frame_with_cursor_memory(
-                        &frame_data,
-                        state.last_frame.as_ref(),
-                        &mut state.last_visible_cursor,
-                    );
-                    state.last_frame = Some(frame_data);
-                    let _ = io::stdout().flush();
+                    let encoded = state.blit_encoder.encode(&frame_data, false);
+                    let mut stdout = io::stdout();
+                    let _ = stdout.write_all(&encoded.bytes);
+                    let _ = stdout.flush();
+                    state.blit_encoder.commit(frame_data, encoded);
+                }
+                ServerMessage::Terminal(frame) => {
+                    let mut stdout = io::stdout();
+                    let _ = stdout.write_all(&frame.bytes);
+                    let _ = stdout.flush();
                 }
                 ServerMessage::ServerShutdown { reason } => {
                     return Err(ClientError::ServerShutdown { reason });

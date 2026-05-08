@@ -250,8 +250,8 @@ fn client_connects_and_receives_frame() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 3, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 3, "server should report protocol version 3");
+        client_handshake(&mut stream, 4, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 4, "server should report protocol version 4");
     assert!(
         error.is_none(),
         "handshake should not have error: {:?}",
@@ -330,8 +330,8 @@ fn client_sees_headless_startup_config_diagnostic() {
 
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 3, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 3);
+        client_handshake(&mut stream, 4, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 4);
     assert!(error.is_none(), "{:?}", error);
 
     stream
@@ -379,8 +379,8 @@ fn client_input_forwarded_to_pane() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 3, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 3);
+        client_handshake(&mut stream, 4, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 4);
     assert!(error.is_none(), "{:?}", error);
 
     // Send an Input message containing "echo hello\n".
@@ -433,8 +433,8 @@ fn client_resize_sends_message() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 3, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 3);
+        client_handshake(&mut stream, 4, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 4);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain the initial frame(s).
@@ -490,8 +490,8 @@ fn server_shutdown_sends_message_to_client() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 3, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 3);
+        client_handshake(&mut stream, 4, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 4);
     assert!(error.is_none(), "{:?}", error);
 
     // Send SIGINT so the server takes the graceful shutdown path and
@@ -513,7 +513,7 @@ fn server_shutdown_sends_message_to_client() {
     while Instant::now() < deadline {
         match read_server_message(&mut stream) {
             Ok((variant, _)) => {
-                if variant == 2 {
+                if variant == 3 {
                     saw_shutdown = true;
                     break;
                 }
@@ -717,8 +717,8 @@ fn client_receives_frame_after_pane_output() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 3, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 3);
+        client_handshake(&mut stream, 4, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 4);
     assert!(error.is_none(), "{:?}", error);
 
     // Read the initial frame (server renders immediately on client connect).
@@ -771,8 +771,8 @@ fn navigate_mode_keybind_dispatch_in_server() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 3, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 3);
+        client_handshake(&mut stream, 4, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 4);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frames.
@@ -889,8 +889,8 @@ fn graceful_shutdown_sends_server_shutdown_to_client() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 3, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 3);
+        client_handshake(&mut stream, 4, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 4);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frame(s).
@@ -906,7 +906,7 @@ fn graceful_shutdown_sends_server_shutdown_to_client() {
         }
     }
 
-    // The client should receive a ServerShutdown message (variant 2)
+    // The client should receive a ServerShutdown message (variant 3)
     // before the connection is closed, not just an abrupt EOF.
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -915,8 +915,8 @@ fn graceful_shutdown_sends_server_shutdown_to_client() {
     match result {
         Ok((variant, _payload)) => {
             assert_eq!(
-                variant, 2,
-                "expected ServerShutdown (variant 2), got variant {variant}"
+                variant, 3,
+                "expected ServerShutdown (variant 3), got variant {variant}"
             );
         }
         Err(e) => {
@@ -987,8 +987,8 @@ fn client_receives_notify_on_agent_state_change() {
     // Connect as a client and perform handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect");
     let (version, error) =
-        client_handshake(&mut stream, 3, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 3);
+        client_handshake(&mut stream, 4, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 4);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frame(s).
@@ -1039,8 +1039,8 @@ fn client_receives_notify_on_agent_state_change() {
     let mut report_response = String::new();
     report_reader.read_line(&mut report_response).unwrap();
 
-    // Read messages from the client stream and look for Notify (variant 3).
-    // Notify = ServerMessage variant index 3 (after Welcome=0, Frame=1, ServerShutdown=2).
+    // Read messages from the client stream and look for Notify (variant 4).
+    // Notify = ServerMessage variant index 4 (after Welcome=0, Frame=1, Terminal=2, ServerShutdown=3).
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -1049,7 +1049,7 @@ fn client_receives_notify_on_agent_state_change() {
     while Instant::now() < deadline {
         match read_server_message(&mut stream) {
             Ok((variant, _payload)) => {
-                if variant == 3 {
+                if variant == 4 {
                     // ServerMessage::Notify — found it!
                     found_notify = true;
                     break;
@@ -1135,7 +1135,7 @@ fn client_receives_notify_on_agent_state_change() {
     while Instant::now() < deadline {
         match read_server_message(&mut stream) {
             Ok((variant, _payload)) => {
-                if variant == 3 {
+                if variant == 4 {
                     // Found a Notify message — that's good enough.
                     // The test already verified the Blocked→Notify path above.
                     found_done_notify = true;
