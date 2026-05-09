@@ -2,13 +2,13 @@
 
 # Run tests
 test:
-    cargo nextest run
+    cargo nextest run --locked
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
 # Run PR CI checks
 ci:
     cargo fmt --check
-    cargo nextest run
+    cargo nextest run --locked
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
@@ -22,7 +22,7 @@ install-hooks:
 
 # Build release binary
 build:
-    cargo build --release
+    cargo build --release --locked
 
 # Build the vendored libghostty-vt source dist
 build-libghostty-vt:
@@ -49,4 +49,4 @@ release version:
 
 # Print default config
 default-config:
-    cargo run --release -- --default-config
+    cargo run --release --locked -- --default-config
