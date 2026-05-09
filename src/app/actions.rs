@@ -7,6 +7,7 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
 use crate::pane::EffectiveStateChange;
+use crate::workspace::WorkspaceGitStatus;
 
 use super::state::{AppState, Mode, ToastKind, ToastNotification, ToastTarget, ViewLayout};
 
@@ -534,6 +535,33 @@ impl AppState {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    pub fn apply_workspace_git_statuses(&mut self, results: Vec<WorkspaceGitStatus>) -> bool {
+        let mut changed = false;
+        for result in results {
+            let Some(ws) = self
+                .workspaces
+                .iter_mut()
+                .find(|ws| ws.id == result.workspace_id)
+            else {
+                continue;
+            };
+
+            if ws.resolved_identity_cwd().as_ref() != Some(&result.resolved_identity_cwd) {
+                continue;
+            }
+
+            if ws.cached_git_branch != result.branch {
+                ws.cached_git_branch = result.branch;
+                changed = true;
+            }
+            if ws.cached_git_ahead_behind != result.ahead_behind {
+                ws.cached_git_ahead_behind = result.ahead_behind;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn handle_app_event(&mut self, event: AppEvent) -> Vec<PaneStateUpdate> {
         match event {
             AppEvent::PaneDied { pane_id } => {
@@ -593,6 +621,10 @@ impl AppState {
             // Intercepted in App::handle_internal_event before reaching this
             // dispatch; never touches AppState.
             AppEvent::ClipboardWrite { .. } => Vec::new(),
+            AppEvent::GitStatusRefreshed { results } => {
+                self.apply_workspace_git_statuses(results);
+                Vec::new()
+            }
         }
     }
 
@@ -750,6 +782,66 @@ mod tests {
             state.mode = Mode::Terminal;
         }
         state
+    }
+
+    #[test]
+    fn apply_workspace_git_statuses_updates_matching_workspace() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let first_id = state.workspaces[0].id.clone();
+        let first_cwd = state.workspaces[0].resolved_identity_cwd().unwrap();
+        let second_id = state.workspaces[1].id.clone();
+
+        let changed = state.apply_workspace_git_statuses(vec![WorkspaceGitStatus {
+            workspace_id: first_id,
+            resolved_identity_cwd: first_cwd,
+            branch: Some("main".into()),
+            ahead_behind: Some((2, 1)),
+        }]);
+
+        assert!(changed);
+        assert_eq!(state.workspaces[0].branch().as_deref(), Some("main"));
+        assert_eq!(state.workspaces[0].git_ahead_behind(), Some((2, 1)));
+        assert_eq!(state.workspaces[1].id, second_id);
+        assert_eq!(state.workspaces[1].git_ahead_behind(), None);
+    }
+
+    #[test]
+    fn apply_workspace_git_statuses_ignores_stale_cwd() {
+        let mut state = app_with_workspaces(&["one"]);
+        let workspace_id = state.workspaces[0].id.clone();
+        state.workspaces[0].cached_git_branch = Some("old".into());
+        state.workspaces[0].cached_git_ahead_behind = Some((1, 0));
+
+        let changed = state.apply_workspace_git_statuses(vec![WorkspaceGitStatus {
+            workspace_id,
+            resolved_identity_cwd: std::path::PathBuf::from("/definitely/not/current"),
+            branch: Some("main".into()),
+            ahead_behind: Some((0, 1)),
+        }]);
+
+        assert!(!changed);
+        assert_eq!(state.workspaces[0].branch().as_deref(), Some("old"));
+        assert_eq!(state.workspaces[0].git_ahead_behind(), Some((1, 0)));
+    }
+
+    #[test]
+    fn apply_workspace_git_statuses_clears_missing_git_status() {
+        let mut state = app_with_workspaces(&["one"]);
+        let workspace_id = state.workspaces[0].id.clone();
+        let cwd = state.workspaces[0].resolved_identity_cwd().unwrap();
+        state.workspaces[0].cached_git_branch = Some("main".into());
+        state.workspaces[0].cached_git_ahead_behind = Some((1, 2));
+
+        let changed = state.apply_workspace_git_statuses(vec![WorkspaceGitStatus {
+            workspace_id,
+            resolved_identity_cwd: cwd,
+            branch: None,
+            ahead_behind: None,
+        }]);
+
+        assert!(changed);
+        assert_eq!(state.workspaces[0].branch(), None);
+        assert_eq!(state.workspaces[0].git_ahead_behind(), None);
     }
 
     #[test]

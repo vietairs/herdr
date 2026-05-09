@@ -5,6 +5,7 @@
 
 use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
+use crate::workspace::WorkspaceGitStatus;
 
 /// An event from a background task to the main loop.
 #[derive(Debug)]
@@ -42,4 +43,6 @@ pub enum AppEvent {
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
+    /// Background git status refresh completed for workspaces.
+    GitStatusRefreshed { results: Vec<WorkspaceGitStatus> },
 }

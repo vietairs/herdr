@@ -24,6 +24,14 @@ pub use self::{
     tab::Tab,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceGitStatus {
+    pub workspace_id: String,
+    pub resolved_identity_cwd: PathBuf,
+    pub branch: Option<String>,
+    pub ahead_behind: Option<(usize, usize)>,
+}
+
 static NEXT_WORKSPACE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn generate_workspace_id() -> String {
@@ -362,10 +370,28 @@ impl Workspace {
         self.cached_git_ahead_behind
     }
 
+    pub fn refresh_git_branch(&mut self) {
+        let cwd = self.resolved_identity_cwd();
+        self.cached_git_branch = cwd.as_deref().and_then(git_branch);
+    }
+
+    #[cfg(test)]
     pub fn refresh_git_ahead_behind(&mut self) {
         let cwd = self.resolved_identity_cwd();
         self.cached_git_branch = cwd.as_deref().and_then(git_branch);
         self.cached_git_ahead_behind = cwd.as_deref().and_then(git_ahead_behind);
+    }
+
+    pub fn git_status_for_cwd(
+        workspace_id: String,
+        resolved_identity_cwd: PathBuf,
+    ) -> WorkspaceGitStatus {
+        WorkspaceGitStatus {
+            branch: git_branch(&resolved_identity_cwd),
+            ahead_behind: git_ahead_behind(&resolved_identity_cwd),
+            workspace_id,
+            resolved_identity_cwd,
+        }
     }
 
     pub fn focused_runtime(&self) -> Option<&PaneRuntime> {

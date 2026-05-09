@@ -7,7 +7,8 @@ use super::{
     AUTO_UPDATE_CHECK_INTERVAL, GIT_REMOTE_STATUS_REFRESH_INTERVAL, MIN_RENDER_INTERVAL,
     RESIZE_POLL_INTERVAL,
 };
-use crate::workspace::Workspace;
+use crate::events::AppEvent;
+use crate::workspace::{Workspace, WorkspaceGitStatus};
 
 impl App {
     pub(crate) fn drain_api_requests(&mut self) -> bool {
@@ -149,16 +150,7 @@ impl App {
             changed = true;
         }
 
-        if self
-            .git_refresh_deadline()
-            .is_some_and(|deadline| now >= deadline)
-        {
-            for ws in &mut self.state.workspaces {
-                ws.refresh_git_ahead_behind();
-            }
-            self.last_git_remote_status_refresh = now;
-            changed = true;
-        }
+        self.start_git_status_refresh_if_due(now);
 
         if self
             .next_auto_update_check
@@ -236,8 +228,41 @@ impl App {
         std::thread::spawn(move || crate::update::auto_update(update_tx));
     }
 
+    pub(crate) fn start_git_status_refresh_if_due(&mut self, now: Instant) {
+        if !self
+            .git_refresh_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            return;
+        }
+
+        let workspaces: Vec<_> = self
+            .state
+            .workspaces
+            .iter()
+            .filter_map(|ws| ws.resolved_identity_cwd().map(|cwd| (ws.id.clone(), cwd)))
+            .collect();
+
+        if workspaces.is_empty() {
+            self.last_git_remote_status_refresh = now;
+            return;
+        }
+
+        self.git_refresh_in_flight = true;
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let results = workspaces
+                .into_iter()
+                .map(|(workspace_id, resolved_identity_cwd)| {
+                    Workspace::git_status_for_cwd(workspace_id, resolved_identity_cwd)
+                })
+                .collect::<Vec<WorkspaceGitStatus>>();
+            let _ = event_tx.blocking_send(AppEvent::GitStatusRefreshed { results });
+        });
+    }
+
     pub(crate) fn git_refresh_deadline(&self) -> Option<Instant> {
-        (!self.state.workspaces.is_empty())
+        (!self.git_refresh_in_flight && !self.state.workspaces.is_empty())
             .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
     }
 

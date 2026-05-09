@@ -1563,17 +1563,7 @@ impl HeadlessServer {
             changed = true;
         }
 
-        if self
-            .app
-            .git_refresh_deadline()
-            .is_some_and(|deadline| now >= deadline)
-        {
-            for ws in &mut self.app.state.workspaces {
-                ws.refresh_git_ahead_behind();
-            }
-            self.app.last_git_remote_status_refresh = now;
-            changed = true;
-        }
+        self.app.start_git_status_refresh_if_due(now);
 
         if self
             .app

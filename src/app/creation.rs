@@ -105,7 +105,7 @@ impl App {
         focus: bool,
     ) -> std::io::Result<usize> {
         let (rows, cols) = self.state.estimate_pane_size();
-        let mut ws = Workspace::new(
+        let ws = Workspace::new(
             initial_cwd,
             rows,
             cols,
@@ -115,7 +115,6 @@ impl App {
             self.render_notify.clone(),
             self.render_dirty.clone(),
         )?;
-        ws.refresh_git_ahead_behind();
         self.state.workspaces.push(ws);
         let idx = self.state.workspaces.len() - 1;
         let workspace_id = self.state.workspaces[idx].id.clone();

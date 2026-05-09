@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::{
@@ -13,6 +14,16 @@ impl App {
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         if let AppEvent::ClipboardWrite { content } = ev {
             crate::selection::write_osc52_bytes(&content);
+            return;
+        }
+
+        if let AppEvent::GitStatusRefreshed { results } = ev {
+            self.git_refresh_in_flight = false;
+            self.last_git_remote_status_refresh = Instant::now();
+            if self.state.apply_workspace_git_statuses(results) {
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+            }
             return;
         }
 

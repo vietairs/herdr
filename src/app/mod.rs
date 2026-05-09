@@ -66,6 +66,7 @@ pub struct App {
     pub(crate) config_diagnostic_deadline: Option<Instant>,
     pub(crate) toast_deadline: Option<Instant>,
     pub(crate) last_git_remote_status_refresh: Instant,
+    pub(crate) git_refresh_in_flight: bool,
     pub(crate) last_sidebar_divider_click: Option<Instant>,
     pub(crate) next_resize_poll: Instant,
     pub(crate) next_animation_tick: Option<Instant>,
@@ -368,7 +369,7 @@ impl App {
         };
 
         for ws in &mut state.workspaces {
-            ws.refresh_git_ahead_behind();
+            ws.refresh_git_branch();
         }
 
         // Background auto-update is disabled in monolithic no-session mode
@@ -395,7 +396,8 @@ impl App {
             state,
             event_tx,
             event_rx,
-            last_git_remote_status_refresh: Instant::now(),
+            last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
+            git_refresh_in_flight: false,
             last_sidebar_divider_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
             next_animation_tick: None,
@@ -906,6 +908,50 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique).join("config.toml")
+    }
+
+    #[test]
+    fn git_refresh_deadline_is_suppressed_while_in_flight() {
+        let mut app = test_app();
+        app.state.workspaces.push(Workspace::test_new("one"));
+        app.git_refresh_in_flight = true;
+
+        assert_eq!(app.git_refresh_deadline(), None);
+    }
+
+    #[test]
+    fn git_status_event_clears_in_flight_refresh() {
+        let mut app = test_app();
+        app.git_refresh_in_flight = true;
+        let previous_refresh = Instant::now() - Duration::from_secs(10);
+        app.last_git_remote_status_refresh = previous_refresh;
+
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            results: Vec::new(),
+        });
+
+        assert!(!app.git_refresh_in_flight);
+        assert!(app.last_git_remote_status_refresh > previous_refresh);
+    }
+
+    #[test]
+    fn git_status_event_marks_render_dirty_when_status_changes() {
+        let mut app = test_app();
+        app.state.workspaces.push(Workspace::test_new("one"));
+        app.render_dirty.store(false, Ordering::Release);
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let resolved_identity_cwd = app.state.workspaces[0].resolved_identity_cwd().unwrap();
+
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            results: vec![crate::workspace::WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd,
+                branch: Some("render-dirty-test".into()),
+                ahead_behind: Some((1, 0)),
+            }],
+        });
+
+        assert!(app.render_dirty.load(Ordering::Acquire));
     }
 
     #[test]
