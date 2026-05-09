@@ -39,11 +39,12 @@
 
         <link rel="icon" type="image/png" href="/assets/logo.png" />
         <link rel="apple-touch-icon" href="/assets/logo.png" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link
-            href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap"
-            rel="stylesheet"
+            rel="preload"
+            href="/assets/fonts/jetbrains-mono-latin.woff2"
+            as="font"
+            type="font/woff2"
+            crossorigin
         />
         <link rel="stylesheet" href="/css/style.css" />
     </head>
@@ -73,9 +74,10 @@
                     <span class="text-blocked">blocked</span>,
                     <span class="text-working">working</span>,
                     <span class="text-done">done</span>. detach and reattach,
-                    agents keep running. no gui app, no electron, no mac-only
-                    native wrapper. you see the agent's own terminal, not
-                    someone's interpretation of it.
+                    agents keep running. attach locally, over ssh, or as a thin
+                    client to a remote server. no gui app, no electron, no
+                    mac-only native wrapper. you see the agent's own terminal,
+                    not someone's interpretation of it.
                 </p>
             </div>
             <div class="install-row">
@@ -230,13 +232,34 @@
             </div>
             <div class="prose-block">
                 <p>
-                    start herdr on your desktop or server. run your agents,
-                    split panes, do your work. press
-                    <strong>ctrl+b q</strong> to detach. close your terminal,
-                    close your laptop; your agents keep running. open a new
-                    terminal, run <strong>herdr</strong>, you're back. same
-                    session, same panes, same agents.
+                    herdr runs as a background session server by default. run
+                    your agents, split panes, do your work, then press
+                    <strong>ctrl+b q</strong> to detach the client. close your
+                    terminal or laptop; the panes keep running. open herdr again
+                    and you reattach to the same session.
                 </p>
+                <p>
+                    named sessions give each project or context its own panes,
+                    tabs, workspaces, sockets, and runtime state while sharing
+                    the same global config.
+                </p>
+            </div>
+            <div class="detach-flow" style="margin-top: 1.5rem">
+                <div class="detach-line">
+                    <span class="prompt">$</span> <span class="cmd">herdr</span>
+                    <span class="key">--session</span>
+                    <span class="comment">work</span>
+                </div>
+                <div class="detach-line">
+                    <span class="prompt">$</span> <span class="cmd">herdr</span>
+                    <span class="key">session attach</span>
+                    <span class="comment">side-project</span>
+                </div>
+                <div class="detach-line">
+                    <span class="dim">
+                        separate sessions, same config, persistent agents.</span
+                    >
+                </div>
             </div>
         </section>
 
@@ -252,24 +275,91 @@
             </div>
             <div class="prose-block">
                 <p>
-                    need to check on your agents from your phone? just ssh in
-                    and run herdr. any ssh client works. no app to download, no
-                    account to create.
+                    once the session is running, attach to it three ways. keep
+                    the work on the machine that has the code, the keys, and the
+                    agents. connect from wherever you are.
                 </p>
             </div>
-            <div class="detach-flow" style="margin-top: 1.5rem">
-                <div class="detach-line">
-                    <span class="prompt">$</span> <span class="cmd">ssh</span>
-                    <span class="comment">you@yourserver</span>
+            <div class="access-grid">
+                <div class="access-card">
+                    <div class="access-kicker">server</div>
+                    <h3>ssh in, run herdr</h3>
+                    <p>
+                        use it like tmux on a remote box. herdr starts the
+                        session there, and your panes keep running after you
+                        detach.
+                    </p>
+                    <div class="mini-flow">
+                        <div>
+                            <span class="prompt">$</span>
+                            <span class="cmd">ssh</span>
+                            <span class="comment">you@server</span>
+                        </div>
+                        <div>
+                            <span class="prompt">$</span>
+                            <span class="cmd">herdr</span>
+                        </div>
+                    </div>
                 </div>
-                <div class="detach-line">
-                    <span class="prompt">$</span> <span class="cmd">herdr</span>
+                <div class="access-card">
+                    <div class="access-kicker">phone</div>
+                    <h3>ssh from mobile</h3>
+                    <p>
+                        narrow terminals get a responsive tui instead of a
+                        squeezed desktop layout. spaces, tabs, and agents stay
+                        reachable from a phone ssh client.
+                    </p>
+                    <div class="mini-flow">
+                        <div>
+                            <span class="prompt">$</span>
+                            <span class="cmd">ssh</span>
+                            <span class="comment">you@server</span>
+                        </div>
+                        <div>
+                            <span class="prompt">$</span>
+                            <span class="cmd">herdr</span>
+                        </div>
+                    </div>
                 </div>
-                <div class="detach-line">
-                    <span class="dim">
-                        same session, same agents, same state.</span
-                    >
+                <div class="access-card">
+                    <div class="access-kicker">thin client</div>
+                    <h3>herdr --remote host</h3>
+                    <p>
+                        run herdr on your laptop and target any ssh config host.
+                        herdr connects over ssh, bootstraps the remote server,
+                        and streams the tui back to your local terminal.
+                    </p>
+                    <div class="mini-flow">
+                        <div>
+                            <span class="prompt">$</span>
+                            <span class="cmd">herdr</span>
+                            <span class="key">--remote</span>
+                            <span class="comment">workbox</span>
+                        </div>
+                    </div>
                 </div>
+            </div>
+            <div class="mobile-proof">
+                <figure class="phone-shot">
+                    <div class="phone-shot-frame">
+                        <img
+                            src="/assets/mobile-terminal.jpeg"
+                            alt="herdr responsive terminal view over ssh on a phone"
+                            loading="lazy"
+                        />
+                    </div>
+                    <figcaption>terminal view over ssh</figcaption>
+                </figure>
+                <figure class="phone-shot">
+                    <div class="phone-shot-frame">
+                        <img
+                            src="/assets/mobile-switcher.jpeg"
+                            alt="herdr mobile switcher showing spaces tabs and agents on a phone"
+                            loading="lazy"
+                        />
+                    </div>
+                    <figcaption>responsive switcher</figcaption>
+                </figure>
             </div>
         </section>
 
