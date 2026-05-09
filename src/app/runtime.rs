@@ -229,10 +229,11 @@ impl App {
     }
 
     pub(crate) fn start_git_status_refresh_if_due(&mut self, now: Instant) {
-        if !self
-            .git_refresh_deadline()
-            .is_some_and(|deadline| now >= deadline)
-        {
+        let Some(deadline) = self.git_refresh_deadline() else {
+            return;
+        };
+
+        if now < deadline {
             return;
         }
 

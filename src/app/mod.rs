@@ -351,7 +351,7 @@ impl App {
             toast_config: config.ui.toast.clone(),
             keybinds: config.keybinds(),
             spinner_tick: 0,
-            palette: resolve_palette(&config),
+            palette: resolve_palette(config),
             theme_name: config
                 .theme
                 .name

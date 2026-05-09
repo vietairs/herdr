@@ -158,8 +158,7 @@ pub(crate) fn handle_client_handshake(
         encoding: render_encoding,
         error: None,
     };
-    protocol::write_message(&mut stream, &welcome)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    protocol::write_message(&mut stream, &welcome).map_err(|e| io::Error::other(e.to_string()))?;
 
     // Clear read timeout for normal operation.
     stream.set_read_timeout(None)?;

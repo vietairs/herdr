@@ -243,57 +243,56 @@ fn main() -> io::Result<()> {
         println!("       herdr integration <subcommand> ...");
         println!();
         println!("Common commands:");
-        println!(
-            "  {:<32} {}",
-            "herdr", "Launch or attach to the persistent session"
-        );
-        println!(
-            "  {:<32} {}",
-            "herdr status [server|client]", "Show local client and running server status"
-        );
-        println!(
-            "  {:<32} {}",
-            "herdr update", "Download and install the latest version"
-        );
-        println!(
-            "  {:<32} {}",
-            "herdr server stop", "Stop the running server via the API socket"
-        );
-        println!(
-            "  {:<32} {}",
-            "herdr server reload-config", "Reload config.toml in the running server"
-        );
-        println!(
-            "  {:<32} {}",
-            "herdr workspace <subcommand>", "Workspace helpers over the socket API"
-        );
-        println!(
-            "  {:<32} {}",
-            "herdr tab <subcommand>", "Tab helpers over the socket API"
-        );
-        println!(
-            "  {:<32} {}",
-            "herdr pane <subcommand>", "Pane control helpers over the socket API"
-        );
-        println!(
-            "  {:<32} {}",
-            "herdr wait <subcommand>", "Blocking wait helpers over the socket API"
-        );
-        println!(
-            "  {:<32} {}",
-            "herdr session <subcommand>", "Manage named persistent sessions"
-        );
-        println!(
-            "  {:<32} {}",
-            "herdr integration <subcommand>", "Manage built-in agent integrations"
-        );
+        for (command, description) in [
+            ("herdr", "Launch or attach to the persistent session"),
+            (
+                "herdr status [server|client]",
+                "Show local client and running server status",
+            ),
+            ("herdr update", "Download and install the latest version"),
+            (
+                "herdr server stop",
+                "Stop the running server via the API socket",
+            ),
+            (
+                "herdr server reload-config",
+                "Reload config.toml in the running server",
+            ),
+            (
+                "herdr workspace <subcommand>",
+                "Workspace helpers over the socket API",
+            ),
+            ("herdr tab <subcommand>", "Tab helpers over the socket API"),
+            (
+                "herdr pane <subcommand>",
+                "Pane control helpers over the socket API",
+            ),
+            (
+                "herdr wait <subcommand>",
+                "Blocking wait helpers over the socket API",
+            ),
+            (
+                "herdr session <subcommand>",
+                "Manage named persistent sessions",
+            ),
+            (
+                "herdr integration <subcommand>",
+                "Manage built-in agent integrations",
+            ),
+        ] {
+            println!("  {command:<32} {description}");
+        }
         println!();
         println!("Advanced commands:");
-        println!("  {:<32} {}", "herdr server", "Run as headless server");
-        println!(
-            "  {:<32} {}",
-            "herdr client", "Connect to a running server as a thin client"
-        );
+        for (command, description) in [
+            ("herdr server", "Run as headless server"),
+            (
+                "herdr client",
+                "Connect to a running server as a thin client",
+            ),
+        ] {
+            println!("  {command:<32} {description}");
+        }
         println!();
         println!("Options:");
         println!("  --no-session        Run monolithically (no server/client, escape hatch)");

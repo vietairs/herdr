@@ -368,7 +368,7 @@ fn output_match_read_source(
 ) -> crate::api::schema::ReadSource {
     match source {
         crate::api::schema::ReadSource::Recent => crate::api::schema::ReadSource::RecentUnwrapped,
-        other => other.clone(),
+        other => *other,
     }
 }
 
@@ -741,14 +741,12 @@ impl ActiveSubscription {
                 let probe = pane_read(
                     format!("{request_id}:sub:{index}:probe"),
                     &pane_id,
-                    source.clone(),
+                    source,
                     lines,
                     strip_ansi,
                     api_tx,
                 );
-                if let Err(error) = probe {
-                    return Err(error);
-                }
+                probe?;
 
                 Ok(Self::OutputMatched(ActiveOutputMatchedSubscription {
                     pane_id,
@@ -765,11 +763,7 @@ impl ActiveSubscription {
                 pane_id,
                 agent_status,
             } => {
-                let probe =
-                    match pane_get(format!("{request_id}:sub:{index}:probe"), &pane_id, api_tx) {
-                        Ok(probe) => probe,
-                        Err(error) => return Err(error),
-                    };
+                let probe = pane_get(format!("{request_id}:sub:{index}:probe"), &pane_id, api_tx)?;
 
                 Ok(Self::AgentStatusChanged(
                     ActiveAgentStatusChangedSubscription {

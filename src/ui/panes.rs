@@ -219,6 +219,44 @@ fn render_selection_highlight(
     }
 }
 
+fn render_empty(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let lines = vec![
+        Line::from(""),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  No workspaces yet",
+            Style::default().fg(p.overlay0),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  A workspace is one project context.",
+            Style::default().fg(p.overlay1),
+        )),
+        Line::from(Span::styled(
+            "  Its root pane (top-left) sets the default repo or folder name.",
+            Style::default().fg(p.overlay1),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Press ", Style::default().fg(p.overlay0)),
+            Span::styled(
+                app.keybinds.new_workspace_label.to_string(),
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to create one", Style::default().fg(p.overlay0)),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(p.surface_dim)),
+        ),
+        area,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,42 +352,4 @@ mod tests {
         assert_eq!(info.scrollbar_rect, Some(Rect::new(49, 3, 1, 8)));
         assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
     }
-}
-
-fn render_empty(app: &AppState, frame: &mut Frame, area: Rect) {
-    let p = &app.palette;
-    let lines = vec![
-        Line::from(""),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  No workspaces yet",
-            Style::default().fg(p.overlay0),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  A workspace is one project context.",
-            Style::default().fg(p.overlay1),
-        )),
-        Line::from(Span::styled(
-            "  Its root pane (top-left) sets the default repo or folder name.",
-            Style::default().fg(p.overlay1),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Press ", Style::default().fg(p.overlay0)),
-            Span::styled(
-                format!("{}", app.keybinds.new_workspace_label),
-                Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to create one", Style::default().fg(p.overlay0)),
-        ]),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(p.surface_dim)),
-        ),
-        area,
-    );
 }

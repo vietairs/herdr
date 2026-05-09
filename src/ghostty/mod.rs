@@ -234,8 +234,10 @@ impl CellWide {
     }
 }
 
+type WritePtyCallback = dyn FnMut(&[u8]) + Send;
+
 struct WritePtyCallbackState {
-    callback: Box<dyn FnMut(&[u8]) + Send>,
+    callback: Box<WritePtyCallback>,
 }
 
 unsafe extern "C" fn write_pty_trampoline(
@@ -1469,10 +1471,10 @@ mod tests {
         );
 
         render_state.update(&terminal).unwrap();
-        assert_eq!(render_state.cursor_visible().unwrap(), true);
+        assert!(render_state.cursor_visible().unwrap());
         terminal.write(b"\x1b[?25l");
         render_state.update(&terminal).unwrap();
-        assert_eq!(render_state.cursor_visible().unwrap(), false);
+        assert!(!render_state.cursor_visible().unwrap());
 
         terminal.write(b"\x1b[?1049h\x1b[HALT");
         assert_eq!(terminal.active_screen().unwrap(), ActiveScreen::Alternate);

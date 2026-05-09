@@ -745,11 +745,7 @@ fn render_left_scrollbar(
         .max(1)
         .min(track.height as usize) as u16;
     let travel = track.height.saturating_sub(thumb_len);
-    let thumb_top = if max_scroll == 0 {
-        track.y
-    } else {
-        track.y + ((travel as usize * scroll.min(max_scroll)) / max_scroll) as u16
-    };
+    let thumb_top = track.y + ((travel as usize * scroll.min(max_scroll)) / max_scroll) as u16;
 
     for y in track.y..track.y + track.height {
         let is_thumb = y >= thumb_top && y < thumb_top + thumb_len;

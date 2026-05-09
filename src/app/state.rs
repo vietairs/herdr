@@ -391,16 +391,11 @@ pub enum Mode {
     KeybindHelp,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentPanelScope {
     CurrentWorkspace,
+    #[default]
     AllWorkspaces,
-}
-
-impl Default for AgentPanelScope {
-    fn default() -> Self {
-        Self::AllWorkspaces
-    }
 }
 
 // ---------------------------------------------------------------------------

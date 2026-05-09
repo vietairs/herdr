@@ -231,9 +231,8 @@ fn do_handshake(
         rows,
         requested_encoding,
     };
-    protocol::write_message(stream, &hello).map_err(|e| {
-        ClientError::ConnectionFailed(io::Error::new(io::ErrorKind::Other, e.to_string()))
-    })?;
+    protocol::write_message(stream, &hello)
+        .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
 
     // Read Welcome.
     stream
@@ -339,7 +338,7 @@ pub fn run_client() -> io::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
     let should_quit = Arc::new(AtomicBool::new(false));
 
@@ -577,8 +576,7 @@ fn server_reader_thread(
 
 /// Writes a message to the server stream (blocking).
 fn write_to_server(stream: &mut UnixStream, msg: &ClientMessage) -> io::Result<()> {
-    protocol::write_message(stream, msg)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    protocol::write_message(stream, msg).map_err(|e| io::Error::other(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------

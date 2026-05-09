@@ -599,7 +599,6 @@ struct CursorWire {
 
 fn decode_frame_payload(payload: &[u8]) -> io::Result<FrameWire> {
     bincode::serde::decode_from_slice(payload, bincode::config::standard())
-        .map(|(frame, consumed)| (frame, consumed))
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
         .and_then(|(frame, consumed): (FrameWire, usize)| {
             if consumed != payload.len() {

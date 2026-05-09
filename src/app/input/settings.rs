@@ -10,6 +10,8 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// The shared `Save` verb is semantic: these actions persist settings.
+#[allow(clippy::enum_variant_names)]
 pub(super) enum SettingsAction {
     SaveTheme(String),
     SaveSound(bool),
@@ -135,10 +137,13 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 state.settings.section = SettingsSection::Theme;
                 state.settings.list.selected = current_theme_index(&state.theme_name);
             }
-            _ => match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
-                Some(super::modal::ModalAction::Close) => cancel_settings(state),
-                _ => {}
-            },
+            _ => {
+                if let Some(super::modal::ModalAction::Close) =
+                    super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS)
+                {
+                    cancel_settings(state);
+                }
+            }
         },
         SettingsSection::Toast => match key.code {
             KeyCode::Up | KeyCode::Char('k') => state.settings.list.move_prev(),
@@ -155,10 +160,13 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 state.settings.section = SettingsSection::Theme;
                 state.settings.list.selected = current_theme_index(&state.theme_name);
             }
-            _ => match super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS) {
-                Some(super::modal::ModalAction::Close) => cancel_settings(state),
-                _ => {}
-            },
+            _ => {
+                if let Some(super::modal::ModalAction::Close) =
+                    super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS)
+                {
+                    cancel_settings(state);
+                }
+            }
         },
     }
 

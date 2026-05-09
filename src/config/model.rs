@@ -209,11 +209,11 @@ impl<'de> Deserialize<'de> for ToastConfig {
         }
 
         let raw = RawToastConfig::deserialize(deserializer)?;
-        let delivery = raw.delivery.unwrap_or_else(|| match raw.enabled {
+        let legacy_delivery = match raw.enabled {
             Some(true) => ToastDelivery::Herdr,
-            Some(false) => ToastDelivery::Off,
-            None => ToastDelivery::Off,
-        });
+            Some(false) | None => ToastDelivery::Off,
+        };
+        let delivery = raw.delivery.unwrap_or(legacy_delivery);
         Ok(Self { delivery })
     }
 }

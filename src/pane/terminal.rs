@@ -712,10 +712,12 @@ impl GhosttyPaneTerminal {
     }
 }
 
+type VisibleHyperlinks = Vec<((u16, u16), String, String)>;
+
 fn ghostty_visible_hyperlinks(
     core: &mut GhosttyPaneCore,
     area: Rect,
-) -> Result<Vec<((u16, u16), String, String)>, crate::ghostty::Error> {
+) -> Result<VisibleHyperlinks, crate::ghostty::Error> {
     let GhosttyPaneCore {
         terminal,
         render_state,

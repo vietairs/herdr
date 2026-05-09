@@ -612,7 +612,7 @@ impl HeadlessServer {
                 crate::raw_input::RawInputEvent::OuterFocusLost => Some(false),
                 _ => None,
             })
-            .last();
+            .next_back();
 
         let Some(next_focus) = next_focus else {
             return;
@@ -1708,7 +1708,7 @@ pub fn run_server() -> io::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
     let result = rt.block_on(async {
         // Create the App (with AppState, event channels, etc.).

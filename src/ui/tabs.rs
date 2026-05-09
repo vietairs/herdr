@@ -33,14 +33,14 @@ fn layout_tab_hit_areas(ws: &crate::workspace::Workspace, area: Rect, scroll: us
 
     let mut x = area.x;
     let right = area.x + area.width;
-    for idx in scroll..ws.tabs.len() {
+    for (idx, rect) in rects.iter_mut().enumerate().skip(scroll) {
         if x >= right {
             break;
         }
         let desired = tab_width(&ws.tabs[idx]);
         let remaining = right.saturating_sub(x);
         let width = desired.min(remaining).max(1);
-        rects[idx] = Rect::new(x, area.y, width, 1);
+        *rect = Rect::new(x, area.y, width, 1);
         x = x.saturating_add(width + 1);
     }
     rects
@@ -178,14 +178,14 @@ fn tab_drop_indicator_x(
     ws: &crate::workspace::Workspace,
     insert_idx: usize,
 ) -> Option<u16> {
-    let visible_tabs = app
+    let mut visible_tabs = app
         .view
         .tab_hit_areas
         .iter()
         .enumerate()
         .filter(|(_, rect)| rect.width > 0);
     let first_visible = visible_tabs.clone().next()?;
-    let last_visible = visible_tabs.last().unwrap_or(first_visible);
+    let last_visible = visible_tabs.next_back().unwrap_or(first_visible);
 
     if insert_idx == 0 {
         return Some(if first_visible.0 == 0 {

@@ -287,7 +287,7 @@ pub fn drain_messages(stream: &mut UnixStream) {
     stream
         .set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
-    while let Ok(_) = read_server_message(stream) {}
+    while read_server_message(stream).is_ok() {}
     stream.set_read_timeout(None).unwrap();
 }
 

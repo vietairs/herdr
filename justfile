@@ -2,13 +2,17 @@
 
 # Run tests
 test:
-    cargo nextest run --locked
+    cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
-# Run PR CI checks
-ci:
+# Run fast local lint checks
+lint:
     cargo fmt --check
-    cargo nextest run --locked
+    cargo clippy --all-targets --locked -- -D warnings
+
+# Run PR CI checks
+ci: lint
+    cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci

@@ -202,7 +202,7 @@ fn compatibility_label(protocol: Option<u32>) -> &'static str {
 fn restart_needed_label(server: &ServerRuntimeStatus) -> &'static str {
     match server {
         ServerRuntimeStatus::Running { version, .. } => match version.as_deref() {
-            Some(version) if version == env!("CARGO_PKG_VERSION") => "no",
+            Some(env!("CARGO_PKG_VERSION")) => "no",
             Some(_) => "yes",
             None => "unknown",
         },
@@ -1391,10 +1391,7 @@ fn parse_session_name_and_json(args: &[String], usage: &str) -> Result<(String, 
 }
 
 fn print_session_table(sessions: &[crate::session::SessionInfo]) {
-    println!(
-        "{:<20} {:<8} {:<48} {}",
-        "name", "status", "directory", "socket"
-    );
+    println!("{:<20} {:<8} {:<48} socket", "name", "status", "directory");
     for session in sessions {
         println!(
             "{:<20} {:<8} {:<48} {}",

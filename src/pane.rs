@@ -602,6 +602,8 @@ impl PaneRuntime {
                     }
 
                     let pid = child_pid.load(Ordering::Acquire);
+                    // Keep the terminal restore side effect separate from render notification state.
+                    #[allow(clippy::collapsible_if)]
                     if pid > 0 && terminal.maybe_restore_host_terminal_theme(pane_id, pid) {
                         if !render_dirty.swap(true, Ordering::AcqRel) {
                             render_notify.notify_one();

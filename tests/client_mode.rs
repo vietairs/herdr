@@ -188,7 +188,6 @@ struct CursorWire {
 
 fn decode_frame_payload(payload: &[u8]) -> std::io::Result<FrameWire> {
     bincode::serde::decode_from_slice(payload, bincode::config::standard())
-        .map(|(frame, consumed)| (frame, consumed))
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))
         .and_then(|(frame, consumed): (FrameWire, usize)| {
             if consumed != payload.len() {
@@ -441,7 +440,7 @@ fn client_resize_sends_message() {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    while let Ok(_) = read_server_message(&mut stream) {}
+    while read_server_message(&mut stream).is_ok() {}
 
     // Send a Resize message: ClientMessage::Resize is variant 2: { cols: u16, rows: u16 }
     let resize_payload = {
@@ -779,7 +778,7 @@ fn navigate_mode_keybind_dispatch_in_server() {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    while let Ok(_) = read_server_message(&mut stream) {}
+    while read_server_message(&mut stream).is_ok() {}
 
     // Send Ctrl+B (prefix key) as raw bytes. In kitty mode, Ctrl+B is 0x02.
     // In legacy mode, it's also 0x02 (control character).
@@ -797,7 +796,7 @@ fn navigate_mode_keybind_dispatch_in_server() {
     stream
         .set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
-    while let Ok(_) = read_server_message(&mut stream) {}
+    while read_server_message(&mut stream).is_ok() {}
     stream.set_read_timeout(None).unwrap();
 
     // Send 'n' (new workspace in navigate mode).
@@ -897,7 +896,7 @@ fn graceful_shutdown_sends_server_shutdown_to_client() {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    while let Ok(_) = read_server_message(&mut stream) {}
+    while read_server_message(&mut stream).is_ok() {}
 
     // Send SIGINT to the server process to trigger graceful shutdown.
     if let Some(pid) = spawned.child.process_id() {
@@ -995,7 +994,7 @@ fn client_receives_notify_on_agent_state_change() {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    while let Ok(_) = read_server_message(&mut stream) {}
+    while read_server_message(&mut stream).is_ok() {}
 
     // Create a workspace via the API.
     let mut ws_stream = UnixStream::connect(&api_socket).expect("connect to API");

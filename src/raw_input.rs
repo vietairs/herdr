@@ -39,10 +39,7 @@ pub fn parse_raw_input_bytes_with_ranges(data: &[u8]) -> Vec<RawInputEventWithRa
     let mut events = Vec::new();
     let mut offset = 0usize;
 
-    loop {
-        let Some((event, consumed)) = extract_one_event(&buffer) else {
-            break;
-        };
+    while let Some((event, consumed)) = extract_one_event(&buffer) {
         buffer.drain(..consumed);
         events.push(RawInputEventWithRange {
             event,
@@ -85,10 +82,7 @@ pub fn parse_raw_input_bytes_sync(data: &[u8]) -> Vec<RawInputEvent> {
     let mut buffer = data.to_vec();
     let mut events = Vec::new();
 
-    loop {
-        let Some((event, consumed)) = extract_one_event(&buffer) else {
-            break;
-        };
+    while let Some((event, consumed)) = extract_one_event(&buffer) {
         buffer.drain(..consumed);
         events.push(event);
     }
@@ -175,10 +169,7 @@ fn drain_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
 pub(crate) fn drain_complete_input_bytes(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
     let mut chunks = Vec::new();
 
-    loop {
-        let Some((_event, consumed)) = extract_one_event(buffer) else {
-            break;
-        };
+    while let Some((_event, consumed)) = extract_one_event(buffer) {
         chunks.push(buffer[..consumed].to_vec());
         buffer.drain(..consumed);
     }
@@ -244,7 +235,7 @@ fn stdin_read_ready<R: AsRawFd>(_reader: &R, _timeout_ms: i32) -> Option<bool> {
     #[cfg(unix)]
     {
         let fd = _reader.as_raw_fd();
-        return poll_read_ready(fd, _timeout_ms);
+        poll_read_ready(fd, _timeout_ms)
     }
 }
 

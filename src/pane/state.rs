@@ -104,9 +104,7 @@ impl PaneState {
         source: &str,
         agent_label: &str,
     ) -> Option<EffectiveStateChange> {
-        let Some(current_agent_label) = self.effective_agent_label() else {
-            return None;
-        };
+        let current_agent_label = self.effective_agent_label()?;
         if current_agent_label != agent_label {
             return None;
         }

@@ -92,10 +92,13 @@ impl App {
     pub(crate) fn handle_onboarding_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Right | KeyCode::Char('l') => self.open_settings_from_onboarding(),
-            _ => match modal_action_from_key(&key, ONBOARDING_WELCOME_ACTIONS) {
-                Some(ModalAction::Continue) => self.open_settings_from_onboarding(),
-                _ => {}
-            },
+            _ => {
+                if let Some(ModalAction::Continue) =
+                    modal_action_from_key(&key, ONBOARDING_WELCOME_ACTIONS)
+                {
+                    self.open_settings_from_onboarding();
+                }
+            }
         }
     }
 
@@ -116,10 +119,12 @@ impl App {
                     notes.scroll = max_scroll;
                 }
             }
-            _ => match modal_action_from_key(&key, RELEASE_NOTES_ACTIONS) {
-                Some(ModalAction::Close) => self.dismiss_release_notes(),
-                _ => {}
-            },
+            _ => {
+                if let Some(ModalAction::Close) = modal_action_from_key(&key, RELEASE_NOTES_ACTIONS)
+                {
+                    self.dismiss_release_notes();
+                }
+            }
         }
     }
 

@@ -32,7 +32,7 @@ fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
     }
 
     if total_h < 6 {
-        let ws_h = (total_h + 1) / 2;
+        let ws_h = total_h.div_ceil(2);
         return (ws_h, total_h.saturating_sub(ws_h));
     }
 
@@ -385,7 +385,7 @@ pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect
     }
 
     let total_h = content.height as usize;
-    let ws_h = (total_h + 1) / 2;
+    let ws_h = total_h.div_ceil(2);
     let detail_h = total_h.saturating_sub(ws_h + 1);
     if ws_h == 0 || detail_h == 0 {
         return (content, None, Rect::default());
