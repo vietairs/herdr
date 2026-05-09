@@ -1,9 +1,13 @@
 //! Remote thin-client launcher over SSH command stdio.
 
-use std::io;
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::{self, IsTerminal, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+
+use serde::Deserialize;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -13,6 +17,10 @@ use std::time::Duration;
 
 const BRIDGE_ACCEPT_POLL: Duration = Duration::from_millis(50);
 const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
+const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
+pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteLaunch {
@@ -76,13 +84,25 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     let session_name = crate::session::active_name()
         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
     let local_socket = local_forward_socket_path(&remote.target, &session_name);
+    let program = std::env::args()
+        .next()
+        .unwrap_or_else(|| "herdr".to_string());
+    let reattach_command = reattach_command(&program, &remote.target, &session_name);
+    let remote_herdr = prepare_remote_herdr(&remote.target)?;
 
-    let _bridge = SshStdioBridge::start(remote.target, local_socket.clone(), session_name)?;
+    let _bridge = SshStdioBridge::start(
+        remote.target,
+        remote_herdr,
+        local_socket.clone(),
+        session_name,
+    )?;
 
-    run_client_process(&local_socket)
+    run_client_process(&local_socket, &reattach_command)
 }
 
 pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
+    ensure_remote_server_running()?;
+
     let socket_path = crate::server::headless::client_socket_path();
     let stream = UnixStream::connect(&socket_path).map_err(|err| {
         io::Error::new(
@@ -107,6 +127,464 @@ pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
     copy_flush(&mut socket_to_stdout, &mut stdout).map(|_| ())
 }
 
+fn ensure_remote_server_running() -> io::Result<()> {
+    let socket_path = crate::server::headless::client_socket_path();
+    if crate::server::autodetect::is_server_listening() {
+        return Ok(());
+    }
+
+    crate::server::autodetect::spawn_server_daemon()?;
+    crate::server::autodetect::wait_for_server_socket(&socket_path, Duration::from_secs(5))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemotePlatform {
+    os: &'static str,
+    arch: &'static str,
+}
+
+impl RemotePlatform {
+    fn from_uname(os: &str, arch: &str) -> Option<Self> {
+        let os = match os.trim() {
+            "Linux" => "linux",
+            "Darwin" => "macos",
+            _ => return None,
+        };
+        let arch = match arch.trim() {
+            "x86_64" | "amd64" => "x86_64",
+            "aarch64" | "arm64" => "aarch64",
+            _ => return None,
+        };
+        Some(Self { os, arch })
+    }
+
+    fn local() -> Self {
+        let os = if cfg!(target_os = "linux") {
+            "linux"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "unknown"
+        };
+
+        let arch = if cfg!(target_arch = "x86_64") {
+            "x86_64"
+        } else if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "unknown"
+        };
+
+        Self { os, arch }
+    }
+
+    fn asset_key(&self) -> String {
+        format!("{}-{}", self.os, self.arch)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RemoteHerdr {
+    install_suffix: String,
+    shell_path: String,
+    platform: RemotePlatform,
+}
+
+impl RemoteHerdr {
+    fn for_platform(platform: RemotePlatform) -> Self {
+        let install_suffix = ".local/bin/herdr".to_string();
+        let shell_path = format!("\"$HOME/{install_suffix}\"");
+        Self {
+            install_suffix,
+            shell_path,
+            platform,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RemoteUpdateManifest {
+    version: String,
+    assets: BTreeMap<String, String>,
+}
+
+struct InstallSource {
+    path: PathBuf,
+    temporary_dir: Option<PathBuf>,
+}
+
+impl InstallSource {
+    fn persistent(path: PathBuf) -> Self {
+        Self {
+            path,
+            temporary_dir: None,
+        }
+    }
+
+    fn temporary(path: PathBuf, temporary_dir: PathBuf) -> Self {
+        Self {
+            path,
+            temporary_dir: Some(temporary_dir),
+        }
+    }
+
+    fn cleanup(&self) {
+        if let Some(dir) = &self.temporary_dir {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+fn prepare_remote_herdr(target: &str) -> io::Result<RemoteHerdr> {
+    let platform = detect_remote_platform(target)?;
+    let remote_herdr = RemoteHerdr::for_platform(platform);
+    let override_binary = remote_binary_override_path()?;
+
+    if override_binary.is_none() && remote_binary_matches(target, &remote_herdr)? {
+        return Ok(remote_herdr);
+    }
+
+    confirm_remote_install(
+        target,
+        &remote_herdr,
+        &install_source_description(&remote_herdr.platform, override_binary.as_deref()),
+    )?;
+    let source = resolve_install_source(&remote_herdr.platform, override_binary)?;
+    let install_result = install_remote_herdr(target, &remote_herdr, &source.path);
+    source.cleanup();
+    install_result?;
+
+    if !remote_binary_matches(target, &remote_herdr)? {
+        return Err(io::Error::other(format!(
+            "installed remote herdr at {}, but it did not report version {CURRENT_VERSION}",
+            remote_herdr.shell_path
+        )));
+    }
+    warn_if_remote_bin_not_on_path(target)?;
+
+    Ok(remote_herdr)
+}
+
+fn detect_remote_platform(target: &str) -> io::Result<RemotePlatform> {
+    let output = ssh_output(target, "uname -s; uname -m")?;
+    if !output.status.success() {
+        return Err(command_failed("remote platform detection failed", &output));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let os = lines.next().unwrap_or_default();
+    let arch = lines.next().unwrap_or_default();
+    RemotePlatform::from_uname(os, arch).ok_or_else(|| {
+        io::Error::other(format!(
+            "unsupported remote platform: {} {}",
+            os.trim(),
+            arch.trim()
+        ))
+    })
+}
+
+fn remote_binary_matches(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
+    let command = format!("test -x {0} && {0} --version", remote_herdr.shell_path);
+    let output = ssh_output(target, &command)?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout);
+    Ok(version.trim() == format!("herdr {CURRENT_VERSION}"))
+}
+
+fn remote_binary_override_path() -> io::Result<Option<PathBuf>> {
+    let Some(value) = std::env::var_os(REMOTE_BINARY_ENV_VAR) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{REMOTE_BINARY_ENV_VAR} must not be empty"),
+        ));
+    }
+
+    let path = PathBuf::from(value);
+    let metadata = fs::metadata(&path).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "failed to inspect {REMOTE_BINARY_ENV_VAR} path {}: {err}",
+                path.display()
+            ),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{REMOTE_BINARY_ENV_VAR} path is not a file: {}",
+                path.display()
+            ),
+        ));
+    }
+
+    Ok(Some(path))
+}
+
+fn install_source_description(platform: &RemotePlatform, override_binary: Option<&Path>) -> String {
+    if let Some(path) = override_binary {
+        return format!("{REMOTE_BINARY_ENV_VAR} ({})", path.display());
+    }
+
+    if *platform == RemotePlatform::local() {
+        "the current local herdr binary".to_string()
+    } else {
+        format!(
+            "the {CURRENT_VERSION} release asset for {}",
+            platform.asset_key()
+        )
+    }
+}
+
+fn resolve_install_source(
+    platform: &RemotePlatform,
+    override_binary: Option<PathBuf>,
+) -> io::Result<InstallSource> {
+    if let Some(path) = override_binary {
+        return Ok(InstallSource::persistent(path));
+    }
+
+    if *platform == RemotePlatform::local() {
+        let path = std::env::current_exe()?;
+        return Ok(InstallSource::persistent(path));
+    }
+
+    download_release_asset(platform)
+}
+
+fn warn_if_remote_bin_not_on_path(target: &str) -> io::Result<()> {
+    let output = ssh_output(
+        target,
+        "case \":$PATH:\" in *\":$HOME/.local/bin:\"*) exit 0 ;; *) exit 1 ;; esac",
+    )?;
+    if !output.status.success() {
+        eprintln!(
+            "herdr: installed remote binary to ~/.local/bin/herdr, but ~/.local/bin is not in the remote PATH"
+        );
+    }
+    Ok(())
+}
+
+fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource> {
+    let manifest_output = Command::new("curl")
+        .args([
+            "-sfL",
+            "--retry",
+            "3",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "20",
+            UPDATE_MANIFEST_URL,
+        ])
+        .output()
+        .map_err(|err| io::Error::new(err.kind(), format!("curl failed: {err}")))?;
+    if !manifest_output.status.success() {
+        return Err(command_failed(
+            "failed to fetch update manifest",
+            &manifest_output,
+        ));
+    }
+
+    let manifest: RemoteUpdateManifest = serde_json::from_slice(&manifest_output.stdout)
+        .map_err(|err| io::Error::other(format!("failed to parse update manifest JSON: {err}")))?;
+    if manifest.version.trim_start_matches('v') != CURRENT_VERSION {
+        return Err(io::Error::other(format!(
+            "remote host is {}, but this local herdr is {CURRENT_VERSION} and the latest release manifest is {}; build herdr for the remote platform or install it there manually",
+            platform.asset_key(),
+            manifest.version
+        )));
+    }
+
+    let asset_key = platform.asset_key();
+    let url = manifest.assets.get(&asset_key).ok_or_else(|| {
+        io::Error::other(format!(
+            "no {asset_key} binary in the release manifest for herdr {CURRENT_VERSION}"
+        ))
+    })?;
+
+    let dir = private_download_dir(&asset_key)?;
+    let path = dir.join("herdr.tmp");
+    let status = Command::new("curl")
+        .args(["-sfL", "--max-time", "120", "-o"])
+        .arg(&path)
+        .arg(url)
+        .status()
+        .map_err(|err| io::Error::new(err.kind(), format!("download failed: {err}")))?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(io::Error::other("download failed"));
+    }
+
+    Ok(InstallSource::temporary(path, dir))
+}
+
+fn private_download_dir(asset_key: &str) -> io::Result<PathBuf> {
+    let base = std::env::temp_dir();
+    for attempt in 0..100 {
+        let dir = base.join(format!(
+            "herdr-remote-{}-{}-{attempt}",
+            std::process::id(),
+            asset_key
+        ));
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "failed to create private herdr remote download directory",
+    ))
+}
+
+fn confirm_remote_install(
+    target: &str,
+    remote_herdr: &RemoteHerdr,
+    source_description: &str,
+) -> io::Result<()> {
+    if !io::stdin().is_terminal() {
+        return Err(io::Error::other(format!(
+            "matching remote herdr {CURRENT_VERSION} is not installed at {}; run from an interactive terminal to approve installation",
+            remote_herdr.shell_path
+        )));
+    }
+
+    eprintln!(
+        "matching herdr {CURRENT_VERSION} is not installed on {target} for {}.",
+        remote_herdr.platform.asset_key()
+    );
+    eprint!(
+        "Install {} to {}? [Y/n] ",
+        source_description, remote_herdr.shell_path
+    );
+    io::stderr().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim().to_ascii_lowercase();
+    if answer == "n" || answer == "no" {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "remote herdr installation cancelled",
+        ));
+    }
+
+    Ok(())
+}
+
+fn install_remote_herdr(
+    target: &str,
+    remote_herdr: &RemoteHerdr,
+    source_path: &Path,
+) -> io::Result<()> {
+    let script = format!(
+        r#"dest="$HOME/{install_suffix}"
+dir="${{dest%/*}}"
+mkdir -p "$dir"
+tmp="${{dest}}.tmp.$$"
+cat > "$tmp"
+chmod 755 "$tmp"
+mv "$tmp" "$dest"
+"#,
+        install_suffix = remote_herdr.install_suffix
+    );
+
+    let mut child = Command::new("ssh")
+        .arg("-T")
+        .arg(target)
+        .arg(format!("sh -eu -c {}", shell_quote(&script)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|err| io::Error::new(err.kind(), format!("failed to start ssh install: {err}")))?;
+
+    let mut source = File::open(source_path)?;
+    let copy_result = if let Some(mut stdin) = child.stdin.take() {
+        io::copy(&mut source, &mut stdin).map(|_| ())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "ssh install stdin missing",
+        ))
+    };
+    let status = child.wait()?;
+    copy_result?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "remote install exited with {status}"
+        )))
+    }
+}
+
+fn ssh_output(target: &str, command: &str) -> io::Result<Output> {
+    Command::new("ssh")
+        .arg("-T")
+        .arg(target)
+        .arg(command)
+        .output()
+}
+
+fn remote_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
+    let mut command = format!("exec {}", remote_herdr.shell_path);
+    if session_name != crate::session::DEFAULT_SESSION_NAME {
+        command.push_str(" --session ");
+        command.push_str(&shell_quote(session_name));
+    }
+    command.push_str(" remote-client-bridge");
+    command
+}
+
+fn reattach_command(program: &str, target: &str, session_name: &str) -> String {
+    let program = if program.is_empty() { "herdr" } else { program };
+    let mut command = format!("{} --remote {}", shell_quote(program), shell_quote(target));
+    if session_name != crate::session::DEFAULT_SESSION_NAME {
+        command.push_str(" --session ");
+        command.push_str(&shell_quote(session_name));
+    }
+    command
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '@' | '%' | '_' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
+                )
+        })
+    {
+        return value.to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn command_failed(context: &str, output: &Output) -> io::Error {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        io::Error::other(format!("{context}: {}", output.status))
+    } else {
+        io::Error::other(format!("{context}: {stderr}"))
+    }
+}
+
 struct SshStdioBridge {
     local_socket: PathBuf,
     should_stop: Arc<AtomicBool>,
@@ -114,7 +592,12 @@ struct SshStdioBridge {
 }
 
 impl SshStdioBridge {
-    fn start(target: String, local_socket: PathBuf, session_name: String) -> io::Result<Self> {
+    fn start(
+        target: String,
+        remote_herdr: RemoteHerdr,
+        local_socket: PathBuf,
+        session_name: String,
+    ) -> io::Result<Self> {
         let _ = std::fs::remove_file(&local_socket);
         let listener = UnixListener::bind(&local_socket)?;
         crate::ipc::restrict_socket_permissions(&local_socket, BRIDGE_SOCKET_PERMISSION_MODE)?;
@@ -132,7 +615,9 @@ impl SshStdioBridge {
                             );
                             continue;
                         }
-                        if let Err(err) = bridge_connection(stream, &target, &session_name) {
+                        if let Err(err) =
+                            bridge_connection(stream, &target, &remote_herdr, &session_name)
+                        {
                             eprintln!("herdr: remote bridge failed: {err}");
                         }
                     }
@@ -165,14 +650,18 @@ impl Drop for SshStdioBridge {
     }
 }
 
-fn bridge_connection(stream: UnixStream, target: &str, session_name: &str) -> io::Result<()> {
+fn bridge_connection(
+    stream: UnixStream,
+    target: &str,
+    remote_herdr: &RemoteHerdr,
+    session_name: &str,
+) -> io::Result<()> {
     let mut command = Command::new("ssh");
-    command.arg("-T").arg(target).arg("herdr");
-    if session_name != crate::session::DEFAULT_SESSION_NAME {
-        command.arg("--session").arg(session_name);
-    }
     command
-        .arg("remote-client-bridge")
+        .arg("-T")
+        .arg(target)
+        .arg(remote_bridge_command(remote_herdr, session_name));
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -231,7 +720,7 @@ fn copy_flush<R: io::Read, W: io::Write>(reader: &mut R, writer: &mut W) -> io::
     }
 }
 
-fn run_client_process(local_socket: &Path) -> io::Result<()> {
+fn run_client_process(local_socket: &Path, reattach_command: &str) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let status = Command::new(exe)
         .arg("client")
@@ -240,6 +729,7 @@ fn run_client_process(local_socket: &Path) -> io::Result<()> {
             local_socket,
         )
         .env("HERDR_RENDER_ENCODING", "terminal-ansi")
+        .env(REATTACH_COMMAND_ENV_VAR, reattach_command)
         .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -292,9 +782,17 @@ mod tests {
             "herdr-bridge-permissions-test-{}.sock",
             std::process::id()
         ));
-        let bridge =
-            SshStdioBridge::start("example".to_string(), socket.clone(), "default".to_string())
-                .expect("start bridge listener");
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        let bridge = SshStdioBridge::start(
+            "example".to_string(),
+            remote_herdr,
+            socket.clone(),
+            "default".to_string(),
+        )
+        .expect("start bridge listener");
 
         let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, BRIDGE_SOCKET_PERMISSION_MODE);
@@ -359,5 +857,86 @@ mod tests {
     #[test]
     fn sanitize_path_component_removes_shell_sensitive_chars() {
         assert_eq!(sanitize_path_component("user@host:22"), "user-host-22");
+    }
+
+    #[test]
+    fn remote_platform_maps_uname_values() {
+        assert_eq!(
+            RemotePlatform::from_uname("Linux", "amd64")
+                .unwrap()
+                .asset_key(),
+            "linux-x86_64"
+        );
+        assert_eq!(
+            RemotePlatform::from_uname("Darwin", "arm64")
+                .unwrap()
+                .asset_key(),
+            "macos-aarch64"
+        );
+        assert!(RemotePlatform::from_uname("FreeBSD", "x86_64").is_none());
+    }
+
+    #[test]
+    fn reattach_command_includes_remote_and_session() {
+        assert_eq!(
+            reattach_command("target/release/herdr", "user@host", "work"),
+            "target/release/herdr --remote user@host --session work"
+        );
+        assert_eq!(
+            reattach_command("herdr", "host name", crate::session::DEFAULT_SESSION_NAME),
+            "herdr --remote 'host name'"
+        );
+    }
+
+    #[test]
+    fn remote_bridge_command_uses_installed_binary() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        assert_eq!(
+            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
+            "exec \"$HOME/.local/bin/herdr\" remote-client-bridge"
+        );
+    }
+
+    #[test]
+    fn install_source_description_uses_override_binary() {
+        let platform = RemotePlatform {
+            os: "linux",
+            arch: "aarch64",
+        };
+        assert_eq!(
+            install_source_description(&platform, Some(Path::new("/tmp/herdr-aarch64"))),
+            "HERDR_REMOTE_BINARY (/tmp/herdr-aarch64)"
+        );
+    }
+
+    #[test]
+    fn resolve_install_source_uses_override_binary_without_temporary_cleanup() {
+        let platform = RemotePlatform {
+            os: "linux",
+            arch: "aarch64",
+        };
+        let source = resolve_install_source(&platform, Some(PathBuf::from("/tmp/herdr-aarch64")))
+            .expect("override source");
+        assert_eq!(source.path, PathBuf::from("/tmp/herdr-aarch64"));
+        assert!(source.temporary_dir.is_none());
+    }
+
+    #[test]
+    fn install_source_cleanup_removes_temporary_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-install-source-cleanup-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).expect("create temp dir");
+        let path = dir.join("herdr.tmp");
+        fs::write(&path, b"test").expect("write temp file");
+
+        InstallSource::temporary(path, dir.clone()).cleanup();
+
+        assert!(!dir.exists());
     }
 }

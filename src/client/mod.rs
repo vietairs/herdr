@@ -86,8 +86,15 @@ impl std::fmt::Display for ClientError {
             ClientError::ServerShutdown { reason } => {
                 match reason.as_deref() {
                     Some("detached") => {
-                        write!(f, "detached from server")?;
-                        write!(f, "\nRun `herdr` to reattach")?;
+                        if let Ok(reattach_command) =
+                            std::env::var(crate::remote::REATTACH_COMMAND_ENV_VAR)
+                        {
+                            write!(f, "detached from remote server")?;
+                            write!(f, "\nRun `{reattach_command}` to reattach")?;
+                        } else {
+                            write!(f, "detached from server")?;
+                            write!(f, "\nRun `herdr` to reattach")?;
+                        }
                     }
                     _ => {
                         write!(f, "server shut down")?;
