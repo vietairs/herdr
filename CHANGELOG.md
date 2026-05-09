@@ -2,8 +2,19 @@
 
 ## Unreleased
 
+### Added
+- Added the `vesper` built-in theme. (#71, thanks @nexxeln)
+- Added `herdr --remote <ssh-target>`, so you can use Herdr as a thin client for remote servers without SSHing in first. Herdr connects over SSH, bootstraps a matching remote `herdr` binary when needed, starts the remote server automatically, and streams an efficient terminal view back to your local terminal.
+
+### Changed
+- Updated the bundled `libghostty-vt` engine and removed the custom Linux C++ runtime link workaround from static builds.
+- CLI workspace, tab, and pane creation now preserve the current focus by default; pass `--focus` to switch to the newly created item.
+
 ### Fixed
+- OSC 8 hyperlinks emitted inside panes now remain clickable after Herdr renders them, including titled markdown-style links.
 - Agent panel scope now defaults to `all` and is saved to config when changed, so choosing `current` or `all` survives session resets and upgrades.
+- Native agent hook state now clears when the detected native agent exits, preventing stale hook-reported status from sticking to a pane.
+- Clicking an in-app agent toast now jumps to the relevant pane and clears the toast after focus.
 
 ## [0.5.5] - 2026-05-06
 
