@@ -788,12 +788,29 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
             break;
         }
 
+        // Check if this agent entry corresponds to the active session
+        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+
         let (icon, icon_style) = agent_icon(detail.state, detail.seen, app.spinner_tick, p);
         let label_color = state_label_color(detail.state, detail.seen, p);
         let label = state_label(detail.state, detail.seen);
 
-        let name_style = Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD);
-        let status_style = Style::default().fg(label_color).add_modifier(Modifier::DIM);
+        let row_style = if is_active {
+            Style::default().bg(p.surface_dim)
+        } else {
+            Style::default()
+        };
+
+        let name_style = if is_active {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+        };
+        let status_style = if is_active {
+            Style::default().fg(label_color)
+        } else {
+            Style::default().fg(label_color).add_modifier(Modifier::DIM)
+        };
         let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
 
         let primary_label =
@@ -805,7 +822,7 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled(primary_label, name_style),
         ]);
         frame.render_widget(
-            Paragraph::new(name_line),
+            Paragraph::new(name_line).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
         );
         row_y += 1;
@@ -819,7 +836,7 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
             status_spans.push(Span::styled(agent_label, agent_style));
         }
         frame.render_widget(
-            Paragraph::new(Line::from(status_spans)),
+            Paragraph::new(Line::from(status_spans)).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
         );
         row_y += 1;
