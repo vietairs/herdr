@@ -1,8 +1,8 @@
 /**
- * `@issue:` GitHub issues and `@pr:` GitHub PRs autocomplete provider.
+ * `@issue` GitHub issues and `@pr` GitHub PRs autocomplete provider.
  *
- * On `@issue:<token>` in the input editor, suggests open issues from the current repo.
- * On `@pr:<token>` in the input editor, suggests open PRs from the current repo.
+ * On `@issue`, `@issue:<token>`, or `@issue <token>` in the input editor, suggests open issues from the current repo.
+ * On `@pr`, `@pr:<token>`, or `@pr <token>` in the input editor, suggests recent PRs from the current repo.
  *
  * Accepting a completion inserts the reference (e.g. `issue owner/repo#123` or `pr owner/repo#45`).
  * A `before_agent_start` nudge tells the agent how to fetch details with `gh`.
@@ -13,10 +13,11 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type {
-  AutocompleteItem,
-  AutocompleteProvider,
-  AutocompleteSuggestions,
+import {
+  fuzzyFilter,
+  type AutocompleteItem,
+  type AutocompleteProvider,
+  type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
 
 // --- Constants ---
@@ -24,11 +25,11 @@ import type {
 const ISSUE_PREFIX = "@issue";
 const PR_PREFIX = "@pr";
 
-/** Match `@issue`, `@issue:`, or `@issue:<token>` at end of text before cursor. */
-const ISSUE_TOKEN_RE = /(?:^|\s)(@issue(?::\s*([^\s@]*))?)$/;
+/** Match `@issue`, `@issue:`, `@issue:<token>`, or `@issue <token>` at end of text before cursor. */
+const ISSUE_TOKEN_RE = /(?:^|\s)(@issue(?:(?::|\s+)\s*([^\s@]*))?)$/;
 
-/** Match `@pr`, `@pr:`, or `@pr:<token>` at end of text before cursor. */
-const PR_TOKEN_RE = /(?:^|\s)(@pr(?::\s*([^\s@]*))?)$/;
+/** Match `@pr`, `@pr:`, `@pr:<token>`, or `@pr <token>` at end of text before cursor. */
+const PR_TOKEN_RE = /(?:^|\s)(@pr(?:(?::|\s+)\s*([^\s@]*))?)$/;
 
 const MAX_SUGGESTIONS = 20;
 
@@ -52,6 +53,7 @@ interface IssueInfo {
 interface PRInfo {
   number: number;
   title: string;
+  state: string;
   author: string;
   headRefName: string;
   updatedAt: string;
@@ -75,7 +77,9 @@ async function readCache(cwd: string): Promise<CachedData> {
     return {
       repo: data.repo ?? null,
       issues: Array.isArray(data.issues) ? data.issues : [],
-      prs: Array.isArray(data.prs) ? data.prs : [],
+      prs: Array.isArray(data.prs)
+        ? data.prs.map((pr) => ({ ...pr, state: pr.state ?? "OPEN" }))
+        : [],
     };
   } catch {
     return { repo: null, issues: [], prs: [] };
@@ -151,7 +155,16 @@ async function fetchPRs(
 ): Promise<PRInfo[]> {
   const result = await exec(
     "gh",
-    ["pr", "list", "--json", "number,title,author,headRefName,updatedAt,isDraft", "--limit", "50", "--state", "open"],
+    [
+      "pr",
+      "list",
+      "--json",
+      "number,title,state,author,headRefName,updatedAt,isDraft",
+      "--limit",
+      "100",
+      "--state",
+      "all",
+    ],
     { cwd },
   );
 
@@ -161,6 +174,7 @@ async function fetchPRs(
     const items = JSON.parse(result.stdout || "[]") as Array<{
       number: number;
       title: string;
+      state: string;
       author: { login: string };
       headRefName: string;
       updatedAt: string;
@@ -170,6 +184,7 @@ async function fetchPRs(
     return items.map((item) => ({
       number: item.number,
       title: item.title,
+      state: item.state ?? "",
       author: item.author?.login ?? "",
       headRefName: item.headRefName,
       updatedAt: item.updatedAt,
@@ -233,6 +248,46 @@ function createPrefixCompletionItem(
   return { value, label, description };
 }
 
+function filterIssues(issues: IssueInfo[], token: string): IssueInfo[] {
+  const query = token.trim();
+  if (!query) return issues.slice(0, MAX_SUGGESTIONS);
+
+  if (/^\d+$/.test(query)) {
+    const numericMatches = issues.filter((issue) =>
+      String(issue.number).startsWith(query),
+    );
+    if (numericMatches.length > 0) {
+      return numericMatches.slice(0, MAX_SUGGESTIONS);
+    }
+  }
+
+  return fuzzyFilter(
+    issues,
+    query,
+    (issue) => `${issue.number} ${issue.title} ${issue.labels} ${issue.author}`,
+  ).slice(0, MAX_SUGGESTIONS);
+}
+
+function filterPRs(prs: PRInfo[], token: string): PRInfo[] {
+  const query = token.trim();
+  if (!query) return prs.slice(0, MAX_SUGGESTIONS);
+
+  if (/^\d+$/.test(query)) {
+    const numericMatches = prs.filter((pr) =>
+      String(pr.number).startsWith(query),
+    );
+    if (numericMatches.length > 0) {
+      return numericMatches.slice(0, MAX_SUGGESTIONS);
+    }
+  }
+
+  return fuzzyFilter(
+    prs,
+    query,
+    (pr) => `${pr.number} ${pr.title} ${pr.headRefName} ${pr.state} ${pr.author}`,
+  ).slice(0, MAX_SUGGESTIONS);
+}
+
 // --- Provider factory ---
 
 export function createGithubAutocompleteProvider(
@@ -292,14 +347,7 @@ export function createGithubAutocompleteProvider(
 
       // --- Issues ---
       if (issueToken !== undefined) {
-        const tokenLower = issueToken.toLowerCase();
-        const filtered = data.issues
-          .filter(
-            (i) =>
-              i.title.toLowerCase().includes(tokenLower) ||
-              String(i.number).includes(tokenLower),
-          )
-          .slice(0, MAX_SUGGESTIONS);
+        const filtered = filterIssues(data.issues, issueToken);
 
         if (filtered.length === 0) return null;
 
@@ -314,22 +362,19 @@ export function createGithubAutocompleteProvider(
 
       // --- PRs ---
       if (prToken !== undefined) {
-        const tokenLower = prToken.toLowerCase();
-        const filtered = data.prs
-          .filter(
-            (p) =>
-              p.title.toLowerCase().includes(tokenLower) ||
-              String(p.number).includes(tokenLower) ||
-              p.headRefName.toLowerCase().includes(tokenLower),
-          )
-          .slice(0, MAX_SUGGESTIONS);
+        const filtered = filterPRs(data.prs, prToken);
 
         if (filtered.length === 0) return null;
 
         const items: AutocompleteItem[] = filtered.map((p) => ({
           value: `pr ${repoPrefix}${p.number}`,
           label: `#${p.number} ${p.title}`,
-          description: [p.headRefName, p.author, p.isDraft ? "draft" : ""]
+          description: [
+            p.state.toLowerCase(),
+            p.headRefName,
+            p.author,
+            p.isDraft ? "draft" : "",
+          ]
             .filter(Boolean)
             .join(" · "),
         }));
@@ -421,7 +466,7 @@ function buildNudge(matches: RefMatch[]): string {
       lines.push(
         `GitHub PRs referenced: ${uniqueRefs.map((r) => `pr ${r}`).join(", ")}.`,
         `To fetch PR details, use: gh pr view <number> --json number,title,body,headRefName,baseRefName,author,reviews,mergeable`,
-        `To list PRs, use: gh pr list --json number,title,author,headRefName,updatedAt,isDraft --state open`,
+        `To list PRs, use: gh pr list --json number,title,state,author,headRefName,updatedAt,isDraft --state all`,
       );
     }
   }
