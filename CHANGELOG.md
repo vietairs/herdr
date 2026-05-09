@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.6] - 2026-05-09
+
 ### Added
 - Added the `vesper` built-in theme. (#71, thanks @nexxeln)
 - Added `herdr --remote <ssh-target>`, so you can use Herdr as a thin client for remote servers without SSHing in first. Herdr connects over SSH, bootstraps a matching remote `herdr` binary when needed, starts the remote server automatically, and streams an efficient terminal view back to your local terminal.
