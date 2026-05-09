@@ -37,9 +37,7 @@ use crate::detect::AgentState;
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::server::client_transport::{self, ClientWriter, ServerEvent};
-use crate::server::protocol::{
-    self, CursorState, FrameData, RenderEncoding, ServerMessage, MAX_FRAME_SIZE,
-};
+use crate::server::protocol::{self, FrameData, RenderEncoding, ServerMessage, MAX_FRAME_SIZE};
 use crate::server::render_stream::ClientRenderState;
 
 // ---------------------------------------------------------------------------
