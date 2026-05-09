@@ -288,8 +288,8 @@ impl App {
 
         use crate::api::schema::{
             ErrorBody, ErrorResponse, IntegrationInstallResult, IntegrationUninstallResult, Method,
-            PaneListParams, PaneReadResult, ReadSource, ResponseResult, SuccessResponse,
-            TabListParams,
+            PaneListParams, PaneReadResult, ReadFormat, ReadSource, ResponseResult,
+            SuccessResponse, TabListParams,
         };
 
         let response = match request.method {
@@ -964,10 +964,17 @@ impl App {
                     .unwrap();
                 };
                 let requested_lines = params.lines.unwrap_or(80).min(1000) as usize;
-                let text = match params.source {
-                    ReadSource::Visible => pane.visible_text(),
-                    ReadSource::Recent => pane.recent_text(requested_lines),
-                    ReadSource::RecentUnwrapped => pane.recent_unwrapped_text(requested_lines),
+                let text = match params.format {
+                    ReadFormat::Text => match params.source {
+                        ReadSource::Visible => pane.visible_text(),
+                        ReadSource::Recent => pane.recent_text(requested_lines),
+                        ReadSource::RecentUnwrapped => pane.recent_unwrapped_text(requested_lines),
+                    },
+                    ReadFormat::Ansi => match params.source {
+                        ReadSource::Visible => pane.visible_ansi(),
+                        ReadSource::Recent => pane.recent_ansi(requested_lines),
+                        ReadSource::RecentUnwrapped => pane.recent_unwrapped_ansi(requested_lines),
+                    },
                 };
                 SuccessResponse {
                     id: request.id,
@@ -977,6 +984,7 @@ impl App {
                             workspace_id,
                             tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
                             source: params.source,
+                            format: params.format,
                             text,
                             revision: 0,
                             truncated: false,

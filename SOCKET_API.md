@@ -165,6 +165,7 @@ for backward compatibility, requests also accept the older positional forms like
   "workspace_id": "w64e95948145ed1",
   "tab_id": "w64e95948145ed1:1",
   "source": "recent",
+  "format": "text",
   "text": "...",
   "revision": 0,
   "truncated": false
@@ -489,21 +490,24 @@ params:
   "pane_id": "1-1",
   "source": "recent",
   "lines": 80,
+  "format": "text",
   "strip_ansi": true
 }
 ```
 
 notes:
 
-- `source` is required and must be `visible` or `recent`
+- `source` is required and must be `visible`, `recent`, or `recent_unwrapped`
 - `lines` is optional
 - current implementation defaults to `80` lines when `lines` is omitted and caps reads at `1000`
-- `strip_ansi` defaults to `true`
+- `format` defaults to `text`; use `ansi` for a rendered VT/ANSI snapshot with styles preserved
+- `strip_ansi` defaults to `true` and is kept for compatibility
 
 `source` meanings:
 
 - `visible` — current viewport
 - `recent` — recent scrollback text
+- `recent_unwrapped` — recent scrollback text with soft wraps joined
 
 example response:
 
@@ -517,6 +521,7 @@ example response:
       "workspace_id": "1",
       "tab_id": "1:1",
       "source": "recent",
+      "format": "text",
       "text": "...",
       "revision": 0,
       "truncated": false
@@ -941,7 +946,7 @@ pane commands:
 ```text
 herdr pane list [--workspace <workspace_id>]
 herdr pane get <pane_id>
-herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--raw]
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]
 herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]
 herdr pane close <pane_id>
 herdr pane send-text <pane_id> <text>
@@ -971,13 +976,14 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 - `tab create` returns `result.tab` and `result.root_pane`
 - `pane split` keeps focus where it is by default; pass `--focus` to switch to the new pane
 - `pane read` prints **text**, not json
+- `pane read --format ansi` and `pane read --ansi` print a rendered ANSI snapshot with colors/styles preserved
 - `pane read --source recent-unwrapped` returns recent terminal text with soft wraps joined back together
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success
 - list/get/create/split/wait commands print json on success
 - `pane run` is a convenience wrapper for `pane.send_input` with the command text followed by a real `Enter` keypress
 - `wait agent-status` is a cli convenience built on top of event subscriptions
 - use it when you want the same `done` / `idle` distinction the UI shows
-- `--raw` disables ansi stripping for `pane read` and `wait output`
+- `--raw` is a legacy alias for ANSI formatted `pane read` output and still disables ansi stripping for `wait output`
 - `wait output --source recent` matches against unwrapped recent terminal text by default, so pane width and soft wrapping do not break matches
 
 ### cli examples

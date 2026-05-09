@@ -133,6 +133,10 @@ impl PaneTerminal {
         self.ghostty.visible_text()
     }
 
+    pub fn visible_ansi(&self) -> String {
+        self.ghostty.visible_ansi()
+    }
+
     pub fn detection_text(&self) -> String {
         self.ghostty.detection_text()
     }
@@ -141,8 +145,16 @@ impl PaneTerminal {
         self.ghostty.recent_text(lines)
     }
 
+    pub fn recent_ansi(&self, lines: usize) -> String {
+        self.ghostty.recent_ansi(lines)
+    }
+
     pub fn recent_unwrapped_text(&self, lines: usize) -> String {
         self.ghostty.recent_unwrapped_text(lines)
+    }
+
+    pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
+        self.ghostty.recent_unwrapped_ansi(lines)
     }
 
     pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
@@ -546,6 +558,14 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
+    pub fn visible_ansi(&self) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| ghostty_visible_ansi(&core).ok())
+            .unwrap_or_default()
+    }
+
     pub fn detection_text(&self) -> String {
         self.core
             .lock()
@@ -562,11 +582,27 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
+    pub fn recent_ansi(&self, lines: usize) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| ghostty_recent_ansi(&core, lines, false).ok())
+            .unwrap_or_default()
+    }
+
     pub fn recent_unwrapped_text(&self, lines: usize) -> String {
         self.core
             .lock()
             .ok()
             .and_then(|core| ghostty_recent_text_unwrapped(&core, lines).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| ghostty_recent_ansi(&core, lines, true).ok())
             .unwrap_or_default()
     }
 
@@ -726,6 +762,19 @@ fn ghostty_visible_text(core: &mut GhosttyPaneCore) -> Result<String, crate::gho
     Ok(lines_to_text(lines))
 }
 
+fn ghostty_visible_ansi(core: &GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
+    let rows = core.terminal.rows()?;
+    let cols = core.terminal.cols()?;
+    if rows == 0 || cols == 0 {
+        return Ok(String::new());
+    }
+    core.terminal.read_ansi_viewport(
+        (0, 0),
+        (cols.saturating_sub(1), u32::from(rows.saturating_sub(1))),
+        false,
+    )
+}
+
 fn ghostty_detection_text(core: &GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
     let lines = core
         .terminal
@@ -764,6 +813,22 @@ fn ghostty_recent_text_unwrapped(
     let end = (total_rows.saturating_sub(1)) as u32;
     core.terminal
         .read_text_screen((0, start), (cols.saturating_sub(1), end), false)
+}
+
+fn ghostty_recent_ansi(
+    core: &GhosttyPaneCore,
+    lines: usize,
+    unwrap: bool,
+) -> Result<String, crate::ghostty::Error> {
+    let total_rows = core.terminal.total_rows()?;
+    let cols = core.terminal.cols()?;
+    if total_rows == 0 || cols == 0 {
+        return Ok(String::new());
+    }
+    let start = total_rows.saturating_sub(lines) as u32;
+    let end = (total_rows.saturating_sub(1)) as u32;
+    core.terminal
+        .read_ansi_screen((0, start), (cols.saturating_sub(1), end), false, unwrap)
 }
 
 fn ghostty_extract_selection(
@@ -1454,6 +1519,32 @@ mod tests {
 
         assert_eq!(pane.recent_text(3), "ABCDE\nFGHIJ\n");
         assert_eq!(pane.recent_unwrapped_text(3), "ABCDEFGHIJ");
+    }
+
+    #[test]
+    fn visible_ansi_preserves_cell_style_sequences() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(20, 3, 100).unwrap();
+        terminal.write(b"\x1b[31;1mred\x1b[0m plain");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let ansi = pane.visible_ansi();
+        assert!(ansi.contains("red"));
+        assert!(ansi.contains("plain"));
+        assert!(ansi.contains("\x1b["));
+    }
+
+    #[test]
+    fn recent_ansi_can_read_styled_scrollback() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(20, 3, 100).unwrap();
+        terminal.write(b"\x1b[34mblue\x1b[0m\r\nline2\r\nline3\r\nline4");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let ansi = pane.recent_ansi(4);
+        assert!(ansi.contains("blue"));
+        assert!(ansi.contains("line4"));
+        assert!(ansi.contains("\x1b["));
     }
 
     #[test]

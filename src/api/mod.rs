@@ -415,6 +415,7 @@ fn wait_for_output(
                 pane_id: params.pane_id.clone(),
                 source: output_match_read_source(&params.source),
                 lines: params.lines,
+                format: crate::api::schema::ReadFormat::Text,
                 strip_ansi: params.strip_ansi,
             }),
         };
@@ -894,6 +895,7 @@ fn pane_read(
                 pane_id: pane_id.to_string(),
                 source,
                 lines,
+                format: crate::api::schema::ReadFormat::Text,
                 strip_ansi,
             }),
         },
@@ -1203,6 +1205,7 @@ mod tests {
                                     workspace_id: "ws_1".into(),
                                     tab_id: "tab_1".into(),
                                     source: crate::api::schema::ReadSource::RecentUnwrapped,
+                                    format: crate::api::schema::ReadFormat::Text,
                                     text: String::new(),
                                     revision: 0,
                                     truncated: false,

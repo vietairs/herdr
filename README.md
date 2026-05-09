@@ -136,6 +136,9 @@ herdr wait agent-status 1-1 --status done
 
 # read output
 herdr pane read 1-2 --source recent --lines 50
+
+# read a rendered ANSI snapshot for TUI feedback loops
+herdr pane read 1-2 --source visible --ansi
 ```
 
 full reference: [`SOCKET_API.md`](./SOCKET_API.md) and [`SKILL.md`](./SKILL.md).

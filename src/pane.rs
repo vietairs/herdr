@@ -761,12 +761,24 @@ impl PaneRuntime {
         self.terminal.visible_text()
     }
 
+    pub fn visible_ansi(&self) -> String {
+        self.terminal.visible_ansi()
+    }
+
     pub fn recent_text(&self, lines: usize) -> String {
         self.terminal.recent_text(lines)
     }
 
+    pub fn recent_ansi(&self, lines: usize) -> String {
+        self.terminal.recent_ansi(lines)
+    }
+
     pub fn recent_unwrapped_text(&self, lines: usize) -> String {
         self.terminal.recent_unwrapped_text(lines)
+    }
+
+    pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
+        self.terminal.recent_unwrapped_ansi(lines)
     }
 
     pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {

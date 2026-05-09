@@ -187,6 +187,8 @@ pub struct PaneReadParams {
     pub source: ReadSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<u32>,
+    #[serde(default)]
+    pub format: ReadFormat,
     #[serde(default = "default_true")]
     pub strip_ansi: bool,
 }
@@ -215,12 +217,20 @@ pub struct PaneReleaseAgentParams {
     pub agent: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadSource {
     Visible,
     Recent,
     RecentUnwrapped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadFormat {
+    #[default]
+    Text,
+    Ansi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -528,6 +538,7 @@ pub struct PaneReadResult {
     pub workspace_id: String,
     pub tab_id: String,
     pub source: ReadSource,
+    pub format: ReadFormat,
     pub text: String,
     pub revision: u64,
     pub truncated: bool,
@@ -686,6 +697,7 @@ mod tests {
                 pane_id: "p_1".into(),
                 source: ReadSource::Recent,
                 lines: Some(80),
+                format: ReadFormat::Text,
                 strip_ansi: true,
             }),
         };
@@ -846,6 +858,26 @@ mod tests {
     }
 
     #[test]
+    fn pane_read_defaults_to_text_format() {
+        let json = r#"
+        {
+            "id": "req_1",
+            "method": "pane.read",
+            "params": {
+                "pane_id": "p_1",
+                "source": "visible"
+            }
+        }
+        "#;
+
+        let request: Request = serde_json::from_str(json).unwrap();
+        let Method::PaneRead(params) = request.method else {
+            panic!("wrong method parsed");
+        };
+        assert_eq!(params.format, ReadFormat::Text);
+    }
+
+    #[test]
     fn event_envelope_round_trips() {
         let event = EventEnvelope {
             event: EventKind::PaneOutputChanged,
@@ -922,6 +954,7 @@ mod tests {
                     workspace_id: "w_1".into(),
                     tab_id: "t_1_1".into(),
                     source: ReadSource::Recent,
+                    format: ReadFormat::Text,
                     text: "auth: received\n".into(),
                     revision: 0,
                     truncated: false,

@@ -8,8 +8,8 @@ use crate::api;
 use crate::api::schema::{
     AgentStatus, EmptyParams, IntegrationTarget, Method, OutputMatch, PaneListParams,
     PaneReadParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams,
-    PaneTarget, PaneWaitForOutputParams, PingParams, ReadSource, Request, SplitDirection,
-    Subscription, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
+    PaneTarget, PaneWaitForOutputParams, PingParams, ReadFormat, ReadSource, Request,
+    SplitDirection, Subscription, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
     WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
 };
 
@@ -789,13 +789,14 @@ fn pane_get(args: &[String]) -> std::io::Result<i32> {
 
 fn pane_read(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N]");
+        eprintln!("usage: herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
         return Ok(2);
     };
 
     let pane_id = normalize_pane_id(raw_pane_id);
     let mut source = ReadSource::Recent;
     let mut lines = None;
+    let mut format = ReadFormat::Text;
     let mut strip_ansi = true;
 
     let mut index = 1;
@@ -817,7 +818,20 @@ fn pane_read(args: &[String]) -> std::io::Result<i32> {
                 lines = Some(parse_u32_flag("--lines", value)?);
                 index += 2;
             }
+            "--format" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --format");
+                    return Ok(2);
+                };
+                format = parse_read_format(value)?;
+                index += 2;
+            }
+            "--ansi" => {
+                format = ReadFormat::Ansi;
+                index += 1;
+            }
             "--raw" => {
+                format = ReadFormat::Ansi;
                 strip_ansi = false;
                 index += 1;
             }
@@ -834,6 +848,7 @@ fn pane_read(args: &[String]) -> std::io::Result<i32> {
             pane_id,
             source,
             lines,
+            format,
             strip_ansi,
         }),
     })?;
@@ -1308,6 +1323,16 @@ fn parse_read_source(value: &str) -> std::io::Result<ReadSource> {
     }
 }
 
+fn parse_read_format(value: &str) -> std::io::Result<ReadFormat> {
+    match value {
+        "text" => Ok(ReadFormat::Text),
+        "ansi" => Ok(ReadFormat::Ansi),
+        _ => Err(std::io::Error::other(format!(
+            "invalid read format: {value}"
+        ))),
+    }
+}
+
 fn parse_agent_status(value: &str) -> std::io::Result<AgentStatus> {
     match value {
         "idle" => Ok(AgentStatus::Idle),
@@ -1438,7 +1463,7 @@ fn print_pane_help() {
     eprintln!("herdr pane commands:");
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane get <pane_id>");
-    eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--raw]");
+    eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!(
         "  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]"
     );

@@ -23,6 +23,21 @@ pub use bindings as ffi;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error(ffi::GhosttyResult);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormatterFormat {
+    Plain,
+    Vt,
+}
+
+impl FormatterFormat {
+    fn as_raw(self) -> ffi::GhosttyFormatterFormat {
+        match self {
+            Self::Plain => ffi::GhosttyFormatterFormat_GHOSTTY_FORMATTER_FORMAT_PLAIN,
+            Self::Vt => ffi::GhosttyFormatterFormat_GHOSTTY_FORMATTER_FORMAT_VT,
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ghostty error {}", self.0)
@@ -427,10 +442,29 @@ impl Terminal {
         end: (u16, u32),
         rectangle: bool,
     ) -> Result<String, Error> {
-        self.read_text_selection(
+        self.read_formatted_selection(
             ghostty_viewport_point(start.0, start.1),
             ghostty_viewport_point(end.0, end.1),
             rectangle,
+            FormatterFormat::Plain,
+            true,
+            true,
+        )
+    }
+
+    pub fn read_ansi_viewport(
+        &self,
+        start: (u16, u32),
+        end: (u16, u32),
+        rectangle: bool,
+    ) -> Result<String, Error> {
+        self.read_formatted_selection(
+            ghostty_viewport_point(start.0, start.1),
+            ghostty_viewport_point(end.0, end.1),
+            rectangle,
+            FormatterFormat::Vt,
+            false,
+            true,
         )
     }
 
@@ -440,18 +474,41 @@ impl Terminal {
         end: (u16, u32),
         rectangle: bool,
     ) -> Result<String, Error> {
-        self.read_text_selection(
+        self.read_formatted_selection(
             ghostty_screen_point(start.0, start.1),
             ghostty_screen_point(end.0, end.1),
             rectangle,
+            FormatterFormat::Plain,
+            true,
+            true,
         )
     }
 
-    fn read_text_selection(
+    pub fn read_ansi_screen(
+        &self,
+        start: (u16, u32),
+        end: (u16, u32),
+        rectangle: bool,
+        unwrap: bool,
+    ) -> Result<String, Error> {
+        self.read_formatted_selection(
+            ghostty_screen_point(start.0, start.1),
+            ghostty_screen_point(end.0, end.1),
+            rectangle,
+            FormatterFormat::Vt,
+            unwrap,
+            true,
+        )
+    }
+
+    fn read_formatted_selection(
         &self,
         start: ffi::GhosttyPoint,
         end: ffi::GhosttyPoint,
         rectangle: bool,
+        format: FormatterFormat,
+        unwrap: bool,
+        trim: bool,
     ) -> Result<String, Error> {
         let mut start_ref = ffi::GhosttyGridRef {
             size: mem::size_of::<ffi::GhosttyGridRef>(),
@@ -475,9 +532,9 @@ impl Terminal {
         let mut formatter: ffi::GhosttyFormatter_ptr = ptr::null_mut();
         let options = ffi::GhosttyFormatterTerminalOptions {
             size: mem::size_of::<ffi::GhosttyFormatterTerminalOptions>(),
-            emit: ffi::GhosttyFormatterFormat_GHOSTTY_FORMATTER_FORMAT_PLAIN,
-            unwrap: true,
-            trim: true,
+            emit: format.as_raw(),
+            unwrap,
+            trim,
             extra: ffi::GhosttyFormatterTerminalExtra {
                 size: mem::size_of::<ffi::GhosttyFormatterTerminalExtra>(),
                 screen: ffi::GhosttyFormatterScreenExtra {
