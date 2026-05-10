@@ -179,8 +179,16 @@ impl From<ffi::GhosttyColorRgb> for RgbColor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellColor {
+    Palette(u8),
+    Rgb(RgbColor),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CellStyle {
+    pub fg_color: Option<CellColor>,
+    pub bg_color: Option<CellColor>,
     pub bold: bool,
     pub italic: bool,
     pub faint: bool,
@@ -195,6 +203,8 @@ pub struct CellStyle {
 impl From<ffi::GhosttyStyle> for CellStyle {
     fn from(value: ffi::GhosttyStyle) -> Self {
         Self {
+            fg_color: cell_color_from_style_color(value.fg_color),
+            bg_color: cell_color_from_style_color(value.bg_color),
             bold: value.bold,
             italic: value.italic,
             faint: value.faint,
@@ -205,6 +215,20 @@ impl From<ffi::GhosttyStyle> for CellStyle {
             overline: value.overline,
             underlined: value.underline != 0,
         }
+    }
+}
+
+fn cell_color_from_style_color(color: ffi::GhosttyStyleColor) -> Option<CellColor> {
+    match color.tag {
+        ffi::GhosttyStyleColorTag_GHOSTTY_STYLE_COLOR_PALETTE => {
+            // SAFETY: Ghostty's tagged union stores `palette` when the tag is PALETTE.
+            Some(CellColor::Palette(unsafe { color.value.palette }))
+        }
+        ffi::GhosttyStyleColorTag_GHOSTTY_STYLE_COLOR_RGB => {
+            // SAFETY: Ghostty's tagged union stores `rgb` when the tag is RGB.
+            Some(CellColor::Rgb(unsafe { color.value.rgb }.into()))
+        }
+        _ => None,
     }
 }
 
@@ -1196,6 +1220,47 @@ impl<'a> RowCellIter<'a> {
             .into_result()?;
         }
         Ok(style.into())
+    }
+
+    pub fn content_bg_color(&self) -> Result<Option<CellColor>, Error> {
+        let raw = self.raw_cell()?;
+        let mut tag = ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_CODEPOINT;
+        unsafe {
+            ffi::ghostty_cell_get(
+                raw,
+                ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CONTENT_TAG,
+                (&mut tag as *mut ffi::GhosttyCellContentTag).cast(),
+            )
+            .into_result()?;
+        }
+
+        match tag {
+            ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE => {
+                let mut index = 0u8;
+                unsafe {
+                    ffi::ghostty_cell_get(
+                        raw,
+                        ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_PALETTE,
+                        (&mut index as *mut u8).cast(),
+                    )
+                    .into_result()?;
+                }
+                Ok(Some(CellColor::Palette(index)))
+            }
+            ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_RGB => {
+                let mut color = ffi::GhosttyColorRgb::default();
+                unsafe {
+                    ffi::ghostty_cell_get(
+                        raw,
+                        ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_RGB,
+                        (&mut color as *mut ffi::GhosttyColorRgb).cast(),
+                    )
+                    .into_result()?;
+                }
+                Ok(Some(CellColor::Rgb(color.into())))
+            }
+            _ => Ok(None),
+        }
     }
 
     pub fn fg_color(&self) -> Result<Option<RgbColor>, Error> {

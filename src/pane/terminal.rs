@@ -987,17 +987,18 @@ fn ghostty_cell_style(
     resolved_bg: Option<Color>,
 ) -> Style {
     let style_data = cells.style().unwrap_or_default();
-    let mut fg = cells
-        .fg_color()
-        .ok()
-        .flatten()
-        .map(ghostty_color)
+    let mut fg = style_data
+        .fg_color
+        .map(ghostty_cell_color)
+        .or_else(|| cells.fg_color().ok().flatten().map(ghostty_color))
         .or(default_fg);
     let mut bg = cells
-        .bg_color()
+        .content_bg_color()
         .ok()
         .flatten()
-        .map(ghostty_color)
+        .or(style_data.bg_color)
+        .map(ghostty_cell_color)
+        .or_else(|| cells.bg_color().ok().flatten().map(ghostty_color))
         .or(default_bg);
     if style_data.invisible {
         fg = bg.or(default_bg);
@@ -1070,6 +1071,13 @@ fn terminal_theme_color(color: crate::ghostty::RgbColor) -> crate::terminal_them
         r: color.r,
         g: color.g,
         b: color.b,
+    }
+}
+
+fn ghostty_cell_color(color: crate::ghostty::CellColor) -> Color {
+    match color {
+        crate::ghostty::CellColor::Palette(index) => Color::Indexed(index),
+        crate::ghostty::CellColor::Rgb(color) => ghostty_color(color),
     }
 }
 
@@ -1641,6 +1649,81 @@ mod tests {
         assert_eq!(buffer[(0, 0)].style().bg, expected_bg);
         assert_eq!(buffer[(2, 0)].symbol(), " ");
         assert_eq!(buffer[(2, 0)].style().bg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn render_preserves_palette_colors_instead_of_flattening_to_rgb() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.terminal.write(
+                b"\x1b[31mR\x1b[0m \x1b[38;5;171mI\x1b[0m \x1b[48;5;4mB\x1b[0m \x1b[38;2;1;2;3mT",
+            );
+        }
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "R");
+        assert_eq!(buffer[(0, 0)].style().fg, Some(Color::Indexed(1)));
+        assert_eq!(buffer[(2, 0)].symbol(), "I");
+        assert_eq!(buffer[(2, 0)].style().fg, Some(Color::Indexed(171)));
+        assert_eq!(buffer[(4, 0)].symbol(), "B");
+        assert_eq!(buffer[(4, 0)].style().bg, Some(Color::Indexed(4)));
+        assert_eq!(buffer[(6, 0)].symbol(), "T");
+        assert_eq!(buffer[(6, 0)].style().fg, Some(Color::Rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn render_preserves_palette_background_fill_cells() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.terminal.write(b"\x1b[48;5;4m\x1b[K");
+        }
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        for x in 0..20 {
+            assert_eq!(buffer[(x, 0)].symbol(), " ");
+            assert_eq!(buffer[(x, 0)].style().bg, Some(Color::Indexed(4)));
+        }
+    }
+
+    #[test]
+    fn render_preserves_rgb_background_fill_cells() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.terminal.write(b"\x1b[48;2;17;34;51m\x1b[K");
+        }
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        for x in 0..20 {
+            assert_eq!(buffer[(x, 0)].symbol(), " ");
+            assert_eq!(buffer[(x, 0)].style().bg, Some(Color::Rgb(17, 34, 51)));
+        }
     }
 
     #[test]
