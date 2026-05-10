@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+- Added ANSI-formatted pane reads to the CLI and socket API with `herdr pane read --format ansi` / `--ansi`, preserving colors and styles for visible and recent pane output.
+
+### Changed
+- The agents panel now highlights the currently focused agent entry, matching the active workspace styling. (#84, thanks @soomtong)
+
+### Fixed
+- Git branch and ahead/behind refreshes now run off the main loop, preventing slow Git status checks from freezing the UI.
+- Update and startup flows now detect incompatible running servers earlier and give clear stop/restart guidance instead of trying to attach with a mismatched client/server protocol.
+- `herdr update` now downloads and prepares the new binary before stopping a running server, reducing the chance of interrupting an active session when download or install preparation fails.
+
 ## [0.5.6] - 2026-05-09
 
 ### Added
