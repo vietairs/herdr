@@ -11,7 +11,7 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -169,8 +169,21 @@ fn check_latest() -> Result<Option<ReleaseInfo>, String> {
 // Download + install
 // ---------------------------------------------------------------------------
 
-/// Download and install a release. Returns the installed version.
-fn download_and_install(release: &ReleaseInfo) -> Result<(), String> {
+struct DownloadedUpdate {
+    current_exe: PathBuf,
+    tmp_path: Option<PathBuf>,
+}
+
+impl Drop for DownloadedUpdate {
+    fn drop(&mut self) {
+        if let Some(tmp_path) = self.tmp_path.take() {
+            let _ = fs::remove_file(tmp_path);
+        }
+    }
+}
+
+/// Download a release to a prepared executable temp file without touching the running server.
+fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
     let current_exe = env::current_exe().map_err(|e| format!("can't find current binary: {e}"))?;
 
     let parent = current_exe.parent().ok_or("can't find binary directory")?;
@@ -213,10 +226,22 @@ fn download_and_install(release: &ReleaseInfo) -> Result<(), String> {
         }
     }
 
+    Ok(DownloadedUpdate {
+        current_exe,
+        tmp_path: Some(tmp_path),
+    })
+}
+
+fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String> {
+    let tmp_path = update
+        .tmp_path
+        .take()
+        .ok_or("downloaded update temp file is missing")?;
+
     // Atomic replace — rename over the current binary.
     // On Linux, the running process keeps its fd to the old inode.
     // Next launch picks up the new file.
-    if let Err(e) = fs::rename(&tmp_path, &current_exe) {
+    if let Err(e) = fs::rename(&tmp_path, &update.current_exe) {
         let _ = fs::remove_file(&tmp_path);
         return Err(format!("failed to replace binary: {e}"));
     }
@@ -260,97 +285,9 @@ fn client_protocol_server_is_running() -> bool {
     client_protocol_server_is_running_at(&crate::server::headless::client_socket_path())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RunningServerInfo {
-    version: Option<String>,
-    protocol: Option<u32>,
-}
-
-fn read_running_server_info_at(
-    socket_path: &Path,
-    timeout: Duration,
-) -> Result<Option<RunningServerInfo>, String> {
-    use crate::api::schema::{Method, PingParams, Request};
-
-    if !socket_path.exists() {
-        return Ok(None);
-    }
-
-    let mut stream = match UnixStream::connect(socket_path) {
-        Ok(stream) => stream,
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::ConnectionRefused
-                    | io::ErrorKind::NotFound
-                    | io::ErrorKind::TimedOut
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(err) => {
-            return Err(format!(
-                "failed to connect to running server on {}: {err}",
-                socket_path.display()
-            ));
-        }
-    };
-
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|e| format!("failed to set server status write timeout: {e}"))?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|e| format!("failed to set server status read timeout: {e}"))?;
-
-    let request = Request {
-        id: "update:server:status".into(),
-        method: Method::Ping(PingParams::default()),
-    };
-    stream
-        .write_all(
-            serde_json::to_string(&request)
-                .map_err(|e| e.to_string())?
-                .as_bytes(),
-        )
-        .map_err(|e| format!("failed to send server status request: {e}"))?;
-    stream
-        .write_all(b"\n")
-        .map_err(|e| format!("failed to finish server status request: {e}"))?;
-    stream
-        .flush()
-        .map_err(|e| format!("failed to flush server status request: {e}"))?;
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let read = reader
-        .read_line(&mut line)
-        .map_err(|e| format!("failed to read server status response: {e}"))?;
-    if read == 0 || line.trim().is_empty() {
-        return Err("empty server status response".into());
-    }
-
-    let response: serde_json::Value =
-        serde_json::from_str(&line).map_err(|e| format!("invalid server status response: {e}"))?;
-    if let Some(error) = response.get("error") {
-        return Err(format!("server status request failed: {error}"));
-    }
-
-    let result = &response["result"];
-    Ok(Some(RunningServerInfo {
-        version: result
-            .get("version")
-            .and_then(|value| value.as_str())
-            .map(str::to_owned),
-        protocol: result
-            .get("protocol")
-            .and_then(|value| value.as_u64())
-            .and_then(|value| u32::try_from(value).ok()),
-    }))
-}
-
-fn read_running_server_info() -> Result<Option<RunningServerInfo>, String> {
-    read_running_server_info_at(&crate::api::socket_path(), SERVER_STOP_RESPONSE_TIMEOUT)
+fn read_running_server_info() -> Result<Option<crate::api::RuntimeStatus>, String> {
+    crate::api::read_runtime_status_at(&crate::api::socket_path(), SERVER_STOP_RESPONSE_TIMEOUT)
+        .map_err(|e| format!("failed to read running server status: {e}"))
 }
 
 fn protocol_label(protocol: Option<u32>) -> String {
@@ -363,7 +300,7 @@ fn version_label(version: Option<&str>) -> &str {
     version.unwrap_or("unknown")
 }
 
-fn update_requires_server_stop(server: &RunningServerInfo, release: &ReleaseInfo) -> bool {
+fn update_requires_server_stop(server: &crate::api::RuntimeStatus, release: &ReleaseInfo) -> bool {
     match (server.protocol, release.target_protocol) {
         (Some(server_protocol), Some(target_protocol)) => server_protocol != target_protocol,
         _ => true,
@@ -380,7 +317,7 @@ fn parse_stop_server_before_update_response(input: &str) -> Option<bool> {
 }
 
 fn prompt_to_stop_server_before_update(
-    server: &RunningServerInfo,
+    server: &crate::api::RuntimeStatus,
     release: &ReleaseInfo,
     requires_stop: bool,
 ) -> Result<bool, String> {
@@ -447,7 +384,15 @@ fn prompt_to_stop_server_before_update(
     }
 }
 
-fn preflight_running_server_for_update(release: &ReleaseInfo) -> Result<bool, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunningServerUpdatePlan {
+    server: crate::api::RuntimeStatus,
+    requires_stop: bool,
+}
+
+fn plan_running_server_update(
+    release: &ReleaseInfo,
+) -> Result<Option<RunningServerUpdatePlan>, String> {
     let Some(server) = read_running_server_info()? else {
         if client_protocol_server_is_running() {
             return Err(
@@ -455,13 +400,28 @@ fn preflight_running_server_for_update(release: &ReleaseInfo) -> Result<bool, St
                     .to_string(),
             );
         }
-        return Ok(false);
+        return Ok(None);
     };
 
     let requires_stop = update_requires_server_stop(&server, release);
-    let stop_server = prompt_to_stop_server_before_update(&server, release, requires_stop)?;
+    Ok(Some(RunningServerUpdatePlan {
+        server,
+        requires_stop,
+    }))
+}
+
+fn stop_running_server_for_update(
+    plan: Option<&RunningServerUpdatePlan>,
+    release: &ReleaseInfo,
+) -> Result<bool, String> {
+    let Some(plan) = plan else {
+        return Ok(false);
+    };
+
+    let stop_server =
+        prompt_to_stop_server_before_update(&plan.server, release, plan.requires_stop)?;
     if !stop_server {
-        if requires_stop {
+        if plan.requires_stop {
             return Err(
                 "update cancelled; stop the running herdr server with `herdr server stop`, then run `herdr update` again"
                     .to_string(),
@@ -594,7 +554,7 @@ pub fn self_update() -> Result<Version, String> {
         }
     };
 
-    let stopped_server = preflight_running_server_for_update(&release)?;
+    let running_server_plan = plan_running_server_update(&release)?;
 
     eprintln!("downloading v{}...", release.version);
     if let Err(e) =
@@ -602,7 +562,9 @@ pub fn self_update() -> Result<Version, String> {
     {
         tracing::warn!("failed to save pending release notes: {e}");
     }
-    download_and_install(&release)?;
+    let downloaded_update = download_update(&release)?;
+    let stopped_server = stop_running_server_for_update(running_server_plan.as_ref(), &release)?;
+    install_downloaded_update(downloaded_update)?;
     eprintln!("updated to v{}", release.version);
 
     if stopped_server {
@@ -813,7 +775,7 @@ mod tests {
 
     #[test]
     fn update_requires_server_stop_when_target_protocol_differs_or_unknown() {
-        let server = RunningServerInfo {
+        let server = crate::api::RuntimeStatus {
             version: Some("0.5.5".to_string()),
             protocol: Some(2),
         };

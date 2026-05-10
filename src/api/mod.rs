@@ -1,7 +1,7 @@
 pub mod schema;
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,6 +96,76 @@ impl EventHub {
 
 pub fn socket_path() -> PathBuf {
     crate::session::active_api_socket_path()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStatus {
+    pub version: Option<String>,
+    pub protocol: Option<u32>,
+}
+
+pub fn read_runtime_status_at(
+    socket_path: &Path,
+    timeout: Duration,
+) -> io::Result<Option<RuntimeStatus>> {
+    if !socket_path.exists() {
+        return Ok(None);
+    }
+
+    let mut stream = match UnixStream::connect(socket_path) {
+        Ok(stream) => stream,
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::NotFound
+                    | io::ErrorKind::TimedOut
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
+    };
+
+    stream.set_write_timeout(Some(timeout))?;
+    stream.set_read_timeout(Some(timeout))?;
+
+    let request = Request {
+        id: "runtime:status".into(),
+        method: Method::Ping(crate::api::schema::PingParams::default()),
+    };
+    stream.write_all(serde_json::to_string(&request)?.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    let read = reader.read_line(&mut line)?;
+    if read == 0 || line.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "empty server status response",
+        ));
+    }
+
+    let response: serde_json::Value = serde_json::from_str(&line).map_err(io::Error::other)?;
+    if response.get("error").is_some() {
+        return Err(io::Error::other(format!(
+            "server status request failed: {response}"
+        )));
+    }
+
+    let result = &response["result"];
+    Ok(Some(RuntimeStatus {
+        version: result
+            .get("version")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        protocol: result
+            .get("protocol")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok()),
+    }))
 }
 
 pub struct ServerHandle {
