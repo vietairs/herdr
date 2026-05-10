@@ -7,7 +7,8 @@
  * Accepting a completion inserts the reference (e.g. `issue owner/repo#123` or `pr owner/repo#45`).
  * A `before_agent_start` nudge tells the agent how to fetch details with `gh`.
  *
- * Issues and PRs are fetched once on session start and cached in memory.
+ * Issues and PRs are served from cache immediately, refreshed in the background,
+ * and exact numeric misses are fetched on demand.
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -32,6 +33,8 @@ const ISSUE_TOKEN_RE = /(?:^|\s)(@issue(?:(?::|\s+)\s*([^\s@]*))?)$/;
 const PR_TOKEN_RE = /(?:^|\s)(@pr(?:(?::|\s+)\s*([^\s@]*))?)$/;
 
 const MAX_SUGGESTIONS = 20;
+const GH_TIMEOUT_MS = 5_000;
+const CACHE_REFRESH_INTERVAL_MS = 30_000;
 
 // --- Types ---
 
@@ -64,6 +67,7 @@ interface CachedData {
   repo: RepoInfo | null;
   issues: IssueInfo[];
   prs: PRInfo[];
+  fetchedAt?: string;
 }
 
 function getCachePath(cwd: string): string {
@@ -80,6 +84,7 @@ async function readCache(cwd: string): Promise<CachedData> {
       prs: Array.isArray(data.prs)
         ? data.prs.map((pr) => ({ ...pr, state: pr.state ?? "OPEN" }))
         : [],
+      fetchedAt: typeof data.fetchedAt === "string" ? data.fetchedAt : undefined,
     };
   } catch {
     return { repo: null, issues: [], prs: [] };
@@ -92,13 +97,67 @@ async function writeCache(cwd: string, data: CachedData): Promise<void> {
   await writeFile(cachePath, JSON.stringify(data, null, 2), "utf8");
 }
 
+function replaceData(target: CachedData, source: CachedData): void {
+  target.repo = source.repo;
+  target.issues = source.issues;
+  target.prs = source.prs;
+  target.fetchedAt = source.fetchedAt;
+}
+
+function cacheTimestamp(data: CachedData): number {
+  const parsed = data.fetchedAt ? Date.parse(data.fetchedAt) : 0;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function replaceDataIfNewer(target: CachedData, source: CachedData): void {
+  if (cacheTimestamp(source) >= cacheTimestamp(target)) {
+    replaceData(target, source);
+  }
+}
+
+function upsertIssue(data: CachedData, issue: IssueInfo): void {
+  data.issues = [issue, ...data.issues.filter((item) => item.number !== issue.number)];
+}
+
+function upsertPR(data: CachedData, pr: PRInfo): void {
+  data.prs = [pr, ...data.prs.filter((item) => item.number !== pr.number)];
+}
+
+function shouldRefresh(data: CachedData): boolean {
+  const fetchedAt = data.fetchedAt ? Date.parse(data.fetchedAt) : 0;
+  return !Number.isFinite(fetchedAt) || Date.now() - fetchedAt > CACHE_REFRESH_INTERVAL_MS;
+}
+
 // --- Shell helpers (use pi.exec) ---
+
+function repoInfoFromRemoteUrl(remoteUrl: string): RepoInfo | null {
+  const match = remoteUrl.trim().match(
+    /(?:github\.com[:/])([^/]+)\/([^/\s]+?)(?:\.git)?$/,
+  );
+  const owner = match?.[1] ?? "";
+  const repo = match?.[2] ?? "";
+  if (!owner || !repo) return null;
+  return { owner, repo, fullName: `${owner}/${repo}` };
+}
 
 async function fetchRepoName(
   exec: ExtensionAPI["exec"],
   cwd: string,
 ): Promise<RepoInfo | null> {
-  const result = await exec("gh", ["repo", "view", "--json", "owner,name"], { cwd });
+  const remote = await exec("git", ["remote", "get-url", "origin"], {
+    cwd,
+    timeout: 1_000,
+  });
+
+  if (remote.code === 0 && remote.stdout.trim()) {
+    const repo = repoInfoFromRemoteUrl(remote.stdout);
+    if (repo) return repo;
+  }
+
+  const result = await exec("gh", ["repo", "view", "--json", "owner,name"], {
+    cwd,
+    timeout: GH_TIMEOUT_MS,
+  });
 
   if (result.code !== 0 || !result.stdout.trim()) return null;
 
@@ -119,14 +178,14 @@ async function fetchRepoName(
 async function fetchIssues(
   exec: ExtensionAPI["exec"],
   cwd: string,
-): Promise<IssueInfo[]> {
+): Promise<IssueInfo[] | null> {
   const result = await exec(
     "gh",
     ["issue", "list", "--json", "number,title,labels,author,updatedAt", "--limit", "50", "--state", "open"],
-    { cwd },
+    { cwd, timeout: GH_TIMEOUT_MS },
   );
 
-  if (result.code !== 0 || !result.stdout.trim()) return [];
+  if (result.code !== 0 || !result.stdout.trim()) return null;
 
   try {
     const items = JSON.parse(result.stdout) as Array<{
@@ -145,14 +204,54 @@ async function fetchIssues(
       updatedAt: item.updatedAt,
     }));
   } catch {
-    return [];
+    return null;
+  }
+}
+
+async function fetchIssueByNumber(
+  exec: ExtensionAPI["exec"],
+  cwd: string,
+  number: number,
+): Promise<IssueInfo | null> {
+  const result = await exec(
+    "gh",
+    [
+      "issue",
+      "view",
+      String(number),
+      "--json",
+      "number,title,labels,author,updatedAt",
+    ],
+    { cwd, timeout: GH_TIMEOUT_MS },
+  );
+
+  if (result.code !== 0 || !result.stdout.trim()) return null;
+
+  try {
+    const item = JSON.parse(result.stdout) as {
+      number: number;
+      title: string;
+      labels: Array<{ name: string }>;
+      author: { login: string };
+      updatedAt: string;
+    };
+
+    return {
+      number: item.number,
+      title: item.title,
+      labels: item.labels.map((l) => l.name).join(", "),
+      author: item.author?.login ?? "",
+      updatedAt: item.updatedAt,
+    };
+  } catch {
+    return null;
   }
 }
 
 async function fetchPRs(
   exec: ExtensionAPI["exec"],
   cwd: string,
-): Promise<PRInfo[]> {
+): Promise<PRInfo[] | null> {
   const result = await exec(
     "gh",
     [
@@ -165,10 +264,10 @@ async function fetchPRs(
       "--state",
       "all",
     ],
-    { cwd },
+    { cwd, timeout: GH_TIMEOUT_MS },
   );
 
-  if (result.code !== 0 || !result.stdout.trim()) return [];
+  if (result.code !== 0 || !result.stdout.trim()) return null;
 
   try {
     const items = JSON.parse(result.stdout || "[]") as Array<{
@@ -191,21 +290,87 @@ async function fetchPRs(
       isDraft: item.isDraft,
     }));
   } catch {
-    return [];
+    return null;
+  }
+}
+
+async function fetchPRByNumber(
+  exec: ExtensionAPI["exec"],
+  cwd: string,
+  number: number,
+): Promise<PRInfo | null> {
+  const result = await exec(
+    "gh",
+    [
+      "pr",
+      "view",
+      String(number),
+      "--json",
+      "number,title,state,author,headRefName,updatedAt,isDraft",
+    ],
+    { cwd, timeout: GH_TIMEOUT_MS },
+  );
+
+  if (result.code !== 0 || !result.stdout.trim()) return null;
+
+  try {
+    const item = JSON.parse(result.stdout) as {
+      number: number;
+      title: string;
+      state: string;
+      author: { login: string };
+      headRefName: string;
+      updatedAt: string;
+      isDraft: boolean;
+    };
+
+    return {
+      number: item.number,
+      title: item.title,
+      state: item.state ?? "",
+      author: item.author?.login ?? "",
+      headRefName: item.headRefName,
+      updatedAt: item.updatedAt,
+      isDraft: item.isDraft,
+    };
+  } catch {
+    return null;
   }
 }
 
 /** Fetch all data needed for the session in parallel. */
-async function fetchAll(
+async function fetchIssueSnapshot(
   exec: ExtensionAPI["exec"],
   cwd: string,
+  previous?: CachedData,
 ): Promise<CachedData> {
-  const [repo, issues, prs] = await Promise.all([
-    fetchRepoName(exec, cwd),
+  const [repo, issues] = await Promise.all([
+    previous?.repo ? Promise.resolve(previous.repo) : fetchRepoName(exec, cwd),
     fetchIssues(exec, cwd),
+  ]);
+  return {
+    repo: repo ?? previous?.repo ?? null,
+    issues: issues ?? previous?.issues ?? [],
+    prs: previous?.prs ?? [],
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+async function fetchPRSnapshot(
+  exec: ExtensionAPI["exec"],
+  cwd: string,
+  previous?: CachedData,
+): Promise<CachedData> {
+  const [repo, prs] = await Promise.all([
+    previous?.repo ? Promise.resolve(previous.repo) : fetchRepoName(exec, cwd),
     fetchPRs(exec, cwd),
   ]);
-  return { repo, issues, prs };
+  return {
+    repo: repo ?? previous?.repo ?? null,
+    issues: previous?.issues ?? [],
+    prs: prs ?? previous?.prs ?? [],
+    fetchedAt: new Date().toISOString(),
+  };
 }
 
 // --- Autocomplete replacement ---
@@ -290,9 +455,17 @@ function filterPRs(prs: PRInfo[], token: string): PRInfo[] {
 
 // --- Provider factory ---
 
+interface ProviderRefreshOptions {
+  refreshFromDisk?: () => Promise<void>;
+  refreshIfStale?: () => void;
+  fetchIssueByNumber?: (number: number) => Promise<IssueInfo | null>;
+  fetchPRByNumber?: (number: number) => Promise<PRInfo | null>;
+}
+
 export function createGithubAutocompleteProvider(
   current: AutocompleteProvider,
   data: CachedData,
+  refreshOptions: ProviderRefreshOptions = {},
 ): AutocompleteProvider {
   return {
     async getSuggestions(
@@ -343,13 +516,25 @@ export function createGithubAutocompleteProvider(
 
       if (options.signal.aborted) return null;
 
+      await refreshOptions.refreshFromDisk?.();
+      refreshOptions.refreshIfStale?.();
+
       const repoPrefix = data.repo ? `${data.repo.fullName}#` : "#";
 
       // --- Issues ---
       if (issueToken !== undefined) {
-        const filtered = filterIssues(data.issues, issueToken);
+        let filtered = filterIssues(data.issues, issueToken);
 
-        if (filtered.length === 0) return null;
+        if (
+          filtered.length === 0 &&
+          /^\d{2,}$/.test(issueToken) &&
+          refreshOptions.fetchIssueByNumber
+        ) {
+          const fetched = await refreshOptions.fetchIssueByNumber(Number(issueToken));
+          if (fetched) filtered = [fetched];
+        }
+
+        if (options.signal.aborted || filtered.length === 0) return null;
 
         const items: AutocompleteItem[] = filtered.map((i) => ({
           value: `issue ${repoPrefix}${i.number}`,
@@ -362,9 +547,18 @@ export function createGithubAutocompleteProvider(
 
       // --- PRs ---
       if (prToken !== undefined) {
-        const filtered = filterPRs(data.prs, prToken);
+        let filtered = filterPRs(data.prs, prToken);
 
-        if (filtered.length === 0) return null;
+        if (
+          filtered.length === 0 &&
+          /^\d{2,}$/.test(prToken) &&
+          refreshOptions.fetchPRByNumber
+        ) {
+          const fetched = await refreshOptions.fetchPRByNumber(Number(prToken));
+          if (fetched) filtered = [fetched];
+        }
+
+        if (options.signal.aborted || filtered.length === 0) return null;
 
         const items: AutocompleteItem[] = filtered.map((p) => ({
           value: `pr ${repoPrefix}${p.number}`,
@@ -477,22 +671,99 @@ function buildNudge(matches: RefMatch[]): string {
 // --- Extension entry point ---
 
 export default async function (pi: ExtensionAPI) {
+  let refreshTimer: ReturnType<typeof setInterval> | undefined;
+
   pi.on("session_start", async (_event, ctx) => {
     const cwd = ctx.cwd;
     const data = await readCache(cwd);
+    let issueRefreshInFlight: Promise<void> | undefined;
+    let prRefreshInFlight: Promise<void> | undefined;
+
+    const refreshFromDisk = async () => {
+      const cached = await readCache(cwd);
+      if (
+        cached.repo !== null ||
+        cached.issues.length > 0 ||
+        cached.prs.length > 0 ||
+        cached.fetchedAt !== undefined
+      ) {
+        replaceDataIfNewer(data, cached);
+      }
+    };
+
+    const refreshIssuesFromGithub = (force = false): Promise<void> => {
+      if (!force && !shouldRefresh(data)) return Promise.resolve();
+      issueRefreshInFlight ??= fetchIssueSnapshot(pi.exec, cwd, data)
+        .then(async (fresh) => {
+          replaceData(data, fresh);
+          await writeCache(cwd, fresh);
+        })
+        .catch(() => {
+          // Keep stale cache when gh is unavailable or slow.
+        })
+        .finally(() => {
+          issueRefreshInFlight = undefined;
+        });
+      return issueRefreshInFlight;
+    };
+
+    const refreshPRsFromGithub = (force = false): Promise<void> => {
+      if (!force && !shouldRefresh(data)) return Promise.resolve();
+      prRefreshInFlight ??= fetchPRSnapshot(pi.exec, cwd, data)
+        .then(async (fresh) => {
+          replaceData(data, fresh);
+          await writeCache(cwd, fresh);
+        })
+        .catch(() => {
+          // Keep stale cache when gh is unavailable or slow.
+        })
+        .finally(() => {
+          prRefreshInFlight = undefined;
+        });
+      return prRefreshInFlight;
+    };
+
+    const fetchAndCacheIssueByNumber = async (number: number) => {
+      const issue = await fetchIssueByNumber(pi.exec, cwd, number);
+      if (issue) {
+        upsertIssue(data, issue);
+        data.fetchedAt = new Date().toISOString();
+        await writeCache(cwd, data).catch(() => undefined);
+      }
+      return issue;
+    };
+
+    const fetchAndCachePRByNumber = async (number: number) => {
+      const pr = await fetchPRByNumber(pi.exec, cwd, number);
+      if (pr) {
+        upsertPR(data, pr);
+        data.fetchedAt = new Date().toISOString();
+        await writeCache(cwd, data).catch(() => undefined);
+      }
+      return pr;
+    };
 
     ctx.ui.addAutocompleteProvider((current) =>
-      createGithubAutocompleteProvider(current, data),
+      createGithubAutocompleteProvider(current, data, {
+        refreshFromDisk,
+        refreshIfStale: () => void refreshIssuesFromGithub(false),
+        fetchIssueByNumber: fetchAndCacheIssueByNumber,
+        fetchPRByNumber: fetchAndCachePRByNumber,
+      }),
     );
 
-    void fetchAll(pi.exec, cwd).then(async (fresh) => {
-      data.repo = fresh.repo;
-      data.issues = fresh.issues;
-      data.prs = fresh.prs;
-      await writeCache(cwd, fresh);
-    }).catch(() => {
-      // Keep stale cache when gh is unavailable or slow.
-    });
+    void refreshIssuesFromGithub(true);
+    setTimeout(() => void refreshPRsFromGithub(true), 1_000).unref?.();
+    refreshTimer = setInterval(
+      () => void refreshIssuesFromGithub(false),
+      CACHE_REFRESH_INTERVAL_MS,
+    );
+    refreshTimer.unref?.();
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = undefined;
   });
 
   pi.on("before_agent_start", async (event) => {
