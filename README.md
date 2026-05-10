@@ -192,6 +192,15 @@ press `ctrl+b` to enter navigate mode.
 
 resize mode: `h`/`l` resize width, `j`/`k` resize height, `esc` exit.
 
+custom command keybindings can launch detached shell helpers or temporary panes from prefix mode:
+
+```toml
+[[keys.command]]
+key = "g"
+type = "pane" # "shell" or "pane"
+command = "lazygit"
+```
+
 mouse is supported throughout. full reference: [`CONFIGURATION.md`](./CONFIGURATION.md).
 
 ## configuration

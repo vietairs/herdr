@@ -139,6 +139,44 @@ focus_pane_right = "alt+l"
 | `resize_mode` | `r` | enter or leave resize mode |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
 
+### custom command keybindings
+
+Use `[[keys.command]]` to bind a prefix-mode key to a command. Press the prefix key, then the configured key.
+
+```toml
+[[keys.command]]
+key = "g"
+type = "pane"
+command = "lazygit"
+```
+
+`type` is optional and defaults to `shell`.
+
+| type | behavior |
+|------|----------|
+| `shell` | run the command detached in the background |
+| `pane` | open a temporary zoomed pane, run the command there, then close the pane when the command exits |
+
+Commands run through `/bin/sh -lc`. Herdr sets the command working directory to the active pane cwd when available and provides context through environment variables:
+
+| variable | value |
+|----------|-------|
+| `HERDR_SOCKET_PATH` | active herdr socket path |
+| `HERDR_BIN_PATH` | current herdr binary path |
+| `HERDR_ACTIVE_WORKSPACE_ID` | active workspace id |
+| `HERDR_ACTIVE_TAB_ID` | active tab id |
+| `HERDR_ACTIVE_PANE_ID` | focused pane id |
+| `HERDR_ACTIVE_PANE_CWD` | focused pane cwd |
+
+Example detached helper:
+
+```toml
+[[keys.command]]
+key = "shift+g"
+type = "shell"
+command = "notify-send herdr 'custom command ran'"
+```
+
 ## theme
 
 herdr ships with 10 built-in color themes. set one in config:

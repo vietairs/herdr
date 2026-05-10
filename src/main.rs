@@ -103,6 +103,14 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resize_mode = "r"
 # toggle_sidebar = "b"
 
+# Custom prefix-mode commands. Press prefix, then the configured key.
+# type = "shell" runs detached in the background.
+# type = "pane" opens a temporary pane and closes it when the command exits.
+# [[keys.command]]
+# key = "g"
+# type = "pane"
+# command = "lazygit"
+
 [ui]
 # Sidebar width (auto-scaled based on workspace names, this sets the default)
 # sidebar_width = 26
