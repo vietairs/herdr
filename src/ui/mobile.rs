@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::sidebar::agent_panel_entries;
+use super::sidebar::{agent_panel_entries, AgentPanelEntry};
 use super::status::{agent_icon, state_dot};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
@@ -553,11 +553,7 @@ fn render_mobile_switcher_content(app: &AppState, frame: &mut Frame, viewport: R
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
-        let detail = format!(
-            "  {} · {}",
-            super::status::state_label(entry.state, entry.seen),
-            entry.agent_label.as_deref().unwrap_or("agent")
-        );
+        let detail = mobile_agent_detail(entry);
         render_two_line_item(
             frame,
             viewport,
@@ -592,6 +588,19 @@ fn render_mobile_switcher_content(app: &AppState, frame: &mut Frame, viewport: R
         }
         doc_y += 1;
     }
+}
+
+fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
+    let mut parts = Vec::new();
+    if let Some(tab_label) = entry.primary_tab_label.as_deref() {
+        parts.push(tab_label.to_string());
+    }
+    parts.push(super::status::state_label(entry.state, entry.seen).to_string());
+    if let Some(agent_label) = entry.agent_label.as_deref() {
+        parts.push(agent_label.to_string());
+    }
+
+    format!("  {}", parts.join(" · "))
 }
 
 fn render_section_title_at(
@@ -885,4 +894,35 @@ fn truncate(text: &str, max_width: usize) -> String {
     }
     let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
     format!("{prefix}…")
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
+        AgentPanelEntry {
+            ws_idx: 0,
+            tab_idx: 0,
+            pane_id: PaneId::from_raw(1),
+            primary_label: "herdr".into(),
+            primary_tab_label: primary_tab_label.map(str::to_string),
+            agent_label: agent_label.map(str::to_string),
+            state: AgentState::Idle,
+            seen: true,
+        }
+    }
+
+    #[test]
+    fn mobile_agent_detail_includes_tab_context_when_available() {
+        let entry = agent_entry(Some("mobile-state"), Some("pi"));
+
+        assert_eq!(mobile_agent_detail(&entry), "  mobile-state · idle · pi");
+    }
+
+    #[test]
+    fn mobile_agent_detail_keeps_existing_compact_detail_without_tab_context() {
+        let entry = agent_entry(None, Some("pi"));
+
+        assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
+    }
 }
