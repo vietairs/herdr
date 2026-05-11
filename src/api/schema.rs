@@ -201,6 +201,8 @@ pub struct PaneReportAgentParams {
     pub state: PaneAgentState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +210,8 @@ pub struct PaneClearAgentAuthorityParams {
     pub pane_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +219,8 @@ pub struct PaneReleaseAgentParams {
     pub pane_id: String,
     pub source: String,
     pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -717,6 +723,7 @@ mod tests {
                 agent: "pi".into(),
                 state: PaneAgentState::Working,
                 message: Some("thinking".into()),
+                seq: Some(42),
             }),
         };
 
@@ -732,6 +739,7 @@ mod tests {
             method: Method::PaneClearAgentAuthority(PaneClearAgentAuthorityParams {
                 pane_id: "1-1".into(),
                 source: Some("herdr:pi".into()),
+                seq: Some(42),
             }),
         };
 
@@ -748,6 +756,7 @@ mod tests {
                 pane_id: "1-1".into(),
                 source: "herdr:pi".into(),
                 agent: "pi".into(),
+                seq: Some(42),
             }),
         };
 

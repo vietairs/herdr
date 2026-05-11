@@ -1019,6 +1019,7 @@ impl App {
                     agent_label,
                     state: detect_state_from_api(params.state),
                     message: params.message,
+                    seq: params.seq,
                 });
                 SuccessResponse {
                     id: request.id,
@@ -1039,6 +1040,7 @@ impl App {
                 self.handle_internal_event(crate::events::AppEvent::HookAuthorityCleared {
                     pane_id,
                     source: params.source,
+                    seq: params.seq,
                 });
                 SuccessResponse {
                     id: request.id,
@@ -1071,6 +1073,7 @@ impl App {
                     source: params.source,
                     known_agent: crate::detect::parse_agent_label(&agent_label),
                     agent_label,
+                    seq: params.seq,
                 });
                 SuccessResponse {
                     id: request.id,

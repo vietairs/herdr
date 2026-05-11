@@ -1,6 +1,8 @@
 #!/bin/sh
 # installed by herdr
 # safe to edit. this hook only activates inside herdr-managed panes.
+# HERDR_INTEGRATION_ID=codex
+# HERDR_INTEGRATION_VERSION=1
 
 set -eu
 
@@ -33,6 +35,7 @@ if not pane_id or not socket_path:
     raise SystemExit(0)
 
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
+report_seq = time.time_ns()
 if action == "release":
     request = {
         "id": request_id,
@@ -41,6 +44,7 @@ if action == "release":
             "pane_id": pane_id,
             "source": source,
             "agent": "codex",
+            "seq": report_seq,
         },
     }
 else:
@@ -52,6 +56,7 @@ else:
             "source": source,
             "agent": "codex",
             "state": action,
+            "seq": report_seq,
         },
     }
 

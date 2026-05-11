@@ -25,11 +25,13 @@ pub enum AppEvent {
         agent_label: String,
         state: AgentState,
         message: Option<String>,
+        seq: Option<u64>,
     },
     /// Hook authority was explicitly cleared for a pane.
     HookAuthorityCleared {
         pane_id: PaneId,
         source: Option<String>,
+        seq: Option<u64>,
     },
     /// The current detected agent gracefully released this pane back to the shell.
     HookAgentReleased {
@@ -37,6 +39,7 @@ pub enum AppEvent {
         source: String,
         agent_label: String,
         known_agent: Option<Agent>,
+        seq: Option<u64>,
     },
     /// A new version is available and ready to install explicitly.
     UpdateReady { version: String },

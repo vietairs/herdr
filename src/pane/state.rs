@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::detect::{Agent, AgentState};
 
 const CLAUDE_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
@@ -26,6 +28,7 @@ pub struct PaneState {
     pub detected_agent: Option<Agent>,
     pub fallback_state: AgentState,
     pub hook_authority: Option<HookAuthority>,
+    hook_report_sequences: HashMap<String, u64>,
     pub state: AgentState,
     /// Whether the user has seen this pane since its last state change to Idle.
     /// False = "Done" (agent finished while user was in another workspace).
@@ -38,6 +41,7 @@ impl PaneState {
             detected_agent: None,
             fallback_state: AgentState::Unknown,
             hook_authority: None,
+            hook_report_sequences: HashMap::new(),
             state: AgentState::Unknown,
             seen: true,
         }
@@ -71,7 +75,12 @@ impl PaneState {
         agent_label: String,
         state: AgentState,
         message: Option<String>,
+        seq: Option<u64>,
     ) -> Option<EffectiveStateChange> {
+        if !self.accept_hook_report(&source, seq) {
+            return None;
+        }
+
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
@@ -84,7 +93,39 @@ impl PaneState {
         self.recompute_effective_state(previous_agent_label, previous_known_agent, previous_state)
     }
 
-    pub fn clear_hook_authority(&mut self, source: Option<&str>) -> Option<EffectiveStateChange> {
+    fn accept_hook_report(&mut self, source: &str, seq: Option<u64>) -> bool {
+        let Some(seq) = seq else {
+            return !self.hook_report_sequences.contains_key(source);
+        };
+
+        if self
+            .hook_report_sequences
+            .get(source)
+            .is_some_and(|last_seq| seq <= *last_seq)
+        {
+            return false;
+        }
+
+        self.hook_report_sequences.insert(source.to_string(), seq);
+        true
+    }
+
+    pub fn clear_hook_authority(
+        &mut self,
+        source: Option<&str>,
+        seq: Option<u64>,
+    ) -> Option<EffectiveStateChange> {
+        let sequence_source = source.map(str::to_string).or_else(|| {
+            self.hook_authority
+                .as_ref()
+                .map(|authority| authority.source.clone())
+        });
+        if let Some(source) = sequence_source.as_deref() {
+            if !self.accept_hook_report(source, seq) {
+                return None;
+            }
+        }
+
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
@@ -103,7 +144,12 @@ impl PaneState {
         &mut self,
         source: &str,
         agent_label: &str,
+        seq: Option<u64>,
     ) -> Option<EffectiveStateChange> {
+        if !self.accept_hook_report(source, seq) {
+            return None;
+        }
+
         let current_agent_label = self.effective_agent_label()?;
         if current_agent_label != agent_label {
             return None;
@@ -260,7 +306,13 @@ mod tests {
     fn hook_authority_overrides_fallback_for_same_agent() {
         let mut pane = PaneState::new();
         pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        pane.set_hook_authority("herdr:pi".into(), "pi".into(), AgentState::Working, None);
+        pane.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
 
         assert_eq!(pane.detected_agent, Some(Agent::Pi));
         assert_eq!(pane.fallback_state, AgentState::Idle);
@@ -276,6 +328,7 @@ mod tests {
             "herdr:custom".into(),
             "hermes".into(),
             AgentState::Working,
+            None,
             None,
         );
 
@@ -293,6 +346,7 @@ mod tests {
             "herdr:custom".into(),
             "hermes".into(),
             AgentState::Working,
+            None,
             None,
         );
 
@@ -313,6 +367,7 @@ mod tests {
             "opencode".into(),
             AgentState::Idle,
             None,
+            None,
         );
 
         pane.set_detected_state(None, AgentState::Unknown);
@@ -328,7 +383,13 @@ mod tests {
     fn detected_agent_change_clears_previous_matching_hook_authority() {
         let mut pane = PaneState::new();
         pane.set_detected_state(Some(Agent::Codex), AgentState::Idle);
-        pane.set_hook_authority("herdr:codex".into(), "codex".into(), AgentState::Idle, None);
+        pane.set_hook_authority(
+            "herdr:codex".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            None,
+        );
 
         pane.set_detected_state(Some(Agent::OpenCode), AgentState::Working);
 
@@ -342,13 +403,123 @@ mod tests {
     fn release_agent_clears_identity_immediately() {
         let mut pane = PaneState::new();
         pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        pane.set_hook_authority("herdr:pi".into(), "pi".into(), AgentState::Working, None);
+        pane.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
 
-        pane.release_agent("herdr:pi", "pi");
+        pane.release_agent("herdr:pi", "pi", None);
 
         assert!(pane.hook_authority.is_none());
         assert_eq!(pane.detected_agent, None);
         assert_eq!(pane.fallback_state, AgentState::Unknown);
         assert_eq!(pane.state, AgentState::Unknown);
+    }
+
+    #[test]
+    fn stale_hook_report_sequence_is_ignored_for_same_source() {
+        let mut pane = PaneState::new();
+        pane.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(20),
+        );
+
+        let change = pane.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            Some(19),
+        );
+
+        assert!(change.is_none());
+        assert_eq!(pane.state, AgentState::Working);
+        assert_eq!(
+            pane.hook_authority.as_ref().unwrap().state,
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn unsequenced_hook_report_is_ignored_after_source_uses_sequence() {
+        let mut pane = PaneState::new();
+        pane.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(20),
+        );
+
+        let change =
+            pane.set_hook_authority("herdr:pi".into(), "pi".into(), AgentState::Idle, None, None);
+
+        assert!(change.is_none());
+        assert_eq!(pane.state, AgentState::Working);
+    }
+
+    #[test]
+    fn stale_release_sequence_is_ignored_for_same_source() {
+        let mut pane = PaneState::new();
+        pane.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(20),
+        );
+
+        let change = pane.release_agent("herdr:pi", "pi", Some(19));
+
+        assert!(change.is_none());
+        assert_eq!(pane.state, AgentState::Working);
+        assert!(pane.hook_authority.is_some());
+    }
+
+    #[test]
+    fn stale_clear_all_sequence_is_checked_against_current_authority_source() {
+        let mut pane = PaneState::new();
+        pane.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(20),
+        );
+
+        let change = pane.clear_hook_authority(None, Some(19));
+
+        assert!(change.is_none());
+        assert_eq!(pane.state, AgentState::Working);
+        assert!(pane.hook_authority.is_some());
+    }
+
+    #[test]
+    fn same_sequence_from_different_sources_is_independent() {
+        let mut pane = PaneState::new();
+        pane.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(20),
+        );
+
+        pane.set_hook_authority(
+            "custom:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            Some(19),
+        );
+
+        assert_eq!(pane.state, AgentState::Idle);
+        assert_eq!(pane.hook_authority.as_ref().unwrap().source, "custom:pi");
     }
 }

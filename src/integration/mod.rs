@@ -1,6 +1,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use portable_pty::CommandBuilder;
 use serde_json::{json, Map, Value};
@@ -10,12 +12,17 @@ use crate::layout::PaneId;
 pub(crate) const HERDR_PANE_ID_ENV_VAR: &str = "HERDR_PANE_ID";
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
+const PI_INTEGRATION_VERSION: u32 = 1;
 const CLAUDE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/herdr-agent-state.sh");
+const CLAUDE_INTEGRATION_VERSION: u32 = 1;
 const CODEX_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/herdr-agent-state.sh");
+const CODEX_INTEGRATION_VERSION: u32 = 1;
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
+const OPENCODE_INTEGRATION_VERSION: u32 = 1;
+const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 #[derive(Debug)]
 pub(crate) struct ClaudeInstallPaths {
@@ -33,6 +40,22 @@ pub(crate) struct CodexInstallPaths {
 #[derive(Debug)]
 pub(crate) struct OpenCodeInstallPaths {
     pub plugin_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntegrationStatus {
+    pub target: crate::api::schema::IntegrationTarget,
+    pub path: PathBuf,
+    pub state: IntegrationStatusKind,
+    pub installed_version: Option<u32>,
+    pub expected_version: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntegrationStatusKind {
+    NotInstalled,
+    Current,
+    Outdated,
 }
 
 #[derive(Debug)]
@@ -213,13 +236,145 @@ pub(crate) fn uninstall_target(
     Ok(messages)
 }
 
-fn integration_target_label(target: crate::api::schema::IntegrationTarget) -> &'static str {
+pub(crate) fn integration_target_label(
+    target: crate::api::schema::IntegrationTarget,
+) -> &'static str {
     match target {
         crate::api::schema::IntegrationTarget::Pi => "pi",
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
     }
+}
+
+pub(crate) fn installed_integration_statuses() -> Vec<IntegrationStatus> {
+    integration_specs()
+        .into_iter()
+        .filter_map(|(target, path, expected_version)| {
+            Some(integration_status_at(target, path.ok()?, expected_version))
+        })
+        .collect()
+}
+
+fn outdated_installed_integrations() -> Vec<IntegrationStatus> {
+    installed_integration_statuses()
+        .into_iter()
+        .filter(|status| status.state == IntegrationStatusKind::Outdated)
+        .collect()
+}
+
+fn integration_specs() -> [(
+    crate::api::schema::IntegrationTarget,
+    io::Result<PathBuf>,
+    u32,
+); 4] {
+    [
+        (
+            crate::api::schema::IntegrationTarget::Pi,
+            pi_extension_dir().map(|dir| dir.join(PI_EXTENSION_INSTALL_NAME)),
+            PI_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Claude,
+            claude_dir().map(|dir| dir.join("hooks").join(CLAUDE_HOOK_INSTALL_NAME)),
+            CLAUDE_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Codex,
+            codex_dir().map(|dir| dir.join(CODEX_HOOK_INSTALL_NAME)),
+            CODEX_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Opencode,
+            opencode_dir().map(|dir| dir.join("plugins").join(OPENCODE_PLUGIN_INSTALL_NAME)),
+            OPENCODE_INTEGRATION_VERSION,
+        ),
+    ]
+}
+
+pub(crate) fn integration_update_instructions(
+    targets: &[crate::api::schema::IntegrationTarget],
+) -> String {
+    let commands: Vec<String> = targets
+        .iter()
+        .map(|target| {
+            format!(
+                "`herdr integration install {}`",
+                integration_target_label(*target)
+            )
+        })
+        .collect();
+
+    match commands.as_slice() {
+        [] => String::new(),
+        [command] => format!("run {command}"),
+        [rest @ .., last] => format!("run {} and {last}", rest.join(", ")),
+    }
+}
+
+pub(crate) fn print_outdated_update_notice() -> bool {
+    let outdated = outdated_installed_integrations();
+    if outdated.is_empty() {
+        return false;
+    }
+
+    let targets = outdated
+        .iter()
+        .map(|integration| integration.target)
+        .collect::<Vec<_>>();
+    eprintln!(
+        "installed herdr integrations need updating; {}.",
+        integration_update_instructions(&targets).replace('`', "")
+    );
+    true
+}
+
+fn integration_status_at(
+    target: crate::api::schema::IntegrationTarget,
+    path: PathBuf,
+    expected_version: u32,
+) -> IntegrationStatus {
+    if !path.is_file() {
+        return IntegrationStatus {
+            target,
+            path,
+            state: IntegrationStatusKind::NotInstalled,
+            installed_version: None,
+            expected_version,
+        };
+    }
+
+    let installed_version = fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| parse_integration_version(&content));
+    let state = if installed_version.is_some_and(|version| version >= expected_version) {
+        IntegrationStatusKind::Current
+    } else {
+        IntegrationStatusKind::Outdated
+    };
+
+    IntegrationStatus {
+        target,
+        path,
+        state,
+        installed_version,
+        expected_version,
+    }
+}
+
+fn parse_integration_version(content: &str) -> Option<u32> {
+    content.lines().find_map(|line| {
+        let marker_line = line
+            .trim()
+            .trim_start_matches('/')
+            .trim_start_matches('#')
+            .trim();
+        marker_line
+            .strip_prefix(INTEGRATION_VERSION_MARKER)?
+            .trim()
+            .parse()
+            .ok()
+    })
 }
 
 pub(crate) fn install_pi() -> io::Result<PathBuf> {
@@ -816,9 +971,14 @@ fn home_dir() -> io::Result<PathBuf> {
 }
 
 #[cfg(test)]
+pub(crate) fn integration_env_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn unique_base() -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -831,14 +991,9 @@ mod tests {
         ))
     }
 
-    fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
-
     #[test]
     fn install_pi_writes_embedded_asset_to_pi_extensions_dir() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         let ext_dir = home.join(".pi/agent/extensions");
@@ -857,7 +1012,7 @@ mod tests {
 
     #[test]
     fn uninstall_pi_removes_embedded_extension_when_present() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         let ext_dir = home.join(".pi/agent/extensions");
@@ -879,8 +1034,50 @@ mod tests {
     }
 
     #[test]
+    fn outdated_integrations_treat_missing_version_marker_as_legacy() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let ext_dir = home.join(".pi/agent/extensions");
+        fs::create_dir_all(&ext_dir).unwrap();
+        let extension_path = ext_dir.join(PI_EXTENSION_INSTALL_NAME);
+        fs::write(&extension_path, "// installed by herdr\n").unwrap();
+        std::env::set_var("HOME", &home);
+
+        let outdated = outdated_installed_integrations();
+
+        assert_eq!(outdated.len(), 1);
+        assert_eq!(
+            outdated[0].target,
+            crate::api::schema::IntegrationTarget::Pi
+        );
+        assert_eq!(outdated[0].path, extension_path);
+        assert_eq!(outdated[0].installed_version, None);
+        assert_eq!(outdated[0].expected_version, PI_INTEGRATION_VERSION);
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn outdated_integrations_accept_current_version_marker() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let ext_dir = home.join(".pi/agent/extensions");
+        fs::create_dir_all(&ext_dir).unwrap();
+        fs::write(ext_dir.join(PI_EXTENSION_INSTALL_NAME), PI_EXTENSION_ASSET).unwrap();
+        std::env::set_var("HOME", &home);
+
+        assert!(outdated_installed_integrations().is_empty());
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn install_pi_errors_when_extension_dir_missing() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         fs::create_dir_all(&home).unwrap();
@@ -896,7 +1093,7 @@ mod tests {
 
     #[test]
     fn install_claude_writes_hook_and_updates_settings() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         let claude_dir = home.join(".claude");
@@ -965,7 +1162,7 @@ mod tests {
 
     #[test]
     fn install_claude_is_idempotent_for_hook_entries() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         let claude_dir = home.join(".claude");
@@ -1017,7 +1214,7 @@ mod tests {
 
     #[test]
     fn uninstall_claude_removes_herdr_hooks_and_preserves_others() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         let claude_dir = home.join(".claude");
@@ -1073,7 +1270,7 @@ mod tests {
 
     #[test]
     fn install_claude_errors_when_claude_dir_missing() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         fs::create_dir_all(&home).unwrap();
@@ -1089,7 +1286,7 @@ mod tests {
 
     #[test]
     fn install_codex_writes_hook_and_updates_hooks_and_config() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         let codex_dir = home.join(".codex");
@@ -1133,7 +1330,7 @@ mod tests {
 
     #[test]
     fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         let codex_dir = home.join(".codex");
@@ -1169,7 +1366,7 @@ mod tests {
 
     #[test]
     fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         let codex_dir = home.join(".codex");
@@ -1224,7 +1421,7 @@ mod tests {
 
     #[test]
     fn install_codex_errors_when_config_dir_missing() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         fs::create_dir_all(&home).unwrap();
@@ -1240,7 +1437,7 @@ mod tests {
 
     #[test]
     fn install_opencode_writes_plugin_to_plugins_dir() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         let opencode_dir = home.join(".config/opencode");
@@ -1264,7 +1461,7 @@ mod tests {
 
     #[test]
     fn uninstall_opencode_removes_plugin_when_present() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         let opencode_dir = home.join(".config/opencode/plugins");
@@ -1287,7 +1484,7 @@ mod tests {
 
     #[test]
     fn install_opencode_errors_when_config_dir_missing() {
-        let _lock = env_lock();
+        let _lock = integration_env_lock();
         let base = unique_base();
         let home = base.join("home");
         fs::create_dir_all(&home).unwrap();

@@ -599,23 +599,33 @@ impl AppState {
                 agent_label,
                 state,
                 message,
+                seq,
             } => self
                 .update_pane_state(pane_id, |pane| {
-                    pane.set_hook_authority(source, agent_label, state, message)
+                    pane.set_hook_authority(source, agent_label, state, message, seq)
                 })
                 .into_iter()
                 .collect(),
-            AppEvent::HookAuthorityCleared { pane_id, source } => self
-                .update_pane_state(pane_id, |pane| pane.clear_hook_authority(source.as_deref()))
+            AppEvent::HookAuthorityCleared {
+                pane_id,
+                source,
+                seq,
+            } => self
+                .update_pane_state(pane_id, |pane| {
+                    pane.clear_hook_authority(source.as_deref(), seq)
+                })
                 .into_iter()
                 .collect(),
             AppEvent::HookAgentReleased {
                 pane_id,
                 source,
                 agent_label,
+                seq,
                 ..
             } => self
-                .update_pane_state(pane_id, |pane| pane.release_agent(&source, &agent_label))
+                .update_pane_state(pane_id, |pane| {
+                    pane.release_agent(&source, &agent_label, seq)
+                })
                 .into_iter()
                 .collect(),
             // Intercepted in App::handle_internal_event before reaching this
@@ -1153,6 +1163,7 @@ mod tests {
             agent_label: "hermes".into(),
             state: AgentState::Blocked,
             message: None,
+            seq: None,
         });
 
         let toast = state.toast.as_ref().unwrap();

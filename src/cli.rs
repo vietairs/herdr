@@ -319,6 +319,7 @@ fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "install" => integration_install(&args[1..]),
         "uninstall" => integration_uninstall(&args[1..]),
+        "status" => integration_status(&args[1..]),
         "help" | "--help" | "-h" => {
             print_integration_help();
             Ok(0)
@@ -983,6 +984,42 @@ fn pane_run(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
+fn integration_status(args: &[String]) -> std::io::Result<i32> {
+    let outdated_only = match args {
+        [] => false,
+        [flag] if flag == "--outdated-only" => true,
+        _ => {
+            eprintln!("usage: herdr integration status [--outdated-only]");
+            return Ok(2);
+        }
+    };
+
+    if outdated_only {
+        crate::integration::print_outdated_update_notice();
+        return Ok(0);
+    }
+
+    for status in crate::integration::installed_integration_statuses() {
+        let target = crate::integration::integration_target_label(status.target);
+        let version = match status.installed_version {
+            Some(version) => format!("v{version}"),
+            None => "legacy".to_string(),
+        };
+        let state = match status.state {
+            crate::integration::IntegrationStatusKind::NotInstalled => "not installed".to_string(),
+            crate::integration::IntegrationStatusKind::Current => {
+                format!("current ({version})")
+            }
+            crate::integration::IntegrationStatusKind::Outdated => {
+                format!("outdated ({version} < v{})", status.expected_version)
+            }
+        };
+        println!("{target}: {state} ({})", status.path.display());
+    }
+
+    Ok(0)
+}
+
 fn integration_install(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = parse_integration_target(args, "install")? else {
         return Ok(2);
@@ -1488,6 +1525,7 @@ fn print_integration_help() {
     eprintln!("  herdr integration uninstall claude");
     eprintln!("  herdr integration uninstall codex");
     eprintln!("  herdr integration uninstall opencode");
+    eprintln!("  herdr integration status [--outdated-only]");
 }
 
 fn print_session_help() {

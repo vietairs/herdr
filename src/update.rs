@@ -563,9 +563,11 @@ pub fn self_update() -> Result<Version, String> {
         tracing::warn!("failed to save pending release notes: {e}");
     }
     let downloaded_update = download_update(&release)?;
+    let updated_exe = downloaded_update.current_exe.clone();
     let stopped_server = stop_running_server_for_update(running_server_plan.as_ref(), &release)?;
     install_downloaded_update(downloaded_update)?;
     eprintln!("updated to v{}", release.version);
+    print_outdated_integration_notice_with_updated_binary(&updated_exe);
 
     if stopped_server {
         eprintln!("run herdr again to start the updated server.");
@@ -576,6 +578,16 @@ pub fn self_update() -> Result<Version, String> {
     }
 
     Ok(release.version)
+}
+
+fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
+    let status = Command::new(updated_exe)
+        .args(["integration", "status", "--outdated-only"])
+        .status();
+
+    if !status.is_ok_and(|status| status.success()) {
+        crate::integration::print_outdated_update_notice();
+    }
 }
 
 /// Background update check: only surface availability and release notes.

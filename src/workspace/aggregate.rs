@@ -183,6 +183,7 @@ mod tests {
                 "hermes".into(),
                 AgentState::Working,
                 None,
+                None,
             );
 
         let details = ws.pane_details();

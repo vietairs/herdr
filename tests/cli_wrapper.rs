@@ -454,6 +454,7 @@ fn claude_hook_reports_subagent_working_and_blocked() {
         run_claude_hook("working", subagent_input).expect("subagent working should report working");
     assert_eq!(working["method"], "pane.report_agent");
     assert_eq!(working["params"]["state"], "working");
+    assert!(working["params"]["seq"].as_u64().is_some());
 
     let blocked =
         run_claude_hook("blocked", subagent_input).expect("subagent blocked should report blocked");
@@ -833,6 +834,17 @@ fn integration_commands_run_locally_when_server_is_missing() {
         "integration install should write local files without a server"
     );
 
+    let integration_status = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["integration", "status"])
+        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("HOME", &home_dir)
+        .output()
+        .unwrap();
+    assert_eq!(integration_status.status.code(), Some(0));
+    let status_stdout = String::from_utf8_lossy(&integration_status.stdout);
+    assert!(status_stdout.contains("pi: current (v1)"));
+    assert!(status_stdout.contains("claude: not installed"));
+
     let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .args(["integration", "uninstall", "pi"])
         .env("HERDR_SOCKET_PATH", &missing_socket)
@@ -844,6 +856,61 @@ fn integration_commands_run_locally_when_server_is_missing() {
         !expected_extension.exists(),
         "integration uninstall should remove local files without a server"
     );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn integration_status_outdated_only_prints_action_for_legacy_install() {
+    let base = unique_test_dir();
+    let home_dir = base.join("home");
+    let extensions_dir = home_dir.join(".pi/agent/extensions");
+    fs::create_dir_all(&extensions_dir).unwrap();
+    fs::write(
+        extensions_dir.join("herdr-agent-state.ts"),
+        "// legacy herdr integration\n",
+    )
+    .unwrap();
+
+    let runtime_dir = base.join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    register_runtime_dir(&runtime_dir);
+    let missing_socket = runtime_dir.join("missing.sock");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["integration", "status", "--outdated-only"])
+        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("HOME", &home_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("installed herdr integrations need updating"));
+    assert!(stderr.contains("herdr integration install pi"));
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn integration_status_rejects_unknown_flags() {
+    let base = unique_test_dir();
+    let home_dir = base.join("home");
+    fs::create_dir_all(&home_dir).unwrap();
+    let runtime_dir = base.join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    register_runtime_dir(&runtime_dir);
+    let missing_socket = runtime_dir.join("missing.sock");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["integration", "status", "--wat"])
+        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("HOME", &home_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
 
     cleanup_test_base(&base);
 }
