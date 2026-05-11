@@ -182,7 +182,6 @@ pub(crate) fn handle_client_handshake(
 
     // Spawn a writer thread that forwards messages from the channels to the stream.
     let write_stream = stream.try_clone()?;
-    let write_quit = should_quit.clone();
     let writer_event_tx = server_event_tx.clone();
     std::thread::spawn(move || {
         client_writer_loop(
@@ -191,7 +190,6 @@ pub(crate) fn handle_client_handshake(
             control_rx,
             render_rx,
             writer_event_tx,
-            &write_quit,
         );
     });
 
@@ -206,12 +204,11 @@ fn client_writer_loop(
     control_rx: std::sync::mpsc::Receiver<Vec<u8>>,
     render_rx: std::sync::mpsc::Receiver<Vec<u8>>,
     server_event_tx: mpsc::Sender<ServerEvent>,
-    should_quit: &Arc<AtomicBool>,
 ) {
     let mut control_closed = false;
     let mut render_closed = false;
 
-    while !should_quit.load(Ordering::Acquire) {
+    loop {
         match control_rx.try_recv() {
             Ok(data) => {
                 if !write_framed_bytes(&mut stream, &data) {
