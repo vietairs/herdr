@@ -92,6 +92,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # previous_tab = ""       # optional, unset by default
 # next_tab = ""           # optional, unset by default
 # close_tab = ""          # optional, unset by default
+# rename_pane = ""        # optional, unset by default
 # focus_pane_left = ""    # optional, unset by default
 # focus_pane_down = ""    # optional, unset by default
 # focus_pane_up = ""      # optional, unset by default
@@ -117,6 +118,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Ask for confirmation before closing a workspace
 # confirm_close = true
+
+# Show detected/reported agent labels in split pane borders when no manual pane name is set.
+# show_agent_labels_on_pane_borders = false
 
 # Agent panel scope: "current" or "all". Toggling it in the sidebar saves this setting.
 # agent_panel_scope = "all"

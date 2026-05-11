@@ -145,11 +145,14 @@ for backward compatibility, requests also accept the older positional forms like
   "tab_id": "w64e95948145ed1:1",
   "focused": true,
   "cwd": "/home/can/Projects/herdr",
+  "label": "reviewer",
   "agent": "pi",
   "agent_status": "working",
   "revision": 0
 }
 ```
+
+`label` is an optional manual pane name set through `pane.rename`.
 
 `agent` is an optional display label string.
 
@@ -202,6 +205,7 @@ for backward compatibility, requests also accept the older positional forms like
 | `tab.close` | close a tab | `ok` |
 | `pane.list` | list panes, optionally filtered by workspace | `pane_list` |
 | `pane.get` | inspect one pane | `pane_info` |
+| `pane.rename` | set or clear a manual pane label | `pane_info` |
 | `pane.read` | read pane output | `pane_read` |
 | `pane.split` | split a pane and create a sibling pane | `pane_info` |
 | `pane.send_text` | send literal text without Enter | `ok` |
@@ -478,6 +482,21 @@ params:
   "pane_id": "1-1"
 }
 ```
+
+returns `pane_info`.
+
+### `pane.rename`
+
+params:
+
+```json
+{
+  "pane_id": "1-1",
+  "label": "reviewer"
+}
+```
+
+send `label: null` or omit `label` to clear the manual pane label.
 
 returns `pane_info`.
 
@@ -946,6 +965,7 @@ pane commands:
 ```text
 herdr pane list [--workspace <workspace_id>]
 herdr pane get <pane_id>
+herdr pane rename <pane_id> <label>|--clear
 herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]
 herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]
 herdr pane close <pane_id>

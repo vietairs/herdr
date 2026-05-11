@@ -16,6 +16,7 @@ pub(super) enum SettingsAction {
     SaveTheme(String),
     SaveSound(bool),
     SaveToastDelivery(ToastDelivery),
+    SaveAgentBorderLabels(bool),
 }
 
 impl App {
@@ -25,6 +26,9 @@ impl App {
                 SettingsAction::SaveTheme(name) => self.save_theme(&name),
                 SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
                 SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
+                SettingsAction::SaveAgentBorderLabels(enabled) => {
+                    self.save_agent_border_labels(enabled)
+                }
             }
         }
     }
@@ -157,6 +161,30 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
                 state.settings.list.selected = usize::from(!state.sound_enabled());
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                state.settings.section = SettingsSection::PaneLabels;
+                state.settings.list.selected = usize::from(!state.agent_border_labels_enabled());
+            }
+            _ => {
+                if let Some(super::modal::ModalAction::Close) =
+                    super::modal::modal_action_from_key(&key, super::modal::SETTINGS_ACTIONS)
+                {
+                    cancel_settings(state);
+                }
+            }
+        },
+        SettingsSection::PaneLabels => match key.code {
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+                state.settings.list.selected = 1 - state.settings.list.selected.min(1);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let enabled = state.settings.list.selected == 0;
+                return Some(SettingsAction::SaveAgentBorderLabels(enabled));
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                state.settings.section = SettingsSection::Toast;
+                state.settings.list.selected = toast_delivery_index(state.toast_delivery());
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                 state.settings.section = SettingsSection::Theme;
                 state.settings.list.selected = current_theme_index(&state.theme_name);
             }
@@ -252,6 +280,14 @@ impl AppState {
                     None
                 }
             }
+            SettingsSection::PaneLabels => {
+                let list_y = area.y + 3;
+                if row >= list_y && row < list_y + 2 {
+                    Some((row - list_y) as usize)
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -264,6 +300,9 @@ impl AppState {
                         SettingsSection::Theme => current_theme_index(&self.theme_name),
                         SettingsSection::Sound => usize::from(!self.sound_enabled()),
                         SettingsSection::Toast => toast_delivery_index(self.toast_delivery()),
+                        SettingsSection::PaneLabels => {
+                            usize::from(!self.agent_border_labels_enabled())
+                        }
                     });
                     return None;
                 }
@@ -281,6 +320,10 @@ impl AppState {
                         SettingsSection::Toast => {
                             let delivery = toast_delivery_for_index(idx);
                             Some(SettingsAction::SaveToastDelivery(delivery))
+                        }
+                        SettingsSection::PaneLabels => {
+                            let enabled = idx == 0;
+                            Some(SettingsAction::SaveAgentBorderLabels(enabled))
                         }
                     };
                 }

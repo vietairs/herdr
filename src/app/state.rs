@@ -383,6 +383,7 @@ pub enum Mode {
     Terminal,
     RenameWorkspace,
     RenameTab,
+    RenamePane,
     Resize,
     ConfirmClose,
     ContextMenu,
@@ -408,16 +409,18 @@ pub enum SettingsSection {
     Theme,
     Sound,
     Toast,
+    PaneLabels,
 }
 
 impl SettingsSection {
-    pub const ALL: &[Self] = &[Self::Theme, Self::Sound, Self::Toast];
+    pub const ALL: &[Self] = &[Self::Theme, Self::Sound, Self::Toast, Self::PaneLabels];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Theme => "theme",
             Self::Sound => "sound",
             Self::Toast => "toasts",
+            Self::PaneLabels => "pane labels",
         }
     }
 }
@@ -554,9 +557,17 @@ pub(crate) struct TabPressState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMenuKind {
-    Workspace { ws_idx: usize },
-    Tab { ws_idx: usize, tab_idx: usize },
-    Pane,
+    Workspace {
+        ws_idx: usize,
+    },
+    Tab {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
+    Pane {
+        pane_id: PaneId,
+        has_manual_label: bool,
+    },
 }
 
 /// Right-click context menu state.
@@ -572,7 +583,22 @@ impl ContextMenuState {
         match self.kind {
             ContextMenuKind::Workspace { .. } => &["Rename", "Close"],
             ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Close"],
-            ContextMenuKind::Pane => &[
+            ContextMenuKind::Pane {
+                has_manual_label: true,
+                ..
+            } => &[
+                "Rename pane",
+                "Clear pane name",
+                "Split vertical",
+                "Split horizontal",
+                "Fullscreen",
+                "Close pane",
+            ],
+            ContextMenuKind::Pane {
+                has_manual_label: false,
+                ..
+            } => &[
+                "Rename pane",
                 "Split vertical",
                 "Split horizontal",
                 "Fullscreen",
@@ -645,6 +671,7 @@ pub struct AppState {
     pub request_clipboard_write: Option<Vec<u8>>,
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
+    pub rename_pane_target: Option<PaneId>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -683,6 +710,7 @@ pub struct AppState {
     pub sidebar_section_split: f32,
     pub agent_panel_scope: AgentPanelScope,
     pub confirm_close: bool,
+    pub show_agent_labels_on_pane_borders: bool,
     pub pane_scrollback_limit_bytes: usize,
     #[allow(dead_code)] // kept for backward compat; palette.accent is the source of truth
     pub accent: Color,
@@ -717,6 +745,10 @@ impl AppState {
 
     pub fn toast_delivery(&self) -> ToastDelivery {
         self.toast_config.delivery
+    }
+
+    pub fn agent_border_labels_enabled(&self) -> bool {
+        self.show_agent_labels_on_pane_borders
     }
 
     pub fn is_prefix(&self, key: &crossterm::event::KeyEvent) -> bool {
@@ -797,6 +829,7 @@ impl AppState {
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
+            rename_pane_target: None,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -844,6 +877,7 @@ impl AppState {
             sidebar_section_split: 0.5,
             agent_panel_scope: AgentPanelScope::AllWorkspaces,
             confirm_close: true,
+            show_agent_labels_on_pane_borders: false,
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,
             accent: Color::Cyan,
             sound: SoundConfig {
@@ -877,6 +911,8 @@ impl AppState {
                 next_tab_label: None,
                 close_tab: None,
                 close_tab_label: None,
+                rename_pane: None,
+                rename_pane_label: None,
                 focus_pane_left: None,
                 focus_pane_left_label: None,
                 focus_pane_down: None,

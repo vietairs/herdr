@@ -7,10 +7,10 @@ use serde::Serialize;
 use crate::api;
 use crate::api::schema::{
     AgentStatus, EmptyParams, IntegrationTarget, Method, OutputMatch, PaneListParams,
-    PaneReadParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams,
-    PaneTarget, PaneWaitForOutputParams, PingParams, ReadFormat, ReadSource, Request,
-    SplitDirection, Subscription, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
-    WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
+    PaneReadParams, PaneRenameParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams,
+    PaneSplitParams, PaneTarget, PaneWaitForOutputParams, PingParams, ReadFormat, ReadSource,
+    Request, SplitDirection, Subscription, TabCreateParams, TabListParams, TabRenameParams,
+    TabTarget, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
 };
 
 pub enum CommandOutcome {
@@ -274,6 +274,7 @@ fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "list" => pane_list(&args[1..]),
         "get" => pane_get(&args[1..]),
         "read" => pane_read(&args[1..]),
+        "rename" => pane_rename(&args[1..]),
         "split" => pane_split(&args[1..]),
         "close" => pane_close(&args[1..]),
         "send-text" => pane_send_text(&args[1..]),
@@ -784,6 +785,30 @@ fn pane_get(args: &[String]) -> std::io::Result<i32> {
         id: "cli:pane:get".into(),
         method: Method::PaneGet(PaneTarget {
             pane_id: normalize_pane_id(raw_pane_id),
+        }),
+    })?)
+}
+
+fn pane_rename(args: &[String]) -> std::io::Result<i32> {
+    let Some(raw_pane_id) = args.first() else {
+        eprintln!("usage: herdr pane rename <pane_id> <label>|--clear");
+        return Ok(2);
+    };
+    if args.len() < 2 {
+        eprintln!("usage: herdr pane rename <pane_id> <label>|--clear");
+        return Ok(2);
+    }
+    let label = if args.len() == 2 && args[1] == "--clear" {
+        None
+    } else {
+        Some(args[1..].join(" "))
+    };
+
+    print_response(&send_request(&Request {
+        id: "cli:pane:rename".into(),
+        method: Method::PaneRename(PaneRenameParams {
+            pane_id: normalize_pane_id(raw_pane_id),
+            label,
         }),
     })?)
 }
@@ -1497,6 +1522,7 @@ fn print_pane_help() {
     eprintln!("herdr pane commands:");
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane get <pane_id>");
+    eprintln!("  herdr pane rename <pane_id> <label>|--clear");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!(
         "  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]"

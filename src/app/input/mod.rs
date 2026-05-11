@@ -63,7 +63,7 @@ impl App {
                     Mode::Onboarding => self.handle_onboarding_key(key),
                     Mode::ReleaseNotes => self.handle_release_notes_key(key),
                     Mode::Navigate => unreachable!(),
-                    Mode::RenameWorkspace | Mode::RenameTab => {
+                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                         handle_rename_key(&mut self.state, key)
                     }
                     Mode::Resize => handle_resize_key(&mut self.state, key),
@@ -159,6 +159,9 @@ impl App {
                 SettingsAction::SaveTheme(name) => self.save_theme(&name),
                 SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
                 SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
+                SettingsAction::SaveAgentBorderLabels(enabled) => {
+                    self.save_agent_border_labels(enabled)
+                }
             }
         }
         if self.state.agent_panel_scope != previous_agent_panel_scope {

@@ -401,6 +401,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneSplit(_) => "pane.split",
         Method::PaneList(_) => "pane.list",
         Method::PaneGet(_) => "pane.get",
+        Method::PaneRename(_) => "pane.rename",
         Method::PaneSendText(_) => "pane.send_text",
         Method::PaneSendKeys(_) => "pane.send_keys",
         Method::PaneSendInput(_) => "pane.send_input",

@@ -164,6 +164,7 @@ pub(crate) fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
 
 pub(super) fn open_rename_workspace(state: &mut AppState, ws_idx: usize) {
     state.selected = ws_idx;
+    state.rename_pane_target = None;
     state.name_input = state.workspaces[ws_idx].display_name();
     state.name_input_replace_on_type = false;
     state.mode = Mode::RenameWorkspace;
@@ -172,6 +173,7 @@ pub(super) fn open_rename_workspace(state: &mut AppState, ws_idx: usize) {
 pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool) {
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
+    state.rename_pane_target = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
         if let Some(name) = ws.active_tab_display_name() {
             state.name_input = name;
@@ -179,6 +181,21 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
             state.mode = Mode::RenameTab;
         }
     }
+}
+
+pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::PaneId) {
+    let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) else {
+        return;
+    };
+    let Some(pane) = ws.pane_state(pane_id) else {
+        return;
+    };
+    state.creating_new_tab = false;
+    state.requested_new_tab_name = None;
+    state.rename_pane_target = Some(pane_id);
+    state.name_input = pane.manual_label.clone().unwrap_or_default();
+    state.name_input_replace_on_type = pane.manual_label.is_none();
+    state.mode = Mode::RenamePane;
 }
 
 fn next_new_tab_default_name(state: &AppState) -> String {
@@ -192,6 +209,7 @@ fn next_new_tab_default_name(state: &AppState) -> String {
 pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.creating_new_tab = true;
     state.requested_new_tab_name = None;
+    state.rename_pane_target = None;
     state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameTab;
@@ -295,9 +313,21 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         }
                     }
                 }
+                Mode::RenamePane => {
+                    if let (Some(ws_idx), Some(pane_id)) = (state.active, state.rename_pane_target)
+                    {
+                        if let Some(ws) = state.workspaces.get_mut(ws_idx) {
+                            if let Some(pane) = ws.pane_state_mut(pane_id) {
+                                pane.set_manual_label(new_name);
+                                state.mark_session_dirty();
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
             state.creating_new_tab = false;
+            state.rename_pane_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -309,6 +339,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
         ModalAction::Cancel => {
             state.creating_new_tab = false;
             state.requested_new_tab_name = None;
+            state.rename_pane_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -432,19 +463,33 @@ pub(super) fn apply_context_menu_action(state: &mut AppState, menu: ContextMenuS
                 Mode::Navigate
             };
         }
-        (ContextMenuKind::Pane, Some("Split vertical")) => {
+        (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
+            open_rename_pane(state, pane_id);
+        }
+        (ContextMenuKind::Pane { pane_id, .. }, Some("Clear pane name")) => {
+            if let Some(ws_idx) = state.active {
+                if let Some(ws) = state.workspaces.get_mut(ws_idx) {
+                    if let Some(pane) = ws.pane_state_mut(pane_id) {
+                        pane.clear_manual_label();
+                        state.mark_session_dirty();
+                    }
+                }
+            }
+            state.mode = Mode::Terminal;
+        }
+        (ContextMenuKind::Pane { .. }, Some("Split vertical")) => {
             state.split_pane(Direction::Horizontal);
             state.mode = Mode::Terminal;
         }
-        (ContextMenuKind::Pane, Some("Split horizontal")) => {
+        (ContextMenuKind::Pane { .. }, Some("Split horizontal")) => {
             state.split_pane(Direction::Vertical);
             state.mode = Mode::Terminal;
         }
-        (ContextMenuKind::Pane, Some("Fullscreen")) => {
+        (ContextMenuKind::Pane { .. }, Some("Fullscreen")) => {
             state.toggle_fullscreen();
             state.mode = Mode::Terminal;
         }
-        (ContextMenuKind::Pane, Some("Close pane")) => {
+        (ContextMenuKind::Pane { .. }, Some("Close pane")) => {
             state.close_pane();
             state.mode = if state.active.is_some() {
                 Mode::Terminal

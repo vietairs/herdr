@@ -137,7 +137,10 @@ impl AppState {
                     return None;
                 }
 
-                if matches!(self.mode, Mode::RenameWorkspace | Mode::RenameTab) {
+                if matches!(
+                    self.mode,
+                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
+                ) {
                     let action = self
                         .rename_modal_inner()
                         .map(crate::ui::rename_button_rects)
@@ -678,8 +681,17 @@ impl AppState {
             MouseEventKind::Down(MouseButton::Right) if !in_sidebar => {
                 if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
                     self.focus_pane(info.id);
+                    let has_manual_label = self
+                        .active
+                        .and_then(|ws_idx| self.workspaces.get(ws_idx))
+                        .and_then(|ws| ws.pane_state(info.id))
+                        .and_then(|pane| pane.manual_label.as_ref())
+                        .is_some();
                     self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Pane,
+                        kind: ContextMenuKind::Pane {
+                            pane_id: info.id,
+                            has_manual_label,
+                        },
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),

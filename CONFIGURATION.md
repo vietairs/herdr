@@ -98,6 +98,7 @@ new_tab = "c"
 split_vertical = "v"
 split_horizontal = "-"
 close_pane = "x"
+rename_pane = ""        # optional, unset by default
 fullscreen = "f"
 resize_mode = "r"
 toggle_sidebar = "b"
@@ -135,6 +136,7 @@ focus_pane_right = "alt+l"
 | `split_vertical` | `v` | split pane vertically (side by side) |
 | `split_horizontal` | `-` | split pane horizontally (stacked) |
 | `close_pane` | `x` | close focused pane |
+| `rename_pane` | unset | rename the focused pane |
 | `fullscreen` | `f` | toggle focused pane fullscreen |
 | `resize_mode` | `r` | enter or leave resize mode |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
@@ -251,6 +253,7 @@ for `panel_bg`, you can also use `reset`, `default`, `none`, or `transparent` to
 [ui]
 sidebar_width = 26
 confirm_close = true
+show_agent_labels_on_pane_borders = false
 agent_panel_scope = "all"
 accent = "cyan"
 ```
@@ -261,6 +264,7 @@ accent = "cyan"
 |--------|---------|-------------|
 | `sidebar_width` | `26` | base sidebar width before auto-scaling |
 | `confirm_close` | `true` | ask before closing a workspace |
+| `show_agent_labels_on_pane_borders` | `false` | show detected/reported agent labels in split pane borders when no manual pane name is set |
 | `agent_panel_scope` | `all` | sidebar agent list scope: `current` or `all` |
 | `accent` | `cyan` | highlight and border color |
 

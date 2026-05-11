@@ -70,6 +70,7 @@ fn agent_panel_current_workspace_idx(app: &AppState) -> Option<usize> {
         app.mode,
         Mode::Navigate
             | Mode::RenameWorkspace
+            | Mode::RenamePane
             | Mode::Resize
             | Mode::ConfirmClose
             | Mode::ContextMenu

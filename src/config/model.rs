@@ -93,6 +93,8 @@ pub struct KeysConfig {
     pub next_tab: String,
     /// Close the active tab. Unset by default.
     pub close_tab: String,
+    /// Rename the focused pane. Unset by default.
+    pub rename_pane: String,
     /// Focus the pane to the left in terminal mode. Unset by default.
     pub focus_pane_left: String,
     /// Focus the pane below in terminal mode. Unset by default.
@@ -123,6 +125,8 @@ pub struct UiConfig {
     pub sidebar_width: u16,
     /// Ask for confirmation before closing a workspace. Default: true.
     pub confirm_close: bool,
+    /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
+    pub show_agent_labels_on_pane_borders: bool,
     /// Agent sidebar scope. Saved values are "current" or "all". Default: "all".
     pub agent_panel_scope: AgentPanelScopeConfig,
     /// Accent color for highlights, borders, and navigation UI.
@@ -160,6 +164,7 @@ impl Default for KeysConfig {
             previous_tab: "".into(),
             next_tab: "".into(),
             close_tab: "".into(),
+            rename_pane: "".into(),
             focus_pane_left: "".into(),
             focus_pane_down: "".into(),
             focus_pane_up: "".into(),
@@ -180,6 +185,7 @@ impl Default for UiConfig {
         Self {
             sidebar_width: 26,
             confirm_close: true,
+            show_agent_labels_on_pane_borders: false,
             agent_panel_scope: AgentPanelScopeConfig::All,
             accent: "cyan".into(),
             toast: ToastConfig::default(),
@@ -239,6 +245,19 @@ agent_panel_scope = "all"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.agent_panel_scope, AgentPanelScopeConfig::All);
+    }
+
+    #[test]
+    fn pane_border_agent_labels_default_off_and_parse() {
+        let default_config = Config::default();
+        assert!(!default_config.ui.show_agent_labels_on_pane_borders);
+
+        let toml = r#"
+[ui]
+show_agent_labels_on_pane_borders = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.show_agent_labels_on_pane_borders);
     }
 
     #[test]

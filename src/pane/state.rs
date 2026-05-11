@@ -28,6 +28,7 @@ pub struct PaneState {
     pub detected_agent: Option<Agent>,
     pub fallback_state: AgentState,
     pub hook_authority: Option<HookAuthority>,
+    pub manual_label: Option<String>,
     hook_report_sequences: HashMap<String, u64>,
     pub state: AgentState,
     /// Whether the user has seen this pane since its last state change to Idle.
@@ -41,6 +42,7 @@ impl PaneState {
             detected_agent: None,
             fallback_state: AgentState::Unknown,
             hook_authority: None,
+            manual_label: None,
             hook_report_sequences: HashMap::new(),
             state: AgentState::Unknown,
             seen: true,
@@ -182,6 +184,23 @@ impl PaneState {
             return crate::detect::parse_agent_label(&authority.agent_label);
         }
         self.detected_agent
+    }
+
+    pub fn set_manual_label(&mut self, label: String) {
+        let label = label.trim().to_string();
+        self.manual_label = (!label.is_empty()).then_some(label);
+    }
+
+    pub fn clear_manual_label(&mut self) {
+        self.manual_label = None;
+    }
+
+    pub fn border_label(&self, show_agent_labels: bool) -> Option<&str> {
+        self.manual_label.as_deref().or_else(|| {
+            show_agent_labels
+                .then(|| self.effective_agent_label())
+                .flatten()
+        })
     }
 
     fn recompute_effective_state(
@@ -336,6 +355,26 @@ mod tests {
         assert_eq!(pane.effective_agent_label(), Some("hermes"));
         assert_eq!(pane.effective_known_agent(), None);
         assert_eq!(pane.state, AgentState::Working);
+    }
+
+    #[test]
+    fn border_label_prefers_manual_label_over_agent_label() {
+        let mut pane = PaneState::new();
+        pane.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        assert_eq!(pane.border_label(false), None);
+        assert_eq!(pane.border_label(true), Some("claude"));
+
+        pane.set_manual_label(" reviewer ".into());
+        assert_eq!(pane.border_label(false), Some("reviewer"));
+        assert_eq!(pane.border_label(true), Some("reviewer"));
+
+        pane.set_manual_label("   ".into());
+        assert_eq!(pane.border_label(true), Some("claude"));
+
+        pane.set_manual_label("reviewer".into());
+        pane.clear_manual_label();
+        assert_eq!(pane.border_label(true), Some("claude"));
     }
 
     #[test]

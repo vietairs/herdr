@@ -368,6 +368,7 @@ pub(crate) enum NavigateAction {
     PreviousTab,
     NextTab,
     CloseTab,
+    RenamePane,
     FocusPaneLeft,
     FocusPaneDown,
     FocusPaneUp,
@@ -431,6 +432,12 @@ fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateA
         .is_some_and(|(code, mods)| key_matches(key, code, mods))
     {
         return Some(NavigateAction::CloseTab);
+    }
+    if kb
+        .rename_pane
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::RenamePane);
     }
     if key_matches(key, kb.split_vertical.0, kb.split_vertical.1) {
         return Some(NavigateAction::SplitVertical);
@@ -507,6 +514,15 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
         NavigateAction::CloseTab => {
             state.close_tab();
             leave_navigate_mode(state);
+        }
+        NavigateAction::RenamePane => {
+            if let Some(pane_id) = state
+                .active
+                .and_then(|ws_idx| state.workspaces.get(ws_idx))
+                .and_then(|ws| ws.focused_pane_id())
+            {
+                super::modal::open_rename_pane(state, pane_id);
+            }
         }
         NavigateAction::FocusPaneLeft => state.navigate_pane(NavDirection::Left),
         NavigateAction::FocusPaneDown => state.navigate_pane(NavDirection::Down),

@@ -18,6 +18,30 @@ pub(crate) fn pane_is_scrolled_back(rt: &PaneRuntime) -> bool {
         .is_some_and(|metrics| metrics.offset_from_bottom > 0)
 }
 
+fn truncate_label(text: &str, max_width: usize) -> String {
+    let len = text.chars().count();
+    if len <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
+    format!("{prefix}…")
+}
+
+fn pane_border_title(label: &str, pane_width: u16) -> Option<String> {
+    let label = label.trim();
+    if label.is_empty() || pane_width <= 4 {
+        return None;
+    }
+    let max_label_width = pane_width.saturating_sub(4) as usize;
+    Some(format!(" {} ", truncate_label(label, max_label_width)))
+}
+
 fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
     if pane_inner.width <= 4 {
         return pane_inner;
@@ -174,10 +198,17 @@ pub(super) fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
                     )
                 };
 
-                let block = Block::default()
+                let mut block = Block::default()
                     .borders(Borders::ALL)
                     .border_style(border_style)
                     .border_set(border_set);
+                if let Some(title) = ws
+                    .pane_state(info.id)
+                    .and_then(|pane| pane.border_label(app.show_agent_labels_on_pane_borders))
+                    .and_then(|label| pane_border_title(label, info.rect.width))
+                {
+                    block = block.title(Line::from(Span::styled(title, border_style)));
+                }
                 frame.render_widget(block, info.rect);
             }
 
@@ -302,6 +333,17 @@ mod tests {
     use super::*;
     use crate::pane::PaneRuntime;
     use crate::workspace::Workspace;
+
+    #[test]
+    fn pane_border_title_trims_and_truncates() {
+        assert_eq!(
+            pane_border_title(" claude ", 20).as_deref(),
+            Some(" claude ")
+        );
+        assert_eq!(pane_border_title("", 20), None);
+        assert_eq!(pane_border_title("abcdef", 8).as_deref(), Some(" abc… "));
+        assert_eq!(pane_border_title("abcdef", 4), None);
+    }
 
     #[tokio::test]
     async fn pane_scrollbar_gutter_is_reserved_before_scrollback_exists() {

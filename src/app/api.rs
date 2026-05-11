@@ -927,6 +927,48 @@ impl App {
                     result: ResponseResult::PaneInfo { pane },
                 }
             }
+            Method::PaneRename(params) => {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(pane_state) = ws.pane_state_mut(pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                match params.label.map(|label| label.trim().to_string()) {
+                    Some(label) if !label.is_empty() => pane_state.set_manual_label(label),
+                    _ => pane_state.clear_manual_label(),
+                }
+                self.state.mark_session_dirty();
+                let pane = self.pane_info(ws_idx, pane_id).unwrap();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::PaneInfo { pane },
+                }
+            }
             Method::PaneRead(params) => {
                 let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
                     return serde_json::to_string(&ErrorResponse {

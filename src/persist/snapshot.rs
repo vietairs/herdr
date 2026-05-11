@@ -68,6 +68,8 @@ pub struct TabSnapshot {
 #[derive(Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Serializable BSP tree.
@@ -228,7 +230,8 @@ fn capture_tab(tab: &crate::workspace::Tab) -> TabSnapshot {
         let cwd = tab
             .cwd_for_pane(*id)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        panes.insert(id.raw(), PaneSnapshot { cwd });
+        let label = tab.panes.get(id).and_then(|pane| pane.manual_label.clone());
+        panes.insert(id.raw(), PaneSnapshot { cwd, label });
     }
     TabSnapshot {
         custom_name: tab.custom_name.clone(),
@@ -381,12 +384,14 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
+                label: None,
             },
         );
         panes.insert(
             1,
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
+                label: Some("website".into()),
             },
         );
 
@@ -432,6 +437,10 @@ mod tests {
         assert_eq!(
             restored.workspaces[0].tabs[0].panes[&0].cwd,
             PathBuf::from("/home/can/Projects/herdr")
+        );
+        assert_eq!(
+            restored.workspaces[0].tabs[0].panes[&1].label.as_deref(),
+            Some("website")
         );
         assert_eq!(
             restored.agent_panel_scope,
@@ -691,6 +700,7 @@ mod tests {
             0,
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
+                label: None,
             },
         );
         panes.insert(
@@ -699,6 +709,7 @@ mod tests {
                 cwd: std::env::var("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
+                label: None,
             },
         );
 

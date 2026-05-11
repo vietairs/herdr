@@ -408,6 +408,12 @@ impl Workspace {
         self.tabs.iter().find_map(|tab| tab.panes.get(&pane_id))
     }
 
+    pub fn pane_state_mut(&mut self, pane_id: PaneId) -> Option<&mut PaneState> {
+        self.tabs
+            .iter_mut()
+            .find_map(|tab| tab.panes.get_mut(&pane_id))
+    }
+
     pub fn runtime(&self, pane_id: PaneId) -> Option<&PaneRuntime> {
         self.tabs.iter().find_map(|tab| tab.runtimes.get(&pane_id))
     }

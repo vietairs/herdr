@@ -136,6 +136,11 @@ fn restore_tab(
             }
         };
 
+        let saved_label = reverse_id_map
+            .get(id)
+            .and_then(|old_id| snap.panes.get(old_id))
+            .and_then(|p| p.label.clone());
+
         match PaneRuntime::spawn(
             *id,
             rows,
@@ -148,7 +153,9 @@ fn restore_tab(
             render_dirty.clone(),
         ) {
             Ok(runtime) => {
-                panes.insert(*id, PaneState::new());
+                let mut pane_state = PaneState::new();
+                pane_state.manual_label = saved_label;
+                panes.insert(*id, pane_state);
                 pane_cwds.insert(*id, cwd.clone());
                 runtimes.insert(*id, runtime);
             }

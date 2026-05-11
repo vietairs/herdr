@@ -46,6 +46,8 @@ pub enum Method {
     PaneList(PaneListParams),
     #[serde(rename = "pane.get")]
     PaneGet(PaneTarget),
+    #[serde(rename = "pane.rename")]
+    PaneRename(PaneRenameParams),
     #[serde(rename = "pane.send_text")]
     PaneSendText(PaneSendTextParams),
     #[serde(rename = "pane.send_keys")]
@@ -158,6 +160,13 @@ pub enum SplitDirection {
 pub struct PaneListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneRenameParams {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,6 +541,8 @@ pub struct PaneInfo {
     pub focused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     pub agent_status: AgentStatus,
@@ -1012,6 +1023,7 @@ mod tests {
                     tab_id: "w_1:2".into(),
                     focused: false,
                     cwd: Some("/tmp/review".into()),
+                    label: None,
                     agent: None,
                     agent_status: AgentStatus::Unknown,
                     revision: 0,

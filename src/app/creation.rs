@@ -245,6 +245,7 @@ impl App {
             cwd: runtime
                 .and_then(|rt| rt.cwd())
                 .map(|cwd| cwd.display().to_string()),
+            label: pane.manual_label.clone(),
             agent: pane.effective_agent_label().map(str::to_string),
             agent_status: pane_agent_status(pane.state, pane.seen),
             revision: 0,

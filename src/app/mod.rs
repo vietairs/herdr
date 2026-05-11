@@ -292,6 +292,7 @@ impl App {
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
+            rename_pane_target: None,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -344,6 +345,7 @@ impl App {
             sidebar_section_split,
             agent_panel_scope,
             confirm_close: config.ui.confirm_close,
+            show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
             accent: crate::config::parse_color(&config.ui.accent),
             sound: config.ui.sound.clone(),
@@ -649,6 +651,8 @@ impl App {
                 self.state.sidebar_width = config.ui.sidebar_width;
             }
             self.state.confirm_close = config.ui.confirm_close;
+            self.state.show_agent_labels_on_pane_borders =
+                config.ui.show_agent_labels_on_pane_borders;
             self.state.agent_panel_scope =
                 agent_panel_scope_from_config(config.ui.agent_panel_scope);
             self.state.agent_panel_scroll = 0;
@@ -809,7 +813,7 @@ impl App {
             Mode::Navigate => {
                 self.handle_navigate_key(key);
             }
-            Mode::RenameWorkspace | Mode::RenameTab => {
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 input::handle_rename_key(&mut self.state, key_event);
             }
             Mode::Resize => {
@@ -1480,6 +1484,54 @@ mod tests {
 
         assert_eq!(response["result"]["type"], "ok");
         assert!(app.state.should_quit);
+    }
+
+    #[test]
+    fn pane_rename_request_sets_and_clears_manual_label() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("api-pane-rename");
+        let pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let pane_id = app.pane_info(0, pane).unwrap().pane_id;
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_rename".into(),
+            method: crate::api::schema::Method::PaneRename(crate::api::schema::PaneRenameParams {
+                pane_id: pane_id.clone(),
+                label: Some("reviewer".into()),
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "pane_info");
+        assert_eq!(response["result"]["pane"]["label"], "reviewer");
+        assert_eq!(
+            app.state.workspaces[0]
+                .pane_state(pane)
+                .unwrap()
+                .manual_label
+                .as_deref(),
+            Some("reviewer")
+        );
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_rename_clear".into(),
+            method: crate::api::schema::Method::PaneRename(crate::api::schema::PaneRenameParams {
+                pane_id,
+                label: None,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "pane_info");
+        assert!(response["result"]["pane"].get("label").is_none());
+        assert!(app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .manual_label
+            .is_none());
     }
 
     #[tokio::test]
