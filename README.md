@@ -90,6 +90,22 @@ ssh you@yourserver
 herdr
 ```
 
+or attach from your local terminal through ssh:
+
+```bash
+herdr --remote workbox
+herdr --remote ssh://you@yourserver:2222
+```
+
+for repeat targets, use your ssh config:
+
+```sshconfig
+Host workbox
+  HostName yourserver
+  User you
+  Port 2222
+```
+
 same session, same agents, same state.
 
 ## agent awareness
