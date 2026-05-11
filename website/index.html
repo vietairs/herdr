@@ -46,7 +46,7 @@
             type="font/woff2"
             crossorigin
         />
-        <link rel="stylesheet" href="/css/style.css?v=d0a150a" />
+        <link rel="stylesheet" href="/css/style.css?v=37c8e0f6" />
     </head>
     <body>
         <!-- ── Hero ── -->
@@ -69,15 +69,24 @@
                     >
                 </p>
                 <p>
-                    workspaces, tabs, panes. mouse-native: click, drag, split.
-                    every agent at a glance:
+                    workspaces, tabs, panes. every agent at a glance:
                     <span class="text-blocked">blocked</span>,
                     <span class="text-working">working</span>,
                     <span class="text-done">done</span>. detach and reattach,
                     agents keep running. attach locally, over ssh, or as a thin
-                    client to a remote server. no gui app, no electron, no
-                    mac-only native wrapper. you see the agent's own terminal,
-                    not someone's interpretation of it.
+                    client to a remote server.
+                </p>
+                <p class="mouse-native-line">
+                    <span class="mouse-native-pill">mouse-native tui</span>:
+                    click
+                    <span>panes</span
+                    >/<span>tabs</span>/<span>workspaces</span>/<span>agents</span>,
+                    drag borders, select text, right-click menus.
+                </p>
+                <p>
+                    no gui app, no electron, no mac-only native wrapper. you see
+                    the agent's own terminal, not someone's interpretation of
+                    it.
                 </p>
             </div>
             <div class="install-row">
@@ -267,34 +276,29 @@
         <hr class="section-rule" />
         <div class="gap"></div>
 
-        <!-- ── From anywhere ── -->
+        <!-- ── Local or remote ── -->
         <section class="section">
             <div class="section-heading">
                 <span class="dot dot-done"></span>
-                <h2>from anywhere</h2>
+                <h2>local or remote</h2>
             </div>
             <div class="prose-block">
                 <p>
-                    once the session is running, attach to it three ways. keep
-                    the work on the machine that has the code, the keys, and the
-                    agents. connect from wherever you are.
+                    use herdr where the work lives. most days that is your
+                    laptop or desktop. if the code, keys, or agents live on a
+                    server, attach there instead.
                 </p>
             </div>
             <div class="access-grid">
                 <div class="access-card">
-                    <div class="access-kicker">server</div>
-                    <h3>ssh in, run herdr</h3>
+                    <div class="access-kicker">local</div>
+                    <h3>run herdr where you work</h3>
                     <p>
-                        use it like tmux on a remote box. herdr starts the
-                        session there, and your panes keep running after you
-                        detach.
+                        start a local session on your own machine. detach,
+                        reattach, split panes, create tabs, and keep agents
+                        running while your terminal comes and goes.
                     </p>
                     <div class="mini-flow">
-                        <div>
-                            <span class="prompt">$</span>
-                            <span class="cmd">ssh</span>
-                            <span class="comment">you@server</span>
-                        </div>
                         <div>
                             <span class="prompt">$</span>
                             <span class="cmd">herdr</span>
@@ -302,12 +306,12 @@
                     </div>
                 </div>
                 <div class="access-card">
-                    <div class="access-kicker">phone</div>
-                    <h3>ssh from mobile</h3>
+                    <div class="access-kicker">ssh</div>
+                    <h3>ssh in, run herdr</h3>
                     <p>
-                        narrow terminals get a responsive tui instead of a
-                        squeezed desktop layout. spaces, tabs, and agents stay
-                        reachable from a phone ssh client.
+                        use it like tmux on a remote box. herdr starts the
+                        session there, and your panes keep running after you
+                        detach.
                     </p>
                     <div class="mini-flow">
                         <div>
@@ -627,8 +631,7 @@
                     >api</a
                 >
                 ·
-                <a
-                    href="https://github.com/ogulcancelik/herdr/releases"
+                <a href="https://github.com/ogulcancelik/herdr/releases"
                     >releases</a
                 >
             </p>

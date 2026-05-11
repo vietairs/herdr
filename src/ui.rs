@@ -847,6 +847,8 @@ mod tests {
 
         assert!(workspace_tab.contains(&("unset".to_string(), "previous workspace")));
         assert!(workspace_tab.contains(&("unset".to_string(), "next workspace")));
+        assert!(workspace_tab.contains(&("unset".to_string(), "previous agent")));
+        assert!(workspace_tab.contains(&("unset".to_string(), "next agent")));
         assert!(workspace_tab.contains(&("unset".to_string(), "rename tab")));
         assert!(workspace_tab.contains(&("unset".to_string(), "previous tab")));
         assert!(workspace_tab.contains(&("unset".to_string(), "next tab")));

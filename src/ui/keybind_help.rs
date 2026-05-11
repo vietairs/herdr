@@ -68,6 +68,11 @@ pub(super) fn keybind_help_groups(
             optional_keybind_label(&kb.next_workspace_label),
             "next workspace",
         ),
+        (
+            optional_keybind_label(&kb.previous_agent_label),
+            "previous agent",
+        ),
+        (optional_keybind_label(&kb.next_agent_label), "next agent"),
         (kb.new_tab_label.clone(), "new tab"),
         (optional_keybind_label(&kb.rename_tab_label), "rename tab"),
         (

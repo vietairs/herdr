@@ -85,6 +85,10 @@ pub struct KeysConfig {
     pub previous_workspace: String,
     /// Select the next workspace. Unset by default.
     pub next_workspace: String,
+    /// Focus the previous agent shown in the agent panel. Unset by default.
+    pub previous_agent: String,
+    /// Focus the next agent shown in the agent panel. Unset by default.
+    pub next_agent: String,
     /// Create a new tab in the active workspace. Default: "c"
     pub new_tab: String,
     /// Rename the active tab. Unset by default.
@@ -162,6 +166,8 @@ impl Default for KeysConfig {
             open_notification_target: "".into(),
             previous_workspace: "".into(),
             next_workspace: "".into(),
+            previous_agent: "".into(),
+            next_agent: "".into(),
             new_tab: "c".into(),
             rename_tab: "".into(),
             previous_tab: "".into(),

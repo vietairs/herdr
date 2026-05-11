@@ -73,6 +73,10 @@ pub struct Keybinds {
     pub previous_workspace_label: Option<String>,
     pub next_workspace: Option<(KeyCode, KeyModifiers)>,
     pub next_workspace_label: Option<String>,
+    pub previous_agent: Option<(KeyCode, KeyModifiers)>,
+    pub previous_agent_label: Option<String>,
+    pub next_agent: Option<(KeyCode, KeyModifiers)>,
+    pub next_agent_label: Option<String>,
     pub new_tab: (KeyCode, KeyModifiers),
     pub new_tab_label: String,
     pub rename_tab: Option<(KeyCode, KeyModifiers)>,
@@ -367,6 +371,18 @@ impl Config {
             ),
             optional_binding(
                 BindingScope::Navigate,
+                "keys.previous_agent",
+                &self.keys.previous_agent,
+                &mut diagnostics,
+            ),
+            optional_binding(
+                BindingScope::Navigate,
+                "keys.next_agent",
+                &self.keys.next_agent,
+                &mut diagnostics,
+            ),
+            optional_binding(
+                BindingScope::Navigate,
                 "keys.rename_tab",
                 &self.keys.rename_tab,
                 &mut diagnostics,
@@ -610,26 +626,30 @@ impl Config {
             previous_workspace_label: optional_bindings[3].label.clone(),
             next_workspace: optional_bindings[4].value,
             next_workspace_label: optional_bindings[4].label.clone(),
+            previous_agent: optional_bindings[5].value,
+            previous_agent_label: optional_bindings[5].label.clone(),
+            next_agent: optional_bindings[6].value,
+            next_agent_label: optional_bindings[6].label.clone(),
             new_tab: bindings[3].value,
             new_tab_label: bindings[3].label.clone(),
-            rename_tab: optional_bindings[5].value,
-            rename_tab_label: optional_bindings[5].label.clone(),
-            previous_tab: optional_bindings[6].value,
-            previous_tab_label: optional_bindings[6].label.clone(),
-            next_tab: optional_bindings[7].value,
-            next_tab_label: optional_bindings[7].label.clone(),
-            close_tab: optional_bindings[8].value,
-            close_tab_label: optional_bindings[8].label.clone(),
-            rename_pane: optional_bindings[9].value,
-            rename_pane_label: optional_bindings[9].label.clone(),
-            focus_pane_left: optional_bindings[10].value,
-            focus_pane_left_label: optional_bindings[10].label.clone(),
-            focus_pane_down: optional_bindings[11].value,
-            focus_pane_down_label: optional_bindings[11].label.clone(),
-            focus_pane_up: optional_bindings[12].value,
-            focus_pane_up_label: optional_bindings[12].label.clone(),
-            focus_pane_right: optional_bindings[13].value,
-            focus_pane_right_label: optional_bindings[13].label.clone(),
+            rename_tab: optional_bindings[7].value,
+            rename_tab_label: optional_bindings[7].label.clone(),
+            previous_tab: optional_bindings[8].value,
+            previous_tab_label: optional_bindings[8].label.clone(),
+            next_tab: optional_bindings[9].value,
+            next_tab_label: optional_bindings[9].label.clone(),
+            close_tab: optional_bindings[10].value,
+            close_tab_label: optional_bindings[10].label.clone(),
+            rename_pane: optional_bindings[11].value,
+            rename_pane_label: optional_bindings[11].label.clone(),
+            focus_pane_left: optional_bindings[12].value,
+            focus_pane_left_label: optional_bindings[12].label.clone(),
+            focus_pane_down: optional_bindings[13].value,
+            focus_pane_down_label: optional_bindings[13].label.clone(),
+            focus_pane_up: optional_bindings[14].value,
+            focus_pane_up_label: optional_bindings[14].label.clone(),
+            focus_pane_right: optional_bindings[15].value,
+            focus_pane_right_label: optional_bindings[15].label.clone(),
             split_vertical: bindings[4].value,
             split_vertical_label: bindings[4].label.clone(),
             split_horizontal: bindings[5].value,
@@ -863,6 +883,8 @@ mod tests {
             (KeyCode::Char('d'), KeyModifiers::SHIFT)
         );
         assert_eq!(kb.detach, None);
+        assert_eq!(kb.previous_agent, None);
+        assert_eq!(kb.next_agent, None);
         assert_eq!(kb.split_vertical.0, KeyCode::Char('v'));
         assert_eq!(kb.split_horizontal.0, KeyCode::Char('-'));
         assert_eq!(kb.close_pane.0, KeyCode::Char('x'));
@@ -886,6 +908,8 @@ close_pane = "ctrl+w"
 fullscreen = "z"
 resize_mode = "ctrl+r"
 toggle_sidebar = "tab"
+previous_agent = "alt+a"
+next_agent = "alt+d"
 focus_pane_left = "alt+h"
 focus_pane_right = "alt+right"
 "#;
@@ -916,6 +940,11 @@ focus_pane_right = "alt+right"
         assert_eq!(kb.fullscreen.0, KeyCode::Char('z'));
         assert_eq!(kb.resize_mode, (KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert_eq!(kb.toggle_sidebar, (KeyCode::Tab, KeyModifiers::empty()));
+        assert_eq!(
+            kb.previous_agent,
+            Some((KeyCode::Char('a'), KeyModifiers::ALT))
+        );
+        assert_eq!(kb.next_agent, Some((KeyCode::Char('d'), KeyModifiers::ALT)));
         assert_eq!(
             kb.focus_pane_left,
             Some((KeyCode::Char('h'), KeyModifiers::ALT))

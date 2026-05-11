@@ -31,6 +31,18 @@ pub(crate) fn terminal_direct_navigation_action(
         return Some(NavigateAction::NextWorkspace);
     }
     if kb
+        .previous_agent
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::PreviousAgent);
+    }
+    if kb
+        .next_agent
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::NextAgent);
+    }
+    if kb
         .previous_tab
         .is_some_and(|(code, mods)| key_matches(key, code, mods))
     {
@@ -363,6 +375,8 @@ pub(crate) enum NavigateAction {
     CloseWorkspace,
     PreviousWorkspace,
     NextWorkspace,
+    PreviousAgent,
+    NextAgent,
     NewTab,
     RenameTab,
     PreviousTab,
@@ -406,6 +420,18 @@ fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateA
         .is_some_and(|(code, mods)| key_matches(key, code, mods))
     {
         return Some(NavigateAction::NextWorkspace);
+    }
+    if kb
+        .previous_agent
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::PreviousAgent);
+    }
+    if kb
+        .next_agent
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::NextAgent);
     }
     if key_matches(key, kb.new_tab.0, kb.new_tab.1) {
         return Some(NavigateAction::NewTab);
@@ -506,6 +532,14 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
         }
         NavigateAction::NextWorkspace => {
             state.next_workspace();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::PreviousAgent => {
+            state.previous_agent();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::NextAgent => {
+            state.next_agent();
             leave_navigate_mode(state);
         }
         NavigateAction::NewTab => super::modal::open_new_tab_dialog(state),
@@ -727,6 +761,20 @@ mod tests {
 
         assert_eq!(state.selected, 1);
         assert_eq!(state.mobile_switcher_scroll, 1);
+    }
+
+    #[test]
+    fn terminal_direct_agent_shortcut_maps_to_navigation_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.next_agent = Some((KeyCode::Char('a'), KeyModifiers::ALT));
+        state.keybinds.next_agent_label = Some("alt+a".into());
+
+        let action = terminal_direct_navigation_action(
+            &state,
+            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT),
+        );
+
+        assert_eq!(action, Some(NavigateAction::NextAgent));
     }
 
     #[test]

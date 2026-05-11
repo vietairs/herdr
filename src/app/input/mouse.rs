@@ -581,17 +581,22 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !in_sidebar => {
-                if self.on_tab_bar(mouse.column, mouse.row) {
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => self.scroll_tabs_left(),
-                        MouseEventKind::ScrollDown => self.scroll_tabs_right(),
-                        _ => {}
-                    }
-                } else if !self.scroll_selection_with_wheel(mouse) {
-                    self.selection = None;
-                    self.handle_terminal_wheel(mouse);
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if self.on_tab_bar(mouse.column, mouse.row) =>
+            {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => self.previous_tab(),
+                    MouseEventKind::ScrollDown => self.next_tab(),
+                    _ => {}
                 }
+            }
+
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if !in_sidebar && self.scroll_selection_with_wheel(mouse) => {}
+
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !in_sidebar => {
+                self.selection = None;
+                self.handle_terminal_wheel(mouse);
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
@@ -1565,6 +1570,90 @@ mod tests {
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::MouseReport);
+    }
+
+    #[test]
+    fn wheel_over_tab_bar_switches_tabs() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        ws.test_add_tab(Some("three"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let tab_bar = app.state.view.tab_bar_rect;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, tab_bar.x + 1, tab_bar.y));
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, tab_bar.x + 1, tab_bar.y));
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, tab_bar.x + 1, tab_bar.y));
+        assert_eq!(app.state.workspaces[0].active_tab, 2);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            tab_bar.x + tab_bar.width.saturating_sub(1),
+            tab_bar.y,
+        ));
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+    }
+
+    #[test]
+    fn wheel_over_overflowing_tab_bar_switches_tabs() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.tabs[0].set_custom_name("very-long-one".into());
+        ws.test_add_tab(Some("very-long-two"));
+        ws.test_add_tab(Some("very-long-three"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
+        assert!(app.state.view.tab_scroll_right_hit_area.width > 0);
+        let tab_bar = app.state.view.tab_bar_rect;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            tab_bar.x + tab_bar.width.saturating_sub(2),
+            tab_bar.y,
+        ));
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            tab_bar.x + tab_bar.width.saturating_sub(2),
+            tab_bar.y,
+        ));
+        assert_eq!(app.state.workspaces[0].active_tab, 2);
+    }
+
+    #[test]
+    fn wheel_outside_tab_bar_does_not_switch_tabs() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let terminal = app.state.view.terminal_area;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            terminal.x + 1,
+            terminal.y + 1,
+        ));
+
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
     }
 
     #[test]

@@ -96,8 +96,8 @@ close_workspace = "shift+d"
 reload_config = ""      # optional, unset by default
 open_notification_target = "" # optional, unset by default
 new_tab = "c"
-split_vertical = "v"
-split_horizontal = "-"
+split_vertical = "d"
+split_horizontal = "D"
 close_pane = "x"
 rename_pane = ""        # optional, unset by default
 fullscreen = "f"
@@ -105,6 +105,8 @@ resize_mode = "r"
 toggle_sidebar = "b"
 previous_workspace = "ctrl+alt+["
 next_workspace = "ctrl+alt+]"
+previous_agent = "ctrl+["
+next_agent = "ctrl+]"
 previous_tab = "alt+["
 next_tab = "alt+]"
 focus_pane_left = "alt+h"
@@ -126,6 +128,8 @@ focus_pane_right = "alt+l"
 | `open_notification_target` | unset | jump to the currently visible notification target |
 | `previous_workspace` | unset | switch to the previous workspace directly from terminal mode |
 | `next_workspace` | unset | switch to the next workspace directly from terminal mode |
+| `previous_agent` | unset | focus the previous agent shown in the sidebar agent list |
+| `next_agent` | unset | focus the next agent shown in the sidebar agent list |
 | `new_tab` | `c` | create a new tab |
 | `rename_tab` | unset | rename the active tab |
 | `previous_tab` | unset | switch to the previous tab directly from terminal mode |

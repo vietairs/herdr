@@ -257,6 +257,23 @@ a:hover {
     font-weight: 500;
 }
 
+.mouse-native-line span:not(.mouse-native-pill) {
+    transition: color 0.2s ease;
+}
+
+.mouse-native-line:hover span:not(.mouse-native-pill) {
+    color: var(--white);
+}
+
+.mouse-native-pill {
+    color: var(--green);
+    transition: text-shadow 0.2s ease;
+}
+
+.mouse-native-line:hover .mouse-native-pill {
+    text-shadow: 0 0 8px rgba(166, 227, 161, 0.35);
+}
+
 .install-row {
     display: flex;
     align-items: center;
@@ -447,8 +464,8 @@ a:hover {
 }
 
 .access-card {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-rows: auto 3.2rem 1fr auto;
     min-width: 0;
     background: var(--mantle);
     border: 1px solid var(--border);
@@ -484,7 +501,6 @@ a:hover {
     align-content: start;
     gap: 0.35rem;
     min-height: 3.6rem;
-    margin-top: auto;
     padding-top: 0.85rem;
     border-top: 1px solid var(--border);
     font-size: 0.74rem;
