@@ -9,6 +9,8 @@ use std::process::{Command, Output};
 
 use tracing::warn;
 
+const DISABLE_SOUND_ENV: &str = "HERDR_DISABLE_SOUND";
+
 static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.mp3");
 static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.mp3");
 
@@ -24,6 +26,10 @@ pub enum Sound {
 /// Play a notification sound in a background thread.
 /// Silently does nothing if no audio player is available.
 pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
+    if sound_playback_disabled_by_env() {
+        return;
+    }
+
     let custom_path = config.path_for(sound);
     std::thread::spawn(move || {
         if let Some(path) = custom_path {
@@ -44,6 +50,10 @@ pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
             warn!(sound = ?sound, err = %err, "sound playback failed");
         }
     });
+}
+
+fn sound_playback_disabled_by_env() -> bool {
+    std::env::var_os(DISABLE_SOUND_ENV).is_some() || std::env::var_os("NEXTEST").is_some()
 }
 
 fn play_file(path: &Path) -> Result<(), String> {

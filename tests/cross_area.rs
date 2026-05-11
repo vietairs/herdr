@@ -146,6 +146,7 @@ fn spawn_client_process(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("client");
+    cmd.env("HERDR_DISABLE_SOUND", "1");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", api_socket_path);
