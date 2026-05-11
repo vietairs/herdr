@@ -13,6 +13,11 @@ use crate::app::{AppState, Mode};
 use crate::layout::PaneInfo;
 use crate::pane::PaneRuntime;
 
+pub(crate) fn pane_is_scrolled_back(rt: &PaneRuntime) -> bool {
+    rt.scroll_metrics()
+        .is_some_and(|metrics| metrics.offset_from_bottom > 0)
+}
+
 fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
     if pane_inner.width <= 4 {
         return pane_inner;
@@ -176,7 +181,8 @@ pub(super) fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
                 frame.render_widget(block, info.rect);
             }
 
-            rt.render(frame, info.inner_rect, info.is_focused && terminal_active);
+            let show_cursor = info.is_focused && terminal_active && !pane_is_scrolled_back(rt);
+            rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
 
             let should_dim = !info.is_focused && multi_pane && !terminal_active;

@@ -1962,6 +1962,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn virtual_render_hides_focused_pane_cursor_while_scrolled_back() {
+        let mut state = AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let mut bytes = Vec::new();
+        for line in 0..80 {
+            bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
+        }
+        let runtime = crate::pane::PaneRuntime::test_with_scrollback_bytes(20, 5, 4096, &bytes);
+        ws.tabs[0].runtimes.insert(pane_id, runtime);
+
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Terminal;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
+        let runtime = state.workspaces[0]
+            .runtime(pane_id)
+            .expect("pane runtime after initial render");
+        runtime.scroll_up(6);
+        assert!(crate::ui::pane_is_scrolled_back(runtime));
+
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, true);
+
+        assert!(
+            cursor.as_ref().is_none_or(|cursor| !cursor.visible),
+            "cursor: {cursor:?}"
+        );
+    }
+
     #[test]
     fn latest_active_client_drives_shared_size_theme_and_fallback() {
         let mut server = test_headless_server();

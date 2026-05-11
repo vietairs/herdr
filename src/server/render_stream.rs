@@ -257,11 +257,11 @@ fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
         .pane_infos
         .iter()
         .find(|info| info.is_focused)?;
-    let rt = ws.runtimes.get(&info.id)?;
+    let rt = ws.runtime(info.id)?;
     let cursor = rt.cursor_state(info.inner_rect, true)?;
     Some(CursorState {
         x: cursor.x,
         y: cursor.y,
-        visible: cursor.visible,
+        visible: cursor.visible && !crate::ui::pane_is_scrolled_back(rt),
     })
 }
