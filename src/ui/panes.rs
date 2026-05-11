@@ -13,17 +13,24 @@ use crate::app::{AppState, Mode};
 use crate::layout::PaneInfo;
 use crate::pane::PaneRuntime;
 
-fn stable_scrollbar_gutter(rt: &PaneRuntime, pane_inner: Rect) -> (Rect, Option<Rect>) {
+fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
     if pane_inner.width <= 4 {
-        return (pane_inner, None);
+        return pane_inner;
     }
 
-    let inner_rect = Rect::new(
+    Rect::new(
         pane_inner.x,
         pane_inner.y,
         pane_inner.width.saturating_sub(1),
         pane_inner.height,
-    );
+    )
+}
+
+fn stable_scrollbar_gutter(rt: &PaneRuntime, pane_inner: Rect) -> (Rect, Option<Rect>) {
+    let inner_rect = stable_terminal_inner_rect(pane_inner);
+    if inner_rect == pane_inner {
+        return (inner_rect, None);
+    }
     let gutter = Rect::new(
         pane_inner.x + pane_inner.width.saturating_sub(1),
         pane_inner.y,
@@ -36,6 +43,33 @@ fn stable_scrollbar_gutter(rt: &PaneRuntime, pane_inner: Rect) -> (Rect, Option<
         .map(|_| gutter);
 
     (inner_rect, scrollbar_rect)
+}
+
+/// Resize every visible runtime in a tab to the geometry it would receive if the tab were selected.
+pub(super) fn resize_tab_panes(tab: &crate::workspace::Tab, area: Rect) {
+    let multi_pane = tab.layout.pane_count() > 1;
+
+    if tab.zoomed {
+        let focused_id = tab.layout.focused();
+        if let Some(rt) = tab.runtimes.get(&focused_id) {
+            let inner_rect = stable_terminal_inner_rect(area);
+            rt.resize(inner_rect.height, inner_rect.width);
+        }
+        return;
+    }
+
+    for info in tab.layout.panes(area) {
+        let pane_inner = if multi_pane {
+            Block::default().borders(Borders::ALL).inner(info.rect)
+        } else {
+            area
+        };
+
+        if let Some(rt) = tab.runtimes.get(&info.id) {
+            let inner_rect = stable_terminal_inner_rect(pane_inner);
+            rt.resize(inner_rect.height, inner_rect.width);
+        }
+    }
 }
 
 /// Compute pane layout info and optionally resize pane runtimes to match.

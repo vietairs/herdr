@@ -2190,6 +2190,54 @@ mod tests {
         assert_eq!((phone_frame.width, phone_frame.height), (80, 24));
     }
 
+    #[tokio::test]
+    async fn resize_shared_runtime_resizes_background_tabs() {
+        let mut server = test_headless_server();
+        let mut workspace = crate::workspace::Workspace::test_new("test");
+        let background_tab = workspace.test_add_tab(Some("background"));
+        let active_pane = workspace.tabs[0].root_pane;
+        let background_pane = workspace.tabs[background_tab].root_pane;
+        workspace.tabs[0].runtimes.insert(
+            active_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        workspace.tabs[background_tab].runtimes.insert(
+            background_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        let terminal_area = server.app.state.view.terminal_area;
+        let expected = (terminal_area.height, terminal_area.width.saturating_sub(1));
+        assert_eq!(
+            server.app.state.workspaces[0].tabs[0].runtimes[&active_pane].current_size(),
+            expected
+        );
+        assert_eq!(
+            server.app.state.workspaces[0].tabs[background_tab].runtimes[&background_pane]
+                .current_size(),
+            expected
+        );
+    }
+
     #[test]
     fn render_and_stream_sends_terminal_frame_for_terminal_ansi_client() {
         let mut server = test_headless_server();

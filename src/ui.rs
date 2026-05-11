@@ -32,7 +32,7 @@ use self::mobile::{
 };
 pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
 use self::onboarding::render_onboarding_overlay;
-use self::panes::{compute_pane_infos, render_panes};
+use self::panes::{compute_pane_infos, render_panes, resize_tab_panes};
 use self::release_notes::render_release_notes_overlay;
 pub(crate) use self::release_notes::{
     release_notes_close_button_rect, release_notes_display_lines, release_notes_sections,
@@ -95,6 +95,17 @@ pub fn compute_view(app: &mut AppState, area: Rect) {
 /// client.
 pub(crate) fn compute_view_without_resizing_panes(app: &mut AppState, area: Rect) {
     compute_view_internal(app, area, false);
+}
+
+fn resize_background_tab_panes_to_terminal_area(app: &AppState, terminal_area: Rect) {
+    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
+        for (tab_idx, tab) in ws.tabs.iter().enumerate() {
+            if app.active == Some(ws_idx) && tab_idx == ws.active_tab_index() {
+                continue;
+            }
+            resize_tab_panes(tab, terminal_area);
+        }
+    }
 }
 
 fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
@@ -160,6 +171,9 @@ fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
         .unwrap_or_default();
 
     let pane_infos = compute_pane_infos(app, terminal_area, resize_panes);
+    if resize_panes {
+        resize_background_tab_panes_to_terminal_area(app, terminal_area);
+    }
 
     let toast_hit_area = app
         .toast
@@ -208,6 +222,9 @@ fn compute_mobile_view(app: &mut AppState, area: Rect, resize_panes: bool) {
         .unwrap_or_default();
 
     let pane_infos = compute_pane_infos(app, terminal_area, resize_panes);
+    if resize_panes {
+        resize_background_tab_panes_to_terminal_area(app, terminal_area);
+    }
     let header_hits = compute_mobile_header_hit_areas(app, header_rect);
 
     let toast_hit_area = app

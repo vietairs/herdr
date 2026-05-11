@@ -8,7 +8,7 @@ use std::sync::{
 use bytes::Bytes;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use ratatui::{layout::Rect, Frame};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::detect::{Agent, AgentState};
@@ -162,7 +162,7 @@ impl AgentDetectionPresence {
 pub struct PaneRuntime {
     terminal: Arc<PaneTerminal>,
     sender: mpsc::Sender<Bytes>,
-    resize_tx: mpsc::Sender<(u16, u16)>,
+    resize_tx: watch::Sender<(u16, u16)>,
     current_size: Cell<(u16, u16)>,
     child_pid: Arc<AtomicU32>,
     kitty_keyboard_flags: Arc<AtomicU16>,
@@ -663,12 +663,18 @@ impl PaneRuntime {
         }
 
         // --- Resize task ---
-        let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(4);
+        let (resize_tx, mut resize_rx) = watch::channel::<(u16, u16)>((rows, cols));
         {
             let master = pair.master;
             tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Handle::current();
-                while let Some((rows, cols)) = rt.block_on(resize_rx.recv()) {
+                let mut last_size = (rows, cols);
+                while rt.block_on(resize_rx.changed()).is_ok() {
+                    let (rows, cols) = *resize_rx.borrow_and_update();
+                    if (rows, cols) == last_size {
+                        continue;
+                    }
+                    last_size = (rows, cols);
                     if let Err(e) = master.resize(PtySize {
                         rows,
                         cols,
@@ -704,6 +710,11 @@ impl PaneRuntime {
         self.detect_reset_notify.notify_one();
     }
 
+    #[cfg(test)]
+    pub(crate) fn current_size(&self) -> (u16, u16) {
+        self.current_size.get()
+    }
+
     /// Resize if the dimensions actually changed.
     pub fn resize(&self, rows: u16, cols: u16) {
         let rows = rows.max(2);
@@ -713,7 +724,7 @@ impl PaneRuntime {
         }
         self.current_size.set((rows, cols));
         self.terminal.resize(rows, cols);
-        let _ = self.resize_tx.try_send((rows, cols));
+        let _ = self.resize_tx.send((rows, cols));
     }
 
     /// Scroll up by N lines (into scrollback history).
@@ -937,7 +948,7 @@ impl PaneRuntime {
         bytes: &[u8],
     ) -> (Self, mpsc::Receiver<Bytes>) {
         let (tx, rx) = mpsc::channel(4);
-        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let (resize_tx, _resize_rx) = watch::channel((rows, cols));
         let mut terminal =
             crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes).unwrap();
         terminal.write(bytes);
@@ -1020,7 +1031,7 @@ mod tests {
     #[tokio::test]
     async fn focus_events_are_forwarded_when_enabled() {
         let (tx, mut rx) = mpsc::channel(4);
-        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let (resize_tx, _resize_rx) = watch::channel((80, 24));
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal
             .mode_set(crate::ghostty::MODE_FOCUS_EVENT, true)
@@ -1046,7 +1057,7 @@ mod tests {
     #[tokio::test]
     async fn focus_events_are_suppressed_when_disabled() {
         let (tx, mut rx) = mpsc::channel(4);
-        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let (resize_tx, _resize_rx) = watch::channel((80, 24));
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let runtime = PaneRuntime {
             terminal: Arc::new(PaneTerminal::new(
