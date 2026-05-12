@@ -11,14 +11,26 @@
     "**/.classpath",
     "**/.settings",
     "**/target",
+    "**/vendor",
+    "**/node_modules",
+    "**/.zig-cache",
+    "**/zig-out",
   ],
+
+  "languages": {
+    "Rust": {
+      "enable_language_server": false,
+      "formatter": "auto",
+      "format_on_save": "off"
+    }
+  },
 
   "lsp": {
     "rust-analyzer": {
+      "enable_lsp_tasks": false,
       "initialization_options": {
         "checkOnSave": false,
         "cargo": {
-          "targetDir": true,
           "allTargets": false,
           "buildScripts": {
             "enable": false
@@ -26,6 +38,9 @@
         },
         "check": {
           "workspace": false
+        },
+        "rust": {
+          "analyzerTargetDir": true
         },
         "files": {
           "exclude": [
@@ -35,14 +50,16 @@
           ]
         },
         "lru": {
-          "capacity": 48
+          "capacity": 32
         },
         "cachePriming": {
-          "enable": false
+          "enable": false,
+          "numThreads": 1
         },
         "procMacro": {
           "enable": false
-        }
+        },
+        "numThreads": 2
       }
     }
   },
