@@ -6,5 +6,8 @@ mod parse;
 pub use encode::{
     encode_cursor_key, encode_mouse_button, encode_mouse_scroll, encode_terminal_key,
 };
-pub use model::{KeyboardProtocol, MouseProtocolEncoding, MouseProtocolMode, TerminalKey};
+pub use model::{
+    ime_compatible_keyboard_enhancement_flags, KeyboardProtocol, MouseProtocolEncoding,
+    MouseProtocolMode, TerminalKey,
+};
 pub use parse::parse_terminal_key_sequence;

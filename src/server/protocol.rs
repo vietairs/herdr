@@ -566,6 +566,23 @@ mod tests {
     }
 
     #[test]
+    fn client_input_large_multilingual_payload_roundtrip() {
+        let text = "你好，今天我们测试一段比较长的语音输入。こんにちは。안녕하세요.🙂".repeat(1024);
+        assert!(text.len() > 64 * 1024);
+        assert!(text.len() < MAX_FRAME_SIZE);
+        let msg = ClientMessage::Input {
+            data: text.as_bytes().to_vec(),
+        };
+
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, consumed): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
     fn client_resize_roundtrip() {
         let msg = ClientMessage::Resize { cols: 80, rows: 24 };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();

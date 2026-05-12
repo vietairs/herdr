@@ -925,7 +925,15 @@ impl PaneRuntime {
 #[cfg(test)]
 impl PaneRuntime {
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
-        Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[])
+        Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[], 4)
+    }
+
+    pub(crate) fn test_with_channel_capacity(
+        cols: u16,
+        rows: u16,
+        capacity: usize,
+    ) -> (Self, mpsc::Receiver<Bytes>) {
+        Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[], capacity)
     }
 
     pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
@@ -938,7 +946,7 @@ impl PaneRuntime {
         scrollback_limit_bytes: usize,
         bytes: &[u8],
     ) -> Self {
-        Self::test_with_channel_and_scrollback_bytes(cols, rows, scrollback_limit_bytes, bytes).0
+        Self::test_with_channel_and_scrollback_bytes(cols, rows, scrollback_limit_bytes, bytes, 4).0
     }
 
     fn test_with_channel_and_scrollback_bytes(
@@ -946,8 +954,9 @@ impl PaneRuntime {
         rows: u16,
         scrollback_limit_bytes: usize,
         bytes: &[u8],
+        channel_capacity: usize,
     ) -> (Self, mpsc::Receiver<Bytes>) {
-        let (tx, rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(channel_capacity);
         let (resize_tx, _resize_rx) = watch::channel((rows, cols));
         let mut terminal =
             crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes).unwrap();

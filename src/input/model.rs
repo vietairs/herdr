@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalKey {
@@ -38,6 +38,12 @@ impl From<KeyEvent> for TerminalKey {
     fn from(value: KeyEvent) -> Self {
         Self::new(value.code, value.modifiers).with_kind(value.kind)
     }
+}
+
+pub fn ime_compatible_keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,5 +102,15 @@ mod tests {
             KeyboardProtocol::from_kitty_flags(7),
             KeyboardProtocol::Kitty { flags: 7 }
         );
+    }
+
+    #[test]
+    fn keyboard_enhancement_flags_stay_ime_compatible() {
+        let flags = ime_compatible_keyboard_enhancement_flags();
+
+        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
     }
 }

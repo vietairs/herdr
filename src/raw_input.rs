@@ -1007,6 +1007,103 @@ mod tests {
     }
 
     #[test]
+    fn chunked_cjk_utf8_waits_for_all_continuation_bytes() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut buffer = Vec::new();
+        let bytes = "好".as_bytes();
+
+        drain_chunk(&mut buffer, &tx, &bytes[..1]);
+        assert_eq!(buffer, bytes[..1]);
+        assert!(collect_events(&mut rx).is_empty());
+        flush_incomplete_buffer(&mut buffer, &tx);
+        assert_eq!(buffer, bytes[..1]);
+        assert!(collect_events(&mut rx).is_empty());
+
+        drain_chunk(&mut buffer, &tx, &bytes[1..2]);
+        assert_eq!(buffer, bytes[..2]);
+        assert!(collect_events(&mut rx).is_empty());
+        flush_incomplete_buffer(&mut buffer, &tx);
+        assert_eq!(buffer, bytes[..2]);
+        assert!(collect_events(&mut rx).is_empty());
+
+        drain_chunk(&mut buffer, &tx, &bytes[2..]);
+        assert!(buffer.is_empty());
+        let events = collect_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('好'),
+            KeyModifiers::empty(),
+        );
+    }
+
+    #[test]
+    fn chunked_four_byte_utf8_waits_for_all_continuation_bytes() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut buffer = Vec::new();
+        let bytes = "🙂".as_bytes();
+
+        for split in 1..bytes.len() {
+            drain_chunk(&mut buffer, &tx, &bytes[split - 1..split]);
+            assert_eq!(buffer, bytes[..split]);
+            assert!(collect_events(&mut rx).is_empty());
+            flush_incomplete_buffer(&mut buffer, &tx);
+            assert_eq!(buffer, bytes[..split]);
+            assert!(collect_events(&mut rx).is_empty());
+        }
+
+        drain_chunk(&mut buffer, &tx, &bytes[bytes.len() - 1..]);
+        assert!(buffer.is_empty());
+        let events = collect_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('🙂'),
+            KeyModifiers::empty(),
+        );
+    }
+
+    #[test]
+    fn long_multilingual_voice_like_burst_drains_without_truncation() {
+        let text = "你好，今天我们测试一段比较长的语音输入。こんにちは。안녕하세요.🙂".repeat(128);
+        assert!(
+            text.len() > 4096,
+            "test input should exceed the client read buffer"
+        );
+        let mut buffer = text.as_bytes().to_vec();
+
+        let chunks = drain_complete_input_bytes(&mut buffer);
+        let rebuilt: Vec<u8> = chunks.into_iter().flatten().collect();
+
+        assert!(buffer.is_empty());
+        assert_eq!(rebuilt, text.as_bytes());
+    }
+
+    #[test]
+    fn long_multilingual_burst_survives_one_byte_chunks_and_timeouts() {
+        let text = "中文かなカナ한글🙂，。".repeat(64);
+        let mut buffer = Vec::new();
+        let mut rebuilt = Vec::new();
+
+        for byte in text.as_bytes() {
+            buffer.push(*byte);
+            for chunk in drain_complete_input_bytes(&mut buffer) {
+                rebuilt.extend(chunk);
+            }
+            if !buffer.is_empty() {
+                assert_eq!(flush_incomplete_input_bytes(&mut buffer), None);
+            }
+        }
+
+        for chunk in drain_complete_input_bytes(&mut buffer) {
+            rebuilt.extend(chunk);
+        }
+
+        assert!(buffer.is_empty());
+        assert_eq!(rebuilt, text.as_bytes());
+    }
+
+    #[test]
     fn parse_with_ranges_tracks_byte_offsets() {
         use super::parse_raw_input_bytes_with_ranges;
 
