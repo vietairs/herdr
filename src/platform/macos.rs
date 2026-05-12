@@ -6,6 +6,8 @@ use std::process::{Command, Stdio};
 
 use super::{ClipboardCommand, ForegroundJob, ForegroundProcess, Signal};
 
+const PROC_PGRP_ONLY: u32 = 2;
+
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     if child_pid == 0 {
@@ -13,25 +15,9 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     }
 
     let fg_pgid = foreground_process_group_id(child_pid)?;
-    let mut pids = vec![0i32; 4096];
-    let bytes = unsafe {
-        libc::proc_listallpids(
-            pids.as_mut_ptr() as *mut libc::c_void,
-            (pids.len() * std::mem::size_of::<i32>()) as libc::c_int,
-        )
-    };
-    if bytes <= 0 {
-        return None;
-    }
-
-    let count = (bytes as usize) / std::mem::size_of::<i32>();
     let mut processes = Vec::new();
 
-    for raw_pid in pids.into_iter().take(count) {
-        if raw_pid <= 0 {
-            continue;
-        }
-        let pid = raw_pid as u32;
+    for pid in process_group_pids(fg_pgid) {
         let Some(info) = process_bsdinfo(pid) else {
             continue;
         };
@@ -60,6 +46,35 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     })
 }
 
+fn process_group_pids(process_group_id: u32) -> Vec<u32> {
+    let mut capacity = 16usize;
+
+    for _ in 0..8 {
+        let mut pids = vec![0 as libc::pid_t; capacity];
+        let buffer_bytes = pids.len() * std::mem::size_of::<libc::pid_t>();
+        let returned_bytes = unsafe {
+            libc::proc_listpids(
+                PROC_PGRP_ONLY,
+                process_group_id,
+                pids.as_mut_ptr() as *mut libc::c_void,
+                buffer_bytes as libc::c_int,
+            )
+        };
+        if returned_bytes <= 0 {
+            return Vec::new();
+        }
+
+        let returned_bytes = returned_bytes as usize;
+        let count = returned_bytes / std::mem::size_of::<libc::pid_t>();
+        if returned_bytes < buffer_bytes {
+            return collect_positive_pids(pids, count);
+        }
+        capacity = capacity.saturating_mul(2);
+    }
+
+    Vec::new()
+}
+
 /// Read `e_tpgid` (foreground process group of the controlling terminal)
 /// for the given PID.
 pub fn foreground_process_group_id(pid: u32) -> Option<u32> {
@@ -81,10 +96,10 @@ pub fn foreground_process_group_id(pid: u32) -> Option<u32> {
     }
 
     let fg = info.e_tpgid;
-    if fg == 0 {
-        None
+    if fg > 0 {
+        Some(fg as u32)
     } else {
-        Some(fg)
+        None
     }
 }
 
@@ -352,22 +367,46 @@ pub fn session_processes(child_pid: u32) -> Vec<u32> {
         return Vec::new();
     }
 
-    let mut pids = vec![0i32; 4096];
-    let bytes = unsafe {
-        libc::proc_listallpids(
-            pids.as_mut_ptr() as *mut libc::c_void,
-            (pids.len() * std::mem::size_of::<i32>()) as libc::c_int,
-        )
+    all_pids()
+        .into_iter()
+        .filter(|pid| unsafe { libc::getsid(*pid as libc::pid_t) } == target_session)
+        .collect()
+}
+
+fn all_pids() -> Vec<u32> {
+    let initial_count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let mut capacity = if initial_count > 0 {
+        initial_count as usize + 128
+    } else {
+        4096
     };
-    if bytes <= 0 {
-        return Vec::new();
+
+    for _ in 0..8 {
+        let mut pids = vec![0 as libc::pid_t; capacity];
+        let count = unsafe {
+            libc::proc_listallpids(
+                pids.as_mut_ptr() as *mut libc::c_void,
+                (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int,
+            )
+        };
+        if count <= 0 {
+            return Vec::new();
+        }
+
+        let count = count as usize;
+        if count < capacity {
+            return collect_positive_pids(pids, count);
+        }
+        capacity = capacity.saturating_mul(2);
     }
 
-    let count = (bytes as usize) / std::mem::size_of::<i32>();
+    Vec::new()
+}
+
+fn collect_positive_pids(pids: Vec<libc::pid_t>, count: usize) -> Vec<u32> {
     pids.into_iter()
         .take(count)
         .filter(|pid| *pid > 0)
-        .filter(|pid| unsafe { libc::getsid(*pid) } == target_session)
         .map(|pid| pid as u32)
         .collect()
 }
