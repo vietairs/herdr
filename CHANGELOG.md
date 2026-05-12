@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added
+- Added manual pane labels through `herdr pane rename`, the `pane.rename` socket API, an optional `keys.rename_pane` binding, and the right-click pane menu.
+- Added `ui.show_agent_labels_on_pane_borders`, which can show detected or reported agent names in split pane borders when no manual pane label is set.
+- Added `herdr integration status [--outdated-only]` so installed agent integrations can be checked for legacy or outdated versions.
+- Added an optional `keys.open_notification_target` binding for jumping to the pane behind the current notification.
+- Added optional `keys.previous_agent` and `keys.next_agent` bindings for cycling through sidebar agent entries.
+
+### Changed
+- Scrolling over the tab bar now switches tabs directly, including overflowing tab bars.
+
+### Fixed
+- Indexed terminal palette colors now render correctly for 256-color terminal apps.
+- Hook-based agent integrations now reject stale out-of-order reports and base notifications on effective agent state, reducing duplicate or stuck state changes.
+- Background tabs now resize when the outer terminal size changes, preventing stale pane dimensions when switching back to them.
+- Client shutdown now drains queued control messages more reliably.
+- Pane cursors are now hidden while scrolled back, and omitted while the mobile switcher is open.
+- Mobile agent switcher entries now include tab context, making agents easier to identify on narrow terminals.
+- macOS foreground job detection now uses process groups, improving agent state tracking for foreground commands.
+- Remote SSH no longer fails before connecting when macOS temporary bridge socket paths exceed Unix socket length limits. (#103, thanks @moonsphere)
+- Nix-wrapped agent commands are now detected by their underlying agent entrypoint.
+- Pane renames made through the socket API now rerender immediately.
+
 ## [0.5.7] - 2026-05-10
 
 ### Added
