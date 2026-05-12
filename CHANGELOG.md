@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.8] - 2026-05-12
+
 ### Added
 - Added manual pane labels through `herdr pane rename`, the `pane.rename` socket API, an optional `keys.rename_pane` binding, and the right-click pane menu.
 - Added `ui.show_agent_labels_on_pane_borders`, which can show detected or reported agent names in split pane borders when no manual pane label is set.
