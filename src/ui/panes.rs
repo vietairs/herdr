@@ -75,14 +75,23 @@ fn stable_scrollbar_gutter(rt: &PaneRuntime, pane_inner: Rect) -> (Rect, Option<
 }
 
 /// Resize every visible runtime in a tab to the geometry it would receive if the tab were selected.
-pub(super) fn resize_tab_panes(tab: &crate::workspace::Tab, area: Rect) {
+pub(super) fn resize_tab_panes(
+    tab: &crate::workspace::Tab,
+    area: Rect,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) {
     let multi_pane = tab.layout.pane_count() > 1;
 
     if tab.zoomed {
         let focused_id = tab.layout.focused();
         if let Some(rt) = tab.runtimes.get(&focused_id) {
             let inner_rect = stable_terminal_inner_rect(area);
-            rt.resize(inner_rect.height, inner_rect.width);
+            rt.resize(
+                inner_rect.height,
+                inner_rect.width,
+                cell_size.width_px,
+                cell_size.height_px,
+            );
         }
         return;
     }
@@ -96,13 +105,23 @@ pub(super) fn resize_tab_panes(tab: &crate::workspace::Tab, area: Rect) {
 
         if let Some(rt) = tab.runtimes.get(&info.id) {
             let inner_rect = stable_terminal_inner_rect(pane_inner);
-            rt.resize(inner_rect.height, inner_rect.width);
+            rt.resize(
+                inner_rect.height,
+                inner_rect.width,
+                cell_size.width_px,
+                cell_size.height_px,
+            );
         }
     }
 }
 
 /// Compute pane layout info and optionally resize pane runtimes to match.
-pub(super) fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool) -> Vec<PaneInfo> {
+pub(super) fn compute_pane_infos(
+    app: &AppState,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) -> Vec<PaneInfo> {
     let Some(ws_idx) = app.active else {
         return Vec::new();
     };
@@ -120,7 +139,12 @@ pub(super) fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool)
         if let Some(rt) = ws.runtimes.get(&focused_id) {
             (inner_rect, scrollbar_rect) = stable_scrollbar_gutter(rt, area);
             if resize_panes {
-                rt.resize(inner_rect.height, inner_rect.width);
+                rt.resize(
+                    inner_rect.height,
+                    inner_rect.width,
+                    cell_size.width_px,
+                    cell_size.height_px,
+                );
             }
         }
         return vec![PaneInfo {
@@ -154,7 +178,12 @@ pub(super) fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool)
         if let Some(rt) = ws.runtimes.get(&info.id) {
             (inner_rect, scrollbar_rect) = stable_scrollbar_gutter(rt, pane_inner);
             if resize_panes {
-                rt.resize(inner_rect.height, inner_rect.width);
+                rt.resize(
+                    inner_rect.height,
+                    inner_rect.width,
+                    cell_size.width_px,
+                    cell_size.height_px,
+                );
             }
         }
 
@@ -358,7 +387,12 @@ mod tests {
         app.active = Some(0);
 
         let area = Rect::new(10, 3, 40, 8);
-        let infos = compute_pane_infos(&app, area, false);
+        let infos = compute_pane_infos(
+            &app,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
         let info = &infos[0];
 
         assert_eq!(info.rect, area);
@@ -380,7 +414,12 @@ mod tests {
         app.active = Some(0);
 
         let area = Rect::new(10, 3, 40, 8);
-        let infos = compute_pane_infos(&app, area, false);
+        let infos = compute_pane_infos(
+            &app,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
         let info = &infos[0];
 
         assert_eq!(info.rect, area);
@@ -401,7 +440,12 @@ mod tests {
         app.active = Some(0);
 
         let area = Rect::new(10, 3, 4, 8);
-        let infos = compute_pane_infos(&app, area, false);
+        let infos = compute_pane_infos(
+            &app,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
         let info = &infos[0];
 
         assert_eq!(info.rect, area);
@@ -427,7 +471,12 @@ mod tests {
         app.active = Some(0);
 
         let area = Rect::new(10, 3, 40, 8);
-        let infos = compute_pane_infos(&app, area, false);
+        let infos = compute_pane_infos(
+            &app,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
         let info = &infos[0];
 
         assert_eq!(info.rect, area);

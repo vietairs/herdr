@@ -29,6 +29,7 @@ mod ghostty;
 mod input;
 mod integration;
 mod ipc;
+mod kitty_graphics;
 mod layout;
 mod logging;
 mod pane;

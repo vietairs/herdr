@@ -86,7 +86,20 @@ pub(super) fn spinner_frame(tick: u32) -> &'static str {
 /// Compute view geometry and reconcile pane sizes.
 /// Called before render to separate mutation from drawing.
 pub fn compute_view(app: &mut AppState, area: Rect) {
-    compute_view_internal(app, area, true);
+    compute_view_internal(
+        app,
+        area,
+        true,
+        crate::kitty_graphics::HostCellSize::default(),
+    );
+}
+
+pub fn compute_view_with_cell_size(
+    app: &mut AppState,
+    area: Rect,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) {
+    compute_view_internal(app, area, true, cell_size);
 }
 
 /// Compute view geometry for a client-sized render without resizing pane runtimes.
@@ -95,23 +108,37 @@ pub fn compute_view(app: &mut AppState, area: Rect) {
 /// own frame size while the shared pane runtimes stay pinned to the foreground
 /// client.
 pub(crate) fn compute_view_without_resizing_panes(app: &mut AppState, area: Rect) {
-    compute_view_internal(app, area, false);
+    compute_view_internal(
+        app,
+        area,
+        false,
+        crate::kitty_graphics::HostCellSize::default(),
+    );
 }
 
-fn resize_background_tab_panes_to_terminal_area(app: &AppState, terminal_area: Rect) {
+fn resize_background_tab_panes_to_terminal_area(
+    app: &AppState,
+    terminal_area: Rect,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) {
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
         for (tab_idx, tab) in ws.tabs.iter().enumerate() {
             if app.active == Some(ws_idx) && tab_idx == ws.active_tab_index() {
                 continue;
             }
-            resize_tab_panes(tab, terminal_area);
+            resize_tab_panes(tab, terminal_area, cell_size);
         }
     }
 }
 
-fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
+fn compute_view_internal(
+    app: &mut AppState,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) {
     if is_mobile_width(area) {
-        compute_mobile_view(app, area, resize_panes);
+        compute_mobile_view(app, area, resize_panes, cell_size);
         return;
     }
 
@@ -171,9 +198,9 @@ fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
         .map(|ws| ws.layout.splits(terminal_area))
         .unwrap_or_default();
 
-    let pane_infos = compute_pane_infos(app, terminal_area, resize_panes);
+    let pane_infos = compute_pane_infos(app, terminal_area, resize_panes, cell_size);
     if resize_panes {
-        resize_background_tab_panes_to_terminal_area(app, terminal_area);
+        resize_background_tab_panes_to_terminal_area(app, terminal_area, cell_size);
     }
 
     let toast_hit_area = app
@@ -200,7 +227,12 @@ fn compute_view_internal(app: &mut AppState, area: Rect, resize_panes: bool) {
     };
 }
 
-fn compute_mobile_view(app: &mut AppState, area: Rect, resize_panes: bool) {
+fn compute_mobile_view(
+    app: &mut AppState,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) {
     let header_h = area.height.min(2);
     let (header_rect, terminal_area) = if area.height > header_h {
         let [header_rect, terminal_area] =
@@ -222,9 +254,9 @@ fn compute_mobile_view(app: &mut AppState, area: Rect, resize_panes: bool) {
         .map(|ws| ws.layout.splits(terminal_area))
         .unwrap_or_default();
 
-    let pane_infos = compute_pane_infos(app, terminal_area, resize_panes);
+    let pane_infos = compute_pane_infos(app, terminal_area, resize_panes, cell_size);
     if resize_panes {
-        resize_background_tab_panes_to_terminal_area(app, terminal_area);
+        resize_background_tab_panes_to_terminal_area(app, terminal_area, cell_size);
     }
     let header_hits = compute_mobile_header_hit_areas(app, header_rect);
 

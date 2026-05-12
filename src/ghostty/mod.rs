@@ -17,6 +17,7 @@ use std::mem;
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
+use std::sync::Once;
 
 pub use bindings as ffi;
 
@@ -141,6 +142,47 @@ pub const MODE_MOUSE_SGR: u16 = 1006;
 pub const MODE_MOUSE_ALTERNATE_SCROLL: u16 = 1007;
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 pub const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
+
+const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+const APC_MAX_BYTES: usize = 16 * 1024 * 1024;
+const APC_MAX_BYTES_KITTY: usize = 16 * 1024 * 1024;
+
+static INSTALL_PNG_DECODER: Once = Once::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KittyImageFormat {
+    Rgb,
+    Rgba,
+    Png,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KittyImagePlacement {
+    pub image_id: u32,
+    pub placement_id: u32,
+    pub z: i32,
+    pub x_offset: u32,
+    pub y_offset: u32,
+    pub image_width: u32,
+    pub image_height: u32,
+    pub format: KittyImageFormat,
+    pub data: Vec<u8>,
+    pub render: KittyPlacementRenderInfo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KittyPlacementRenderInfo {
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub grid_cols: u32,
+    pub grid_rows: u32,
+    pub viewport_col: i32,
+    pub viewport_row: i32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveScreen {
@@ -278,6 +320,95 @@ unsafe extern "C" fn write_pty_trampoline(
     (state.callback)(bytes);
 }
 
+fn install_png_decoder_once() {
+    INSTALL_PNG_DECODER.call_once(|| unsafe {
+        let _ = ffi::ghostty_sys_set(
+            ffi::GhosttySysOption_GHOSTTY_SYS_OPT_DECODE_PNG,
+            (decode_png_trampoline as *const ()).cast(),
+        );
+    });
+}
+
+unsafe extern "C" fn decode_png_trampoline(
+    _userdata: *mut c_void,
+    allocator: *const ffi::GhosttyAllocator,
+    data: *const u8,
+    data_len: usize,
+    out: *mut ffi::GhosttySysImage,
+) -> bool {
+    if data.is_null() || out.is_null() {
+        return false;
+    }
+    let bytes = unsafe { slice::from_raw_parts(data, data_len) };
+    let Some(rgba) = decode_png_rgba(bytes) else {
+        return false;
+    };
+    let ptr = unsafe { ffi::ghostty_alloc(allocator, rgba.data.len()) };
+    if ptr.is_null() {
+        return false;
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(rgba.data.as_ptr(), ptr, rgba.data.len());
+        *out = ffi::GhosttySysImage {
+            width: rgba.width,
+            height: rgba.height,
+            data: ptr,
+            data_len: rgba.data.len(),
+        };
+    }
+    true
+}
+
+struct DecodedPng {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+}
+
+fn decode_png_rgba(bytes: &[u8]) -> Option<DecodedPng> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let frame = &buf[..info.buffer_size()];
+    if info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+
+    let data = match info.color_type {
+        png::ColorType::Rgba => frame.to_vec(),
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity((info.width as usize) * (info.height as usize) * 4);
+            for rgb in frame.chunks_exact(3) {
+                out.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            }
+            out
+        }
+        png::ColorType::Grayscale => {
+            let mut out = Vec::with_capacity((info.width as usize) * (info.height as usize) * 4);
+            for gray in frame {
+                out.extend_from_slice(&[*gray, *gray, *gray, 255]);
+            }
+            out
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let mut out = Vec::with_capacity((info.width as usize) * (info.height as usize) * 4);
+            for ga in frame.chunks_exact(2) {
+                out.extend_from_slice(&[ga[0], ga[0], ga[0], ga[1]]);
+            }
+            out
+        }
+        png::ColorType::Indexed => return None,
+    };
+
+    Some(DecodedPng {
+        width: info.width,
+        height: info.height,
+        data,
+    })
+}
+
 pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>, Error> {
     let mut required = 0usize;
     // SAFETY: null buffer + out len is the documented way to query required size.
@@ -332,9 +463,63 @@ impl Terminal {
         }
     }
 
-    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), Error> {
+    pub fn resize(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Result<(), Error> {
         // SAFETY: self.raw is valid and sizes are plain values.
-        unsafe { ffi::ghostty_terminal_resize(self.raw, cols, rows, 0, 0).into_result() }
+        unsafe {
+            ffi::ghostty_terminal_resize(self.raw, cols, rows, cell_width_px, cell_height_px)
+                .into_result()
+        }
+    }
+
+    pub fn enable_kitty_graphics(&mut self) -> Result<(), Error> {
+        install_png_decoder_once();
+        let storage_limit = KITTY_IMAGE_STORAGE_LIMIT_BYTES;
+        let disable_medium = false;
+        unsafe {
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT,
+                (&storage_limit as *const u64).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE,
+                (&disable_medium as *const bool).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE,
+                (&disable_medium as *const bool).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM,
+                (&disable_medium as *const bool).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_APC_MAX_BYTES,
+                (&APC_MAX_BYTES as *const usize).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_APC_MAX_BYTES_KITTY,
+                (&APC_MAX_BYTES_KITTY as *const usize).cast(),
+            )
+            .into_result()?;
+        }
+        Ok(())
     }
 
     pub fn set_write_pty_callback<F>(&mut self, callback: F) -> Result<(), Error>
@@ -651,8 +836,142 @@ impl Terminal {
         Ok(out)
     }
 
+    pub fn kitty_image_placements(&self) -> Result<Vec<KittyImagePlacement>, Error> {
+        let mut graphics: ffi::GhosttyKittyGraphics = ptr::null_mut();
+        unsafe {
+            ffi::ghostty_terminal_get(
+                self.raw,
+                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS,
+                (&mut graphics as *mut ffi::GhosttyKittyGraphics).cast(),
+            )
+            .into_result()?;
+        }
+        if graphics.is_null() {
+            return Ok(Vec::new());
+        }
+
+        let mut iterator: ffi::GhosttyKittyGraphicsPlacementIterator = ptr::null_mut();
+        unsafe {
+            ffi::ghostty_kitty_graphics_placement_iterator_new(ptr::null(), &mut iterator)
+                .into_result()?;
+            ffi::ghostty_kitty_graphics_get(
+                graphics,
+                ffi::GhosttyKittyGraphicsData_GHOSTTY_KITTY_GRAPHICS_DATA_PLACEMENT_ITERATOR,
+                (&mut iterator as *mut ffi::GhosttyKittyGraphicsPlacementIterator).cast(),
+            )
+            .into_result()?;
+        }
+        let _guard = KittyPlacementIteratorGuard { raw: iterator };
+
+        let mut placements = Vec::new();
+        while unsafe { ffi::ghostty_kitty_graphics_placement_next(iterator) } {
+            if let Some(placement) = self.kitty_image_placement(graphics, iterator)? {
+                placements.push(placement);
+            }
+        }
+        placements.sort_by_key(|placement| placement.z);
+        Ok(placements)
+    }
+
+    fn kitty_image_placement(
+        &self,
+        graphics: ffi::GhosttyKittyGraphics,
+        iterator: ffi::GhosttyKittyGraphicsPlacementIterator,
+    ) -> Result<Option<KittyImagePlacement>, Error> {
+        let image_id = kitty_placement_u32(
+            iterator,
+            ffi::GhosttyKittyGraphicsPlacementData_GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IMAGE_ID,
+        )?;
+        let image = unsafe { ffi::ghostty_kitty_graphics_image(graphics, image_id) };
+        if image.is_null() {
+            return Ok(None);
+        }
+
+        let mut raw_info = ffi::GhosttyKittyGraphicsPlacementRenderInfo {
+            size: mem::size_of::<ffi::GhosttyKittyGraphicsPlacementRenderInfo>(),
+            ..Default::default()
+        };
+        unsafe {
+            ffi::ghostty_kitty_graphics_placement_render_info(
+                iterator,
+                image,
+                self.raw,
+                &mut raw_info,
+            )
+            .into_result()?;
+        }
+        if !raw_info.viewport_visible {
+            return Ok(None);
+        }
+
+        let image_width = kitty_image_u32(
+            image,
+            ffi::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_WIDTH,
+        )?;
+        let image_height = kitty_image_u32(
+            image,
+            ffi::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_HEIGHT,
+        )?;
+        let format = kitty_image_format(image)?;
+        let compression = kitty_image_compression(image)?;
+        if compression != ffi::GhosttyKittyImageCompression_GHOSTTY_KITTY_IMAGE_COMPRESSION_NONE {
+            return Ok(None);
+        }
+        let data = kitty_image_data(image)?;
+        let placement_id = kitty_placement_u32(
+            iterator,
+            ffi::GhosttyKittyGraphicsPlacementData_GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_PLACEMENT_ID,
+        )?;
+        let x_offset = kitty_placement_u32(
+            iterator,
+            ffi::GhosttyKittyGraphicsPlacementData_GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_X_OFFSET,
+        )?;
+        let y_offset = kitty_placement_u32(
+            iterator,
+            ffi::GhosttyKittyGraphicsPlacementData_GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Y_OFFSET,
+        )?;
+        let z = kitty_placement_i32(
+            iterator,
+            ffi::GhosttyKittyGraphicsPlacementData_GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Z,
+        )?;
+
+        Ok(Some(KittyImagePlacement {
+            image_id,
+            placement_id,
+            z,
+            x_offset,
+            y_offset,
+            image_width,
+            image_height,
+            format,
+            data,
+            render: KittyPlacementRenderInfo {
+                pixel_width: raw_info.pixel_width,
+                pixel_height: raw_info.pixel_height,
+                grid_cols: raw_info.grid_cols,
+                grid_rows: raw_info.grid_rows,
+                viewport_col: raw_info.viewport_col,
+                viewport_row: raw_info.viewport_row,
+                source_x: raw_info.source_x,
+                source_y: raw_info.source_y,
+                source_width: raw_info.source_width,
+                source_height: raw_info.source_height,
+            },
+        }))
+    }
+
     fn raw(&self) -> ffi::GhosttyTerminal_ptr {
         self.raw
+    }
+}
+
+struct KittyPlacementIteratorGuard {
+    raw: ffi::GhosttyKittyGraphicsPlacementIterator,
+}
+
+impl Drop for KittyPlacementIteratorGuard {
+    fn drop(&mut self) {
+        unsafe { ffi::ghostty_kitty_graphics_placement_iterator_free(self.raw) }
     }
 }
 
@@ -703,6 +1022,98 @@ fn grid_ref_graphemes(grid_ref: &ffi::GhosttyGridRef) -> Result<Vec<u32>, Error>
     }
     buffer.truncate(required);
     Ok(buffer)
+}
+
+fn kitty_placement_u32(
+    iterator: ffi::GhosttyKittyGraphicsPlacementIterator,
+    data: ffi::GhosttyKittyGraphicsPlacementData,
+) -> Result<u32, Error> {
+    let mut out = 0u32;
+    unsafe {
+        ffi::ghostty_kitty_graphics_placement_get(iterator, data, (&mut out as *mut u32).cast())
+            .into_result()?;
+    }
+    Ok(out)
+}
+
+fn kitty_placement_i32(
+    iterator: ffi::GhosttyKittyGraphicsPlacementIterator,
+    data: ffi::GhosttyKittyGraphicsPlacementData,
+) -> Result<i32, Error> {
+    let mut out = 0i32;
+    unsafe {
+        ffi::ghostty_kitty_graphics_placement_get(iterator, data, (&mut out as *mut i32).cast())
+            .into_result()?;
+    }
+    Ok(out)
+}
+
+fn kitty_image_u32(
+    image: ffi::GhosttyKittyGraphicsImage,
+    data: ffi::GhosttyKittyGraphicsImageData,
+) -> Result<u32, Error> {
+    let mut out = 0u32;
+    unsafe {
+        ffi::ghostty_kitty_graphics_image_get(image, data, (&mut out as *mut u32).cast())
+            .into_result()?;
+    }
+    Ok(out)
+}
+
+fn kitty_image_format(image: ffi::GhosttyKittyGraphicsImage) -> Result<KittyImageFormat, Error> {
+    let mut out = ffi::GhosttyKittyImageFormat_GHOSTTY_KITTY_IMAGE_FORMAT_RGBA;
+    unsafe {
+        ffi::ghostty_kitty_graphics_image_get(
+            image,
+            ffi::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_FORMAT,
+            (&mut out as *mut ffi::GhosttyKittyImageFormat).cast(),
+        )
+        .into_result()?;
+    }
+    match out {
+        ffi::GhosttyKittyImageFormat_GHOSTTY_KITTY_IMAGE_FORMAT_RGB => Ok(KittyImageFormat::Rgb),
+        ffi::GhosttyKittyImageFormat_GHOSTTY_KITTY_IMAGE_FORMAT_RGBA => Ok(KittyImageFormat::Rgba),
+        ffi::GhosttyKittyImageFormat_GHOSTTY_KITTY_IMAGE_FORMAT_PNG => Ok(KittyImageFormat::Png),
+        _ => Err(Error(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE)),
+    }
+}
+
+fn kitty_image_compression(
+    image: ffi::GhosttyKittyGraphicsImage,
+) -> Result<ffi::GhosttyKittyImageCompression, Error> {
+    let mut out = ffi::GhosttyKittyImageCompression_GHOSTTY_KITTY_IMAGE_COMPRESSION_NONE;
+    unsafe {
+        ffi::ghostty_kitty_graphics_image_get(
+            image,
+            ffi::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_COMPRESSION,
+            (&mut out as *mut ffi::GhosttyKittyImageCompression).cast(),
+        )
+        .into_result()?;
+    }
+    Ok(out)
+}
+
+fn kitty_image_data(image: ffi::GhosttyKittyGraphicsImage) -> Result<Vec<u8>, Error> {
+    let mut ptr_out: *const u8 = ptr::null();
+    let mut len = 0usize;
+    unsafe {
+        ffi::ghostty_kitty_graphics_image_get(
+            image,
+            ffi::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR,
+            (&mut ptr_out as *mut *const u8).cast(),
+        )
+        .into_result()?;
+        ffi::ghostty_kitty_graphics_image_get(
+            image,
+            ffi::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_DATA_LEN,
+            (&mut len as *mut usize).cast(),
+        )
+        .into_result()?;
+    }
+    if ptr_out.is_null() || len == 0 {
+        return Ok(Vec::new());
+    }
+    Ok(unsafe { slice::from_raw_parts(ptr_out, len) }.to_vec())
 }
 
 fn grid_ref_hyperlink_uri(grid_ref: &ffi::GhosttyGridRef) -> Result<Option<String>, Error> {
@@ -1391,6 +1802,25 @@ mod tests {
                 | ffi::GhosttyOptimizeMode_GHOSTTY_OPTIMIZE_RELEASE_SMALL
                 | ffi::GhosttyOptimizeMode_GHOSTTY_OPTIMIZE_RELEASE_FAST
         ));
+    }
+
+    #[test]
+    fn kitty_graphics_direct_rgba_placement_is_queryable() {
+        let mut terminal = Terminal::new(10, 5, 0).unwrap();
+        terminal.enable_kitty_graphics().unwrap();
+        terminal.resize(10, 5, 8, 16).unwrap();
+        terminal.write(b"\x1b_Ga=T,f=32,t=d,i=7,p=3,s=1,v=1,c=10,r=5,q=2;/wAA/w==\x1b\\");
+
+        let placements = terminal.kitty_image_placements().unwrap();
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].image_id, 7);
+        assert_eq!(placements[0].placement_id, 3);
+        assert_eq!(placements[0].image_width, 1);
+        assert_eq!(placements[0].image_height, 1);
+        assert_eq!(placements[0].format, KittyImageFormat::Rgba);
+        assert_eq!(placements[0].data, [255, 0, 0, 255]);
+        assert_eq!(placements[0].render.grid_cols, 10);
+        assert_eq!(placements[0].render.grid_rows, 5);
     }
 
     #[test]

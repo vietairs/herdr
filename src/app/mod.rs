@@ -18,7 +18,7 @@ mod theme_sync;
 
 use std::collections::{HashMap, HashSet};
 use std::future::pending;
-use std::io;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -88,6 +88,25 @@ pub(crate) enum LoopEvent {
     RawInput(crate::raw_input::RawInputEvent),
     InputClosed,
     RenderRequested,
+}
+
+struct SyncOutputGuard;
+
+impl SyncOutputGuard {
+    fn begin() -> io::Result<Self> {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(b"\x1b[?2026h")?;
+        stdout.flush()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for SyncOutputGuard {
+    fn drop(&mut self) {
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(b"\x1b[?2026l");
+        let _ = stdout.flush();
+    }
 }
 
 async fn recv_raw_input_or_pending(
@@ -479,10 +498,15 @@ impl App {
 
             if needs_render && self.can_render_now(now) {
                 self.render_dirty.swap(false, Ordering::AcqRel);
+                let _sync_output = SyncOutputGuard::begin()?;
+                let mut cell_size = crate::kitty_graphics::HostCellSize::default();
                 terminal.draw(|frame| {
-                    crate::ui::compute_view(&mut self.state, frame.area());
+                    let area = frame.area();
+                    cell_size = crate::kitty_graphics::HostCellSize::from_terminal(area);
+                    crate::ui::compute_view_with_cell_size(&mut self.state, area, cell_size);
                     crate::ui::render(&self.state, frame);
                 })?;
+                crate::kitty_graphics::paint_local_pane_graphics(&self.state, cell_size)?;
                 self.last_render_at = Some(now);
                 needs_render = false;
                 continue;

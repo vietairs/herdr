@@ -162,8 +162,8 @@ impl AgentDetectionPresence {
 pub struct PaneRuntime {
     terminal: Arc<PaneTerminal>,
     sender: mpsc::Sender<Bytes>,
-    resize_tx: watch::Sender<(u16, u16)>,
-    current_size: Cell<(u16, u16)>,
+    resize_tx: watch::Sender<(u16, u16, u32, u32)>,
+    current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     detect_reset_notify: Arc<Notify>,
@@ -355,7 +355,10 @@ impl PaneRuntime {
 
         crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
-        let terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
+        let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        terminal
+            .enable_kitty_graphics()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         let pane_terminal = GhosttyPaneTerminal::new(terminal, input_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
@@ -663,23 +666,28 @@ impl PaneRuntime {
         }
 
         // --- Resize task ---
-        let (resize_tx, mut resize_rx) = watch::channel::<(u16, u16)>((rows, cols));
+        let (resize_tx, mut resize_rx) = watch::channel::<(u16, u16, u32, u32)>((rows, cols, 0, 0));
         {
             let master = pair.master;
             tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Handle::current();
-                let mut last_size = (rows, cols);
+                let mut last_size = (rows, cols, 0, 0);
                 while rt.block_on(resize_rx.changed()).is_ok() {
-                    let (rows, cols) = *resize_rx.borrow_and_update();
-                    if (rows, cols) == last_size {
+                    let (rows, cols, cell_width_px, cell_height_px) =
+                        *resize_rx.borrow_and_update();
+                    if (rows, cols, cell_width_px, cell_height_px) == last_size {
                         continue;
                     }
-                    last_size = (rows, cols);
+                    last_size = (rows, cols, cell_width_px, cell_height_px);
                     if let Err(e) = master.resize(PtySize {
                         rows,
                         cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
+                        pixel_width: (cols as u32)
+                            .saturating_mul(cell_width_px)
+                            .min(u16::MAX as u32) as u16,
+                        pixel_height: (rows as u32)
+                            .saturating_mul(cell_height_px)
+                            .min(u16::MAX as u32) as u16,
                     }) {
                         warn!(pane = pane_id.raw(), err = %e, rows, cols, "pty resize failed");
                     }
@@ -691,7 +699,7 @@ impl PaneRuntime {
             terminal,
             sender: input_tx,
             resize_tx,
-            current_size: Cell::new((rows, cols)),
+            current_size: Cell::new((rows, cols, 0, 0)),
             child_pid,
             kitty_keyboard_flags,
             detect_reset_notify,
@@ -712,19 +720,22 @@ impl PaneRuntime {
 
     #[cfg(test)]
     pub(crate) fn current_size(&self) -> (u16, u16) {
-        self.current_size.get()
+        let (rows, cols, _, _) = self.current_size.get();
+        (rows, cols)
     }
 
     /// Resize if the dimensions actually changed.
-    pub fn resize(&self, rows: u16, cols: u16) {
+    pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         let rows = rows.max(2);
         let cols = cols.max(4);
-        if self.current_size.get() == (rows, cols) {
+        let size = (rows, cols, cell_width_px, cell_height_px);
+        if self.current_size.get() == size {
             return;
         }
-        self.current_size.set((rows, cols));
-        self.terminal.resize(rows, cols);
-        let _ = self.resize_tx.send((rows, cols));
+        self.current_size.set(size);
+        self.terminal
+            .resize(rows, cols, cell_width_px, cell_height_px);
+        let _ = self.resize_tx.send(size);
     }
 
     /// Scroll up by N lines (into scrollback history).
@@ -804,6 +815,10 @@ impl PaneRuntime {
 
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
         self.terminal.visible_hyperlinks(area)
+    }
+
+    pub fn kitty_image_placements(&self) -> Vec<crate::ghostty::KittyImagePlacement> {
+        self.terminal.kitty_image_placements()
     }
 
     pub fn keyboard_protocol(&self) -> crate::input::KeyboardProtocol {
@@ -957,7 +972,7 @@ impl PaneRuntime {
         channel_capacity: usize,
     ) -> (Self, mpsc::Receiver<Bytes>) {
         let (tx, rx) = mpsc::channel(channel_capacity);
-        let (resize_tx, _resize_rx) = watch::channel((rows, cols));
+        let (resize_tx, _resize_rx) = watch::channel((rows, cols, 0, 0));
         let mut terminal =
             crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes).unwrap();
         terminal.write(bytes);
@@ -969,7 +984,7 @@ impl PaneRuntime {
                 )),
                 sender: tx,
                 resize_tx,
-                current_size: Cell::new((rows, cols)),
+                current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 detect_reset_notify: Arc::new(Notify::new()),
@@ -1040,7 +1055,7 @@ mod tests {
     #[tokio::test]
     async fn focus_events_are_forwarded_when_enabled() {
         let (tx, mut rx) = mpsc::channel(4);
-        let (resize_tx, _resize_rx) = watch::channel((80, 24));
+        let (resize_tx, _resize_rx) = watch::channel((80, 24, 0, 0));
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal
             .mode_set(crate::ghostty::MODE_FOCUS_EVENT, true)
@@ -1051,7 +1066,7 @@ mod tests {
             )),
             sender: tx,
             resize_tx,
-            current_size: Cell::new((80, 24)),
+            current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detect_reset_notify: Arc::new(Notify::new()),
@@ -1066,7 +1081,7 @@ mod tests {
     #[tokio::test]
     async fn focus_events_are_suppressed_when_disabled() {
         let (tx, mut rx) = mpsc::channel(4);
-        let (resize_tx, _resize_rx) = watch::channel((80, 24));
+        let (resize_tx, _resize_rx) = watch::channel((80, 24, 0, 0));
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let runtime = PaneRuntime {
             terminal: Arc::new(PaneTerminal::new(
@@ -1074,7 +1089,7 @@ mod tests {
             )),
             sender: tx,
             resize_tx,
-            current_size: Cell::new((80, 24)),
+            current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detect_reset_notify: Arc::new(Notify::new()),

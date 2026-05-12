@@ -5,7 +5,7 @@ use bytes::Bytes;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::{layout::Rect, Frame};
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 use unicode_width::UnicodeWidthStr;
 
 use crate::layout::PaneId;
@@ -97,8 +97,9 @@ impl PaneTerminal {
             .process_pty_bytes(pane_id, shell_pid, bytes, response_writer)
     }
 
-    pub fn resize(&self, rows: u16, cols: u16) {
-        self.ghostty.resize(rows, cols);
+    pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
+        self.ghostty
+            .resize(rows, cols, cell_width_px, cell_height_px);
     }
 
     pub fn scroll_up(&self, lines: usize) {
@@ -167,6 +168,10 @@ impl PaneTerminal {
 
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
         self.ghostty.visible_hyperlinks(area)
+    }
+
+    pub fn kitty_image_placements(&self) -> Vec<crate::ghostty::KittyImagePlacement> {
+        self.ghostty.kitty_image_placements()
     }
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
@@ -353,6 +358,20 @@ impl GhosttyPaneTerminal {
         }
 
         core.terminal.write(filtered_bytes.as_ref());
+        if contains_kitty_graphics_sequence(filtered_bytes.as_ref()) {
+            match core.terminal.kitty_image_placements() {
+                Ok(placements) => info!(
+                    pane = pane_id.raw(),
+                    placements = placements.len(),
+                    "processed kitty graphics sequence"
+                ),
+                Err(err) => warn!(
+                    pane = pane_id.raw(),
+                    err = %err,
+                    "failed to query kitty graphics after sequence"
+                ),
+            }
+        }
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             key_encoder.set_from_terminal(&core.terminal);
         }
@@ -367,9 +386,11 @@ impl GhosttyPaneTerminal {
         }
     }
 
-    pub fn resize(&self, rows: u16, cols: u16) {
+    pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         if let Ok(mut core) = self.core.lock() {
-            let _ = core.terminal.resize(cols, rows);
+            let _ = core
+                .terminal
+                .resize(cols, rows, cell_width_px, cell_height_px);
         }
     }
 
@@ -618,6 +639,14 @@ impl GhosttyPaneTerminal {
             .lock()
             .ok()
             .and_then(|mut core| ghostty_visible_hyperlinks(&mut core, area).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn kitty_image_placements(&self) -> Vec<crate::ghostty::KittyImagePlacement> {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| core.terminal.kitty_image_placements().ok())
             .unwrap_or_default()
     }
 
@@ -1110,6 +1139,10 @@ fn recent_text_from_rows(rows: &[String], lines: usize) -> String {
     }
 }
 
+fn contains_kitty_graphics_sequence(bytes: &[u8]) -> bool {
+    bytes.windows(3).any(|window| window == b"\x1b_G")
+}
+
 fn should_probe_host_terminal_theme_restore(core: &GhosttyPaneCore) -> bool {
     if core.transient_default_color_owner_pgid.is_none() || core.host_terminal_theme.is_empty() {
         return false;
@@ -1573,7 +1606,7 @@ mod tests {
         assert!(!pane.visible_text().trim().is_empty());
 
         for (rows, cols) in [(4, 10), (4, 7), (6, 18), (3, 9), (5, 12)] {
-            pane.resize(rows, cols);
+            pane.resize(rows, cols, 0, 0);
 
             let metrics = pane.scroll_metrics().expect("scroll metrics after resize");
             assert_eq!(metrics.viewport_rows, rows as usize);
