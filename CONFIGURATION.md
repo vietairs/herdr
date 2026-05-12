@@ -92,7 +92,7 @@ example:
 prefix = "ctrl+b"
 new_workspace = "n"
 rename_workspace = "shift+n"
-close_workspace = "shift+d"
+close_workspace = "X"
 reload_config = ""      # optional, unset by default
 open_notification_target = "" # optional, unset by default
 new_tab = "c"
