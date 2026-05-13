@@ -496,7 +496,9 @@ fn client_handshake(
             &encode_varint_u32(version),
             &encode_varint_u16(cols),
             &encode_varint_u16(rows),
-            &encode_varint_u32(0), // RenderEncoding::SemanticFrame
+            &encode_varint_u32(8),  // cell_width_px
+            &encode_varint_u32(16), // cell_height_px
+            &encode_varint_u32(0),  // RenderEncoding::SemanticFrame
         ],
     );
     stream
@@ -547,7 +549,7 @@ fn client_handshake(
 
 fn connect_raw_client(client_socket: &Path, cols: u16, rows: u16) -> UnixStream {
     let mut stream = UnixStream::connect(client_socket).expect("should connect to client socket");
-    client_handshake(&mut stream, 4, cols, rows).expect("handshake should succeed");
+    client_handshake(&mut stream, 5, cols, rows).expect("handshake should succeed");
     stream
 }
 
@@ -578,6 +580,7 @@ struct FrameWire {
     height: u16,
     cursor: Option<CursorWire>,
     hyperlinks: Vec<String>,
+    graphics: Vec<u8>,
 }
 
 #[allow(dead_code)]
@@ -709,7 +712,7 @@ fn frame_contains_text(frame: &FrameWire, needle: &str) -> bool {
         full_text.push('\n');
     }
 
-    let _ = frame.height;
+    let _ = (frame.height, frame.graphics.len());
     if let Some(cursor) = frame.cursor.as_ref() {
         let _ = (cursor.x, cursor.y, cursor.visible);
     }

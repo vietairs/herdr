@@ -994,7 +994,7 @@ mod tests {
             id: "req_1".into(),
             result: ResponseResult::Pong {
                 version: "0.1.2".into(),
-                protocol: 4,
+                protocol: 5,
             },
         };
 

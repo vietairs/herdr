@@ -220,7 +220,9 @@ pub fn client_handshake(
             &encode_varint_u32(version),
             &encode_varint_u16(cols),
             &encode_varint_u16(rows),
-            &encode_varint_u32(0), // RenderEncoding::SemanticFrame
+            &encode_varint_u32(8),  // cell_width_px
+            &encode_varint_u32(16), // cell_height_px
+            &encode_varint_u32(0),  // RenderEncoding::SemanticFrame
         ],
     );
     let framed = frame_message(&hello_payload);
