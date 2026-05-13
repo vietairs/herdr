@@ -13,11 +13,12 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
-/// Maximum allowed frame payload size (2 MB). Frames larger than this are
-/// rejected to prevent denial-of-service via oversized length prefixes.
-pub const MAX_FRAME_SIZE: usize = 2 * 1024 * 1024;
+/// Maximum allowed frame payload size (32 MB). Frames larger than this are
+/// rejected to prevent denial-of-service via oversized length prefixes while
+/// leaving room for first-frame Kitty graphics image uploads.
+pub const MAX_FRAME_SIZE: usize = 32 * 1024 * 1024;
 
 /// Length of the u32 little-endian length prefix in bytes.
 const LENGTH_PREFIX_BYTES: usize = 4;
@@ -46,6 +47,10 @@ pub enum ClientMessage {
         cols: u16,
         /// Terminal height in rows.
         rows: u16,
+        /// Width of a terminal cell in physical pixels.
+        cell_width_px: u32,
+        /// Height of a terminal cell in physical pixels.
+        cell_height_px: u32,
         /// Render encoding requested by the client.
         requested_encoding: RenderEncoding,
     },
@@ -62,6 +67,10 @@ pub enum ClientMessage {
         cols: u16,
         /// New terminal height in rows.
         rows: u16,
+        /// Width of a terminal cell in physical pixels.
+        cell_width_px: u32,
+        /// Height of a terminal cell in physical pixels.
+        cell_height_px: u32,
     },
 
     /// Graceful disconnect request.
@@ -114,6 +123,8 @@ pub struct FrameData {
     pub cursor: Option<CursorState>,
     /// OSC 8 hyperlink URIs referenced by cells.
     pub hyperlinks: Vec<String>,
+    /// Kitty graphics protocol bytes to apply after the text frame.
+    pub graphics: Vec<u8>,
 }
 
 impl FrameData {
@@ -178,6 +189,7 @@ impl FrameData {
             height,
             cursor,
             hyperlinks: hyperlink_uris,
+            graphics: Vec::new(),
         }
     }
 
@@ -254,6 +266,12 @@ pub enum ServerMessage {
 
     /// Terminal bytes to write directly for a terminal-ANSI client.
     Terminal(TerminalFrame),
+
+    /// Client-local Kitty graphics bytes to write directly to the host terminal.
+    Graphics {
+        /// Raw Kitty graphics protocol bytes.
+        bytes: Vec<u8>,
+    },
 
     /// Server is shutting down. Clients should exit gracefully.
     ServerShutdown {
@@ -546,6 +564,8 @@ mod tests {
             version: PROTOCOL_VERSION,
             cols: 80,
             rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
             requested_encoding: RenderEncoding::SemanticFrame,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
@@ -584,7 +604,12 @@ mod tests {
 
     #[test]
     fn client_resize_roundtrip() {
-        let msg = ClientMessage::Resize { cols: 80, rows: 24 };
+        let msg = ClientMessage::Resize {
+            cols: 80,
+            rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
+        };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ClientMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
@@ -690,6 +715,7 @@ mod tests {
                 visible: true,
             }),
             hyperlinks: vec!["https://example.com".to_owned()],
+            graphics: Vec::new(),
         };
         let msg = ServerMessage::Frame(frame.clone());
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
@@ -740,6 +766,17 @@ mod tests {
     }
 
     #[test]
+    fn server_graphics_roundtrip() {
+        let msg = ServerMessage::Graphics {
+            bytes: b"\x1b_Ga=d,d=A,q=2;\x1b\\".to_vec(),
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
     fn server_terminal_frame_roundtrip() {
         let msg = ServerMessage::Terminal(TerminalFrame {
             seq: 7,
@@ -771,6 +808,8 @@ mod tests {
             version: PROTOCOL_VERSION,
             cols: 80,
             rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
             requested_encoding: RenderEncoding::SemanticFrame,
         };
         let mut buf = Vec::new();
@@ -811,6 +850,7 @@ mod tests {
                 visible: true,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         let msg = ServerMessage::Frame(frame);
 
@@ -839,6 +879,8 @@ mod tests {
                     version: PROTOCOL_VERSION,
                     cols: (80 + (i % 40) as u16),
                     rows: (24 + (i % 20) as u16),
+                    cell_width_px: 8,
+                    cell_height_px: 16,
                     requested_encoding: RenderEncoding::SemanticFrame,
                 },
                 1 => ClientMessage::Input {
@@ -847,6 +889,8 @@ mod tests {
                 2 => ClientMessage::Resize {
                     cols: (100 + (i % 30) as u16),
                     rows: (30 + (i % 10) as u16),
+                    cell_width_px: 8,
+                    cell_height_px: 16,
                 },
                 3 => ClientMessage::Detach,
                 _ => unreachable!(),
@@ -1142,6 +1186,7 @@ mod tests {
             height: 2,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         assert!(frame.to_ratatui_buffer().is_none());
     }
@@ -1263,6 +1308,8 @@ mod tests {
             version: PROTOCOL_VERSION,
             cols: 80,
             rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
             requested_encoding: RenderEncoding::SemanticFrame,
         };
         let mut buf = Vec::new();
@@ -1294,6 +1341,8 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 cols: 200,
                 rows: 60,
+                cell_width_px: 8,
+                cell_height_px: 16,
                 requested_encoding: RenderEncoding::SemanticFrame,
             },
             ClientMessage::Input {
@@ -1302,6 +1351,8 @@ mod tests {
             ClientMessage::Resize {
                 cols: 100,
                 rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
             },
             ClientMessage::Detach,
         ];

@@ -10,8 +10,10 @@
 )]
 pub mod bindings;
 
+use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::mem;
 use std::os::raw::c_char;
@@ -149,7 +151,7 @@ const APC_MAX_BYTES_KITTY: usize = 16 * 1024 * 1024;
 
 static INSTALL_PNG_DECODER: Once = Once::new();
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum KittyImageFormat {
     Rgb,
     Rgba,
@@ -166,8 +168,21 @@ pub struct KittyImagePlacement {
     pub image_width: u32,
     pub image_height: u32,
     pub format: KittyImageFormat,
+    pub data_len: usize,
+    pub data_fingerprint: u64,
     pub data: Vec<u8>,
     pub render: KittyPlacementRenderInfo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KittyImageDescriptor {
+    pub image_id: u32,
+    pub placement_id: u32,
+    pub image_width: u32,
+    pub image_height: u32,
+    pub format: KittyImageFormat,
+    pub data_len: usize,
+    pub data_fingerprint: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -837,6 +852,16 @@ impl Terminal {
     }
 
     pub fn kitty_image_placements(&self) -> Result<Vec<KittyImagePlacement>, Error> {
+        self.kitty_image_placements_with_data_filter(|_| true)
+    }
+
+    pub fn kitty_image_placements_with_data_filter<F>(
+        &self,
+        mut needs_data: F,
+    ) -> Result<Vec<KittyImagePlacement>, Error>
+    where
+        F: FnMut(KittyImageDescriptor) -> bool,
+    {
         let mut graphics: ffi::GhosttyKittyGraphics = ptr::null_mut();
         unsafe {
             ffi::ghostty_terminal_get(
@@ -865,7 +890,9 @@ impl Terminal {
 
         let mut placements = Vec::new();
         while unsafe { ffi::ghostty_kitty_graphics_placement_next(iterator) } {
-            if let Some(placement) = self.kitty_image_placement(graphics, iterator)? {
+            if let Some(placement) =
+                self.kitty_image_placement(graphics, iterator, &mut needs_data)?
+            {
                 placements.push(placement);
             }
         }
@@ -873,11 +900,15 @@ impl Terminal {
         Ok(placements)
     }
 
-    fn kitty_image_placement(
+    fn kitty_image_placement<F>(
         &self,
         graphics: ffi::GhosttyKittyGraphics,
         iterator: ffi::GhosttyKittyGraphicsPlacementIterator,
-    ) -> Result<Option<KittyImagePlacement>, Error> {
+        needs_data: &mut F,
+    ) -> Result<Option<KittyImagePlacement>, Error>
+    where
+        F: FnMut(KittyImageDescriptor) -> bool,
+    {
         let image_id = kitty_placement_u32(
             iterator,
             ffi::GhosttyKittyGraphicsPlacementData_GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IMAGE_ID,
@@ -917,11 +948,27 @@ impl Terminal {
         if compression != ffi::GhosttyKittyImageCompression_GHOSTTY_KITTY_IMAGE_COMPRESSION_NONE {
             return Ok(None);
         }
-        let data = kitty_image_data(image)?;
         let placement_id = kitty_placement_u32(
             iterator,
             ffi::GhosttyKittyGraphicsPlacementData_GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_PLACEMENT_ID,
         )?;
+        let (data_ptr, data_len) = kitty_image_data_ptr_len(image)?;
+        let data_fingerprint =
+            kitty_image_fingerprint(data_ptr, data_len, image_width, image_height, format);
+        let descriptor = KittyImageDescriptor {
+            image_id,
+            placement_id,
+            image_width,
+            image_height,
+            format,
+            data_len,
+            data_fingerprint,
+        };
+        let data = if needs_data(descriptor) {
+            kitty_image_data_from_ptr(data_ptr, data_len)
+        } else {
+            Vec::new()
+        };
         let x_offset = kitty_placement_u32(
             iterator,
             ffi::GhosttyKittyGraphicsPlacementData_GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_X_OFFSET,
@@ -944,6 +991,8 @@ impl Terminal {
             image_width,
             image_height,
             format,
+            data_len,
+            data_fingerprint,
             data,
             render: KittyPlacementRenderInfo {
                 pixel_width: raw_info.pixel_width,
@@ -1093,7 +1142,9 @@ fn kitty_image_compression(
     Ok(out)
 }
 
-fn kitty_image_data(image: ffi::GhosttyKittyGraphicsImage) -> Result<Vec<u8>, Error> {
+fn kitty_image_data_ptr_len(
+    image: ffi::GhosttyKittyGraphicsImage,
+) -> Result<(*const u8, usize), Error> {
     let mut ptr_out: *const u8 = ptr::null();
     let mut len = 0usize;
     unsafe {
@@ -1110,10 +1161,40 @@ fn kitty_image_data(image: ffi::GhosttyKittyGraphicsImage) -> Result<Vec<u8>, Er
         )
         .into_result()?;
     }
+    Ok((ptr_out, len))
+}
+
+fn kitty_image_data_from_ptr(ptr_out: *const u8, len: usize) -> Vec<u8> {
     if ptr_out.is_null() || len == 0 {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    Ok(unsafe { slice::from_raw_parts(ptr_out, len) }.to_vec())
+    unsafe { slice::from_raw_parts(ptr_out, len) }.to_vec()
+}
+
+fn kitty_image_fingerprint(
+    ptr_out: *const u8,
+    len: usize,
+    image_width: u32,
+    image_height: u32,
+    format: KittyImageFormat,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    len.hash(&mut hasher);
+    image_width.hash(&mut hasher);
+    image_height.hash(&mut hasher);
+    format.hash(&mut hasher);
+    if ptr_out.is_null() || len == 0 {
+        return hasher.finish();
+    }
+
+    let data = unsafe { slice::from_raw_parts(ptr_out, len) };
+    let prefix_len = data.len().min(256);
+    data[..prefix_len].hash(&mut hasher);
+    if data.len() > prefix_len {
+        let suffix_len = data.len().min(256);
+        data[data.len() - suffix_len..].hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn grid_ref_hyperlink_uri(grid_ref: &ffi::GhosttyGridRef) -> Result<Option<String>, Error> {

@@ -51,6 +51,8 @@ pub(crate) enum ServerEvent {
         client_id: u64,
         cols: u16,
         rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
         render_encoding: RenderEncoding,
         writer: ClientWriter,
     },
@@ -61,6 +63,8 @@ pub(crate) enum ServerEvent {
         client_id: u64,
         cols: u16,
         rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
     },
     /// A client detached gracefully.
     ClientDetach { client_id: u64 },
@@ -113,11 +117,13 @@ pub(crate) fn handle_client_handshake(
         }
     };
 
-    let (client_cols, client_rows, render_encoding) = match hello {
+    let (client_cols, client_rows, cell_width_px, cell_height_px, render_encoding) = match hello {
         ClientMessage::Hello {
             version,
             cols,
             rows,
+            cell_width_px,
+            cell_height_px,
             requested_encoding,
         } => {
             // Version check.
@@ -137,7 +143,13 @@ pub(crate) fn handle_client_handshake(
 
             // Clamp size.
             let (clamped_cols, clamped_rows) = clamp_terminal_size(cols, rows);
-            (clamped_cols, clamped_rows, requested_encoding)
+            (
+                clamped_cols,
+                clamped_rows,
+                cell_width_px.max(1),
+                cell_height_px.max(1),
+                requested_encoding,
+            )
         }
         _ => {
             // First message must be Hello.
@@ -176,6 +188,8 @@ pub(crate) fn handle_client_handshake(
         client_id,
         cols: client_cols,
         rows: client_rows,
+        cell_width_px,
+        cell_height_px,
         render_encoding,
         writer,
     });
@@ -324,12 +338,19 @@ fn client_read_loop(
                     ServerEvent::ClientInput { client_id, data }
                 }
             }
-            ClientMessage::Resize { cols, rows } => {
+            ClientMessage::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            } => {
                 let (clamped_cols, clamped_rows) = clamp_terminal_size(cols, rows);
                 ServerEvent::ClientResize {
                     client_id,
                     cols: clamped_cols,
                     rows: clamped_rows,
+                    cell_width_px: cell_width_px.max(1),
+                    cell_height_px: cell_height_px.max(1),
                 }
             }
             ClientMessage::Detach => ServerEvent::ClientDetach { client_id },
@@ -399,6 +420,8 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 cols: 100,
                 rows: 30,
+                cell_width_px: 8,
+                cell_height_px: 16,
                 requested_encoding: RenderEncoding::TerminalAnsi,
             },
         )
@@ -427,11 +450,14 @@ mod tests {
                 client_id,
                 cols,
                 rows,
+                cell_width_px,
+                cell_height_px,
                 render_encoding,
                 writer,
             } => {
                 assert_eq!(client_id, 42);
                 assert_eq!((cols, rows), (100, 30));
+                assert_eq!((cell_width_px, cell_height_px), (8, 16));
                 assert_eq!(render_encoding, RenderEncoding::TerminalAnsi);
                 drop(writer);
             }

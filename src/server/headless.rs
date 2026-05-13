@@ -191,6 +191,8 @@ fn derive_client_socket_from_api_socket(api_socket_path: &Path) -> PathBuf {
 struct ClientConnection {
     /// The client's terminal size (after clamping).
     terminal_size: (u16, u16),
+    /// Pixel size of one client terminal cell.
+    cell_size: crate::kitty_graphics::HostCellSize,
     /// Last known host terminal default colors for this client.
     host_terminal_theme: crate::terminal_theme::TerminalTheme,
     /// Last reported focus state for this client's outer terminal.
@@ -199,6 +201,8 @@ struct ClientConnection {
     last_activity: u64,
     /// Render baseline for the negotiated client encoding.
     render_state: ClientRenderState,
+    /// Client-local host Kitty graphics cache.
+    graphics_cache: crate::kitty_graphics::HostGraphicsCache,
     /// Whether a render was skipped because the render channel was full.
     render_pending: bool,
     /// Channels for sending framed ServerMessage data to the client writer thread.
@@ -208,6 +212,7 @@ struct ClientConnection {
 impl ClientConnection {
     fn new(
         terminal_size: (u16, u16),
+        cell_size: crate::kitty_graphics::HostCellSize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         outer_terminal_focus: Option<bool>,
         last_activity: u64,
@@ -216,10 +221,12 @@ impl ClientConnection {
     ) -> Self {
         Self {
             terminal_size,
+            cell_size,
             host_terminal_theme,
             outer_terminal_focus,
             last_activity,
             render_state: ClientRenderState::new(render_encoding),
+            graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             render_pending: false,
             writer,
         }
@@ -490,9 +497,15 @@ impl HeadlessServer {
         if self.foreground_client_id.is_none() {
             return;
         }
+        let Some(client_id) = self.foreground_client_id else {
+            return;
+        };
+        let Some(client) = self.clients.get(&client_id) else {
+            return;
+        };
         let (cols, rows) = self.effective_size;
         let area = Rect::new(0, 0, cols, rows);
-        crate::ui::compute_view(&mut self.app.state, area);
+        crate::ui::compute_view_with_cell_size(&mut self.app.state, area, client.cell_size);
 
         // Shared runtime size changes affect pane wrapping and foreground-driven
         // rendering semantics. Force one fresh frame to every remaining client
@@ -564,11 +577,39 @@ impl HeadlessServer {
 
     fn remove_client(&mut self, client_id: u64) -> bool {
         let was_foreground = self.foreground_client_id == Some(client_id);
+        self.send_client_graphics_cleanup(client_id);
         self.clients.remove(&client_id);
         if was_foreground {
             self.promote_latest_remaining_client()
         } else {
             false
+        }
+    }
+
+    fn send_client_graphics_cleanup(&mut self, client_id: u64) {
+        let (writer, bytes) = match self.clients.get_mut(&client_id) {
+            Some(client) => {
+                let bytes = client.graphics_cache.clear_bytes();
+                (client.writer.as_ref().cloned(), bytes)
+            }
+            None => return,
+        };
+        if bytes.is_empty() {
+            return;
+        }
+        let Some(writer) = writer else {
+            return;
+        };
+        let Ok(serialized) = Self::frame_server_message(&ServerMessage::Graphics { bytes }) else {
+            return;
+        };
+        let _ = writer.control.send(serialized);
+    }
+
+    fn send_all_clients_graphics_cleanup(&mut self) {
+        let client_ids = self.clients.keys().copied().collect::<Vec<_>>();
+        for client_id in client_ids {
+            self.send_client_graphics_cleanup(client_id);
         }
     }
 
@@ -1047,15 +1088,29 @@ impl HeadlessServer {
                 client_id,
                 cols,
                 rows,
+                cell_width_px,
+                cell_height_px,
                 writer,
                 render_encoding,
             } => {
-                info!(client_id, cols, rows, ?render_encoding, "client connected");
+                info!(
+                    client_id,
+                    cols,
+                    rows,
+                    cell_width_px,
+                    cell_height_px,
+                    ?render_encoding,
+                    "client connected"
+                );
                 let last_activity = self.allocate_activity_stamp();
                 self.clients.insert(
                     client_id,
                     ClientConnection::new(
                         (cols, rows),
+                        crate::kitty_graphics::HostCellSize {
+                            width_px: cell_width_px,
+                            height_px: cell_height_px,
+                        },
                         crate::terminal_theme::TerminalTheme::default(),
                         None,
                         last_activity,
@@ -1097,6 +1152,10 @@ impl HeadlessServer {
                     self.app.state.detach_requested = false;
                     info!(client_id, "client detach requested via keybind");
 
+                    // Clear client-local host graphics before sending ServerShutdown
+                    // so the outer terminal does not retain stale images.
+                    self.send_client_graphics_cleanup(client_id);
+
                     // Send a ServerShutdown with "detached" reason to this client
                     // so it exits cleanly (not with a connection-lost error).
                     // The client will close its connection after receiving this,
@@ -1130,10 +1189,19 @@ impl HeadlessServer {
                 client_id,
                 cols,
                 rows,
+                cell_width_px,
+                cell_height_px,
             } => {
-                info!(client_id, cols, rows, "client resize");
+                info!(
+                    client_id,
+                    cols, rows, cell_width_px, cell_height_px, "client resize"
+                );
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client.terminal_size = (cols, rows);
+                    client.cell_size = crate::kitty_graphics::HostCellSize {
+                        width_px: cell_width_px,
+                        height_px: cell_height_px,
+                    };
                 }
                 self.promote_client_to_foreground(client_id);
                 self.resize_shared_runtime_to_effective_size();
@@ -1355,20 +1423,21 @@ impl HeadlessServer {
     /// frames to all connected clients.
     fn render_and_stream(&mut self) {
         let foreground_client_id = self.foreground_client_id;
-        let mut render_targets: Vec<(u64, (u16, u16), bool)> = self
-            .clients
-            .iter()
-            .filter(|(_, client)| client.writer.is_some())
-            .map(|(&client_id, client)| {
-                (
-                    client_id,
-                    client.terminal_size,
-                    foreground_client_id == Some(client_id),
-                )
-            })
-            .collect();
+        let mut render_targets: Vec<(u64, (u16, u16), crate::kitty_graphics::HostCellSize, bool)> =
+            self.clients
+                .iter()
+                .filter(|(_, client)| client.writer.is_some())
+                .map(|(&client_id, client)| {
+                    (
+                        client_id,
+                        client.terminal_size,
+                        client.cell_size,
+                        foreground_client_id == Some(client_id),
+                    )
+                })
+                .collect();
 
-        render_targets.sort_by_key(|(client_id, _, is_foreground)| (*is_foreground, *client_id));
+        render_targets.sort_by_key(|(client_id, _, _, is_foreground)| (*is_foreground, *client_id));
 
         if render_targets.is_empty() {
             let (cols, rows) = self.effective_size;
@@ -1387,20 +1456,32 @@ impl HeadlessServer {
         }
 
         let mut broken_clients: Vec<u64> = Vec::new();
-        for (client_id, (cols, rows), is_foreground) in render_targets {
+        for (client_id, (cols, rows), cell_size, is_foreground) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
-            let (buffer, cursor) = crate::server::render_stream::render_virtual(
+            let (buffer, cursor) = crate::server::render_stream::render_virtual_with_cell_size(
                 &mut self.app.state,
                 area,
                 is_foreground,
+                cell_size,
             );
             let hyperlinks = crate::server::render_stream::visible_hyperlinks(&self.app.state);
-            let frame =
+            let mut frame =
                 FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks);
 
             let Some(client) = self.clients.get_mut(&client_id) else {
                 continue;
             };
+            let mut next_graphics_cache = client.graphics_cache.clone();
+            if self.app.state.kitty_graphics_enabled {
+                frame.graphics = crate::kitty_graphics::encode_local_pane_graphics(
+                    &self.app.state,
+                    cell_size,
+                    &mut next_graphics_cache,
+                );
+            } else {
+                frame.graphics = next_graphics_cache.clear_bytes();
+            }
+
             let Some(writer) = client.writer.as_ref().cloned() else {
                 continue;
             };
@@ -1417,7 +1498,6 @@ impl HeadlessServer {
                         client_id,
                         claimed, max, "skipping oversized frame for client"
                     );
-                    client.render_state.note_oversized_frame(frame);
                     continue;
                 }
                 Err(err) => {
@@ -1430,6 +1510,7 @@ impl HeadlessServer {
             match writer.render.try_send(serialized) {
                 Ok(()) => {
                     client.render_pending = false;
+                    client.graphics_cache = next_graphics_cache;
                     client.render_state.commit_sent_frame(frame, prepared);
                 }
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
@@ -1534,7 +1615,8 @@ impl HeadlessServer {
         info!("server shutdown initiated");
         self.shutting_down = true;
 
-        // Send ServerShutdown to all connected clients.
+        // Clear client-local host graphics, then send ServerShutdown to all connected clients.
+        self.send_all_clients_graphics_cleanup();
         let shutdown_msg = ServerMessage::ServerShutdown {
             reason: Some("server is shutting down".to_owned()),
         };
@@ -1557,6 +1639,7 @@ impl HeadlessServer {
 
         // Send ServerShutdown to all remaining clients.
         if !self.clients.is_empty() {
+            self.send_all_clients_graphics_cleanup();
             let shutdown_msg = ServerMessage::ServerShutdown {
                 reason: Some("server is shutting down".to_owned()),
             };
@@ -2026,6 +2109,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (160, 45),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme {
                     foreground: Some(crate::terminal_theme::RgbColor {
                         r: 0xaa,
@@ -2048,6 +2132,7 @@ mod tests {
             2,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme {
                     foreground: Some(crate::terminal_theme::RgbColor {
                         r: 0x10,
@@ -2100,6 +2185,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2111,6 +2197,7 @@ mod tests {
             2,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 Some(true),
                 2,
@@ -2140,6 +2227,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2151,6 +2239,7 @@ mod tests {
             2,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 Some(true),
                 2,
@@ -2180,6 +2269,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 Some(true),
                 1,
@@ -2215,6 +2305,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2226,6 +2317,7 @@ mod tests {
             2,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 2,
@@ -2270,6 +2362,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2303,6 +2396,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2348,6 +2442,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2406,6 +2501,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2449,6 +2545,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2499,6 +2596,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2530,6 +2628,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2562,6 +2661,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2573,6 +2673,7 @@ mod tests {
             2,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 2,
@@ -2614,6 +2715,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2625,6 +2727,7 @@ mod tests {
             2,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 2,
@@ -2668,6 +2771,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -2719,6 +2823,7 @@ mod tests {
             1,
             ClientConnection::new(
                 (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,

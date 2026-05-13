@@ -35,6 +35,9 @@ use crate::server::protocol::{
     PROTOCOL_VERSION,
 };
 
+const DELETE_ALL_KITTY_GRAPHICS: &[u8] = b"\x1b_Ga=d,d=A,q=2;\x1b\\";
+static RECEIVED_KITTY_GRAPHICS: AtomicBool = AtomicBool::new(false);
+
 // ---------------------------------------------------------------------------
 // Client state
 // ---------------------------------------------------------------------------
@@ -172,6 +175,10 @@ fn write_terminal_restore_postlude(writer: &mut impl io::Write) -> io::Result<()
 }
 
 fn restore_terminal_state(in_tmux: bool) {
+    if RECEIVED_KITTY_GRAPHICS.swap(false, Ordering::AcqRel) {
+        let _ = io::stdout().write_all(DELETE_ALL_KITTY_GRAPHICS);
+    }
+
     // Reset modifyOtherKeys if we enabled it.
     if in_tmux {
         let _ = io::stdout().write_all(b"\x1b[>4;0m");
@@ -214,6 +221,8 @@ fn do_handshake(
     stream: &mut UnixStream,
     cols: u16,
     rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
     requested_encoding: RenderEncoding,
 ) -> Result<RenderEncoding, ClientError> {
     stream
@@ -225,6 +234,8 @@ fn do_handshake(
         version: PROTOCOL_VERSION,
         cols,
         rows,
+        cell_width_px,
+        cell_height_px,
         requested_encoding,
     };
     protocol::write_message(stream, &hello)
@@ -266,7 +277,7 @@ enum ClientLoopEvent {
     /// Raw input bytes from stdin.
     StdinInput(Vec<u8>),
     /// Terminal resize detected.
-    Resize(u16, u16),
+    Resize(u16, u16, u32, u32),
     /// Server message received.
     ServerMessage(ServerMessage),
     /// Server reader thread exited (connection lost).
@@ -300,13 +311,20 @@ pub fn run_client() -> io::Result<()> {
         }
     };
 
-    // Get the terminal size before handshake (before raw mode).
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    // Get the terminal geometry before handshake (before raw mode).
+    let (cols, rows, cell_width_px, cell_height_px) = current_terminal_geometry();
 
     let requested_encoding = requested_render_encoding();
 
     // Perform handshake while the stream is still in blocking mode.
-    let negotiated_encoding = match do_handshake(&mut stream, cols, rows, requested_encoding) {
+    let negotiated_encoding = match do_handshake(
+        &mut stream,
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+        requested_encoding,
+    ) {
         Ok(encoding) => encoding,
         Err(err) => {
             eprintln!("herdr: {err}");
@@ -452,11 +470,13 @@ async fn run_client_loop(
                     return Err(ClientError::ConnectionLost(e));
                 }
             }
-            ClientLoopEvent::Resize(new_cols, new_rows) => {
+            ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
                 state.reported_size = (new_cols, new_rows);
                 let msg = ClientMessage::Resize {
                     cols: new_cols,
                     rows: new_rows,
+                    cell_width_px,
+                    cell_height_px,
                 };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
                     return Err(ClientError::ConnectionLost(e));
@@ -466,13 +486,26 @@ async fn run_client_loop(
                 ServerMessage::Frame(frame_data) => {
                     let encoded = state.blit_encoder.encode(&frame_data, false);
                     let mut stdout = io::stdout();
-                    let _ = stdout.write_all(&encoded.bytes);
+                    let _ = write_encoded_frame_with_graphics(
+                        &mut stdout,
+                        &encoded.bytes,
+                        &frame_data.graphics,
+                    );
                     let _ = stdout.flush();
                     state.blit_encoder.commit(frame_data, encoded);
                 }
                 ServerMessage::Terminal(frame) => {
+                    if contains_kitty_graphics_bytes(&frame.bytes) {
+                        RECEIVED_KITTY_GRAPHICS.store(true, Ordering::Release);
+                    }
                     let mut stdout = io::stdout();
                     let _ = stdout.write_all(&frame.bytes);
+                    let _ = stdout.flush();
+                }
+                ServerMessage::Graphics { bytes } => {
+                    RECEIVED_KITTY_GRAPHICS.store(true, Ordering::Release);
+                    let mut stdout = io::stdout();
+                    let _ = stdout.write_all(&bytes);
                     let _ = stdout.flush();
                 }
                 ServerMessage::ServerShutdown { reason } => {
@@ -661,8 +694,68 @@ fn forward_clipboard(data: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Frame output
+// ---------------------------------------------------------------------------
+
+const SYNC_OUTPUT_END: &[u8] = b"\x1b[?2026l";
+
+fn write_encoded_frame_with_graphics(
+    mut writer: impl io::Write,
+    encoded: &[u8],
+    graphics: &[u8],
+) -> io::Result<()> {
+    if graphics.is_empty() {
+        return writer.write_all(encoded);
+    }
+
+    RECEIVED_KITTY_GRAPHICS.store(true, Ordering::Release);
+
+    if let Some(sync_end) = rfind_subslice(encoded, SYNC_OUTPUT_END) {
+        writer.write_all(&encoded[..sync_end])?;
+        writer.write_all(graphics)?;
+        writer.write_all(&encoded[sync_end..])?;
+        return Ok(());
+    }
+
+    writer.write_all(b"\x1b[?2026h")?;
+    writer.write_all(encoded)?;
+    writer.write_all(graphics)?;
+    writer.write_all(SYNC_OUTPUT_END)
+}
+
+fn contains_kitty_graphics_bytes(bytes: &[u8]) -> bool {
+    bytes.windows(3).any(|window| window == b"\x1b_G")
+}
+
+fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
+}
+
+// ---------------------------------------------------------------------------
 // Resize polling
 // ---------------------------------------------------------------------------
+
+fn current_terminal_geometry() -> (u16, u16, u32, u32) {
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let Ok(size) = crossterm::terminal::window_size() else {
+        return (cols, rows, 8, 16);
+    };
+    if size.columns == 0 || size.rows == 0 || size.width == 0 || size.height == 0 {
+        return (cols, rows, 8, 16);
+    }
+    (
+        cols,
+        rows,
+        (size.width as u32 / size.columns as u32).max(1),
+        (size.height as u32 / size.rows as u32).max(1),
+    )
+}
 
 /// Polls the terminal size and sends resize events when it changes.
 fn resize_poll_loop(
@@ -671,14 +764,22 @@ fn resize_poll_loop(
     initial_rows: u16,
     should_quit: &Arc<AtomicBool>,
 ) {
-    let mut last_size = (initial_cols, initial_rows);
+    let (_, _, initial_cell_width, initial_cell_height) = current_terminal_geometry();
+    let mut last_size = (
+        initial_cols,
+        initial_rows,
+        initial_cell_width,
+        initial_cell_height,
+    );
     while !should_quit.load(Ordering::Acquire) {
         std::thread::sleep(Duration::from_millis(100));
-        let new_size = crossterm::terminal::size().unwrap_or(last_size);
+        let new_size = current_terminal_geometry();
         if new_size != last_size {
             last_size = new_size;
             if resize_tx
-                .blocking_send(ClientLoopEvent::Resize(new_size.0, new_size.1))
+                .blocking_send(ClientLoopEvent::Resize(
+                    new_size.0, new_size.1, new_size.2, new_size.3,
+                ))
                 .is_err()
             {
                 break; // Main loop gone.
@@ -712,6 +813,33 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graphics_bytes_are_inserted_before_blit_sync_end() {
+        let mut output = Vec::new();
+        write_encoded_frame_with_graphics(
+            &mut output,
+            b"\x1b[?2026htext\x1b[?2026lcursor",
+            b"graphics",
+        )
+        .unwrap();
+
+        assert_eq!(output, b"\x1b[?2026htextgraphics\x1b[?2026lcursor");
+    }
+
+    #[test]
+    fn graphics_bytes_fallback_wraps_unsynchronized_blit() {
+        let mut output = Vec::new();
+        write_encoded_frame_with_graphics(&mut output, b"text", b"graphics").unwrap();
+
+        assert_eq!(output, b"\x1b[?2026htextgraphics\x1b[?2026l");
+    }
+
+    #[test]
+    fn terminal_frame_kitty_detection_matches_apc_prefix() {
+        assert!(contains_kitty_graphics_bytes(b"text\x1b_Ga=p;\x1b\\"));
+        assert!(!contains_kitty_graphics_bytes(b"text\x1b[?2026h"));
+    }
 
     #[test]
     fn write_host_terminal_theme_query_emits_osc_queries() {

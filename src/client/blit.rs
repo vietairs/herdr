@@ -597,6 +597,7 @@ mod tests {
             height,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         }
     }
 
@@ -781,6 +782,7 @@ mod tests {
                 visible: true,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -809,6 +811,7 @@ mod tests {
                 visible: true,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         let hidden = FrameData {
             cells: vec![make_cell("B", 0, 0, 0); 9],
@@ -820,6 +823,7 @@ mod tests {
                 visible: false,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         let mut last_visible_cursor = None;
         let mut output = Vec::new();
@@ -974,6 +978,7 @@ mod tests {
                 visible: true,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -998,6 +1003,7 @@ mod tests {
                 visible: false,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -1018,6 +1024,7 @@ mod tests {
             height: 1,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -1043,6 +1050,7 @@ mod tests {
                 visible: false,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -1063,6 +1071,7 @@ mod tests {
                 visible: true,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -1090,6 +1099,7 @@ mod tests {
                 visible: true,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         let mut curr = prev.clone();
         curr.cells[0] = make_cell("B", 0, 0, 0);
@@ -1127,6 +1137,7 @@ mod tests {
                 visible: true,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         let hidden = FrameData {
             cells: vec![make_cell("B", 0, 0, 0); 9],
@@ -1134,6 +1145,7 @@ mod tests {
             height: 3,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         let mut last_visible_cursor = None;
         let mut output = Vec::new();
@@ -1165,6 +1177,7 @@ mod tests {
             height: 2,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         let mut last_visible_cursor = None;
         let mut output = Vec::new();
@@ -1190,6 +1203,7 @@ mod tests {
                 visible: true,
             }),
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         let curr = FrameData {
             cells: vec![make_cell("B", 0, 0, 0)],
@@ -1197,6 +1211,7 @@ mod tests {
             height: 1,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -1220,6 +1235,7 @@ mod tests {
             height: 1,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -1243,6 +1259,7 @@ mod tests {
             height: 1,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         let curr = FrameData {
             cells: vec![
@@ -1254,6 +1271,7 @@ mod tests {
             height: 1,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
 
         let mut output = Vec::new();
@@ -1279,6 +1297,7 @@ mod tests {
             height: 1,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
         let curr = FrameData {
             cells: vec![
@@ -1290,6 +1309,7 @@ mod tests {
             height: 1,
             cursor: None,
             hyperlinks: Vec::new(),
+            graphics: Vec::new(),
         };
 
         let mut output = Vec::new();

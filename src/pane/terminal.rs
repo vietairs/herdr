@@ -1,11 +1,12 @@
 use std::borrow::Cow;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use bytes::Bytes;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::{layout::Rect, Frame};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use unicode_width::UnicodeWidthStr;
 
 use crate::layout::PaneId;
@@ -24,6 +25,7 @@ use super::{
 };
 
 const DEFAULT_DETECTION_ROWS: usize = 24;
+const KITTY_GRAPHICS_REDRAW_SETTLE: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollMetrics {
@@ -59,6 +61,7 @@ impl InputState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProcessBytesResult {
     pub request_render: bool,
+    pub render_delay: Option<Duration>,
     pub clipboard_writes: Vec<Vec<u8>>,
 }
 
@@ -170,8 +173,15 @@ impl PaneTerminal {
         self.ghostty.visible_hyperlinks(area)
     }
 
-    pub fn kitty_image_placements(&self) -> Vec<crate::ghostty::KittyImagePlacement> {
-        self.ghostty.kitty_image_placements()
+    pub fn kitty_image_placements_with_data_filter<F>(
+        &self,
+        needs_data: F,
+    ) -> Vec<crate::ghostty::KittyImagePlacement>
+    where
+        F: FnMut(crate::ghostty::KittyImageDescriptor) -> bool,
+    {
+        self.ghostty
+            .kitty_image_placements_with_data_filter(needs_data)
     }
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
@@ -315,6 +325,7 @@ impl GhosttyPaneTerminal {
             error!(pane = pane_id.raw(), "ghostty core lock poisoned in reader");
             return ProcessBytesResult {
                 request_render: false,
+                render_delay: None,
                 clipboard_writes: Vec::new(),
             };
         };
@@ -358,9 +369,14 @@ impl GhosttyPaneTerminal {
         }
 
         core.terminal.write(filtered_bytes.as_ref());
-        if contains_kitty_graphics_sequence(filtered_bytes.as_ref()) {
-            match core.terminal.kitty_image_placements() {
-                Ok(placements) => info!(
+        let has_kitty_graphics_sequence = crate::kitty_graphics::is_enabled()
+            && contains_kitty_graphics_sequence(filtered_bytes.as_ref());
+        if has_kitty_graphics_sequence {
+            match core
+                .terminal
+                .kitty_image_placements_with_data_filter(|_| false)
+            {
+                Ok(placements) => debug!(
                     pane = pane_id.raw(),
                     placements = placements.len(),
                     "processed kitty graphics sequence"
@@ -381,7 +397,9 @@ impl GhosttyPaneTerminal {
             .unwrap_or(false);
         let _ = response_writer;
         ProcessBytesResult {
-            request_render: !synchronized_output,
+            request_render: !synchronized_output && !has_kitty_graphics_sequence,
+            render_delay: (!synchronized_output && has_kitty_graphics_sequence)
+                .then_some(KITTY_GRAPHICS_REDRAW_SETTLE),
             clipboard_writes,
         }
     }
@@ -642,11 +660,21 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
-    pub fn kitty_image_placements(&self) -> Vec<crate::ghostty::KittyImagePlacement> {
+    pub fn kitty_image_placements_with_data_filter<F>(
+        &self,
+        needs_data: F,
+    ) -> Vec<crate::ghostty::KittyImagePlacement>
+    where
+        F: FnMut(crate::ghostty::KittyImageDescriptor) -> bool,
+    {
         self.core
             .lock()
             .ok()
-            .and_then(|core| core.terminal.kitty_image_placements().ok())
+            .and_then(|core| {
+                core.terminal
+                    .kitty_image_placements_with_data_filter(needs_data)
+                    .ok()
+            })
             .unwrap_or_default()
     }
 

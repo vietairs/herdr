@@ -194,6 +194,7 @@ impl App {
         event_hub: crate::api::EventHub,
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
+        crate::kitty_graphics::set_enabled(config.advanced.kitty_graphics);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(64);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
@@ -365,6 +366,7 @@ impl App {
             agent_panel_scope,
             confirm_close: config.ui.confirm_close,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
+            kitty_graphics_enabled: config.advanced.kitty_graphics,
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
             accent: crate::config::parse_color(&config.ui.accent),
             sound: config.ui.sound.clone(),
@@ -506,7 +508,11 @@ impl App {
                     crate::ui::compute_view_with_cell_size(&mut self.state, area, cell_size);
                     crate::ui::render(&self.state, frame);
                 })?;
-                crate::kitty_graphics::paint_local_pane_graphics(&self.state, cell_size)?;
+                if self.state.kitty_graphics_enabled {
+                    crate::kitty_graphics::paint_local_pane_graphics(&self.state, cell_size)?;
+                } else {
+                    crate::kitty_graphics::clear_all_host_graphics()?;
+                }
                 self.last_render_at = Some(now);
                 needs_render = false;
                 continue;
@@ -689,6 +695,8 @@ impl App {
         }
 
         if !invalid_section("advanced") {
+            self.state.kitty_graphics_enabled = config.advanced.kitty_graphics;
+            crate::kitty_graphics::set_enabled(config.advanced.kitty_graphics);
             self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
         }
 

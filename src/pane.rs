@@ -437,6 +437,16 @@ impl PaneRuntime {
                             if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                                 render_notify.notify_one();
                             }
+                            if let Some(delay) = result.render_delay {
+                                let render_notify = render_notify.clone();
+                                let render_dirty = render_dirty.clone();
+                                rt.spawn(async move {
+                                    tokio::time::sleep(delay).await;
+                                    if !render_dirty.swap(true, Ordering::AcqRel) {
+                                        render_notify.notify_one();
+                                    }
+                                });
+                            }
                             for content in result.clipboard_writes {
                                 if let Err(err) =
                                     rt.block_on(events.send(AppEvent::ClipboardWrite { content }))
@@ -817,8 +827,15 @@ impl PaneRuntime {
         self.terminal.visible_hyperlinks(area)
     }
 
-    pub fn kitty_image_placements(&self) -> Vec<crate::ghostty::KittyImagePlacement> {
-        self.terminal.kitty_image_placements()
+    pub fn kitty_image_placements_with_data_filter<F>(
+        &self,
+        needs_data: F,
+    ) -> Vec<crate::ghostty::KittyImagePlacement>
+    where
+        F: FnMut(crate::ghostty::KittyImageDescriptor) -> bool,
+    {
+        self.terminal
+            .kitty_image_placements_with_data_filter(needs_data)
     }
 
     pub fn keyboard_protocol(&self) -> crate::input::KeyboardProtocol {

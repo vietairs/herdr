@@ -353,6 +353,7 @@ available agent keys:
 ```toml
 [advanced]
 allow_nested = false
+kitty_graphics = false
 scrollback_limit_bytes = 10000000
 ```
 
@@ -361,11 +362,13 @@ scrollback_limit_bytes = 10000000
 | option | default | description |
 |--------|---------|-------------|
 | `advanced.allow_nested` | `false` | allow launching herdr from inside a herdr-managed pane |
+| `advanced.kitty_graphics` | `false` | experimental Kitty graphics rendering for local attached UIs in `--no-session` and normal server/client mode; requires a Kitty graphics-compatible outer terminal and does not support detached replay yet |
 | `advanced.scrollback_limit_bytes` | `10000000` | maximum scrollback buffer size in bytes retained per pane terminal |
 
 notes:
 - by default, herdr blocks nested launches when `HERDR_ENV=1` is already present
 - this is mainly an escape hatch for debugging or intentionally weird setups
+- `kitty_graphics` is experimental and only renders to currently attached local UI clients; detached replay support is planned separately
 - this matches Ghostty's default `scrollback-limit` value
 - set `scrollback_limit_bytes = 0` to disable pane scrollback entirely
 - the old `advanced.scrollback_lines` key is still accepted as a compatibility alias, but it uses the same byte-based value

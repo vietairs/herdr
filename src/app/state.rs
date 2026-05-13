@@ -711,6 +711,7 @@ pub struct AppState {
     pub agent_panel_scope: AgentPanelScope,
     pub confirm_close: bool,
     pub show_agent_labels_on_pane_borders: bool,
+    pub kitty_graphics_enabled: bool,
     pub pane_scrollback_limit_bytes: usize,
     #[allow(dead_code)] // kept for backward compat; palette.accent is the source of truth
     pub accent: Color,
@@ -878,6 +879,7 @@ impl AppState {
             agent_panel_scope: AgentPanelScope::AllWorkspaces,
             confirm_close: true,
             show_agent_labels_on_pane_borders: false,
+            kitty_graphics_enabled: false,
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,
             accent: Color::Cyan,
             sound: SoundConfig {

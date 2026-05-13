@@ -85,6 +85,7 @@ pub(super) fn spinner_frame(tick: u32) -> &'static str {
 
 /// Compute view geometry and reconcile pane sizes.
 /// Called before render to separate mutation from drawing.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn compute_view(app: &mut AppState, area: Rect) {
     compute_view_internal(
         app,

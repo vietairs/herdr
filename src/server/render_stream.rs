@@ -57,7 +57,8 @@ impl ClientRenderState {
                 if blit_encoder.is_current(frame) {
                     return None;
                 }
-                let encoded = blit_encoder.encode(frame, false);
+                let mut encoded = blit_encoder.encode(frame, false);
+                insert_graphics_before_sync_end(&mut encoded.bytes, &frame.graphics);
                 Some(PreparedRender {
                     message: ServerMessage::Terminal(TerminalFrame {
                         seq: *seq + 1,
@@ -69,12 +70,6 @@ impl ClientRenderState {
                     encoded: Some(encoded),
                 })
             }
-        }
-    }
-
-    pub(crate) fn note_oversized_frame(&mut self, frame: FrameData) {
-        if let Self::Semantic { last_frame } = self {
-            *last_frame = Some(frame);
         }
     }
 
@@ -96,6 +91,30 @@ impl ClientRenderState {
             Self::TerminalAnsi { seq, .. } => Some(*seq),
         }
     }
+}
+
+const SYNC_OUTPUT_END: &[u8] = b"\x1b[?2026l";
+
+fn insert_graphics_before_sync_end(encoded: &mut Vec<u8>, graphics: &[u8]) {
+    if graphics.is_empty() {
+        return;
+    }
+
+    if let Some(sync_end) = rfind_subslice(encoded, SYNC_OUTPUT_END) {
+        encoded.splice(sync_end..sync_end, graphics.iter().copied());
+    } else {
+        encoded.extend_from_slice(graphics);
+    }
+}
+
+fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
 }
 
 /// A prepared client render message plus any baseline state needed after send.
@@ -202,8 +221,22 @@ pub(crate) fn render_virtual(
     area: Rect,
     resize_panes: bool,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
+    render_virtual_with_cell_size(
+        app_state,
+        area,
+        resize_panes,
+        crate::kitty_graphics::HostCellSize::default(),
+    )
+}
+
+pub(crate) fn render_virtual_with_cell_size(
+    app_state: &mut AppState,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) -> (ratatui::buffer::Buffer, Option<CursorState>) {
     if resize_panes {
-        crate::ui::compute_view(app_state, area);
+        crate::ui::compute_view_with_cell_size(app_state, area, cell_size);
     } else {
         crate::ui::compute_view_without_resizing_panes(app_state, area);
     }
