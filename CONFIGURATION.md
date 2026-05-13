@@ -15,6 +15,8 @@ Named sessions share this config file. Sessions are runtime/socket namespaces, n
 
 Use `herdr session list`, `herdr session attach <name>`, `herdr session stop <name>`, and `herdr session delete <name>` to inspect and manage named session namespaces. Add `--json` to session commands when scripts need machine-readable output.
 
+In default persistence mode, quitting the UI detaches the current client. Use `herdr server stop` to stop the shared background server.
+
 print the full default config with:
 
 ```bash
@@ -364,17 +366,28 @@ scrollback_limit_bytes = 10000000
 | option | default | description |
 |--------|---------|-------------|
 | `advanced.allow_nested` | `false` | allow launching herdr from inside a herdr-managed pane |
-| `advanced.kitty_graphics` | `false` | experimental Kitty graphics rendering for local attached UIs in `--no-session` and normal server/client mode; requires a Kitty graphics-compatible outer terminal and does not support detached replay yet |
+| `advanced.kitty_graphics` | `false` | experimental Kitty graphics rendering for local attached UIs; requires a Kitty graphics-compatible outer terminal |
 | `advanced.scrollback_limit_bytes` | `10000000` | maximum scrollback buffer size in bytes retained per pane terminal |
 
-notes:
-- by default, herdr blocks nested launches when `HERDR_ENV=1` is already present
-- this is mainly an escape hatch for debugging or intentionally weird setups
-- `kitty_graphics` is experimental and only renders to currently attached local UI clients; detached replay support is planned separately
-- this matches Ghostty's default `scrollback-limit` value
-- set `scrollback_limit_bytes = 0` to disable pane scrollback entirely
-- the old `advanced.scrollback_lines` key is still accepted as a compatibility alias, but it uses the same byte-based value
-- in default persistence mode, quitting the ui detaches the current client; use `herdr server stop` to stop the shared background server
+### nested launches
+
+By default, herdr blocks nested launches when `HERDR_ENV=1` is already present.
+
+Set `allow_nested = true` only for debugging or intentionally nested setups.
+
+### kitty graphics
+
+`kitty_graphics` enables experimental Kitty graphics rendering for local attached UIs. It requires a Kitty graphics-compatible outer terminal.
+
+### scrollback
+
+`scrollback_limit_bytes` limits retained terminal scrollback per pane.
+
+The default matches Ghostty's `scrollback-limit` value.
+
+Set `scrollback_limit_bytes = 0` to disable pane scrollback entirely.
+
+The old `advanced.scrollback_lines` key is still accepted as a compatibility alias, but it uses the same byte-based value.
 
 ## environment variables
 

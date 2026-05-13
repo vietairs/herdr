@@ -46,6 +46,8 @@ jobs:
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Run checks
         run: just ci
