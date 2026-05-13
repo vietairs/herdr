@@ -8,6 +8,7 @@ __pycache__/
 .DS_Store
 
 /docs
+/.prd/
 
 /.pi/todos
 /.pi/issues
