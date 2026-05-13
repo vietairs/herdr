@@ -16,7 +16,6 @@ use crate::layout::PaneId;
 
 const KITTY_CHUNK_BYTES: usize = 3072;
 const HOST_IMAGE_ID_BASE: u32 = 10_000;
-const STALE_PLACEMENT_GRACE_FRAMES: u8 = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct HostCellSize {
@@ -86,12 +85,6 @@ struct ImageSignature {
     data_fingerprint: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HostPlacementState {
-    signature: PlacementSignature,
-    missed_frames: u8,
-}
-
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 struct PlacementSignature {
     x: u16,
@@ -104,6 +97,7 @@ struct PlacementSignature {
     source_height: u32,
     x_offset: u32,
     y_offset: u32,
+    z: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +117,7 @@ struct ClippedPlacement {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct HostGraphicsCache {
     images: HashMap<u32, ImageSignature>,
-    placements: HashMap<(u32, u32), HostPlacementState>,
+    placements: HashMap<(u32, u32), PlacementSignature>,
     view: Option<HostViewKey>,
 }
 
@@ -216,9 +210,9 @@ pub(crate) fn encode_local_pane_graphics(
 fn encode_graphics_update(
     bytes: &mut Vec<u8>,
     placements: &[HostPlacement],
-    view_changed: bool,
+    _view_changed: bool,
     host_images: &mut HashMap<u32, ImageSignature>,
-    host_placements: &mut HashMap<(u32, u32), HostPlacementState>,
+    host_placements: &mut HashMap<(u32, u32), PlacementSignature>,
 ) {
     let mut current_placements = HashSet::new();
     for placement in placements {
@@ -240,7 +234,7 @@ fn encode_graphics_update(
         let host_id = host_image_id(placement.pane_id, &placement.placement);
         let host_placement_id = host_placement_id(placement.pane_id, &placement.placement);
         let image_signature = image_signature(placement, format_code);
-        let placement_signature = placement_signature(clipped);
+        let placement_signature = placement_signature(clipped, placement.placement.z);
         let placement_key = (host_id, host_placement_id);
         current_placements.insert(placement_key);
 
@@ -256,19 +250,21 @@ fn encode_graphics_update(
                         true
                     }
                 });
-                encode_upload_image(bytes, placement, format_code, host_id);
+                if !encode_upload_image(bytes, placement, format_code, host_id) {
+                    continue;
+                }
                 host_images.insert(host_id, image_signature);
             }
             None => {
-                encode_upload_image(bytes, placement, format_code, host_id);
+                if !encode_upload_image(bytes, placement, format_code, host_id) {
+                    continue;
+                }
                 host_images.insert(host_id, image_signature);
             }
         }
 
         match host_placements.get_mut(&placement_key) {
-            Some(existing) if existing.signature == placement_signature => {
-                existing.missed_frames = 0;
-            }
+            Some(existing) if *existing == placement_signature => {}
             Some(existing) => {
                 encode_display_placement(
                     bytes,
@@ -277,8 +273,7 @@ fn encode_graphics_update(
                     host_placement_id,
                     placement.placement.z,
                 );
-                existing.signature = placement_signature;
-                existing.missed_frames = 0;
+                *existing = placement_signature;
             }
             None => {
                 encode_display_placement(
@@ -288,24 +283,14 @@ fn encode_graphics_update(
                     host_placement_id,
                     placement.placement.z,
                 );
-                host_placements.insert(
-                    placement_key,
-                    HostPlacementState {
-                        signature: placement_signature,
-                        missed_frames: 0,
-                    },
-                );
+                host_placements.insert(placement_key, placement_signature);
             }
         }
     }
 
     let mut stale_placements = Vec::new();
-    for (key, state) in &mut *host_placements {
+    for key in host_placements.keys() {
         if current_placements.contains(key) {
-            continue;
-        }
-        if !view_changed && state.missed_frames < STALE_PLACEMENT_GRACE_FRAMES {
-            state.missed_frames += 1;
             continue;
         }
         stale_placements.push(*key);
@@ -460,9 +445,9 @@ fn encode_upload_image(
     placement: &HostPlacement,
     format_code: u32,
     host_id: u32,
-) {
+) -> bool {
     if placement.placement.data.is_empty() {
-        return;
+        return false;
     }
 
     let control = format!(
@@ -470,6 +455,7 @@ fn encode_upload_image(
         placement.placement.image_width, placement.placement.image_height,
     );
     encode_kitty_data(out, &control, &placement.placement.data);
+    true
 }
 
 fn encode_display_placement(
@@ -677,7 +663,7 @@ fn image_signature_from_descriptor(
     }
 }
 
-fn placement_signature(clipped: ClippedPlacement) -> PlacementSignature {
+fn placement_signature(clipped: ClippedPlacement, z: i32) -> PlacementSignature {
     PlacementSignature {
         x: clipped.x,
         y: clipped.y,
@@ -689,6 +675,7 @@ fn placement_signature(clipped: ClippedPlacement) -> PlacementSignature {
         source_height: clipped.source_height,
         x_offset: clipped.x_offset,
         y_offset: clipped.y_offset,
+        z,
     }
 }
 
@@ -807,6 +794,20 @@ mod tests {
         encode_graphics_update(&mut bytes, &[same], false, &mut images, &mut placements);
         assert!(bytes.is_empty());
 
+        let mut z_changed = test_placement(0, 0);
+        z_changed.placement.z = 1;
+        encode_graphics_update(
+            &mut bytes,
+            &[z_changed],
+            false,
+            &mut images,
+            &mut placements,
+        );
+        let z_changed_bytes = String::from_utf8_lossy(&bytes);
+        assert!(!z_changed_bytes.contains("a=t"));
+        assert!(z_changed_bytes.contains("a=p"));
+
+        bytes.clear();
         let moved = test_placement(0, 1);
         encode_graphics_update(&mut bytes, &[moved], false, &mut images, &mut placements);
         let moved_bytes = String::from_utf8_lossy(&bytes);
@@ -815,7 +816,28 @@ mod tests {
     }
 
     #[test]
-    fn stale_placement_grace_deletes_placement_not_image() {
+    fn empty_image_data_does_not_mark_image_uploaded() {
+        let mut images = HashMap::new();
+        let mut placements = HashMap::new();
+        let mut bytes = Vec::new();
+        let mut placement = test_placement(0, 0);
+        placement.placement.data.clear();
+
+        encode_graphics_update(
+            &mut bytes,
+            &[placement],
+            false,
+            &mut images,
+            &mut placements,
+        );
+
+        assert!(bytes.is_empty());
+        assert!(images.is_empty());
+        assert!(placements.is_empty());
+    }
+
+    #[test]
+    fn stale_placement_deletes_placement_not_image_immediately() {
         let mut images = HashMap::new();
         let mut placements = HashMap::new();
         let mut bytes = Vec::new();
@@ -831,10 +853,6 @@ mod tests {
         assert_eq!(placements.len(), 1);
 
         bytes.clear();
-        encode_graphics_update(&mut bytes, &[], false, &mut images, &mut placements);
-        assert!(bytes.is_empty());
-        assert_eq!(placements.len(), 1);
-
         encode_graphics_update(&mut bytes, &[], false, &mut images, &mut placements);
         let delete = String::from_utf8_lossy(&bytes);
         assert!(delete.contains("a=d,d=i"));

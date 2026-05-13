@@ -1188,12 +1188,7 @@ fn kitty_image_fingerprint(
     }
 
     let data = unsafe { slice::from_raw_parts(ptr_out, len) };
-    let prefix_len = data.len().min(256);
-    data[..prefix_len].hash(&mut hasher);
-    if data.len() > prefix_len {
-        let suffix_len = data.len().min(256);
-        data[data.len() - suffix_len..].hash(&mut hasher);
-    }
+    data.hash(&mut hasher);
     hasher.finish()
 }
 

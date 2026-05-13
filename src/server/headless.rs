@@ -505,7 +505,11 @@ impl HeadlessServer {
         };
         let (cols, rows) = self.effective_size;
         let area = Rect::new(0, 0, cols, rows);
-        crate::ui::compute_view_with_cell_size(&mut self.app.state, area, client.cell_size);
+        if self.app.state.kitty_graphics_enabled && client.cell_size.is_known() {
+            crate::ui::compute_view_with_cell_size(&mut self.app.state, area, client.cell_size);
+        } else {
+            crate::ui::compute_view(&mut self.app.state, area);
+        }
 
         // Shared runtime size changes affect pane wrapping and foreground-driven
         // rendering semantics. Force one fresh frame to every remaining client
@@ -1458,12 +1462,21 @@ impl HeadlessServer {
         let mut broken_clients: Vec<u64> = Vec::new();
         for (client_id, (cols, rows), cell_size, is_foreground) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
-            let (buffer, cursor) = crate::server::render_stream::render_virtual_with_cell_size(
-                &mut self.app.state,
-                area,
-                is_foreground,
-                cell_size,
-            );
+            let (buffer, cursor) = if self.app.state.kitty_graphics_enabled && cell_size.is_known()
+            {
+                crate::server::render_stream::render_virtual_with_cell_size(
+                    &mut self.app.state,
+                    area,
+                    is_foreground,
+                    cell_size,
+                )
+            } else {
+                crate::server::render_stream::render_virtual(
+                    &mut self.app.state,
+                    area,
+                    is_foreground,
+                )
+            };
             let hyperlinks = crate::server::render_stream::visible_hyperlinks(&self.app.state);
             let mut frame =
                 FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks);
@@ -1472,7 +1485,7 @@ impl HeadlessServer {
                 continue;
             };
             let mut next_graphics_cache = client.graphics_cache.clone();
-            if self.app.state.kitty_graphics_enabled {
+            if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
                 frame.graphics = crate::kitty_graphics::encode_local_pane_graphics(
                     &self.app.state,
                     cell_size,
@@ -1486,13 +1499,54 @@ impl HeadlessServer {
                 continue;
             };
 
-            let Some(prepared) = client.render_state.prepare_frame(&frame) else {
+            let mut commit_graphics_cache = true;
+            if frame.graphics.len() > MAX_FRAME_SIZE {
+                warn!(
+                    client_id,
+                    graphics_bytes = frame.graphics.len(),
+                    max = MAX_FRAME_SIZE,
+                    "dropping oversized graphics payload for client frame"
+                );
+                frame.graphics.clear();
+                commit_graphics_cache = false;
+            }
+
+            let Some(mut prepared) = client.render_state.prepare_frame(&frame) else {
                 client.render_pending = false;
                 continue;
             };
+            let mut frame_to_commit = frame.clone();
 
             let serialized = match Self::frame_server_message(prepared.message()) {
                 Ok(framed) => framed,
+                Err(protocol::FramingError::Oversized { claimed, max })
+                    if !frame.graphics.is_empty() =>
+                {
+                    warn!(
+                        client_id,
+                        claimed, max, "dropping graphics from oversized frame for client"
+                    );
+                    let mut text_only_frame = frame.clone();
+                    text_only_frame.graphics.clear();
+                    let Some(text_only_prepared) =
+                        client.render_state.prepare_frame(&text_only_frame)
+                    else {
+                        client.render_pending = false;
+                        continue;
+                    };
+                    let framed = match Self::frame_server_message(text_only_prepared.message()) {
+                        Ok(framed) => framed,
+                        Err(err) => {
+                            warn!(client_id, err = %err, "failed to serialize text-only frame for client");
+                            broken_clients.push(client_id);
+                            continue;
+                        }
+                    };
+                    prepared = text_only_prepared;
+                    frame_to_commit = text_only_frame;
+                    commit_graphics_cache = false;
+                    framed
+                }
                 Err(protocol::FramingError::Oversized { claimed, max }) => {
                     warn!(
                         client_id,
@@ -1510,8 +1564,12 @@ impl HeadlessServer {
             match writer.render.try_send(serialized) {
                 Ok(()) => {
                     client.render_pending = false;
-                    client.graphics_cache = next_graphics_cache;
-                    client.render_state.commit_sent_frame(frame, prepared);
+                    if commit_graphics_cache {
+                        client.graphics_cache = next_graphics_cache;
+                    }
+                    client
+                        .render_state
+                        .commit_sent_frame(frame_to_commit, prepared);
                 }
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
                     client.render_pending = true;

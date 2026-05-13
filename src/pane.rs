@@ -357,9 +357,11 @@ impl PaneRuntime {
 
         let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        terminal
-            .enable_kitty_graphics()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        if crate::kitty_graphics::is_enabled() {
+            terminal
+                .enable_kitty_graphics()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
         let pane_terminal = GhosttyPaneTerminal::new(terminal, input_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));

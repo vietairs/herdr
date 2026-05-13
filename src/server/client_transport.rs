@@ -146,8 +146,8 @@ pub(crate) fn handle_client_handshake(
             (
                 clamped_cols,
                 clamped_rows,
-                cell_width_px.max(1),
-                cell_height_px.max(1),
+                cell_width_px,
+                cell_height_px,
                 requested_encoding,
             )
         }
@@ -349,8 +349,8 @@ fn client_read_loop(
                     client_id,
                     cols: clamped_cols,
                     rows: clamped_rows,
-                    cell_width_px: cell_width_px.max(1),
-                    cell_height_px: cell_height_px.max(1),
+                    cell_width_px,
+                    cell_height_px,
                 }
             }
             ClientMessage::Detach => ServerEvent::ClientDetach { client_id },

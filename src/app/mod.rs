@@ -501,17 +501,20 @@ impl App {
             if needs_render && self.can_render_now(now) {
                 self.render_dirty.swap(false, Ordering::AcqRel);
                 let _sync_output = SyncOutputGuard::begin()?;
+                let kitty_graphics_enabled = self.state.kitty_graphics_enabled;
                 let mut cell_size = crate::kitty_graphics::HostCellSize::default();
                 terminal.draw(|frame| {
                     let area = frame.area();
-                    cell_size = crate::kitty_graphics::HostCellSize::from_terminal(area);
-                    crate::ui::compute_view_with_cell_size(&mut self.state, area, cell_size);
+                    if kitty_graphics_enabled {
+                        cell_size = crate::kitty_graphics::HostCellSize::from_terminal(area);
+                        crate::ui::compute_view_with_cell_size(&mut self.state, area, cell_size);
+                    } else {
+                        crate::ui::compute_view(&mut self.state, area);
+                    }
                     crate::ui::render(&self.state, frame);
                 })?;
-                if self.state.kitty_graphics_enabled {
+                if kitty_graphics_enabled {
                     crate::kitty_graphics::paint_local_pane_graphics(&self.state, cell_size)?;
-                } else {
-                    crate::kitty_graphics::clear_all_host_graphics()?;
                 }
                 self.last_render_at = Some(now);
                 needs_render = false;
@@ -695,8 +698,12 @@ impl App {
         }
 
         if !invalid_section("advanced") {
+            let was_kitty_graphics_enabled = self.state.kitty_graphics_enabled;
             self.state.kitty_graphics_enabled = config.advanced.kitty_graphics;
             crate::kitty_graphics::set_enabled(config.advanced.kitty_graphics);
+            if was_kitty_graphics_enabled && !config.advanced.kitty_graphics {
+                let _ = crate::kitty_graphics::clear_all_host_graphics();
+            }
             self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
         }
 

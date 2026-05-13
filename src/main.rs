@@ -427,7 +427,9 @@ fn main() -> io::Result<()> {
         if panic_in_tmux {
             let _ = std::io::Write::write_all(&mut io::stdout(), b"\x1b[>4;0m");
         }
-        let _ = crate::kitty_graphics::clear_all_host_graphics();
+        if crate::kitty_graphics::is_enabled() {
+            let _ = crate::kitty_graphics::clear_all_host_graphics();
+        }
         let _ = execute!(
             io::stdout(),
             PopKeyboardEnhancementFlags,
@@ -490,7 +492,9 @@ fn main() -> io::Result<()> {
             std::io::stdout().flush()?;
         }
 
-        crate::kitty_graphics::clear_all_host_graphics()?;
+        if crate::kitty_graphics::is_enabled() {
+            crate::kitty_graphics::clear_all_host_graphics()?;
+        }
         execute!(
             io::stdout(),
             PopKeyboardEnhancementFlags,

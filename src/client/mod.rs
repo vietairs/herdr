@@ -15,10 +15,11 @@
 pub(crate) mod blit;
 mod input;
 
+use std::collections::HashSet;
 use std::io::{self, Write as _};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crossterm::event::{
@@ -35,8 +36,7 @@ use crate::server::protocol::{
     PROTOCOL_VERSION,
 };
 
-const DELETE_ALL_KITTY_GRAPHICS: &[u8] = b"\x1b_Ga=d,d=A,q=2;\x1b\\";
-static RECEIVED_KITTY_GRAPHICS: AtomicBool = AtomicBool::new(false);
+static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Client state
@@ -50,6 +50,8 @@ struct ClientState {
     reported_size: (u16, u16),
     /// Client-local sound playback config, refreshed on server request.
     sound_config: crate::config::SoundConfig,
+    /// Whether this client may write Kitty graphics bytes to its host terminal.
+    kitty_graphics_enabled: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -175,9 +177,7 @@ fn write_terminal_restore_postlude(writer: &mut impl io::Write) -> io::Result<()
 }
 
 fn restore_terminal_state(in_tmux: bool) {
-    if RECEIVED_KITTY_GRAPHICS.swap(false, Ordering::AcqRel) {
-        let _ = io::stdout().write_all(DELETE_ALL_KITTY_GRAPHICS);
-    }
+    let _ = clear_received_kitty_graphics(&mut io::stdout());
 
     // Reset modifyOtherKeys if we enabled it.
     if in_tmux {
@@ -295,6 +295,7 @@ pub fn run_client() -> io::Result<()> {
 
     let loaded_config = crate::config::Config::load();
     let sound_config = loaded_config.config.ui.sound;
+    let kitty_graphics_enabled = loaded_config.config.advanced.kitty_graphics;
 
     let socket_path = client_socket_path();
     crate::logging::startup("client");
@@ -312,7 +313,8 @@ pub fn run_client() -> io::Result<()> {
     };
 
     // Get the terminal geometry before handshake (before raw mode).
-    let (cols, rows, cell_width_px, cell_height_px) = current_terminal_geometry();
+    let (cols, rows, cell_width_px, cell_height_px) =
+        current_terminal_geometry(kitty_graphics_enabled);
 
     let requested_encoding = requested_render_encoding();
 
@@ -369,6 +371,7 @@ pub fn run_client() -> io::Result<()> {
             rows,
             should_quit,
             sound_config,
+            kitty_graphics_enabled,
             negotiated_encoding,
         )
         .await
@@ -412,12 +415,14 @@ async fn run_client_loop(
     rows: u16,
     should_quit: Arc<AtomicBool>,
     sound_config: crate::config::SoundConfig,
+    kitty_graphics_enabled: bool,
     negotiated_encoding: RenderEncoding,
 ) -> Result<(), ClientError> {
     let mut state = ClientState {
         blit_encoder: blit::BlitEncoder::new(),
         reported_size: (cols, rows),
         sound_config,
+        kitty_graphics_enabled,
     };
     debug!(?negotiated_encoding, "client render encoding active");
 
@@ -437,7 +442,7 @@ async fn run_client_loop(
     let resize_quit = should_quit.clone();
     let resize_tx = event_tx.clone();
     std::thread::spawn(move || {
-        resize_poll_loop(resize_tx, cols, rows, &resize_quit);
+        resize_poll_loop(resize_tx, cols, rows, kitty_graphics_enabled, &resize_quit);
     });
 
     // Spawn the server reader thread (blocking reads from the socket).
@@ -486,27 +491,31 @@ async fn run_client_loop(
                 ServerMessage::Frame(frame_data) => {
                     let encoded = state.blit_encoder.encode(&frame_data, false);
                     let mut stdout = io::stdout();
-                    let _ = write_encoded_frame_with_graphics(
-                        &mut stdout,
-                        &encoded.bytes,
-                        &frame_data.graphics,
-                    );
+                    let graphics = if state.kitty_graphics_enabled {
+                        frame_data.graphics.as_slice()
+                    } else {
+                        &[]
+                    };
+                    let _ =
+                        write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
                     let _ = stdout.flush();
                     state.blit_encoder.commit(frame_data, encoded);
                 }
                 ServerMessage::Terminal(frame) => {
-                    if contains_kitty_graphics_bytes(&frame.bytes) {
-                        RECEIVED_KITTY_GRAPHICS.store(true, Ordering::Release);
+                    if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {
+                        record_received_kitty_graphics(&frame.bytes);
                     }
                     let mut stdout = io::stdout();
                     let _ = stdout.write_all(&frame.bytes);
                     let _ = stdout.flush();
                 }
                 ServerMessage::Graphics { bytes } => {
-                    RECEIVED_KITTY_GRAPHICS.store(true, Ordering::Release);
-                    let mut stdout = io::stdout();
-                    let _ = stdout.write_all(&bytes);
-                    let _ = stdout.flush();
+                    if state.kitty_graphics_enabled {
+                        record_received_kitty_graphics(&bytes);
+                        let mut stdout = io::stdout();
+                        let _ = stdout.write_all(&bytes);
+                        let _ = stdout.flush();
+                    }
                 }
                 ServerMessage::ServerShutdown { reason } => {
                     return Err(ClientError::ServerShutdown { reason });
@@ -708,7 +717,7 @@ fn write_encoded_frame_with_graphics(
         return writer.write_all(encoded);
     }
 
-    RECEIVED_KITTY_GRAPHICS.store(true, Ordering::Release);
+    record_received_kitty_graphics(graphics);
 
     if let Some(sync_end) = rfind_subslice(encoded, SYNC_OUTPUT_END) {
         writer.write_all(&encoded[..sync_end])?;
@@ -727,6 +736,73 @@ fn contains_kitty_graphics_bytes(bytes: &[u8]) -> bool {
     bytes.windows(3).any(|window| window == b"\x1b_G")
 }
 
+fn record_received_kitty_graphics(bytes: &[u8]) {
+    let ids = kitty_graphics_image_ids(bytes);
+    if ids.is_empty() {
+        return;
+    }
+    let set = RECEIVED_KITTY_GRAPHICS_IDS.get_or_init(|| Mutex::new(HashSet::new()));
+    if let Ok(mut set) = set.lock() {
+        set.extend(ids);
+    }
+}
+
+fn clear_received_kitty_graphics(mut writer: impl io::Write) -> io::Result<()> {
+    let Some(set) = RECEIVED_KITTY_GRAPHICS_IDS.get() else {
+        return Ok(());
+    };
+    let Ok(mut set) = set.lock() else {
+        return Ok(());
+    };
+    for id in set.drain() {
+        write!(writer, "\x1b_Ga=d,d=I,i={id},q=2;\x1b\\")?;
+    }
+    writer.flush()
+}
+
+fn kitty_graphics_image_ids(bytes: &[u8]) -> Vec<u32> {
+    let mut ids = Vec::new();
+    let mut index = 0usize;
+    while let Some(start) = find_subslice(&bytes[index..], b"\x1b_G") {
+        let command_start = index + start + 3;
+        let Some(end) = find_subslice(&bytes[command_start..], b"\x1b\\") else {
+            break;
+        };
+        let command = &bytes[command_start..command_start + end];
+        if let Some(id) = kitty_graphics_command_image_id(command) {
+            ids.push(id);
+        }
+        index = command_start + end + 2;
+    }
+    ids
+}
+
+fn kitty_graphics_command_image_id(command: &[u8]) -> Option<u32> {
+    let header_end = command
+        .iter()
+        .position(|byte| *byte == b';')
+        .unwrap_or(command.len());
+    for part in command[..header_end].split(|byte| *byte == b',') {
+        let Some(value) = part.strip_prefix(b"i=") else {
+            continue;
+        };
+        let text = std::str::from_utf8(value).ok()?;
+        if let Ok(id) = text.parse::<u32>() {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
 fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
@@ -741,8 +817,11 @@ fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // Resize polling
 // ---------------------------------------------------------------------------
 
-fn current_terminal_geometry() -> (u16, u16, u32, u32) {
+fn current_terminal_geometry(kitty_graphics_enabled: bool) -> (u16, u16, u32, u32) {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    if !kitty_graphics_enabled {
+        return (cols, rows, 0, 0);
+    }
     let Ok(size) = crossterm::terminal::window_size() else {
         return (cols, rows, 8, 16);
     };
@@ -762,9 +841,11 @@ fn resize_poll_loop(
     resize_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
     initial_cols: u16,
     initial_rows: u16,
+    kitty_graphics_enabled: bool,
     should_quit: &Arc<AtomicBool>,
 ) {
-    let (_, _, initial_cell_width, initial_cell_height) = current_terminal_geometry();
+    let (_, _, initial_cell_width, initial_cell_height) =
+        current_terminal_geometry(kitty_graphics_enabled);
     let mut last_size = (
         initial_cols,
         initial_rows,
@@ -773,7 +854,7 @@ fn resize_poll_loop(
     );
     while !should_quit.load(Ordering::Acquire) {
         std::thread::sleep(Duration::from_millis(100));
-        let new_size = current_terminal_geometry();
+        let new_size = current_terminal_geometry(kitty_graphics_enabled);
         if new_size != last_size {
             last_size = new_size;
             if resize_tx
@@ -839,6 +920,24 @@ mod tests {
     fn terminal_frame_kitty_detection_matches_apc_prefix() {
         assert!(contains_kitty_graphics_bytes(b"text\x1b_Ga=p;\x1b\\"));
         assert!(!contains_kitty_graphics_bytes(b"text\x1b[?2026h"));
+    }
+
+    #[test]
+    fn kitty_graphics_image_id_parser_tracks_herdr_ids_only() {
+        let ids = kitty_graphics_image_ids(
+            b"text\x1b_Ga=t,t=d,f=32,s=1,v=1,i=10023,q=2;AAAA\x1b\\\x1b_Ga=p,i=10023,p=7;\x1b\\",
+        );
+        assert_eq!(ids, vec![10023, 10023]);
+    }
+
+    #[test]
+    fn kitty_graphics_cleanup_deletes_tracked_images_not_all_images() {
+        record_received_kitty_graphics(b"\x1b_Ga=t,i=123,q=2;AAAA\x1b\\");
+        let mut output = Vec::new();
+        clear_received_kitty_graphics(&mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("a=d,d=I,i=123"));
+        assert!(!text.contains("d=A"));
     }
 
     #[test]

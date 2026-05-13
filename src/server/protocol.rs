@@ -15,10 +15,9 @@ use serde::{Deserialize, Serialize};
 /// Current protocol version. Bumped when wire format changes incompatibly.
 pub const PROTOCOL_VERSION: u32 = 5;
 
-/// Maximum allowed frame payload size (32 MB). Frames larger than this are
-/// rejected to prevent denial-of-service via oversized length prefixes while
-/// leaving room for first-frame Kitty graphics image uploads.
-pub const MAX_FRAME_SIZE: usize = 32 * 1024 * 1024;
+/// Maximum allowed frame payload size (2 MB). Frames larger than this are
+/// rejected to prevent denial-of-service via oversized length prefixes.
+pub const MAX_FRAME_SIZE: usize = 2 * 1024 * 1024;
 
 /// Length of the u32 little-endian length prefix in bytes.
 const LENGTH_PREFIX_BYTES: usize = 4;
@@ -47,9 +46,9 @@ pub enum ClientMessage {
         cols: u16,
         /// Terminal height in rows.
         rows: u16,
-        /// Width of a terminal cell in physical pixels.
+        /// Width of a terminal cell in physical pixels, or 0 when client-side Kitty graphics are disabled.
         cell_width_px: u32,
-        /// Height of a terminal cell in physical pixels.
+        /// Height of a terminal cell in physical pixels, or 0 when client-side Kitty graphics are disabled.
         cell_height_px: u32,
         /// Render encoding requested by the client.
         requested_encoding: RenderEncoding,
@@ -67,9 +66,9 @@ pub enum ClientMessage {
         cols: u16,
         /// New terminal height in rows.
         rows: u16,
-        /// Width of a terminal cell in physical pixels.
+        /// Width of a terminal cell in physical pixels, or 0 when client-side Kitty graphics are disabled.
         cell_width_px: u32,
-        /// Height of a terminal cell in physical pixels.
+        /// Height of a terminal cell in physical pixels, or 0 when client-side Kitty graphics are disabled.
         cell_height_px: u32,
     },
 
