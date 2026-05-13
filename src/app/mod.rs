@@ -33,7 +33,10 @@ const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
 const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
-use crossterm::terminal;
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
+    execute, terminal,
+};
 use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, Notify};
@@ -364,6 +367,7 @@ impl App {
             sidebar_collapsed: false,
             sidebar_section_split,
             agent_panel_scope,
+            mouse_capture: config.ui.mouse_capture,
             confirm_close: config.ui.confirm_close,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             kitty_graphics_enabled: config.advanced.kitty_graphics,
@@ -449,6 +453,7 @@ impl App {
         self.query_host_terminal_theme();
 
         let mut needs_render = true;
+        let mut host_mouse_capture_active = self.state.mouse_capture;
 
         while !self.state.should_quit {
             if self.render_dirty.load(Ordering::Acquire) {
@@ -497,6 +502,7 @@ impl App {
 
             let now = Instant::now();
             self.sync_animation_timer(now);
+            self.sync_host_mouse_capture(&mut host_mouse_capture_active)?;
 
             if needs_render && self.can_render_now(now) {
                 self.render_dirty.swap(false, Ordering::AcqRel);
@@ -574,6 +580,20 @@ impl App {
             self.save_session_now();
         }
 
+        Ok(())
+    }
+
+    fn sync_host_mouse_capture(&self, active: &mut bool) -> io::Result<()> {
+        let desired = self.state.should_capture_host_mouse();
+        if desired == *active {
+            return Ok(());
+        }
+        if desired {
+            execute!(io::stdout(), EnableMouseCapture)?;
+        } else {
+            execute!(io::stdout(), DisableMouseCapture)?;
+        }
+        *active = desired;
         Ok(())
     }
 
@@ -683,6 +703,7 @@ impl App {
             if self.state.sidebar_width_source == state::SidebarWidthSource::ConfigDefault {
                 self.state.sidebar_width = config.ui.sidebar_width;
             }
+            self.state.mouse_capture = config.ui.mouse_capture;
             self.state.confirm_close = config.ui.confirm_close;
             self.state.show_agent_labels_on_pane_borders =
                 config.ui.show_agent_labels_on_pane_borders;
@@ -805,7 +826,11 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                    self.handle_mouse_event_headless(mouse);
+                    if self.state.mouse_capture {
+                        self.handle_mouse_event_headless(mouse);
+                    } else {
+                        self.state.handle_pane_mouse_only(mouse);
+                    }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
                     if self.state.mode == Mode::Terminal {

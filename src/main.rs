@@ -120,6 +120,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Sidebar width (auto-scaled based on workspace names, this sets the default)
 # sidebar_width = 26
 
+# Capture mouse input for Herdr's mouse UI.
+# Set false to let the terminal handle normal clicks, such as Cmd-clicking URLs.
+# Pane apps like lazygit and btop can still receive mouse when they request it.
+# mouse_capture = true
+
 # Ask for confirmation before closing a workspace
 # confirm_close = true
 
@@ -456,9 +461,13 @@ fn main() -> io::Result<()> {
 
     let result = rt.block_on(async {
         let mut terminal = ratatui::init();
+        if config.ui.mouse_capture {
+            execute!(io::stdout(), EnableMouseCapture)?;
+        } else {
+            execute!(io::stdout(), DisableMouseCapture)?;
+        }
         execute!(
             io::stdout(),
-            EnableMouseCapture,
             EnableBracketedPaste,
             EnableFocusChange,
             PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())

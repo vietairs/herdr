@@ -205,6 +205,8 @@ struct ClientConnection {
     graphics_cache: crate::kitty_graphics::HostGraphicsCache,
     /// Whether a render was skipped because the render channel was full.
     render_pending: bool,
+    /// Last host mouse capture mode sent to this client.
+    host_mouse_capture_active: Option<bool>,
     /// Channels for sending framed ServerMessage data to the client writer thread.
     writer: Option<ClientWriter>,
 }
@@ -228,6 +230,7 @@ impl ClientConnection {
             render_state: ClientRenderState::new(render_encoding),
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             render_pending: false,
+            host_mouse_capture_active: None,
             writer,
         }
     }
@@ -416,6 +419,7 @@ impl HeadlessServer {
             }
 
             self.drain_client_sound_config_reload_request();
+            self.stream_host_mouse_capture_mode();
 
             self.app.sync_headless_animation_timer(now);
 
@@ -1421,6 +1425,44 @@ impl HeadlessServer {
         }
 
         changed
+    }
+
+    fn stream_host_mouse_capture_mode(&mut self) {
+        let enabled = self.app.state.should_capture_host_mouse();
+        let serialized = match Self::frame_server_message(&ServerMessage::MouseCapture { enabled })
+        {
+            Ok(framed) => framed,
+            Err(err) => {
+                warn!(err = %err, "failed to serialize mouse capture mode for clients");
+                return;
+            }
+        };
+
+        let mut broken_clients: Vec<u64> = Vec::new();
+        for (&client_id, client) in &mut self.clients {
+            if client.host_mouse_capture_active == Some(enabled) {
+                continue;
+            }
+            let Some(writer) = &client.writer else {
+                continue;
+            };
+            if writer.control.send(serialized.clone()).is_err() {
+                debug!(
+                    client_id,
+                    "client writer channel closed during mouse capture update"
+                );
+                broken_clients.push(client_id);
+                continue;
+            }
+            client.host_mouse_capture_active = Some(enabled);
+        }
+
+        for client_id in broken_clients {
+            let foreground_changed = self.remove_client(client_id);
+            if foreground_changed {
+                self.resize_shared_runtime_to_effective_size();
+            }
+        }
     }
 
     /// Renders the current state to client-sized virtual buffers and streams

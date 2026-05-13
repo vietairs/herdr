@@ -46,6 +46,8 @@ static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::ne
 struct ClientState {
     /// Stateful semantic-frame encoder used when the server sends FrameData.
     blit_encoder: blit::BlitEncoder,
+    /// Whether host mouse capture is currently active.
+    mouse_capture_active: bool,
     /// The terminal size we reported to the server in our last Hello/Resize.
     reported_size: (u16, u16),
     /// Client-local sound playback config, refreshed on server request.
@@ -141,14 +143,18 @@ impl From<protocol::FramingError> for ClientError {
 // Terminal setup / restore
 // ---------------------------------------------------------------------------
 
-/// Sets up the terminal for client mode (raw mode, mouse, keyboard enhancements).
+/// Sets up the terminal for client mode (raw mode, optional mouse, keyboard enhancements).
 ///
 /// Returns a guard that restores the terminal when dropped.
-fn setup_terminal() -> io::Result<TerminalGuard> {
+fn setup_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
     ratatui::init();
+    if mouse_capture {
+        execute!(io::stdout(), EnableMouseCapture)?;
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)?;
+    }
     execute!(
         io::stdout(),
-        EnableMouseCapture,
         EnableBracketedPaste,
         EnableFocusChange,
         PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
@@ -174,6 +180,14 @@ fn write_terminal_restore_postlude(writer: &mut impl io::Write) -> io::Result<()
     // Restore a visible cursor and reset DECSCUSR back to the terminal default.
     writer.write_all(b"\x1b[?25h\x1b[0 q")?;
     writer.flush()
+}
+
+fn set_mouse_capture(enabled: bool) -> io::Result<()> {
+    if enabled {
+        execute!(io::stdout(), EnableMouseCapture)
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)
+    }
 }
 
 fn restore_terminal_state(in_tmux: bool) {
@@ -337,7 +351,7 @@ pub fn run_client() -> io::Result<()> {
     // Now set up the terminal (raw mode, mouse, keyboard enhancements).
     // This must happen AFTER the handshake succeeds, so we don't leave
     // the terminal in raw mode if the server rejects us.
-    let _guard = setup_terminal().map_err(|err| {
+    let _guard = setup_terminal(false).map_err(|err| {
         eprintln!("herdr: failed to set up terminal: {err}");
         err
     })?;
@@ -372,6 +386,7 @@ pub fn run_client() -> io::Result<()> {
             should_quit,
             sound_config,
             kitty_graphics_enabled,
+            false,
             negotiated_encoding,
         )
         .await
@@ -416,10 +431,12 @@ async fn run_client_loop(
     should_quit: Arc<AtomicBool>,
     sound_config: crate::config::SoundConfig,
     kitty_graphics_enabled: bool,
+    mouse_capture_active: bool,
     negotiated_encoding: RenderEncoding,
 ) -> Result<(), ClientError> {
     let mut state = ClientState {
         blit_encoder: blit::BlitEncoder::new(),
+        mouse_capture_active,
         reported_size: (cols, rows),
         sound_config,
         kitty_graphics_enabled,
@@ -529,6 +546,13 @@ async fn run_client_loop(
                 }
                 ServerMessage::ReloadSoundConfig => {
                     reload_local_sound_config(&mut state.sound_config);
+                }
+                ServerMessage::MouseCapture { enabled } => {
+                    let desired = enabled;
+                    if desired != state.mouse_capture_active {
+                        set_mouse_capture(desired).map_err(ClientError::ConnectionFailed)?;
+                        state.mouse_capture_active = desired;
+                    }
                 }
                 ServerMessage::Welcome { .. } => {
                     debug!("received unexpected Welcome in main loop");

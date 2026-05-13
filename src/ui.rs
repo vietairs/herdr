@@ -188,6 +188,7 @@ fn compute_view_internal(
                 tab_bar_rect,
                 app.tab_scroll,
                 app.tab_scroll_follow_active,
+                app.mouse_capture,
             )
         })
         .unwrap_or_default();

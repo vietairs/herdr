@@ -97,4 +97,4 @@ The app update check and the in-app **What's New** flow both depend on that exac
 
 Do not edit `website/latest.json` during normal feature, fix, or test work. It describes the latest published release binaries, not the current unreleased source tree. The release workflow updates it after release assets are published.
 
-When changing the server/client wire protocol, bump `src/server/protocol.rs::PROTOCOL_VERSION` and update all hardcoded protocol expectations and manual protocol fixtures in tests. Keep protocol test expectations intentionally explicit so compatibility changes are reviewed instead of silently following the constant.
+When changing the server/client wire protocol, ensure `src/server/protocol.rs::PROTOCOL_VERSION` is bumped relative to the latest released tag, and update all hardcoded protocol expectations and manual protocol fixtures in tests. Multiple unreleased wire changes in the same release cycle do not need repeated bumps; Herdr supports tagged releases, not arbitrary `master` client/server compatibility. Keep protocol test expectations intentionally explicit so compatibility changes are reviewed instead of silently following the constant.

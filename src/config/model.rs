@@ -129,6 +129,8 @@ pub struct KeysConfig {
 #[serde(default)]
 pub struct UiConfig {
     pub sidebar_width: u16,
+    /// Capture mouse input for Herdr's mouse UI. Default: true.
+    pub mouse_capture: bool,
     /// Ask for confirmation before closing a workspace. Default: true.
     pub confirm_close: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
@@ -195,6 +197,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             sidebar_width: 26,
+            mouse_capture: true,
             confirm_close: true,
             show_agent_labels_on_pane_borders: false,
             agent_panel_scope: AgentPanelScopeConfig::All,
@@ -270,6 +273,19 @@ show_agent_labels_on_pane_borders = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.ui.show_agent_labels_on_pane_borders);
+    }
+
+    #[test]
+    fn mouse_capture_default_on_and_parse() {
+        let default_config = Config::default();
+        assert!(default_config.ui.mouse_capture);
+
+        let toml = r#"
+[ui]
+mouse_capture = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.ui.mouse_capture);
     }
 
     #[test]

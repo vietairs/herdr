@@ -709,6 +709,9 @@ pub struct AppState {
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_scope: AgentPanelScope,
+    /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
+    /// captures mouse while the focused pane app requests mouse reporting.
+    pub mouse_capture: bool,
     pub confirm_close: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub kitty_graphics_enabled: bool,
@@ -750,6 +753,20 @@ impl AppState {
 
     pub fn agent_border_labels_enabled(&self) -> bool {
         self.show_agent_labels_on_pane_borders
+    }
+
+    pub fn focused_pane_requests_mouse_capture(&self) -> bool {
+        self.mode == Mode::Terminal
+            && self
+                .active
+                .and_then(|idx| self.workspaces.get(idx))
+                .and_then(crate::workspace::Workspace::focused_runtime)
+                .and_then(crate::pane::PaneRuntime::input_state)
+                .is_some_and(crate::pane::InputState::mouse_reporting_enabled)
+    }
+
+    pub fn should_capture_host_mouse(&self) -> bool {
+        self.mouse_capture || self.focused_pane_requests_mouse_capture()
     }
 
     pub fn is_prefix(&self, key: &crossterm::event::KeyEvent) -> bool {
@@ -877,6 +894,7 @@ impl AppState {
             sidebar_collapsed: false,
             sidebar_section_split: 0.5,
             agent_panel_scope: AgentPanelScope::AllWorkspaces,
+            mouse_capture: true,
             confirm_close: true,
             show_agent_labels_on_pane_borders: false,
             kitty_graphics_enabled: false,

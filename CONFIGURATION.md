@@ -258,6 +258,7 @@ for `panel_bg`, you can also use `reset`, `default`, `none`, or `transparent` to
 ```toml
 [ui]
 sidebar_width = 26
+mouse_capture = true
 confirm_close = true
 show_agent_labels_on_pane_borders = false
 agent_panel_scope = "all"
@@ -269,6 +270,7 @@ accent = "cyan"
 | option | default | description |
 |--------|---------|-------------|
 | `sidebar_width` | `26` | base sidebar width before auto-scaling |
+| `mouse_capture` | `true` | capture mouse input for Herdr's mouse UI; set false to let the terminal handle normal clicks while still forwarding mouse to pane apps that request it |
 | `confirm_close` | `true` | ask before closing a workspace |
 | `show_agent_labels_on_pane_borders` | `false` | show detected/reported agent labels in split pane borders when no manual pane name is set |
 | `agent_panel_scope` | `all` | sidebar agent list scope: `current` or `all` |

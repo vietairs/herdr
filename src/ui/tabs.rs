@@ -98,9 +98,26 @@ pub(crate) fn compute_tab_bar_view(
     area: Rect,
     current_scroll: usize,
     follow_active: bool,
+    mouse_chrome: bool,
 ) -> TabBarView {
     if area.width == 0 || area.height == 0 {
         return TabBarView::default();
+    }
+
+    if !mouse_chrome {
+        let max_scroll = max_tab_scroll(ws, area);
+        let scroll = if follow_active {
+            centered_tab_scroll(ws, area).min(max_scroll)
+        } else {
+            current_scroll.min(max_scroll)
+        };
+        return TabBarView {
+            scroll,
+            tab_hit_areas: layout_tab_hit_areas(ws, area, scroll),
+            scroll_left_hit_area: Rect::default(),
+            scroll_right_hit_area: Rect::default(),
+            new_tab_hit_area: Rect::default(),
+        };
     }
 
     let area_right = area.x + area.width;
@@ -253,7 +270,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     let can_scroll_right = app.view.tab_scroll_right_hit_area.width > 0
         && last_visible_idx.is_some_and(|idx| idx + 1 < ws.tabs.len());
 
-    if app.view.tab_scroll_left_hit_area.width > 0 {
+    if app.mouse_capture && app.view.tab_scroll_left_hit_area.width > 0 {
         let style = if can_scroll_left {
             Style::default().fg(p.overlay1).bg(p.surface0)
         } else {
@@ -268,7 +285,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         );
     }
 
-    if app.view.tab_scroll_right_hit_area.width > 0 {
+    if app.mouse_capture && app.view.tab_scroll_right_hit_area.width > 0 {
         let style = if can_scroll_right {
             Style::default().fg(p.overlay1).bg(p.surface0)
         } else {
@@ -330,7 +347,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
     }
 
-    if app.view.new_tab_hit_area.width > 0 {
+    if app.mouse_capture && app.view.new_tab_hit_area.width > 0 {
         frame.render_widget(
             Paragraph::new(" + ").style(Style::default().fg(p.overlay1)),
             app.view.new_tab_hit_area,
@@ -338,7 +355,11 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 
     if first_visible_idx.is_some_and(|idx| idx > 0) {
-        let x = app.view.tab_scroll_left_hit_area.x + app.view.tab_scroll_left_hit_area.width;
+        let x = if app.mouse_capture && app.view.tab_scroll_left_hit_area.width > 0 {
+            app.view.tab_scroll_left_hit_area.x + app.view.tab_scroll_left_hit_area.width
+        } else {
+            area.x
+        };
         if x < area.x + area.width {
             frame.buffer_mut()[(x, area.y)]
                 .set_symbol("…")
@@ -346,7 +367,11 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         }
     }
     if last_visible_idx.is_some_and(|idx| idx + 1 < ws.tabs.len()) {
-        let x = app.view.tab_scroll_right_hit_area.x.saturating_sub(1);
+        let x = if app.mouse_capture && app.view.tab_scroll_right_hit_area.width > 0 {
+            app.view.tab_scroll_right_hit_area.x.saturating_sub(1)
+        } else {
+            area.x + area.width.saturating_sub(1)
+        };
         if x >= area.x && x < area.x + area.width {
             frame.buffer_mut()[(x, area.y)]
                 .set_symbol("…")

@@ -25,6 +25,28 @@ use super::{
 };
 
 impl AppState {
+    pub(crate) fn handle_pane_mouse_only(&mut self, mouse: MouseEvent) {
+        if self.mode != Mode::Terminal {
+            return;
+        }
+        let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() else {
+            return;
+        };
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => {
+                self.forward_pane_reported_wheel(&info, mouse);
+            }
+            MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
+                self.forward_pane_mouse_button(&info, mouse);
+            }
+            MouseEventKind::Moved => {}
+        }
+    }
+
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<SettingsAction> {
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
@@ -1114,6 +1136,32 @@ impl AppState {
         rt.scroll_reset();
         if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
             warn!(pane = info.id.raw(), err = %err, kind = ?mouse.kind, "failed to forward mouse button event");
+        }
+        true
+    }
+
+    fn forward_pane_reported_wheel(&self, info: &PaneInfo, mouse: MouseEvent) -> bool {
+        let Some(ws) = self.active.and_then(|i| self.workspaces.get(i)) else {
+            return false;
+        };
+        let Some(rt) = ws.runtimes.get(&info.id) else {
+            return false;
+        };
+        if !rt
+            .input_state()
+            .is_some_and(crate::pane::InputState::mouse_reporting_enabled)
+        {
+            return false;
+        }
+        rt.scroll_reset();
+        let column = mouse.column.saturating_sub(info.inner_rect.x);
+        let row = mouse.row.saturating_sub(info.inner_rect.y);
+        let Some(bytes) = rt.encode_mouse_wheel(mouse.kind, column, row, mouse.modifiers) else {
+            warn!(pane = info.id.raw(), kind = ?mouse.kind, "failed to encode mouse wheel event");
+            return true;
+        };
+        if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
+            warn!(pane = info.id.raw(), err = %err, "failed to forward mouse wheel event");
         }
         true
     }

@@ -294,6 +294,12 @@ pub enum ServerMessage {
 
     /// Client-local sound config changed on disk; refresh it without reconnecting.
     ReloadSoundConfig,
+
+    /// Whether the client should currently capture host mouse input.
+    MouseCapture {
+        /// True when Herdr mouse UI is enabled or the focused pane app requests mouse reporting.
+        enabled: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -793,6 +799,15 @@ mod tests {
     #[test]
     fn server_reload_sound_config_roundtrip() {
         let msg = ServerMessage::ReloadSoundConfig;
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn server_mouse_capture_roundtrip() {
+        let msg = ServerMessage::MouseCapture { enabled: true };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();

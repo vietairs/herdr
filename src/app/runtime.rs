@@ -87,7 +87,11 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                self.handle_mouse(mouse);
+                if self.state.mouse_capture {
+                    self.handle_mouse(mouse);
+                } else {
+                    self.state.handle_pane_mouse_only(mouse);
+                }
                 true
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {

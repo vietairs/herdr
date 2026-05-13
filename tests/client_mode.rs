@@ -206,6 +206,21 @@ fn decode_frame_payload(payload: &[u8]) -> std::io::Result<FrameWire> {
         })
 }
 
+fn read_next_frame_payload(stream: &mut UnixStream, timeout: Duration) -> Result<Vec<u8>, String> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match read_server_message(stream) {
+            Ok((1, payload)) => return Ok(payload),
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    }
+    Err("timed out waiting for Frame message".into())
+}
+
 fn frame_contains_text(frame: &FrameWire, needle: &str) -> bool {
     if frame.cells.is_empty() {
         return false;
@@ -259,20 +274,8 @@ fn client_connects_and_receives_frame() {
         error
     );
 
-    // Read the next message from the server — should be a Frame (variant 1).
-    stream.set_nonblocking(false).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-
-    let (variant, _payload) =
-        read_server_message(&mut stream).expect("should receive a message from server");
-
-    // ServerMessage::Frame is variant 1.
-    assert_eq!(
-        variant, 1,
-        "expected Frame message (variant 1), got variant {variant}"
-    );
+    read_next_frame_payload(&mut stream, Duration::from_secs(10))
+        .expect("should receive a frame from server");
 
     cleanup_spawned_herdr(spawned, base);
 }
@@ -725,15 +728,8 @@ fn client_receives_frame_after_pane_output() {
     assert_eq!(version, 5);
     assert!(error.is_none(), "{:?}", error);
 
-    // Read the initial frame (server renders immediately on client connect).
-    stream.set_nonblocking(false).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-
-    let (variant, _payload) =
-        read_server_message(&mut stream).expect("should receive initial frame");
-    assert_eq!(variant, 1, "initial message should be a Frame (variant 1)");
+    read_next_frame_payload(&mut stream, Duration::from_secs(10))
+        .expect("should receive initial frame");
 
     // Send input to trigger a state change and re-render.
     let input_data = b"echo test-output\n".to_vec();
