@@ -986,10 +986,10 @@ mod tests {
             .expect("website/latest.json should match updater schema");
 
         assert!(!manifest.notes_body().is_empty());
-        assert_eq!(
-            manifest.protocol,
-            Some(crate::server::protocol::PROTOCOL_VERSION)
-        );
+        // website/latest.json describes the latest released binaries, not the
+        // current unreleased checkout. Its protocol is updated by the release
+        // flow together with the release assets.
+        assert!(manifest.protocol.is_some());
         assert_eq!(manifest.assets.len(), 4);
 
         for target in [
