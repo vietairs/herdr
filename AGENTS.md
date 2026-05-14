@@ -52,6 +52,7 @@ Unit tests live next to the code (`#[cfg(test)] mod tests`). If you add behavior
 
 - Conventional commits, lowercase, no emojis.
 - Do not edit `CHANGELOG.md` during normal feature or fix work. Changelog entries are drafted and applied immediately before release.
+- Do not advertise unreleased features in public docs before the release is cut. Keep README, `CONFIGURATION.md`, `INTEGRATIONS.md`, `SOCKET_API.md`, website copy, and config examples aligned with the latest published release unless the user explicitly asks for prerelease docs.
 - Put local PRDs, planning notes, and exploratory specs under `.prd/`; that directory is ignored and locally controlled.
 - When a commit fully fixes a GitHub issue, include `fixes #<issue-number>` in the commit body so GitHub closes it on merge.
 - Rust: no `unwrap()` in production code. `tracing` for logging. `#[allow]` only with a comment explaining why.

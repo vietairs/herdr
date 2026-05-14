@@ -44,7 +44,15 @@ Process:
      - formatting-only changes
      - comment-only/doc-only changes unless they materially affect users
 
-6. Draft the changelog entry.
+6. Audit public docs for release readiness.
+   - Treat `HEAD` as the release candidate that will be released after the changelog is drafted.
+   - Compare meaningful user-facing changes in the range against public docs, especially `README.md`, `CONFIGURATION.md`, `INTEGRATIONS.md`, `SOCKET_API.md`, `website/`, and example config snippets.
+   - Flag missing docs for new or changed features, commands, config keys, protocol behavior, integrations, defaults, and compatibility notes that should be documented for this release.
+   - Flag stale docs that now describe behavior incorrectly.
+   - Flag docs that mention work not included in the release range, deferred experiments, or incomplete features that should not ship in public docs yet.
+   - Do not edit docs unless the user explicitly asks; report the docs audit alongside the changelog draft.
+
+7. Draft the changelog entry.
    - Group items under these sections when applicable:
      - `### Added`
      - `### Changed`
@@ -58,7 +66,7 @@ Process:
    - If there are both PRs and direct commits, include both, but exclude direct commits already covered by PRs.
    - For merged PR items, append the PR reference and contributor thanks inline when appropriate, in the form `(#123, thanks @author)`. Do this for merged PRs, not for direct commits.
 
-7. Respect repo reality.
+8. Respect repo reality.
    - If `CHANGELOG.md` exists, read it before proposing edits and follow its existing style.
    - If no changelog file exists, say so explicitly and produce a draft entry only.
    - Do not edit files yet unless the user explicitly asks you to apply the draft.
@@ -69,6 +77,7 @@ Output format:
 - `PRs included:`
 - `Direct commits included:`
 - `Excluded as housekeeping:`
+- `Public docs release-readiness audit:`
 - `Proposed changelog entry:`
 
 If the range has no meaningful user-facing changes, say that plainly instead of forcing entries.
