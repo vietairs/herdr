@@ -18,7 +18,7 @@ const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/herdr-agent-state.sh
 const CLAUDE_INTEGRATION_VERSION: u32 = 1;
 const CODEX_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/herdr-agent-state.sh");
-const CODEX_INTEGRATION_VERSION: u32 = 1;
+const CODEX_INTEGRATION_VERSION: u32 = 2;
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
 const OPENCODE_INTEGRATION_VERSION: u32 = 1;
@@ -891,35 +891,83 @@ fn remove_file_if_exists(path: &Path) -> io::Result<bool> {
 fn build_codex_config_with_hooks(content: &str) -> String {
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
     let trailing_newline = content.ends_with('\n');
+    let mut in_top_level_features = false;
+    let mut features_header_index = None;
+    let mut hooks_index = None;
+    let mut deprecated_hooks_indexes = Vec::new();
 
-    if let Some(index) = lines
-        .iter()
-        .position(|line| is_toml_key(line, "codex_hooks"))
-    {
-        lines[index] = "codex_hooks = true".to_string();
-        let mut result = lines.join("\n");
-        if trailing_newline || result.is_empty() {
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(header) = toml_table_header(line) {
+            in_top_level_features = header == "[features]";
+            if in_top_level_features && features_header_index.is_none() {
+                features_header_index = Some(index);
+            }
+            continue;
+        }
+
+        if !in_top_level_features {
+            continue;
+        }
+
+        if is_toml_key(line, "codex_hooks") {
+            deprecated_hooks_indexes.push(index);
+        } else if is_toml_key(line, "hooks") {
+            hooks_index = Some(index);
+        }
+    }
+
+    if let Some(index) = hooks_index {
+        lines[index] = "hooks = true".to_string();
+    }
+
+    for index in deprecated_hooks_indexes.into_iter().rev() {
+        lines.remove(index);
+    }
+
+    if hooks_index.is_none() {
+        if let Some(index) = features_header_index {
+            lines.insert(index + 1, "hooks = true".to_string());
+            return join_toml_lines(lines, trailing_newline);
+        }
+
+        let mut result = content.trim_end_matches('\n').to_string();
+        if !result.is_empty() {
+            result.push('\n');
             result.push('\n');
         }
+        result.push_str("[features]\nhooks = true\n");
         return result;
     }
 
-    if let Some(index) = lines.iter().position(|line| line.trim() == "[features]") {
-        lines.insert(index + 1, "codex_hooks = true".to_string());
-        let mut result = lines.join("\n");
-        if trailing_newline || result.is_empty() {
-            result.push('\n');
-        }
-        return result;
-    }
+    join_toml_lines(lines, trailing_newline)
+}
 
-    let mut result = content.trim_end_matches('\n').to_string();
-    if !result.is_empty() {
-        result.push('\n');
+fn join_toml_lines(lines: Vec<String>, trailing_newline: bool) -> String {
+    let mut result = lines.join("\n");
+    if trailing_newline || result.is_empty() {
         result.push('\n');
     }
-    result.push_str("[features]\ncodex_hooks = true\n");
     result
+}
+
+fn toml_table_header(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') || !trimmed.starts_with('[') {
+        return None;
+    }
+
+    let header_end = if trimmed.starts_with("[[") {
+        trimmed.find("]]").map(|index| index + 2)?
+    } else {
+        trimmed.find(']').map(|index| index + 1)?
+    };
+    let header = &trimmed[..header_end];
+    let rest = trimmed[header_end..].trim_start();
+    if !rest.is_empty() && !rest.starts_with('#') {
+        return None;
+    }
+
+    Some(header)
 }
 
 fn is_toml_key(line: &str, key: &str) -> bool {
@@ -1322,7 +1370,8 @@ mod tests {
             .contains(" idle"));
         assert!(config.contains("model = \"gpt-5.4\""));
         assert!(config.contains("[features]"));
-        assert!(config.contains("codex_hooks = true"));
+        assert!(config.contains("hooks = true"));
+        assert!(!config.contains("codex_hooks"));
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
@@ -1357,8 +1406,34 @@ mod tests {
         );
         assert_eq!(hooks["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
         assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 1);
-        assert_eq!(config.matches("codex_hooks = true").count(), 1);
+        assert_eq!(config.matches("hooks = true").count(), 1);
+        assert!(!config.contains("codex_hooks"));
         assert!(config.contains("other = true"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_codex_only_migrates_top_level_feature_flags() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let codex_dir = home.join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        fs::write(
+            codex_dir.join("config.toml"),
+            "profile = \"work\"\n\n[profiles.work.features]\nhooks = false\ncodex_hooks = false\n\n[features]\ncodex_hooks = true\nother = true\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_codex().unwrap();
+
+        let config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+
+        assert!(config.contains("[profiles.work.features]\nhooks = false\ncodex_hooks = false"));
+        assert!(config.contains("[features]\nhooks = true\nother = true"));
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
@@ -1385,7 +1460,7 @@ mod tests {
         .unwrap();
         fs::write(
             codex_dir.join("config.toml"),
-            "[features]\ncodex_hooks = true\nother = true\n",
+            "[features]\nhooks = true\nother = true\n",
         )
         .unwrap();
         std::env::set_var("HOME", &home);
@@ -1412,7 +1487,7 @@ mod tests {
             hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
             "echo keep"
         );
-        assert!(config.contains("codex_hooks = true"));
+        assert!(config.contains("hooks = true"));
         assert!(config.contains("other = true"));
 
         std::env::remove_var("HOME");
