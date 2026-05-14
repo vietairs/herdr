@@ -9,6 +9,7 @@ pub enum ToastDelivery {
     Off,
     Herdr,
     Terminal,
+    System,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -296,6 +297,16 @@ delivery = "terminal"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.toast.delivery, ToastDelivery::Terminal);
+    }
+
+    #[test]
+    fn toast_config_parses_system_delivery() {
+        let toml = r#"
+[ui.toast]
+delivery = "system"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.toast.delivery, ToastDelivery::System);
     }
 
     #[test]

@@ -62,6 +62,7 @@ impl App {
             crate::config::ToastDelivery::Off => "\"off\"",
             crate::config::ToastDelivery::Herdr => "\"herdr\"",
             crate::config::ToastDelivery::Terminal => "\"terminal\"",
+            crate::config::ToastDelivery::System => "\"system\"",
         };
         if self.update_config_file("toast setting", |content| {
             let content =

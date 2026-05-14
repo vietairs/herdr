@@ -299,7 +299,8 @@ delivery = "off"
 available values:
 - `off` — disable popup notifications
 - `herdr` — show top-right in-app toasts
-- `terminal` — ask the outer terminal to show a desktop notification
+- `terminal` — ask the outer terminal to show a desktop notification. Some terminals suppress foreground notifications, including Ghostty on macOS.
+- `system` — ask the OS notification service directly. macOS uses `osascript`; Linux requires `notify-send`.
 
 compatibility note:
 - older configs may still use `ui.toast.enabled = true|false`

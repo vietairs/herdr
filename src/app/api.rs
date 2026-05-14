@@ -84,11 +84,17 @@ impl App {
         if self.local_terminal_notifications
             && matches!(
                 self.state.toast_config.delivery,
-                crate::config::ToastDelivery::Terminal
+                crate::config::ToastDelivery::Terminal | crate::config::ToastDelivery::System
             )
         {
+            let notify = match self.state.toast_config.delivery {
+                crate::config::ToastDelivery::Terminal => crate::terminal_notify::show_notification,
+                crate::config::ToastDelivery::System => crate::platform::show_desktop_notification,
+                _ => unreachable!("toast delivery was checked above"),
+            };
+
             if let Some(version) = update_ready_version {
-                let _ = crate::terminal_notify::show_notification(
+                let _ = notify(
                     &format!("v{version} available"),
                     Some("detach, then run `herdr update`"),
                 );
@@ -127,7 +133,7 @@ impl App {
                         ToastKind::Finished => "finished",
                         ToastKind::UpdateInstalled => "updated",
                     };
-                    let _ = crate::terminal_notify::show_notification(
+                    let _ = notify(
                         &format!("{} {}", agent_label, event_text),
                         Some(&crate::app::actions::notification_context(
                             ws,

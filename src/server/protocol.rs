@@ -247,8 +247,10 @@ pub struct TerminalFrame {
 pub enum NotifyKind {
     /// Play a sound (bell/agent-done, etc.).
     Sound,
-    /// Display a toast message.
+    /// Display a toast message through the outer terminal.
     Toast,
+    /// Display a toast message through the host OS notification service.
+    SystemToast,
 }
 
 /// Messages sent from the server to the client over the client protocol socket.
@@ -754,14 +756,20 @@ mod tests {
 
     #[test]
     fn server_notify_roundtrip() {
-        let msg = ServerMessage::Notify {
-            kind: NotifyKind::Sound,
-            message: "agent done".to_owned(),
-        };
-        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-        let (decoded, _): (ServerMessage, _) =
-            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
-        assert_eq!(msg, decoded);
+        for kind in [
+            NotifyKind::Sound,
+            NotifyKind::Toast,
+            NotifyKind::SystemToast,
+        ] {
+            let msg = ServerMessage::Notify {
+                kind,
+                message: "agent done".to_owned(),
+            };
+            let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+            let (decoded, _): (ServerMessage, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(msg, decoded);
+        }
     }
 
     #[test]

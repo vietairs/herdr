@@ -34,3 +34,8 @@ pub fn process_exists(_pid: u32) -> bool {
 pub fn write_clipboard(_bytes: &[u8]) -> bool {
     false
 }
+
+/// Unsupported platform stub.
+pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::Result<bool> {
+    Ok(false)
+}

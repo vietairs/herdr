@@ -51,6 +51,7 @@ fn toast_delivery_index(delivery: ToastDelivery) -> usize {
         ToastDelivery::Off => 0,
         ToastDelivery::Herdr => 1,
         ToastDelivery::Terminal => 2,
+        ToastDelivery::System => 3,
     }
 }
 
@@ -58,7 +59,8 @@ fn toast_delivery_for_index(idx: usize) -> ToastDelivery {
     match idx {
         0 => ToastDelivery::Off,
         1 => ToastDelivery::Herdr,
-        _ => ToastDelivery::Terminal,
+        2 => ToastDelivery::Terminal,
+        _ => ToastDelivery::System,
     }
 }
 
@@ -151,7 +153,7 @@ pub(super) fn update_settings_state(state: &mut AppState, key: KeyEvent) -> Opti
         },
         SettingsSection::Toast => match key.code {
             KeyCode::Up | KeyCode::Char('k') => state.settings.list.move_prev(),
-            KeyCode::Down | KeyCode::Char('j') => state.settings.list.move_next(3),
+            KeyCode::Down | KeyCode::Char('j') => state.settings.list.move_next(4),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 let delivery = toast_delivery_for_index(state.settings.list.selected);
                 return Some(SettingsAction::SaveToastDelivery(delivery));
@@ -274,7 +276,7 @@ impl AppState {
             }
             SettingsSection::Toast => {
                 let list_y = area.y + 3;
-                if row >= list_y && row < list_y + 6 {
+                if row >= list_y && row < list_y + 8 {
                     Some(((row - list_y) / 2) as usize)
                 } else {
                     None

@@ -155,6 +155,43 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     false
 }
 
+/// Show a native desktop notification through libnotify's command-line helper.
+pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
+    show_desktop_notification_with_command(title, body, |program| Command::new(program))
+}
+
+fn show_desktop_notification_with_command(
+    title: &str,
+    body: Option<&str>,
+    mut command: impl FnMut(&str) -> Command,
+) -> std::io::Result<bool> {
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Ok(false);
+    }
+
+    let mut cmd = command("notify-send");
+    cmd.arg("--").arg(title);
+    if let Some(body) = body.filter(|body| !body.is_empty()) {
+        cmd.arg(body);
+    }
+    run_notification_command(cmd)
+}
+
+fn run_notification_command(mut command: Command) -> std::io::Result<bool> {
+    let status = match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) => status,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+
+    Ok(status.success())
+}
+
 fn clipboard_commands() -> Vec<ClipboardCommand> {
     let mut commands = Vec::new();
 
@@ -247,5 +284,32 @@ mod tests {
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].program, "xclip");
         assert_eq!(commands[1].program, "xsel");
+    }
+
+    #[test]
+    fn desktop_notification_separates_option_like_titles() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::set_var("DISPLAY", ":0");
+        }
+
+        let path =
+            std::env::temp_dir().join(format!("herdr-notify-send-args-{}", std::process::id()));
+        let script = "printf '%s\\n' \"$@\" > \"$HERDR_NOTIFY_ARGS\"";
+        let shown = show_desktop_notification_with_command("-danger", Some("body"), |_| {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c")
+                .arg(script)
+                .arg("notify-send")
+                .env("HERDR_NOTIFY_ARGS", &path);
+            cmd
+        })
+        .expect("notification command should run");
+
+        assert!(shown);
+        let args = std::fs::read_to_string(&path).expect("args file");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(args, "--\n-danger\nbody\n");
     }
 }

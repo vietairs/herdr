@@ -672,19 +672,21 @@ fn reload_local_sound_config(sound_config: &mut crate::config::SoundConfig) {
 }
 
 fn handle_notify(kind: NotifyKind, message: &str, sound_config: &crate::config::SoundConfig) {
-    handle_notify_with_terminal_notifier(
+    handle_notify_with_notifiers(
         kind,
         message,
         sound_config,
         crate::terminal_notify::show_notification,
+        crate::platform::show_desktop_notification,
     );
 }
 
-fn handle_notify_with_terminal_notifier(
+fn handle_notify_with_notifiers(
     kind: NotifyKind,
     message: &str,
     sound_config: &crate::config::SoundConfig,
     mut show_terminal_notification: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
+    mut show_system_notification: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
 ) {
     match kind {
         NotifyKind::Sound => {
@@ -700,10 +702,23 @@ fn handle_notify_with_terminal_notifier(
             }
         }
         NotifyKind::Toast => {
-            debug!(message = message, "received toast notification from server");
+            debug!(
+                message = message,
+                "received terminal toast notification from server"
+            );
             let (title, body) = crate::terminal_notify::split_message(message);
             if let Err(err) = show_terminal_notification(title, body) {
                 warn!(err = %err, "failed to emit terminal notification");
+            }
+        }
+        NotifyKind::SystemToast => {
+            debug!(
+                message = message,
+                "received system toast notification from server"
+            );
+            let (title, body) = crate::terminal_notify::split_message(message);
+            if let Err(err) = show_system_notification(title, body) {
+                warn!(err = %err, "failed to emit system notification");
             }
         }
     }
@@ -1066,10 +1081,33 @@ mod tests {
         let sound_config = crate::config::SoundConfig::default();
         let mut emitted = None;
 
-        handle_notify_with_terminal_notifier(
+        handle_notify_with_notifiers(
             NotifyKind::Toast,
             "pi finished: workspace 1",
             &sound_config,
+            |title, body| {
+                emitted = Some((title.to_string(), body.map(str::to_string)));
+                Ok(true)
+            },
+            |_, _| Ok(false),
+        );
+
+        assert_eq!(
+            emitted,
+            Some(("pi finished".to_string(), Some("workspace 1".to_string())))
+        );
+    }
+
+    #[test]
+    fn system_toast_notify_from_server_uses_system_notifier() {
+        let sound_config = crate::config::SoundConfig::default();
+        let mut emitted = None;
+
+        handle_notify_with_notifiers(
+            NotifyKind::SystemToast,
+            "pi finished: workspace 1",
+            &sound_config,
+            |_, _| Ok(false),
             |title, body| {
                 emitted = Some((title.to_string(), body.map(str::to_string)));
                 Ok(true)

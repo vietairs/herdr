@@ -143,6 +143,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # off = disable pop-up notifications
 # herdr = show top-right in-app toasts
 # terminal = ask the outer terminal to show a desktop notification
+# system = ask the OS notification service directly
 # delivery = "off"
 
 # Play sounds when agents change state in background workspaces

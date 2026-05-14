@@ -99,6 +99,7 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
                     ("off", ToastDelivery::Off),
                     ("inside herdr", ToastDelivery::Herdr),
                     ("via terminal", ToastDelivery::Terminal),
+                    ("via system", ToastDelivery::System),
                 ],
                 app.toast_delivery(),
                 app.settings.list.selected,

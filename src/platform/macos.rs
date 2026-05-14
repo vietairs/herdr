@@ -201,6 +201,43 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     )
 }
 
+/// Show a native macOS notification through AppleScript.
+pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
+    show_desktop_notification_with_command(title, body, |program| Command::new(program))
+}
+
+fn show_desktop_notification_with_command(
+    title: &str,
+    body: Option<&str>,
+    mut command: impl FnMut(&str) -> Command,
+) -> std::io::Result<bool> {
+    let mut cmd = command("/usr/bin/osascript");
+    cmd.arg("-e")
+        .arg("on run argv")
+        .arg("-e")
+        .arg("display notification (item 2 of argv) with title (item 1 of argv)")
+        .arg("-e")
+        .arg("end run")
+        .arg(title)
+        .arg(body.unwrap_or_default());
+    run_notification_command(cmd)
+}
+
+fn run_notification_command(mut command: Command) -> std::io::Result<bool> {
+    let status = match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) => status,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+
+    Ok(status.success())
+}
+
 fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
     let mut child = match Command::new(command.program)
         .args(command.args)
@@ -468,5 +505,29 @@ mod tests {
         assert_eq!(argv, vec!["node", "/Users/can/.local/bin/pi"]);
         assert_eq!(argv.join(" "), "node /Users/can/.local/bin/pi");
         assert!(!argv.join(" ").contains("codex.system"));
+    }
+
+    #[test]
+    fn desktop_notification_uses_osascript_argv() {
+        let path =
+            std::env::temp_dir().join(format!("herdr-osascript-args-{}", std::process::id()));
+        let script = "printf '%s\\n' \"$@\" > \"$HERDR_NOTIFY_ARGS\"";
+        let shown = show_desktop_notification_with_command("title", Some("body"), |_| {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c")
+                .arg(script)
+                .arg("osascript")
+                .env("HERDR_NOTIFY_ARGS", &path);
+            cmd
+        })
+        .expect("notification command should run");
+
+        assert!(shown);
+        let args = std::fs::read_to_string(&path).expect("args file");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            args,
+            "-e\non run argv\n-e\ndisplay notification (item 2 of argv) with title (item 1 of argv)\n-e\nend run\ntitle\nbody\n"
+        );
     }
 }

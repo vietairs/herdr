@@ -87,7 +87,15 @@ const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 fn should_forward_toast_to_clients(delivery: config::ToastDelivery) -> bool {
-    matches!(delivery, config::ToastDelivery::Terminal)
+    toast_notify_kind(delivery).is_some()
+}
+
+fn toast_notify_kind(delivery: config::ToastDelivery) -> Option<protocol::NotifyKind> {
+    match delivery {
+        config::ToastDelivery::Terminal => Some(protocol::NotifyKind::Toast),
+        config::ToastDelivery::System => Some(protocol::NotifyKind::SystemToast),
+        config::ToastDelivery::Off | config::ToastDelivery::Herdr => None,
+    }
 }
 
 fn toast_event_text(kind: app::state::ToastKind) -> &'static str {
@@ -847,7 +855,8 @@ impl HeadlessServer {
 
                 if let Some(msg) = toast_msg {
                     self.send_to_foreground_client(ServerMessage::Notify {
-                        kind: protocol::NotifyKind::Toast,
+                        kind: toast_notify_kind(self.app.state.toast_config.delivery)
+                            .expect("toast forwarding requires a client notification kind"),
                         message: msg,
                     });
                 }
@@ -930,7 +939,8 @@ impl HeadlessServer {
 
                 if let Some(msg) = toast_msg {
                     self.send_to_foreground_client(ServerMessage::Notify {
-                        kind: protocol::NotifyKind::Toast,
+                        kind: toast_notify_kind(self.app.state.toast_config.delivery)
+                            .expect("toast forwarding requires a client notification kind"),
                         message: msg,
                     });
                 }
@@ -962,7 +972,8 @@ impl HeadlessServer {
 
                 if let Some(msg) = toast_msg {
                     self.send_to_foreground_client(ServerMessage::Notify {
-                        kind: protocol::NotifyKind::Toast,
+                        kind: toast_notify_kind(self.app.state.toast_config.delivery)
+                            .expect("toast forwarding requires a client notification kind"),
                         message: msg,
                     });
                 }
@@ -991,7 +1002,7 @@ impl HeadlessServer {
     /// - Detect when a sound would be played and forward as
     ///   `ServerMessage::Notify { kind: Sound }` to the foreground client.
     /// - Detect when a toast is set on AppState and forward as
-    ///   `ServerMessage::Notify { kind: Toast }` to the foreground client.
+    ///   `ServerMessage::Notify` to the foreground client for terminal/system delivery.
     fn drain_internal_events_with_forwarding(&mut self) -> bool {
         let mut changed = false;
         while let Ok(ev) = self.app.event_rx.try_recv() {
@@ -1322,9 +1333,9 @@ impl HeadlessServer {
         let response = self.app.handle_api_request(msg.request);
         let _ = msg.respond_to.send(response);
 
-        // Forward new toast state only when terminal delivery is selected.
+        // Forward new toast state only when a client-local delivery mode is selected.
         // Herdr delivery renders the toast in-frame and must not ask clients to
-        // show a terminal/desktop notification.
+        // show a terminal or system notification.
         let toast_after = self.app.state.toast.clone();
         let forwarded_toast_from_state =
             if should_forward_toast_to_clients(self.app.state.toast_config.delivery)
@@ -1335,7 +1346,8 @@ impl HeadlessServer {
                     let msg_text = format!("{}: {}", toast.title, toast.context);
                     debug!(msg = %msg_text, "forwarding toast notification from API request");
                     self.send_to_foreground_client(ServerMessage::Notify {
-                        kind: protocol::NotifyKind::Toast,
+                        kind: toast_notify_kind(self.app.state.toast_config.delivery)
+                            .expect("toast forwarding requires a client notification kind"),
                         message: msg_text,
                     });
                     true
@@ -1406,7 +1418,8 @@ impl HeadlessServer {
                             )
                         );
                         self.send_to_foreground_client(ServerMessage::Notify {
-                            kind: protocol::NotifyKind::Toast,
+                            kind: toast_notify_kind(self.app.state.toast_config.delivery)
+                                .expect("toast forwarding requires a client notification kind"),
                             message: msg_text,
                         });
                     }
@@ -2897,6 +2910,7 @@ mod tests {
                 Some(client_tx),
             ),
         );
+        server.foreground_client_id = Some(1);
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
 
         let changed = server.handle_internal_event_with_forwarding(AppEvent::UpdateReady {
@@ -2909,8 +2923,46 @@ mod tests {
             client_control_rx
                 .recv_timeout(Duration::from_millis(50))
                 .is_err(),
-            "herdr delivery should render in-frame instead of forwarding a terminal notification"
+            "herdr delivery should render in-frame instead of forwarding a client-local notification"
         );
+    }
+
+    #[test]
+    fn system_toast_delivery_forwards_system_notify_kind() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+
+        let changed = server.handle_internal_event_with_forwarding(AppEvent::UpdateReady {
+            version: "9.9.9".to_string(),
+        });
+
+        assert!(changed);
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("system toast message"),
+        ) {
+            ServerMessage::Notify { kind, message } => {
+                assert_eq!(kind, protocol::NotifyKind::SystemToast);
+                assert_eq!(message, "v9.9.9 available: detach, then run `herdr update`");
+            }
+            other => panic!("expected system toast notify, got {other:?}"),
+        }
     }
 
     #[test]
