@@ -561,6 +561,22 @@ a:hover {
     text-align: center;
 }
 
+.mobile-shout {
+    margin-top: 1.25rem;
+    font-size: 0.7rem;
+    color: var(--text-faint);
+    text-align: center;
+}
+
+.mobile-shout a {
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border-bright);
+}
+.mobile-shout a:hover {
+    color: var(--green);
+    border-color: var(--green);
+}
+
 /* ── Awareness ── */
 .awareness-split {
     display: grid;
