@@ -260,7 +260,6 @@ for `panel_bg`, you can also use `reset`, `default`, `none`, or `transparent` to
 ```toml
 [ui]
 sidebar_width = 26
-mouse_capture = true
 confirm_close = true
 show_agent_labels_on_pane_borders = false
 agent_panel_scope = "all"
@@ -272,7 +271,6 @@ accent = "cyan"
 | option | default | description |
 |--------|---------|-------------|
 | `sidebar_width` | `26` | base sidebar width before auto-scaling |
-| `mouse_capture` | `true` | capture mouse input for Herdr's mouse UI; set false to let the terminal handle normal clicks while still forwarding mouse to pane apps that request it |
 | `confirm_close` | `true` | ask before closing a workspace |
 | `show_agent_labels_on_pane_borders` | `false` | show detected/reported agent labels in split pane borders when no manual pane name is set |
 | `agent_panel_scope` | `all` | sidebar agent list scope: `current` or `all` |
@@ -357,7 +355,6 @@ available agent keys:
 ```toml
 [advanced]
 allow_nested = false
-kitty_graphics = false
 scrollback_limit_bytes = 10000000
 ```
 
@@ -366,7 +363,6 @@ scrollback_limit_bytes = 10000000
 | option | default | description |
 |--------|---------|-------------|
 | `advanced.allow_nested` | `false` | allow launching herdr from inside a herdr-managed pane |
-| `advanced.kitty_graphics` | `false` | experimental Kitty graphics rendering for local attached UIs; requires a Kitty graphics-compatible outer terminal |
 | `advanced.scrollback_limit_bytes` | `10000000` | maximum scrollback buffer size in bytes retained per pane terminal |
 
 ### nested launches
@@ -374,10 +370,6 @@ scrollback_limit_bytes = 10000000
 By default, herdr blocks nested launches when `HERDR_ENV=1` is already present.
 
 Set `allow_nested = true` only for debugging or intentionally nested setups.
-
-### kitty graphics
-
-`kitty_graphics` enables experimental Kitty graphics rendering for local attached UIs. It requires a Kitty graphics-compatible outer terminal.
 
 ### scrollback
 
