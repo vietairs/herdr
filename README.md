@@ -280,6 +280,16 @@ just test-all   # full local test suite
 
 AGPL-3.0: free to use, modify, and distribute. modified versions must be open-sourced under the same license.
 
+## pi, ghostty, and shift+enter
+
+herdr does not require or install terminal keybinds for pi.
+
+ghostty does not ship a default `shift+enter=text:\n` or `shift+enter=text:\x1b\r` keybind. if those lines exist in your ghostty config, they were added by user config or another tool, commonly claude code. they collapse shift+enter into legacy bytes, so downstream programs cannot reliably distinguish shift+enter from ctrl+j or alt+enter.
+
+if shift+enter behaves differently in pi inside herdr, first remove those custom terminal keybinds and retest. do not file this as a herdr keyboard encoding bug unless it reproduces with a clean terminal config.
+
+related context: #78, #81, #106, and earendil-works/pi#1872.
+
 ## mandatory star history
 
 <a href="https://www.star-history.com/?repos=ogulcancelik%2Fherdr&type=date&legend=top-left">
