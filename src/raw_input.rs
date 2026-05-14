@@ -659,6 +659,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_enhanced_pageup_press() {
+        let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\x1b[5;1:1~").unwrap() else {
+            panic!("expected key");
+        };
+        assert_eq!(consumed, 8);
+        assert_eq!(key.code, KeyCode::PageUp);
+        assert_eq!(key.modifiers, KeyModifiers::empty());
+        assert_eq!(key.kind, KeyEventKind::Press);
+    }
+
+    #[test]
+    fn parses_enhanced_pagedown_release() {
+        let (RawInputEvent::Key(key), consumed) = extract_one_event(b"\x1b[6;1:3~").unwrap() else {
+            panic!("expected key");
+        };
+        assert_eq!(consumed, 8);
+        assert_eq!(key.code, KeyCode::PageDown);
+        assert_eq!(key.modifiers, KeyModifiers::empty());
+        assert_eq!(key.kind, KeyEventKind::Release);
+    }
+
+    #[test]
     fn raw_input_family_matrix_is_covered() {
         let cases: &[(&[u8], KeyCode, KeyModifiers)] = &[
             (b"\x02", KeyCode::Char('b'), KeyModifiers::CONTROL),

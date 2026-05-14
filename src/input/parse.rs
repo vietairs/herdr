@@ -181,7 +181,8 @@ fn parse_xterm_modified_special_sequence(data: &str) -> Option<TerminalKey> {
 
     let tilde_body = body.strip_suffix('~')?;
     let (code_part, modifier_part) = tilde_body.split_once(';')?;
-    let mod_value = modifier_part.parse::<u8>().ok()?.checked_sub(1)?;
+    let (modifier_text, event_type) = split_modifier_and_event(modifier_part);
+    let mod_value = modifier_text.parse::<u8>().ok()?.checked_sub(1)?;
     let code = match code_part {
         "2" => KeyCode::Insert,
         "3" => KeyCode::Delete,
@@ -197,7 +198,10 @@ fn parse_xterm_modified_special_sequence(data: &str) -> Option<TerminalKey> {
         "24" => KeyCode::F(12),
         _ => return None,
     };
-    Some(TerminalKey::new(code, key_modifiers_from_u8(mod_value)))
+    Some(
+        TerminalKey::new(code, key_modifiers_from_u8(mod_value))
+            .with_kind(parse_kitty_event_type(event_type)?),
+    )
 }
 
 fn split_modifier_and_event(input: &str) -> (&str, Option<&str>) {
@@ -482,6 +486,30 @@ mod tests {
         assert_eq!(key.code, KeyCode::Up);
         assert_eq!(key.modifiers, KeyModifiers::empty());
         assert_eq!(key.kind, crossterm::event::KeyEventKind::Release);
+    }
+
+    #[test]
+    fn parse_ghostty_enhanced_pageup_press_sequence() {
+        let key = parse_terminal_key_sequence("\x1b[5;1:1~").unwrap();
+        assert_eq!(key.code, KeyCode::PageUp);
+        assert_eq!(key.modifiers, KeyModifiers::empty());
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+    }
+
+    #[test]
+    fn parse_ghostty_enhanced_pagedown_release_sequence() {
+        let key = parse_terminal_key_sequence("\x1b[6;1:3~").unwrap();
+        assert_eq!(key.code, KeyCode::PageDown);
+        assert_eq!(key.modifiers, KeyModifiers::empty());
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Release);
+    }
+
+    #[test]
+    fn parse_ghostty_enhanced_delete_repeat_sequence() {
+        let key = parse_terminal_key_sequence("\x1b[3;1:2~").unwrap();
+        assert_eq!(key.code, KeyCode::Delete);
+        assert_eq!(key.modifiers, KeyModifiers::empty());
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Repeat);
     }
 
     #[test]
