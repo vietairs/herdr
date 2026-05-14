@@ -32,6 +32,15 @@ build:
 build-libghostty-vt:
     scripts/build_vendored_libghostty_vt.sh
 
+# Check that public docs have been finalized from .pi/docs before release
+release-docs-check:
+    @for file in README.md CONFIGURATION.md INTEGRATIONS.md SOCKET_API.md; do \
+        if ! diff -u "$file" ".pi/docs/$file"; then \
+            echo "error: $file differs from .pi/docs/$file; finalize release docs before releasing"; \
+            exit 1; \
+        fi; \
+    done
+
 # Finalize changelog, bump version, commit, tag, push, and trigger the GitHub Release workflow (usage: just release 0.1.1)
 release version:
     @if [ -n "$(git status --porcelain)" ]; then \
@@ -42,6 +51,7 @@ release version:
         echo "error: tag v{{version}} already exists"; \
         exit 1; \
     fi
+    just release-docs-check
     python3 scripts/changelog.py prepare --version {{version}}
     sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
     cargo update -p herdr --offline

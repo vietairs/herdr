@@ -46,11 +46,13 @@ Process:
 
 6. Audit public docs for release readiness.
    - Treat `HEAD` as the release candidate that will be released after the changelog is drafted.
-   - Compare meaningful user-facing changes in the range against public docs, especially `README.md`, `CONFIGURATION.md`, `INTEGRATIONS.md`, `SOCKET_API.md`, `website/`, and example config snippets.
-   - Flag missing docs for new or changed features, commands, config keys, protocol behavior, integrations, defaults, and compatibility notes that should be documented for this release.
-   - Flag stale docs that now describe behavior incorrectly.
-   - Flag docs that mention work not included in the release range, deferred experiments, or incomplete features that should not ship in public docs yet.
+   - Treat root `README.md`, `CONFIGURATION.md`, `INTEGRATIONS.md`, and `SOCKET_API.md` as the latest released public docs.
+   - Treat `.pi/docs/README.md`, `.pi/docs/CONFIGURATION.md`, `.pi/docs/INTEGRATIONS.md`, and `.pi/docs/SOCKET_API.md` as the next-release versions of those public docs.
+   - Compare meaningful user-facing changes in the range against `.pi/docs/` first. Flag missing next-release docs for new or changed features, commands, config keys, protocol behavior, integrations, defaults, and compatibility notes that should be documented for this release.
+   - Compare `.pi/docs/` against the root docs. Flag each difference as either intended to ship in this release, stale, or needing user decision.
+   - Also audit `website/` and example config snippets for release readiness, but keep them aligned with the latest published release unless the user explicitly asks for prerelease docs.
    - Do not edit docs unless the user explicitly asks; report the docs audit alongside the changelog draft.
+   - When the user asks to apply the release draft, update `CHANGELOG.md`, apply approved documentation changes to `.pi/docs/`, then copy the approved `.pi/docs/` files into the matching root public docs so `just release-docs-check` passes.
 
 7. Draft the changelog entry.
    - Group items under these sections when applicable:
@@ -77,7 +79,8 @@ Output format:
 - `PRs included:`
 - `Direct commits included:`
 - `Excluded as housekeeping:`
-- `Public docs release-readiness audit:`
+- `Next-release docs audit:`
+- `Public docs finalization plan:`
 - `Proposed changelog entry:`
 
 If the range has no meaningful user-facing changes, say that plainly instead of forcing entries.

@@ -52,7 +52,10 @@ Unit tests live next to the code (`#[cfg(test)] mod tests`). If you add behavior
 
 - Conventional commits, lowercase, no emojis.
 - Do not edit `CHANGELOG.md` during normal feature or fix work. Changelog entries are drafted and applied immediately before release.
-- Do not advertise unreleased features in public docs before the release is cut. Keep README, `CONFIGURATION.md`, `INTEGRATIONS.md`, `SOCKET_API.md`, website copy, and config examples aligned with the latest published release unless the user explicitly asks for prerelease docs.
+- Treat the root public docs as the latest released docs. Do not document unreleased behavior in root `README.md`, `CONFIGURATION.md`, `INTEGRATIONS.md`, or `SOCKET_API.md` during normal feature or fix work.
+- Treat `.pi/docs/README.md`, `.pi/docs/CONFIGURATION.md`, `.pi/docs/INTEGRATIONS.md`, and `.pi/docs/SOCKET_API.md` as the next-release versions of those public docs. When unreleased work needs public documentation, update the matching file under `.pi/docs/` instead of the root file.
+- Before release, copy the approved `.pi/docs/` versions into the root public docs. `just release` blocks until each root public doc is identical to its `.pi/docs/` counterpart.
+- Keep website copy and config examples aligned with the latest published release unless the user explicitly asks for prerelease docs.
 - Put local PRDs, planning notes, and exploratory specs under `.prd/`; that directory is ignored and locally controlled.
 - When a commit fully fixes a GitHub issue, include `fixes #<issue-number>` in the commit body so GitHub closes it on merge.
 - Rust: no `unwrap()` in production code. `tracing` for logging. `#[allow]` only with a comment explaining why.
@@ -61,7 +64,7 @@ Unit tests live next to the code (`#[cfg(test)] mod tests`). If you add behavior
 
 ## Releases
 
-Before cutting a release, draft the upcoming notes under `## Unreleased` in `CHANGELOG.md`. The release script promotes that section into the versioned entry.
+Before cutting a release, draft the upcoming notes under `## Unreleased` in `CHANGELOG.md`, review `.pi/docs/` against the root public docs, and copy the approved next-release docs into the root public docs. The release script promotes the changelog section into the versioned entry.
 
 Default release flow:
 
