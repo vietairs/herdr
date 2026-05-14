@@ -74,6 +74,28 @@ impl Palette {
         }
     }
 
+    /// Catppuccin Latte — the light Catppuccin flavor.
+    pub fn catppuccin_latte() -> Self {
+        Self {
+            accent: Color::Rgb(30, 102, 245),
+            panel_bg: Color::Rgb(239, 241, 245),
+            surface0: Color::Rgb(204, 208, 218),
+            surface1: Color::Rgb(188, 192, 204),
+            surface_dim: Color::Rgb(230, 233, 239),
+            overlay0: Color::Rgb(156, 160, 176),
+            overlay1: Color::Rgb(140, 143, 161),
+            text: Color::Rgb(76, 79, 105),
+            subtext0: Color::Rgb(108, 111, 133),
+            mauve: Color::Rgb(136, 57, 239),
+            green: Color::Rgb(64, 160, 43),
+            yellow: Color::Rgb(223, 142, 29),
+            red: Color::Rgb(210, 15, 57),
+            blue: Color::Rgb(30, 102, 245),
+            teal: Color::Rgb(23, 146, 153),
+            peach: Color::Rgb(254, 100, 11),
+        }
+    }
+
     /// Tokyo Night — blue-purple aesthetic.
     pub fn tokyo_night() -> Self {
         Self {
@@ -93,6 +115,28 @@ impl Palette {
             blue: Color::Rgb(122, 162, 247),
             teal: Color::Rgb(125, 207, 255),
             peach: Color::Rgb(255, 158, 100),
+        }
+    }
+
+    /// Tokyo Night Day — the light Tokyo Night style.
+    pub fn tokyo_night_day() -> Self {
+        Self {
+            accent: Color::Rgb(46, 125, 233),
+            panel_bg: Color::Rgb(225, 226, 231),
+            surface0: Color::Rgb(196, 200, 218),
+            surface1: Color::Rgb(168, 174, 203),
+            surface_dim: Color::Rgb(210, 211, 218),
+            overlay0: Color::Rgb(137, 144, 179),
+            overlay1: Color::Rgb(104, 112, 154),
+            text: Color::Rgb(55, 96, 191),
+            subtext0: Color::Rgb(97, 114, 176),
+            mauve: Color::Rgb(120, 71, 189),
+            green: Color::Rgb(88, 117, 57),
+            yellow: Color::Rgb(140, 108, 62),
+            red: Color::Rgb(245, 42, 101),
+            blue: Color::Rgb(46, 125, 233),
+            teal: Color::Rgb(17, 140, 116),
+            peach: Color::Rgb(177, 92, 0),
         }
     }
 
@@ -162,6 +206,28 @@ impl Palette {
         }
     }
 
+    /// Gruvbox Light — the light retro palette.
+    pub fn gruvbox_light() -> Self {
+        Self {
+            accent: Color::Rgb(7, 102, 120),
+            panel_bg: Color::Rgb(251, 241, 199),
+            surface0: Color::Rgb(235, 219, 178),
+            surface1: Color::Rgb(213, 196, 161),
+            surface_dim: Color::Rgb(242, 229, 188),
+            overlay0: Color::Rgb(146, 131, 116),
+            overlay1: Color::Rgb(124, 111, 100),
+            text: Color::Rgb(60, 56, 54),
+            subtext0: Color::Rgb(80, 73, 69),
+            mauve: Color::Rgb(143, 63, 113),
+            green: Color::Rgb(121, 116, 14),
+            yellow: Color::Rgb(181, 118, 20),
+            red: Color::Rgb(157, 0, 6),
+            blue: Color::Rgb(7, 102, 120),
+            teal: Color::Rgb(66, 123, 88),
+            peach: Color::Rgb(175, 58, 3),
+        }
+    }
+
     /// One Dark — Atom's classic dark theme.
     pub fn one_dark() -> Self {
         Self {
@@ -184,6 +250,28 @@ impl Palette {
         }
     }
 
+    /// One Light — Atom's classic light theme.
+    pub fn one_light() -> Self {
+        Self {
+            accent: Color::Rgb(64, 120, 242),
+            panel_bg: Color::Rgb(250, 250, 250),
+            surface0: Color::Rgb(240, 240, 241),
+            surface1: Color::Rgb(229, 229, 230),
+            surface_dim: Color::Rgb(245, 245, 246),
+            overlay0: Color::Rgb(160, 161, 167),
+            overlay1: Color::Rgb(104, 107, 119),
+            text: Color::Rgb(56, 58, 66),
+            subtext0: Color::Rgb(104, 107, 119),
+            mauve: Color::Rgb(166, 38, 164),
+            green: Color::Rgb(80, 161, 79),
+            yellow: Color::Rgb(193, 132, 1),
+            red: Color::Rgb(228, 86, 73),
+            blue: Color::Rgb(64, 120, 242),
+            teal: Color::Rgb(1, 132, 188),
+            peach: Color::Rgb(152, 104, 1),
+        }
+    }
+
     /// Solarized Dark — Ethan Schoonover's classic.
     pub fn solarized() -> Self {
         Self {
@@ -195,6 +283,28 @@ impl Palette {
             overlay0: Color::Rgb(88, 110, 117),
             overlay1: Color::Rgb(101, 123, 131),
             text: Color::Rgb(147, 161, 161),
+            subtext0: Color::Rgb(131, 148, 150),
+            mauve: Color::Rgb(211, 54, 130),
+            green: Color::Rgb(133, 153, 0),
+            yellow: Color::Rgb(181, 137, 0),
+            red: Color::Rgb(220, 50, 47),
+            blue: Color::Rgb(38, 139, 210),
+            teal: Color::Rgb(42, 161, 152),
+            peach: Color::Rgb(203, 75, 22),
+        }
+    }
+
+    /// Solarized Light — Ethan Schoonover's light variant.
+    pub fn solarized_light() -> Self {
+        Self {
+            accent: Color::Rgb(38, 139, 210),
+            panel_bg: Color::Rgb(253, 246, 227),
+            surface0: Color::Rgb(238, 232, 213),
+            surface1: Color::Rgb(147, 161, 161),
+            surface_dim: Color::Rgb(238, 232, 213),
+            overlay0: Color::Rgb(147, 161, 161),
+            overlay1: Color::Rgb(88, 110, 117),
+            text: Color::Rgb(101, 123, 131),
             subtext0: Color::Rgb(131, 148, 150),
             mauve: Color::Rgb(211, 54, 130),
             green: Color::Rgb(133, 153, 0),
@@ -228,6 +338,28 @@ impl Palette {
         }
     }
 
+    /// Kanagawa Lotus — the light Kanagawa variant.
+    pub fn kanagawa_lotus() -> Self {
+        Self {
+            accent: Color::Rgb(77, 105, 155),
+            panel_bg: Color::Rgb(242, 236, 188),
+            surface0: Color::Rgb(220, 213, 172),
+            surface1: Color::Rgb(201, 203, 209),
+            surface_dim: Color::Rgb(213, 206, 163),
+            overlay0: Color::Rgb(160, 156, 172),
+            overlay1: Color::Rgb(138, 137, 128),
+            text: Color::Rgb(84, 84, 100),
+            subtext0: Color::Rgb(67, 67, 108),
+            mauve: Color::Rgb(98, 76, 131),
+            green: Color::Rgb(111, 137, 78),
+            yellow: Color::Rgb(119, 113, 63),
+            red: Color::Rgb(200, 64, 83),
+            blue: Color::Rgb(77, 105, 155),
+            teal: Color::Rgb(78, 140, 162),
+            peach: Color::Rgb(204, 109, 0),
+        }
+    }
+
     /// Rosé Pine — muted, elegant.
     pub fn rose_pine() -> Self {
         Self {
@@ -247,6 +379,28 @@ impl Palette {
             blue: Color::Rgb(49, 116, 143),    // pine
             teal: Color::Rgb(156, 207, 216),   // foam
             peach: Color::Rgb(234, 154, 151),  // rose
+        }
+    }
+
+    /// Rosé Pine Dawn — the light Rosé Pine variant.
+    pub fn rose_pine_dawn() -> Self {
+        Self {
+            accent: Color::Rgb(144, 122, 169),
+            panel_bg: Color::Rgb(250, 244, 237),
+            surface0: Color::Rgb(242, 233, 225),
+            surface1: Color::Rgb(255, 250, 243),
+            surface_dim: Color::Rgb(242, 233, 225),
+            overlay0: Color::Rgb(152, 147, 165),
+            overlay1: Color::Rgb(121, 117, 147),
+            text: Color::Rgb(70, 66, 97),
+            subtext0: Color::Rgb(121, 117, 147),
+            mauve: Color::Rgb(144, 122, 169),
+            green: Color::Rgb(40, 105, 131),
+            yellow: Color::Rgb(234, 157, 52),
+            red: Color::Rgb(180, 99, 122),
+            blue: Color::Rgb(40, 105, 131),
+            teal: Color::Rgb(86, 148, 159),
+            peach: Color::Rgb(215, 130, 126),
         }
     }
 
@@ -276,14 +430,21 @@ impl Palette {
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().replace([' ', '_'], "-").as_str() {
             "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin()),
+            "catppuccin-latte" | "latte" | "light" => Some(Self::catppuccin_latte()),
             "tokyo-night" | "tokyonight" => Some(Self::tokyo_night()),
+            "tokyo-night-day" | "tokyo-day" | "tokyonight-day" => Some(Self::tokyo_night_day()),
             "dracula" => Some(Self::dracula()),
             "nord" => Some(Self::nord()),
             "gruvbox" | "gruvbox-dark" => Some(Self::gruvbox()),
+            "gruvbox-light" => Some(Self::gruvbox_light()),
             "one-dark" | "onedark" => Some(Self::one_dark()),
+            "one-light" | "onelight" => Some(Self::one_light()),
             "solarized" | "solarized-dark" => Some(Self::solarized()),
+            "solarized-light" => Some(Self::solarized_light()),
             "kanagawa" => Some(Self::kanagawa()),
+            "kanagawa-lotus" | "lotus" => Some(Self::kanagawa_lotus()),
             "rose-pine" | "rosepine" => Some(Self::rose_pine()),
+            "rose-pine-dawn" | "rosepine-dawn" | "dawn" => Some(Self::rose_pine_dawn()),
             "vesper" => Some(Self::vesper()),
             _ => None,
         }
@@ -428,14 +589,21 @@ impl SettingsSection {
 /// All built-in theme names in display order.
 pub const THEME_NAMES: &[&str] = &[
     "catppuccin",
+    "catppuccin-latte",
     "tokyo-night",
+    "tokyo-night-day",
     "dracula",
     "nord",
     "gruvbox",
+    "gruvbox-light",
     "one-dark",
+    "one-light",
     "solarized",
+    "solarized-light",
     "kanagawa",
+    "kanagawa-lotus",
     "rose-pine",
+    "rose-pine-dawn",
     "vesper",
 ];
 
@@ -981,6 +1149,26 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn built_in_theme_names_resolve() {
+        for name in THEME_NAMES {
+            assert!(
+                Palette::from_name(name).is_some(),
+                "theme should resolve: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn light_theme_aliases_resolve() {
+        for name in ["light", "latte", "tokyo-day", "onelight", "lotus", "dawn"] {
+            assert!(
+                Palette::from_name(name).is_some(),
+                "theme should resolve: {name}"
+            );
+        }
+    }
 
     #[test]
     fn key_matches_requires_exact_modifiers() {
