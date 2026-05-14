@@ -37,7 +37,9 @@ use crate::detect::AgentState;
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::server::client_transport::{self, ClientWriter, ServerEvent};
-use crate::server::protocol::{self, FrameData, RenderEncoding, ServerMessage, MAX_FRAME_SIZE};
+use crate::server::protocol::{
+    self, FrameData, RenderEncoding, ServerMessage, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE,
+};
 use crate::server::render_stream::ClientRenderState;
 
 // ---------------------------------------------------------------------------
@@ -1008,13 +1010,21 @@ impl HeadlessServer {
 
     /// Encodes a server message into a length-prefixed frame.
     fn frame_server_message(msg: &ServerMessage) -> Result<Vec<u8>, protocol::FramingError> {
+        Self::frame_server_message_with_max(msg, MAX_FRAME_SIZE)
+    }
+
+    /// Encodes a server message using an explicit payload cap.
+    fn frame_server_message_with_max(
+        msg: &ServerMessage,
+        max_frame_size: usize,
+    ) -> Result<Vec<u8>, protocol::FramingError> {
         let mut framed = Vec::new();
         protocol::write_message(&mut framed, msg)?;
         let payload_len = framed.len().saturating_sub(4);
-        if payload_len > MAX_FRAME_SIZE {
+        if payload_len > max_frame_size {
             return Err(protocol::FramingError::Oversized {
                 claimed: payload_len,
-                max: MAX_FRAME_SIZE,
+                max: max_frame_size,
             });
         }
         Ok(framed)
@@ -1542,11 +1552,11 @@ impl HeadlessServer {
             };
 
             let mut commit_graphics_cache = true;
-            if frame.graphics.len() > MAX_FRAME_SIZE {
+            if frame.graphics.len() > MAX_GRAPHICS_FRAME_SIZE {
                 warn!(
                     client_id,
                     graphics_bytes = frame.graphics.len(),
-                    max = MAX_FRAME_SIZE,
+                    max = MAX_GRAPHICS_FRAME_SIZE,
                     "dropping oversized graphics payload for client frame"
                 );
                 frame.graphics.clear();
@@ -1559,7 +1569,15 @@ impl HeadlessServer {
             };
             let mut frame_to_commit = frame.clone();
 
-            let serialized = match Self::frame_server_message(prepared.message()) {
+            let max_frame_size = if frame.graphics.is_empty() {
+                MAX_FRAME_SIZE
+            } else {
+                MAX_GRAPHICS_FRAME_SIZE
+            };
+            let serialized = match Self::frame_server_message_with_max(
+                prepared.message(),
+                max_frame_size,
+            ) {
                 Ok(framed) => framed,
                 Err(protocol::FramingError::Oversized { claimed, max })
                     if !frame.graphics.is_empty() =>

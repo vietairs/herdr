@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 use crate::server::headless::client_socket_path;
 use crate::server::protocol::{
     self, ClientMessage, NotifyKind, RenderEncoding, ServerMessage, MAX_FRAME_SIZE,
-    PROTOCOL_VERSION,
+    MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
@@ -468,7 +468,17 @@ async fn run_client_loop(
     let server_read_tx = event_tx.clone();
     let read_stream = stream.try_clone().map_err(ClientError::ConnectionFailed)?;
     std::thread::spawn(move || {
-        server_reader_thread(read_stream, server_read_tx, &server_read_quit);
+        let max_frame_size = if kitty_graphics_enabled {
+            MAX_GRAPHICS_FRAME_SIZE
+        } else {
+            MAX_FRAME_SIZE
+        };
+        server_reader_thread(
+            read_stream,
+            server_read_tx,
+            &server_read_quit,
+            max_frame_size,
+        );
     });
 
     // Use the original stream for writing (blocking is fine since we write
@@ -588,6 +598,7 @@ fn server_reader_thread(
     mut stream: UnixStream,
     event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
+    max_frame_size: usize,
 ) {
     // Ensure the read stream is in blocking mode to avoid WouldBlock errors
     // from read_exact inside read_message. The stream should already be
@@ -603,7 +614,7 @@ fn server_reader_thread(
             break;
         }
 
-        match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
+        match protocol::read_message(&mut stream, max_frame_size) {
             Ok(msg) => {
                 if event_tx
                     .blocking_send(ClientLoopEvent::ServerMessage(msg))
@@ -730,30 +741,20 @@ fn forward_clipboard(data: &str) {
 // Frame output
 // ---------------------------------------------------------------------------
 
-const SYNC_OUTPUT_END: &[u8] = b"\x1b[?2026l";
-
 fn write_encoded_frame_with_graphics(
     mut writer: impl io::Write,
     encoded: &[u8],
     graphics: &[u8],
 ) -> io::Result<()> {
+    writer.write_all(encoded)?;
     if graphics.is_empty() {
-        return writer.write_all(encoded);
-    }
-
-    record_received_kitty_graphics(graphics);
-
-    if let Some(sync_end) = rfind_subslice(encoded, SYNC_OUTPUT_END) {
-        writer.write_all(&encoded[..sync_end])?;
-        writer.write_all(graphics)?;
-        writer.write_all(&encoded[sync_end..])?;
         return Ok(());
     }
 
-    writer.write_all(b"\x1b[?2026h")?;
-    writer.write_all(encoded)?;
+    record_received_kitty_graphics(graphics);
+    writer.write_all(b"\x1b7")?;
     writer.write_all(graphics)?;
-    writer.write_all(SYNC_OUTPUT_END)
+    writer.write_all(b"\x1b8")
 }
 
 fn contains_kitty_graphics_bytes(bytes: &[u8]) -> bool {
@@ -825,16 +826,6 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
-}
-
-fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-
-    haystack
-        .windows(needle.len())
-        .rposition(|window| window == needle)
 }
 
 // ---------------------------------------------------------------------------
@@ -920,7 +911,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn graphics_bytes_are_inserted_before_blit_sync_end() {
+    fn graphics_bytes_are_written_after_blit_with_saved_cursor() {
         let mut output = Vec::new();
         write_encoded_frame_with_graphics(
             &mut output,
@@ -929,15 +920,18 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(output, b"\x1b[?2026htextgraphics\x1b[?2026lcursor");
+        assert_eq!(
+            output,
+            b"\x1b[?2026htext\x1b[?2026lcursor\x1b7graphics\x1b8"
+        );
     }
 
     #[test]
-    fn graphics_bytes_fallback_wraps_unsynchronized_blit() {
+    fn empty_graphics_writes_only_blit_frame() {
         let mut output = Vec::new();
-        write_encoded_frame_with_graphics(&mut output, b"text", b"graphics").unwrap();
+        write_encoded_frame_with_graphics(&mut output, b"text", b"").unwrap();
 
-        assert_eq!(output, b"\x1b[?2026htextgraphics\x1b[?2026l");
+        assert_eq!(output, b"text");
     }
 
     #[test]
