@@ -159,12 +159,14 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # [ui.sound.agents]
 # droid = "off"
 
-[advanced]
+[experimental]
 # Allow launching herdr from inside a herdr-managed pane.
 # allow_nested = false
 # Experimental local Kitty graphics rendering for attached clients.
-# Requires a Kitty graphics-compatible outer terminal. Detach/headless replay is not supported yet.
+# Requires a Kitty graphics-compatible outer terminal.
 # kitty_graphics = false
+
+[advanced]
 # Maximum scrollback buffer size in bytes retained per pane terminal.
 # Matches Ghostty's default scrollback-limit behavior.
 # scrollback_limit_bytes = 10000000
@@ -175,7 +177,7 @@ fn should_block_nested(config: &config::Config) -> bool {
 }
 
 fn should_block_nested_for_env(config: &config::Config, herdr_env: Option<&str>) -> bool {
-    !config.advanced.allow_nested && herdr_env == Some(HERDR_ENV_VALUE)
+    !config.experimental.allow_nested && herdr_env == Some(HERDR_ENV_VALUE)
 }
 
 fn random_nested_message() -> &'static str {
@@ -539,7 +541,8 @@ mod tests {
 
     #[test]
     fn nested_herdr_does_not_block_when_allowed() {
-        let config: config::Config = toml::from_str("[advanced]\nallow_nested = true\n").unwrap();
+        let config: config::Config =
+            toml::from_str("[experimental]\nallow_nested = true\n").unwrap();
         assert!(!should_block_nested_for_env(&config, Some(HERDR_ENV_VALUE)));
     }
 

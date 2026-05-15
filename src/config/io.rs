@@ -166,6 +166,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut invalid_sections,
         |section| config.advanced = section,
     );
+    load_live_section(
+        table,
+        "experimental",
+        "experimental config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.experimental = section,
+    );
 
     Ok(LoadedConfig {
         config,

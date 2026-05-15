@@ -44,12 +44,13 @@ Reloadable now:
 - `ui.agent_panel_scope`
 - `ui.toast.delivery`
 - server-side `ui.sound` policy; attached thin clients refresh local sound config after a successful sound-policy change
+- `experimental.kitty_graphics`
 - `advanced.scrollback_limit_bytes` for panes created after reload
 - `ui.sidebar_width` as the default width; current width updates only while it is still config-owned
 
 Startup-only or special-case:
 - `onboarding` does not reopen onboarding during reload
-- `advanced.allow_nested` is checked before launch and needs a restart
+- `experimental.allow_nested` is checked before launch and needs a restart
 - existing pane scrollback buffers are not resized during reload
 - terminal notifications and sounds are client-local side effects and are sent to the foreground attached client
 
@@ -365,11 +366,37 @@ available agent keys:
 - `droid`
 - `amp`
 
+## experimental
+
+```toml
+[experimental]
+allow_nested = false
+kitty_graphics = false
+```
+
+### options
+
+| option | default | description |
+|--------|---------|-------------|
+| `experimental.allow_nested` | `false` | allow launching herdr from inside a herdr-managed pane |
+| `experimental.kitty_graphics` | `false` | enable experimental local Kitty graphics rendering for attached clients |
+
+### nested launches
+
+By default, herdr blocks nested launches when `HERDR_ENV=1` is already present.
+
+Set `allow_nested = true` only for debugging or intentionally nested setups.
+
+### Kitty graphics
+
+`kitty_graphics` enables experimental local Kitty graphics rendering for attached clients.
+
+It requires a Kitty graphics-compatible outer terminal.
+
 ## advanced
 
 ```toml
 [advanced]
-allow_nested = false
 scrollback_limit_bytes = 10000000
 ```
 
@@ -377,14 +404,7 @@ scrollback_limit_bytes = 10000000
 
 | option | default | description |
 |--------|---------|-------------|
-| `advanced.allow_nested` | `false` | allow launching herdr from inside a herdr-managed pane |
 | `advanced.scrollback_limit_bytes` | `10000000` | maximum scrollback buffer size in bytes retained per pane terminal |
-
-### nested launches
-
-By default, herdr blocks nested launches when `HERDR_ENV=1` is already present.
-
-Set `allow_nested = true` only for debugging or intentionally nested setups.
 
 ### scrollback
 
@@ -394,7 +414,7 @@ The default matches Ghostty's `scrollback-limit` value.
 
 Set `scrollback_limit_bytes = 0` to disable pane scrollback entirely.
 
-The old `advanced.scrollback_lines` key is still accepted as a compatibility alias, but it uses the same byte-based value.
+The legacy `scrollback_lines` key is still accepted inside `[advanced]`, but it uses the same byte-based value.
 
 ## environment variables
 

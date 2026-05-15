@@ -197,7 +197,7 @@ impl App {
         event_hub: crate::api::EventHub,
     ) -> Self {
         let (prefix_code, prefix_mods) = config.prefix_key();
-        crate::kitty_graphics::set_enabled(config.advanced.kitty_graphics);
+        crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(64);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(AtomicBool::new(false));
@@ -370,7 +370,7 @@ impl App {
             mouse_capture: config.ui.mouse_capture,
             confirm_close: config.ui.confirm_close,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
-            kitty_graphics_enabled: config.advanced.kitty_graphics,
+            kitty_graphics_enabled: config.experimental.kitty_graphics,
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
             accent: crate::config::parse_color(&config.ui.accent),
             sound: config.ui.sound.clone(),
@@ -718,13 +718,16 @@ impl App {
             self.state.toast_config = config.ui.toast.clone();
         }
 
-        if !invalid_section("advanced") {
+        if !invalid_section("experimental") {
             let was_kitty_graphics_enabled = self.state.kitty_graphics_enabled;
-            self.state.kitty_graphics_enabled = config.advanced.kitty_graphics;
-            crate::kitty_graphics::set_enabled(config.advanced.kitty_graphics);
-            if was_kitty_graphics_enabled && !config.advanced.kitty_graphics {
+            self.state.kitty_graphics_enabled = config.experimental.kitty_graphics;
+            crate::kitty_graphics::set_enabled(config.experimental.kitty_graphics);
+            if was_kitty_graphics_enabled && !config.experimental.kitty_graphics {
                 let _ = crate::kitty_graphics::clear_all_host_graphics();
             }
+        }
+
+        if !invalid_section("advanced") {
             self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
         }
 

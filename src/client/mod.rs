@@ -309,7 +309,7 @@ pub fn run_client() -> io::Result<()> {
 
     let loaded_config = crate::config::Config::load();
     let sound_config = loaded_config.config.ui.sound;
-    let kitty_graphics_enabled = loaded_config.config.advanced.kitty_graphics;
+    let kitty_graphics_enabled = loaded_config.config.experimental.kitty_graphics;
 
     let socket_path = client_socket_path();
     crate::logging::startup("client");
