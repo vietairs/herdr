@@ -32,9 +32,9 @@ build:
 build-libghostty-vt:
     scripts/build_vendored_libghostty_vt.sh
 
-# Check that public docs have been finalized from .pi/docs before release
+# Check that public docs and changelog have been finalized from .pi/docs before release
 release-docs-check:
-    @for file in README.md CONFIGURATION.md INTEGRATIONS.md SOCKET_API.md; do \
+    @for file in README.md CONFIGURATION.md INTEGRATIONS.md SOCKET_API.md CHANGELOG.md; do \
         if ! diff -u "$file" ".pi/docs/$file"; then \
             echo "error: $file differs from .pi/docs/$file; finalize release docs before releasing"; \
             exit 1; \
@@ -53,10 +53,11 @@ release version:
     fi
     just release-docs-check
     python3 scripts/changelog.py prepare --version {{version}}
+    cp CHANGELOG.md .pi/docs/CHANGELOG.md
     sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
     cargo update -p herdr --offline
     just check
-    git add CHANGELOG.md Cargo.toml Cargo.lock
+    git add CHANGELOG.md .pi/docs/CHANGELOG.md Cargo.toml Cargo.lock
     git diff --cached --quiet || git commit -m "release: v{{version}}"
     git tag -a v{{version}} -m "v{{version}}"
     git push --follow-tags
