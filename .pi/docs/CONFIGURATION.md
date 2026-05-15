@@ -310,9 +310,9 @@ for best macos support, install `terminal-notifier`:
 brew install terminal-notifier
 ```
 
-when `terminal-notifier` is installed, herdr shows the herdr icon in system notifications. herdr also tries to focus the hosting terminal when a notification is clicked. click-to-return is supported for detected ghostty, iterm2, wezterm, kitty, alacritty, and terminal.app sessions.
+when `terminal-notifier` is installed, herdr tries to focus the hosting terminal when a notification is clicked. click-to-return is supported for detected ghostty, iterm2, wezterm, kitty, alacritty, and terminal.app sessions.
 
-without `terminal-notifier`, herdr falls back to built-in `osascript`. this still shows a macos notification, but it cannot set the herdr icon and clicking the notification may focus the apple script runner instead of returning to your terminal.
+without `terminal-notifier`, herdr falls back to built-in `osascript`. this still shows a macos notification, but clicking the notification may focus the apple script runner instead of returning to your terminal.
 
 compatibility note:
 - older configs may still use `ui.toast.enabled = true|false`

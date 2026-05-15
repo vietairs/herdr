@@ -8,7 +8,6 @@ use std::sync::OnceLock;
 use super::{ClipboardCommand, ForegroundJob, ForegroundProcess, Signal};
 
 const PROC_PGRP_ONLY: u32 = 2;
-const HERDR_LOGO_PNG: &[u8] = include_bytes!("../../assets/logo.png");
 
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -205,9 +204,9 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
 
 /// Show a native macOS notification.
 ///
-/// Prefer `terminal-notifier` when it is installed because it supports Herdr's
-/// icon and can activate the hosting terminal on click. Fall back to built-in
-/// AppleScript notifications when it is not available.
+/// Prefer `terminal-notifier` when it is installed because it can activate the
+/// hosting terminal on click. Fall back to built-in AppleScript notifications
+/// when it is not available.
 pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
     show_desktop_notification_with_command(title, body, |program| Command::new(program))
 }
@@ -229,12 +228,10 @@ fn show_terminal_notifier_notification(
     body: Option<&str>,
     command: &mut impl FnMut(&str) -> Command,
 ) -> std::io::Result<bool> {
-    let icon_path = cached_notification_icon_path().ok();
     let activate_bundle_id = verified_terminal_bundle_identifier(command);
     show_terminal_notifier_notification_with_options(
         title,
         body,
-        icon_path.as_deref(),
         activate_bundle_id.as_deref(),
         command,
     )
@@ -243,12 +240,11 @@ fn show_terminal_notifier_notification(
 fn show_terminal_notifier_notification_with_options(
     title: &str,
     body: Option<&str>,
-    icon_path: Option<&Path>,
     activate_bundle_id: Option<&str>,
     command: &mut impl FnMut(&str) -> Command,
 ) -> std::io::Result<bool> {
     let mut cmd = command("terminal-notifier");
-    build_terminal_notifier_command(&mut cmd, title, body, icon_path, activate_bundle_id);
+    build_terminal_notifier_command(&mut cmd, title, body, activate_bundle_id);
     run_notification_command(cmd)
 }
 
@@ -256,14 +252,10 @@ fn build_terminal_notifier_command(
     cmd: &mut Command,
     title: &str,
     body: Option<&str>,
-    icon_path: Option<&Path>,
     activate_bundle_id: Option<&str>,
 ) {
     cmd.arg("-title").arg(title);
     cmd.arg("-message").arg(body.unwrap_or_default());
-    if let Some(icon_path) = icon_path {
-        cmd.arg("-appIcon").arg(icon_path);
-    }
     if let Some(bundle_id) = activate_bundle_id {
         cmd.arg("-activate").arg(bundle_id);
     }
@@ -284,28 +276,6 @@ fn show_osascript_notification(
         .arg(title)
         .arg(body.unwrap_or_default());
     run_notification_command(cmd)
-}
-
-fn cached_notification_icon_path() -> std::io::Result<PathBuf> {
-    static ICON_PATH: OnceLock<std::io::Result<PathBuf>> = OnceLock::new();
-    match ICON_PATH.get_or_init(write_notification_icon) {
-        Ok(path) => Ok(path.clone()),
-        Err(err) => Err(std::io::Error::new(err.kind(), err.to_string())),
-    }
-}
-
-fn write_notification_icon() -> std::io::Result<PathBuf> {
-    let cache_dir = if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join("Library/Caches/herdr")
-    } else {
-        std::env::temp_dir().join("herdr")
-    };
-    std::fs::create_dir_all(&cache_dir)?;
-    let path = cache_dir.join("logo.png");
-    if std::fs::read(&path).ok().as_deref() != Some(HERDR_LOGO_PNG) {
-        std::fs::write(&path, HERDR_LOGO_PNG)?;
-    }
-    Ok(path)
 }
 
 fn verified_terminal_bundle_identifier(
@@ -694,7 +664,6 @@ mod tests {
             &mut cmd,
             "pi finished",
             Some("workspace 1"),
-            Some(Path::new("/tmp/herdr-logo.png")),
             Some("com.mitchellh.ghostty"),
         );
         let args = cmd
@@ -708,8 +677,6 @@ mod tests {
                 "pi finished",
                 "-message",
                 "workspace 1",
-                "-appIcon",
-                "/tmp/herdr-logo.png",
                 "-activate",
                 "com.mitchellh.ghostty"
             ]
@@ -735,7 +702,6 @@ mod tests {
         let shown = show_terminal_notifier_notification_with_options(
             "title",
             Some("body"),
-            Some(Path::new("/tmp/herdr-logo.png")),
             Some("com.mitchellh.ghostty"),
             &mut command,
         )
@@ -745,7 +711,6 @@ mod tests {
         let args = std::fs::read_to_string(&path).expect("args file");
         let _ = std::fs::remove_file(&path);
         assert!(args.starts_with("terminal-notifier:"), "{args}");
-        assert!(args.contains("-appIcon /tmp/herdr-logo.png"), "{args}");
         assert!(args.contains("-activate com.mitchellh.ghostty"), "{args}");
         assert!(!args.contains("osascript"), "{args}");
     }
