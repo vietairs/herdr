@@ -17,6 +17,10 @@ pub(crate) fn terminal_direct_navigation_action(
     state: &AppState,
     key: &KeyEvent,
 ) -> Option<NavigateAction> {
+    if let Some(action) = indexed_navigation_action(state, key) {
+        return Some(action);
+    }
+
     let kb = &state.keybinds;
     if kb
         .previous_workspace
@@ -373,6 +377,9 @@ pub(crate) enum NavigateAction {
     NewWorkspace,
     RenameWorkspace,
     CloseWorkspace,
+    SwitchWorkspace(usize),
+    SwitchTab(usize),
+    FocusAgent(usize),
     PreviousWorkspace,
     NextWorkspace,
     PreviousAgent,
@@ -398,7 +405,40 @@ pub(crate) enum NavigateAction {
     Detach,
 }
 
+fn indexed_navigation_action(state: &AppState, key: &KeyEvent) -> Option<NavigateAction> {
+    let KeyCode::Char(c @ '1'..='9') = key.code else {
+        return None;
+    };
+    let idx = (c as usize) - ('1' as usize);
+    let kb = &state.keybinds;
+
+    if kb
+        .indexed_tabs
+        .is_some_and(|mods| key_matches(key, KeyCode::Char(c), mods))
+    {
+        return Some(NavigateAction::SwitchTab(idx));
+    }
+    if kb
+        .indexed_workspaces
+        .is_some_and(|mods| key_matches(key, KeyCode::Char(c), mods))
+    {
+        return Some(NavigateAction::SwitchWorkspace(idx));
+    }
+    if kb
+        .indexed_agents
+        .is_some_and(|mods| key_matches(key, KeyCode::Char(c), mods))
+    {
+        return Some(NavigateAction::FocusAgent(idx));
+    }
+
+    None
+}
+
 fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateAction> {
+    if let Some(action) = indexed_navigation_action(state, key) {
+        return Some(action);
+    }
+
     let kb = &state.keybinds;
     if key_matches(key, kb.new_workspace.0, kb.new_workspace.1) {
         return Some(NavigateAction::NewWorkspace);
@@ -524,6 +564,27 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
                     state.close_selected_workspace();
                     leave_navigate_mode(state);
                 }
+            }
+        }
+        NavigateAction::SwitchWorkspace(idx) => {
+            if idx < state.workspaces.len() {
+                state.switch_workspace(idx);
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::SwitchTab(idx) => {
+            let tab_exists = state
+                .active
+                .and_then(|ws_idx| state.workspaces.get(ws_idx))
+                .is_some_and(|ws| idx < ws.tabs.len());
+            if tab_exists {
+                state.switch_tab(idx);
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::FocusAgent(idx) => {
+            if state.focus_agent_entry(idx) {
+                leave_navigate_mode(state);
             }
         }
         NavigateAction::PreviousWorkspace => {
@@ -789,6 +850,20 @@ mod tests {
         );
 
         assert_eq!(action, Some(NavigateAction::FocusPaneLeft));
+    }
+
+    #[test]
+    fn terminal_direct_indexed_tab_shortcut_maps_to_navigation_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.indexed_tabs = Some(KeyModifiers::CONTROL);
+        state.keybinds.indexed_tabs_label = Some("ctrl+1..9".into());
+
+        let action = terminal_direct_navigation_action(
+            &state,
+            &KeyEvent::new(KeyCode::Char('3'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(action, Some(NavigateAction::SwitchTab(2)));
     }
 
     #[tokio::test]

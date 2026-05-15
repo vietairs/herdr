@@ -75,9 +75,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 [keys]
 # Prefix key to enter navigate mode (default: "ctrl+b")
 # Examples: "ctrl+b", "f12", "esc", "-"
-# Accepted syntax: plain keys, ctrl/shift/alt modifiers, and special keys like enter/tab/esc/left/right/up/down
+# Accepted syntax: plain keys, ctrl/shift/alt/cmd/super modifiers, and special keys like enter/tab/esc/left/right/up/down
 # Most reliable bindings are plain keys, ctrl+letter, esc/tab/enter, and function keys.
-# alt+... and punctuation-with-modifiers may depend on your terminal/tmux setup.
+# alt+..., cmd/super, and punctuation-with-modifiers may depend on your terminal/tmux setup.
 # prefix = "ctrl+b"
 
 # Navigate-mode actions
@@ -115,6 +115,13 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # key = "g"
 # type = "pane"
 # command = "lazygit"
+
+# Optional modifier-only shortcuts expanded over number keys 1-9.
+# Empty means disabled. Examples: "ctrl", "ctrl+shift", "alt".
+# [keys.indexed]
+# tabs = ""       # e.g. "ctrl" makes ctrl+1..9 switch tabs
+# workspaces = "" # e.g. "ctrl+shift" makes ctrl+shift+1..9 switch workspaces
+# agents = ""     # e.g. "alt" makes alt+1..9 focus agent rows
 
 [ui]
 # Sidebar width (auto-scaled based on workspace names, this sets the default)

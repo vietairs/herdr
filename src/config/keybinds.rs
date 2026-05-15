@@ -77,6 +77,12 @@ pub struct Keybinds {
     pub previous_agent_label: Option<String>,
     pub next_agent: Option<(KeyCode, KeyModifiers)>,
     pub next_agent_label: Option<String>,
+    pub indexed_tabs: Option<KeyModifiers>,
+    pub indexed_tabs_label: Option<String>,
+    pub indexed_workspaces: Option<KeyModifiers>,
+    pub indexed_workspaces_label: Option<String>,
+    pub indexed_agents: Option<KeyModifiers>,
+    pub indexed_agents_label: Option<String>,
     pub new_tab: (KeyCode, KeyModifiers),
     pub new_tab_label: String,
     pub rename_tab: Option<(KeyCode, KeyModifiers)>,
@@ -138,9 +144,15 @@ impl Config {
         }
 
         struct OptionalBinding {
-            scope: BindingScope,
+            scopes: Vec<BindingScope>,
             field: &'static str,
             value: Option<(KeyCode, KeyModifiers)>,
+            label: Option<String>,
+        }
+
+        struct IndexedBinding {
+            field: &'static str,
+            value: Option<KeyModifiers>,
             label: Option<String>,
         }
 
@@ -208,14 +220,14 @@ impl Config {
         }
 
         fn optional_binding(
-            scope: BindingScope,
+            scopes: Vec<BindingScope>,
             field: &'static str,
             configured_label: &str,
             diagnostics: &mut Vec<String>,
         ) -> OptionalBinding {
             if configured_label.trim().is_empty() {
                 return OptionalBinding {
-                    scope,
+                    scopes,
                     field,
                     value: None,
                     label: None,
@@ -223,7 +235,7 @@ impl Config {
             }
             match parse_key_combo(configured_label) {
                 Some(value) => OptionalBinding {
-                    scope,
+                    scopes,
                     field,
                     value: Some(value),
                     label: Some(configured_label.to_string()),
@@ -236,7 +248,41 @@ impl Config {
                     warn!(message = %diag, "config diagnostic");
                     diagnostics.push(diag);
                     OptionalBinding {
-                        scope,
+                        scopes,
+                        field,
+                        value: None,
+                        label: None,
+                    }
+                }
+            }
+        }
+
+        fn indexed_binding(
+            field: &'static str,
+            configured_label: &str,
+            diagnostics: &mut Vec<String>,
+        ) -> IndexedBinding {
+            if configured_label.trim().is_empty() {
+                return IndexedBinding {
+                    field,
+                    value: None,
+                    label: None,
+                };
+            }
+            match parse_modifier_combo(configured_label) {
+                Some(value) => IndexedBinding {
+                    field,
+                    value: Some(value),
+                    label: Some(format!("{}+1..9", configured_label.trim())),
+                },
+                None => {
+                    let diag = format!(
+                        "invalid indexed keybinding: {field} = {:?}; disabling binding",
+                        configured_label
+                    );
+                    warn!(message = %diag, "config diagnostic");
+                    diagnostics.push(diag);
+                    IndexedBinding {
                         field,
                         value: None,
                         label: None,
@@ -338,101 +384,124 @@ impl Config {
             ),
         ];
 
+        let navigate_scope = || vec![BindingScope::Navigate];
+        let terminal_direct_scope = || vec![BindingScope::TerminalDirect];
+        let direct_navigation_scopes =
+            || vec![BindingScope::Navigate, BindingScope::TerminalDirect];
+
         let mut optional_bindings = vec![
             optional_binding(
-                BindingScope::Navigate,
+                navigate_scope(),
                 "keys.detach",
                 &self.keys.detach,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                navigate_scope(),
                 "keys.reload_config",
                 &self.keys.reload_config,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                navigate_scope(),
                 "keys.open_notification_target",
                 &self.keys.open_notification_target,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                direct_navigation_scopes(),
                 "keys.previous_workspace",
                 &self.keys.previous_workspace,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                direct_navigation_scopes(),
                 "keys.next_workspace",
                 &self.keys.next_workspace,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                direct_navigation_scopes(),
                 "keys.previous_agent",
                 &self.keys.previous_agent,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                direct_navigation_scopes(),
                 "keys.next_agent",
                 &self.keys.next_agent,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                navigate_scope(),
                 "keys.rename_tab",
                 &self.keys.rename_tab,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                direct_navigation_scopes(),
                 "keys.previous_tab",
                 &self.keys.previous_tab,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                direct_navigation_scopes(),
                 "keys.next_tab",
                 &self.keys.next_tab,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                navigate_scope(),
                 "keys.close_tab",
                 &self.keys.close_tab,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::Navigate,
+                navigate_scope(),
                 "keys.rename_pane",
                 &self.keys.rename_pane,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::TerminalDirect,
+                terminal_direct_scope(),
                 "keys.focus_pane_left",
                 &self.keys.focus_pane_left,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::TerminalDirect,
+                terminal_direct_scope(),
                 "keys.focus_pane_down",
                 &self.keys.focus_pane_down,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::TerminalDirect,
+                terminal_direct_scope(),
                 "keys.focus_pane_up",
                 &self.keys.focus_pane_up,
                 &mut diagnostics,
             ),
             optional_binding(
-                BindingScope::TerminalDirect,
+                terminal_direct_scope(),
                 "keys.focus_pane_right",
                 &self.keys.focus_pane_right,
+                &mut diagnostics,
+            ),
+        ];
+
+        let mut indexed_bindings = vec![
+            indexed_binding(
+                "keys.indexed.tabs",
+                &self.keys.indexed.tabs,
+                &mut diagnostics,
+            ),
+            indexed_binding(
+                "keys.indexed.workspaces",
+                &self.keys.indexed.workspaces,
+                &mut diagnostics,
+            ),
+            indexed_binding(
+                "keys.indexed.agents",
+                &self.keys.indexed.agents,
                 &mut diagnostics,
             ),
         ];
@@ -452,11 +521,18 @@ impl Config {
             registry.register(binding.scope, binding.value, binding.field);
         }
 
+        registry.reserve_if_unbound(BindingScope::TerminalDirect, prefix, "keys.prefix");
+
         for binding in &mut optional_bindings {
             let Some(value) = binding.value else {
                 continue;
             };
-            if let Some(first_field) = registry.conflict(binding.scope, value) {
+
+            let conflict = binding
+                .scopes
+                .iter()
+                .find_map(|scope| registry.conflict(*scope, value));
+            if let Some(first_field) = conflict {
                 let diag = format!(
                     "duplicate keybinding: {} conflicts with {}; disabling binding",
                     binding.field, first_field
@@ -467,7 +543,9 @@ impl Config {
                 binding.label = None;
                 continue;
             }
-            registry.register(binding.scope, value, binding.field);
+            for scope in &binding.scopes {
+                registry.register(*scope, value, binding.field);
+            }
         }
 
         registry.reserve_if_unbound(BindingScope::Navigate, prefix, "keys.prefix");
@@ -563,6 +641,47 @@ impl Config {
             registry.reserve_if_unbound(BindingScope::Navigate, binding, field);
         }
 
+        for binding in &mut indexed_bindings {
+            let Some(modifiers) = binding.value else {
+                continue;
+            };
+
+            let mut conflict = None;
+            'indexes: for idx in 1..=9 {
+                let key = (
+                    KeyCode::Char(char::from_digit(idx, 10).unwrap_or('1')),
+                    modifiers,
+                );
+                for scope in [BindingScope::Navigate, BindingScope::TerminalDirect] {
+                    if let Some(first_field) = registry.conflict(scope, key) {
+                        conflict = Some(first_field.to_string());
+                        break 'indexes;
+                    }
+                }
+            }
+
+            if let Some(first_field) = conflict {
+                let diag = format!(
+                    "duplicate indexed keybinding: {} conflicts with {}; disabling binding",
+                    binding.field, first_field
+                );
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+                binding.value = None;
+                binding.label = None;
+                continue;
+            }
+
+            for idx in 1..=9 {
+                let key = (
+                    KeyCode::Char(char::from_digit(idx, 10).unwrap_or('1')),
+                    modifiers,
+                );
+                registry.register(BindingScope::Navigate, key, binding.field);
+                registry.register(BindingScope::TerminalDirect, key, binding.field);
+            }
+        }
+
         let mut custom_commands = Vec::new();
         for (index, command) in self.keys.command.iter().enumerate() {
             let key_field = format!("keys.command[{index}].key");
@@ -630,6 +749,12 @@ impl Config {
             previous_agent_label: optional_bindings[5].label.clone(),
             next_agent: optional_bindings[6].value,
             next_agent_label: optional_bindings[6].label.clone(),
+            indexed_tabs: indexed_bindings[0].value,
+            indexed_tabs_label: indexed_bindings[0].label.clone(),
+            indexed_workspaces: indexed_bindings[1].value,
+            indexed_workspaces_label: indexed_bindings[1].label.clone(),
+            indexed_agents: indexed_bindings[2].value,
+            indexed_agents_label: indexed_bindings[2].label.clone(),
             new_tab: bindings[3].value,
             new_tab_label: bindings[3].label.clone(),
             rename_tab: optional_bindings[7].value,
@@ -681,6 +806,15 @@ pub fn format_key_combo(binding: (KeyCode, KeyModifiers)) -> String {
     if modifiers.contains(KeyModifiers::SHIFT) {
         parts.push("shift".to_string());
     }
+    if modifiers.contains(KeyModifiers::SUPER) {
+        parts.push(super_modifier_label().to_string());
+    }
+    if modifiers.contains(KeyModifiers::HYPER) {
+        parts.push("hyper".to_string());
+    }
+    if modifiers.contains(KeyModifiers::META) {
+        parts.push("meta".to_string());
+    }
 
     let key = match code {
         KeyCode::Char(' ') => "space".to_string(),
@@ -710,6 +844,47 @@ pub fn format_key_combo(binding: (KeyCode, KeyModifiers)) -> String {
     parts.join("+")
 }
 
+fn super_modifier_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "super"
+    }
+}
+
+fn parse_modifier_token(token: &str) -> Option<KeyModifiers> {
+    match token.to_lowercase().as_str() {
+        "ctrl" | "control" => Some(KeyModifiers::CONTROL),
+        "shift" => Some(KeyModifiers::SHIFT),
+        "alt" | "option" | "meta" => Some(KeyModifiers::ALT),
+        "cmd" | "command" | "super" => Some(KeyModifiers::SUPER),
+        "hyper" => Some(KeyModifiers::HYPER),
+        _ => None,
+    }
+}
+
+fn parse_modifier_combo(s: &str) -> Option<KeyModifiers> {
+    let mut modifiers = KeyModifiers::empty();
+    let parts: Vec<&str> = s.split('+').collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    for part in &parts {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        modifiers |= parse_modifier_token(trimmed)?;
+    }
+
+    if modifiers.is_empty() {
+        None
+    } else {
+        Some(modifiers)
+    }
+}
+
 pub(super) fn parse_key_combo(s: &str) -> Option<(KeyCode, KeyModifiers)> {
     let parts: Vec<&str> = s.split('+').collect();
     let mut modifiers = KeyModifiers::empty();
@@ -717,17 +892,16 @@ pub(super) fn parse_key_combo(s: &str) -> Option<(KeyCode, KeyModifiers)> {
 
     for part in &parts {
         let trimmed = part.trim();
-        match trimmed.to_lowercase().as_str() {
-            "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
-            "shift" => modifiers |= KeyModifiers::SHIFT,
-            "alt" | "meta" => modifiers |= KeyModifiers::ALT,
-            _ if trimmed.is_empty() => return None,
-            _ => {
-                if key_str.is_some() {
-                    return None;
-                }
-                key_str = Some(trimmed);
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Some(modifier) = parse_modifier_token(trimmed) {
+            modifiers |= modifier;
+        } else {
+            if key_str.is_some() {
+                return None;
             }
+            key_str = Some(trimmed);
         }
     }
 
@@ -794,6 +968,23 @@ mod tests {
             parse_key_combo("ctrl+b"),
             Some((KeyCode::Char('b'), KeyModifiers::CONTROL))
         );
+    }
+
+    #[test]
+    fn parse_cmd_combo() {
+        assert_eq!(
+            parse_key_combo("cmd+1"),
+            Some((KeyCode::Char('1'), KeyModifiers::SUPER))
+        );
+    }
+
+    #[test]
+    fn parse_modifier_combo_for_indexed_bindings() {
+        assert_eq!(
+            parse_modifier_combo("ctrl+shift"),
+            Some(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        );
+        assert_eq!(parse_modifier_combo("1"), None);
     }
 
     #[test]
@@ -885,6 +1076,9 @@ mod tests {
         assert_eq!(kb.detach, None);
         assert_eq!(kb.previous_agent, None);
         assert_eq!(kb.next_agent, None);
+        assert_eq!(kb.indexed_tabs, None);
+        assert_eq!(kb.indexed_workspaces, None);
+        assert_eq!(kb.indexed_agents, None);
         assert_eq!(kb.split_vertical.0, KeyCode::Char('v'));
         assert_eq!(kb.split_horizontal.0, KeyCode::Char('-'));
         assert_eq!(kb.close_pane.0, KeyCode::Char('x'));
@@ -1108,6 +1302,84 @@ command = "echo hi"
                 && d.contains("navigate.quit")
         }));
         assert!(kb.custom_commands.is_empty());
+    }
+
+    #[test]
+    fn indexed_keybinds_parse_from_toml() {
+        let toml = r#"
+[keys.indexed]
+tabs = "ctrl"
+workspaces = "ctrl+shift"
+agents = "alt"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let kb = config.keybinds();
+
+        assert_eq!(kb.indexed_tabs, Some(KeyModifiers::CONTROL));
+        assert_eq!(
+            kb.indexed_workspaces,
+            Some(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        );
+        assert_eq!(kb.indexed_agents, Some(KeyModifiers::ALT));
+        assert_eq!(kb.indexed_tabs_label.as_deref(), Some("ctrl+1..9"));
+    }
+
+    #[test]
+    fn indexed_keybinding_conflict_disables_later_family() {
+        let toml = r#"
+[keys.indexed]
+tabs = "ctrl"
+workspaces = "ctrl"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let diagnostics = config.collect_diagnostics();
+        let kb = config.keybinds();
+
+        assert_eq!(kb.indexed_tabs, Some(KeyModifiers::CONTROL));
+        assert_eq!(kb.indexed_workspaces, None);
+        assert!(diagnostics.iter().any(|d| {
+            d.contains("duplicate indexed keybinding")
+                && d.contains("keys.indexed.workspaces")
+                && d.contains("keys.indexed.tabs")
+        }));
+    }
+
+    #[test]
+    fn terminal_direct_keybinding_conflict_disables_later_binding() {
+        let toml = r#"
+[keys]
+previous_tab = "alt+h"
+focus_pane_left = "alt+h"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let diagnostics = config.collect_diagnostics();
+        let kb = config.keybinds();
+
+        assert_eq!(
+            kb.previous_tab,
+            Some((KeyCode::Char('h'), KeyModifiers::ALT))
+        );
+        assert_eq!(kb.focus_pane_left, None);
+        assert!(diagnostics
+            .iter()
+            .any(|d| { d.contains("keys.focus_pane_left") && d.contains("keys.previous_tab") }));
+    }
+
+    #[test]
+    fn terminal_direct_keybinding_conflicting_with_prefix_is_disabled() {
+        let toml = r#"
+[keys]
+prefix = "ctrl+b"
+previous_tab = "ctrl+b"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let diagnostics = config.collect_diagnostics();
+        let kb = config.keybinds();
+
+        assert_eq!(kb.previous_tab, None);
+        assert!(diagnostics
+            .iter()
+            .any(|d| { d.contains("keys.previous_tab") && d.contains("keys.prefix") }));
     }
 
     #[test]

@@ -123,8 +123,21 @@ pub struct KeysConfig {
     pub resize_mode: String,
     /// Toggle sidebar collapse. Default: "b"
     pub toggle_sidebar: String,
+    /// Optional indexed shortcuts expanded over number keys 1-9.
+    pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
     pub command: Vec<CommandKeybindConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct IndexedKeysConfig {
+    /// Modifier combo for tab shortcuts 1-9. Unset by default.
+    pub tabs: String,
+    /// Modifier combo for workspace shortcuts 1-9. Unset by default.
+    pub workspaces: String,
+    /// Modifier combo for agent shortcuts 1-9. Unset by default.
+    pub agents: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,6 +208,7 @@ impl Default for KeysConfig {
             fullscreen: "f".into(),
             resize_mode: "r".into(),
             toggle_sidebar: "b".into(),
+            indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
         }
     }

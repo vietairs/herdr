@@ -69,10 +69,18 @@ pub(super) fn keybind_help_groups(
             "next workspace",
         ),
         (
+            optional_keybind_label(&kb.indexed_workspaces_label),
+            "switch workspace 1-9",
+        ),
+        (
             optional_keybind_label(&kb.previous_agent_label),
             "previous agent",
         ),
         (optional_keybind_label(&kb.next_agent_label), "next agent"),
+        (
+            optional_keybind_label(&kb.indexed_agents_label),
+            "focus agent 1-9",
+        ),
         (kb.new_tab_label.clone(), "new tab"),
         (optional_keybind_label(&kb.rename_tab_label), "rename tab"),
         (
@@ -80,6 +88,10 @@ pub(super) fn keybind_help_groups(
             "previous tab",
         ),
         (optional_keybind_label(&kb.next_tab_label), "next tab"),
+        (
+            optional_keybind_label(&kb.indexed_tabs_label),
+            "switch tab 1-9",
+        ),
         (optional_keybind_label(&kb.close_tab_label), "close tab"),
     ];
     if let Some(label) = &kb.detach_label {

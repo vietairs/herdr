@@ -77,14 +77,14 @@ keybindings live under `[keys]`.
 
 supported syntax:
 - plain keys: `n`, `x`, `-`, `` ` ``
-- modifiers: `ctrl+b`, `shift+n`, `alt+x`
+- modifiers: `ctrl+b`, `shift+n`, `alt+x`, `cmd+x`, `super+x`
 - special keys: `enter`, `esc`, `tab`, `backspace`, `left`, `right`, `up`, `down`
 - function keys: `f1`, `f12`
 - uppercase letters also imply shift: `D` works like `shift+d`
 
 notes:
 - most reliable bindings are plain keys, `ctrl+letter`, `esc`/`tab`/`enter`, and function keys
-- `alt+...` and punctuation-with-modifiers may vary depending on terminal/tmux setup
+- `alt+...`, `cmd`/`super`, and punctuation-with-modifiers may vary depending on terminal/tmux setup
 - bindings marked `unset` in the key reference are supported actions with no default key assigned
 - for navigate-mode actions, duplicate keybindings are treated as config errors; later conflicting bindings fall back to defaults
 
@@ -116,6 +116,11 @@ focus_pane_left = "alt+h"
 focus_pane_down = "alt+j"
 focus_pane_up = "alt+k"
 focus_pane_right = "alt+l"
+
+[keys.indexed]
+tabs = ""       # optional; e.g. "ctrl" makes ctrl+1..9 switch tabs
+workspaces = "" # optional; e.g. "ctrl+shift" makes ctrl+shift+1..9 switch workspaces
+agents = ""     # optional; follows visible agent panel order
 ```
 
 ### key reference
@@ -149,6 +154,23 @@ focus_pane_right = "alt+l"
 | `fullscreen` | `f` | toggle focused pane fullscreen |
 | `resize_mode` | `r` | enter or leave resize mode |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
+
+### indexed keybindings
+
+Use `[keys.indexed]` to bind number keys `1` through `9` as positional shortcuts. Each value is a modifier combo only. Empty values disable that shortcut family.
+
+```toml
+[keys.indexed]
+tabs = ""
+workspaces = ""
+agents = ""
+```
+
+| key | default | action |
+|-----|---------|--------|
+| `tabs` | unset | switch to tab 1-9 in the active workspace, left to right |
+| `workspaces` | unset | switch to workspace 1-9 in sidebar order, top to bottom |
+| `agents` | unset | focus agent row 1-9 in the visible agent panel order |
 
 ### custom command keybindings
 
