@@ -299,8 +299,20 @@ delivery = "off"
 available values:
 - `off` — disable popup notifications
 - `herdr` — show top-right in-app toasts
-- `terminal` — ask the outer terminal to show a desktop notification. Some terminals suppress foreground notifications, including Ghostty on macOS.
-- `system` — ask the OS notification service directly. macOS uses `osascript`; Linux requires `notify-send`.
+- `terminal` — ask the outer terminal to show a desktop notification. some terminals suppress foreground notifications, including ghostty on macos.
+- `system` — ask the os notification service directly. on macos, herdr uses `terminal-notifier` when available and falls back to built-in `osascript`. on linux, `system` requires `notify-send`.
+
+### macos system notifications
+
+for best macos support, install `terminal-notifier`:
+
+```sh
+brew install terminal-notifier
+```
+
+when `terminal-notifier` is installed, herdr shows the herdr icon in system notifications. herdr also tries to focus the hosting terminal when a notification is clicked. click-to-return is supported for detected ghostty, iterm2, wezterm, kitty, alacritty, and terminal.app sessions.
+
+without `terminal-notifier`, herdr falls back to built-in `osascript`. this still shows a macos notification, but it cannot set the herdr icon and clicking the notification may focus the apple script runner instead of returning to your terminal.
 
 compatibility note:
 - older configs may still use `ui.toast.enabled = true|false`
@@ -313,7 +325,9 @@ current behavior:
 - shown for background agent events like `needs attention` and `finished`
 - suppression is tab-aware: the active tab stays quiet, but background tabs in the same workspace can still notify
 - `terminal` delivery is best-effort and depends on terminal support
-- currently targets terminals such as Ghostty, Kitty, iTerm2, and WezTerm
+- `system` delivery is best-effort and depends on the os helper being available
+- macos `system` delivery prefers `terminal-notifier` when present and falls back to `osascript`
+- currently targets terminals such as ghostty, kitty, iterm2, and wezterm
 - inside tmux, herdr wraps notification escapes with tmux passthrough
 
 ## sound

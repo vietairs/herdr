@@ -3,10 +3,12 @@ use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use super::{ClipboardCommand, ForegroundJob, ForegroundProcess, Signal};
 
 const PROC_PGRP_ONLY: u32 = 2;
+const HERDR_LOGO_PNG: &[u8] = include_bytes!("../../assets/logo.png");
 
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -201,7 +203,11 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     )
 }
 
-/// Show a native macOS notification through AppleScript.
+/// Show a native macOS notification.
+///
+/// Prefer `terminal-notifier` when it is installed because it supports Herdr's
+/// icon and can activate the hosting terminal on click. Fall back to built-in
+/// AppleScript notifications when it is not available.
 pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
     show_desktop_notification_with_command(title, body, |program| Command::new(program))
 }
@@ -210,6 +216,63 @@ fn show_desktop_notification_with_command(
     title: &str,
     body: Option<&str>,
     mut command: impl FnMut(&str) -> Command,
+) -> std::io::Result<bool> {
+    if show_terminal_notifier_notification(title, body, &mut command).unwrap_or(false) {
+        return Ok(true);
+    }
+
+    show_osascript_notification(title, body, &mut command)
+}
+
+fn show_terminal_notifier_notification(
+    title: &str,
+    body: Option<&str>,
+    command: &mut impl FnMut(&str) -> Command,
+) -> std::io::Result<bool> {
+    let icon_path = cached_notification_icon_path().ok();
+    let activate_bundle_id = verified_terminal_bundle_identifier(command);
+    show_terminal_notifier_notification_with_options(
+        title,
+        body,
+        icon_path.as_deref(),
+        activate_bundle_id.as_deref(),
+        command,
+    )
+}
+
+fn show_terminal_notifier_notification_with_options(
+    title: &str,
+    body: Option<&str>,
+    icon_path: Option<&Path>,
+    activate_bundle_id: Option<&str>,
+    command: &mut impl FnMut(&str) -> Command,
+) -> std::io::Result<bool> {
+    let mut cmd = command("terminal-notifier");
+    build_terminal_notifier_command(&mut cmd, title, body, icon_path, activate_bundle_id);
+    run_notification_command(cmd)
+}
+
+fn build_terminal_notifier_command(
+    cmd: &mut Command,
+    title: &str,
+    body: Option<&str>,
+    icon_path: Option<&Path>,
+    activate_bundle_id: Option<&str>,
+) {
+    cmd.arg("-title").arg(title);
+    cmd.arg("-message").arg(body.unwrap_or_default());
+    if let Some(icon_path) = icon_path {
+        cmd.arg("-appIcon").arg(icon_path);
+    }
+    if let Some(bundle_id) = activate_bundle_id {
+        cmd.arg("-activate").arg(bundle_id);
+    }
+}
+
+fn show_osascript_notification(
+    title: &str,
+    body: Option<&str>,
+    command: &mut impl FnMut(&str) -> Command,
 ) -> std::io::Result<bool> {
     let mut cmd = command("/usr/bin/osascript");
     cmd.arg("-e")
@@ -221,6 +284,87 @@ fn show_desktop_notification_with_command(
         .arg(title)
         .arg(body.unwrap_or_default());
     run_notification_command(cmd)
+}
+
+fn cached_notification_icon_path() -> std::io::Result<PathBuf> {
+    static ICON_PATH: OnceLock<std::io::Result<PathBuf>> = OnceLock::new();
+    match ICON_PATH.get_or_init(write_notification_icon) {
+        Ok(path) => Ok(path.clone()),
+        Err(err) => Err(std::io::Error::new(err.kind(), err.to_string())),
+    }
+}
+
+fn write_notification_icon() -> std::io::Result<PathBuf> {
+    let cache_dir = if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join("Library/Caches/herdr")
+    } else {
+        std::env::temp_dir().join("herdr")
+    };
+    std::fs::create_dir_all(&cache_dir)?;
+    let path = cache_dir.join("logo.png");
+    if std::fs::read(&path).ok().as_deref() != Some(HERDR_LOGO_PNG) {
+        std::fs::write(&path, HERDR_LOGO_PNG)?;
+    }
+    Ok(path)
+}
+
+fn verified_terminal_bundle_identifier(
+    command: &mut impl FnMut(&str) -> Command,
+) -> Option<String> {
+    static BUNDLE_ID: OnceLock<Option<String>> = OnceLock::new();
+    BUNDLE_ID
+        .get_or_init(|| {
+            let bundle_id = detected_terminal_bundle_identifier()?;
+            bundle_identifier_available(bundle_id, command).then(|| bundle_id.to_owned())
+        })
+        .clone()
+}
+
+fn bundle_identifier_available(bundle_id: &str, command: &mut impl FnMut(&str) -> Command) -> bool {
+    let query = format!("kMDItemCFBundleIdentifier == '{bundle_id}'");
+    let output = command("mdfind")
+        .arg(query)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => !output.stdout.is_empty(),
+        _ => false,
+    }
+}
+
+fn detected_terminal_bundle_identifier() -> Option<&'static str> {
+    terminal_bundle_identifier_from_env(
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        std::env::var_os("ALACRITTY_WINDOW_ID").is_some(),
+    )
+}
+
+fn terminal_bundle_identifier_from_env(
+    term_program: Option<&str>,
+    term: Option<&str>,
+    has_kitty_window_id: bool,
+    has_alacritty_window_id: bool,
+) -> Option<&'static str> {
+    match term_program {
+        Some("ghostty") => return Some("com.mitchellh.ghostty"),
+        Some("iTerm.app") => return Some("com.googlecode.iterm2"),
+        Some("WezTerm") => return Some("com.github.wez.wezterm"),
+        Some("Apple_Terminal") => return Some("com.apple.Terminal"),
+        _ => {}
+    }
+
+    if has_kitty_window_id || term == Some("xterm-kitty") {
+        return Some("net.kovidgoyal.kitty");
+    }
+    if has_alacritty_window_id {
+        return Some("org.alacritty");
+    }
+
+    None
 }
 
 fn run_notification_command(mut command: Command) -> std::io::Result<bool> {
@@ -508,19 +652,124 @@ mod tests {
     }
 
     #[test]
-    fn desktop_notification_uses_osascript_argv() {
-        let path =
-            std::env::temp_dir().join(format!("herdr-osascript-args-{}", std::process::id()));
-        let script = "printf '%s\\n' \"$@\" > \"$HERDR_NOTIFY_ARGS\"";
-        let shown = show_desktop_notification_with_command("title", Some("body"), |_| {
+    fn terminal_bundle_identifier_maps_known_terminal_env() {
+        assert_eq!(
+            terminal_bundle_identifier_from_env(Some("ghostty"), None, false, false),
+            Some("com.mitchellh.ghostty")
+        );
+        assert_eq!(
+            terminal_bundle_identifier_from_env(Some("iTerm.app"), None, false, false),
+            Some("com.googlecode.iterm2")
+        );
+        assert_eq!(
+            terminal_bundle_identifier_from_env(Some("WezTerm"), None, false, false),
+            Some("com.github.wez.wezterm")
+        );
+        assert_eq!(
+            terminal_bundle_identifier_from_env(Some("Apple_Terminal"), None, false, false),
+            Some("com.apple.Terminal")
+        );
+        assert_eq!(
+            terminal_bundle_identifier_from_env(None, Some("xterm-kitty"), false, false),
+            Some("net.kovidgoyal.kitty")
+        );
+        assert_eq!(
+            terminal_bundle_identifier_from_env(None, None, true, false),
+            Some("net.kovidgoyal.kitty")
+        );
+        assert_eq!(
+            terminal_bundle_identifier_from_env(None, None, false, true),
+            Some("org.alacritty")
+        );
+        assert_eq!(
+            terminal_bundle_identifier_from_env(None, None, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn terminal_notifier_command_includes_icon_and_activation() {
+        let mut cmd = Command::new("terminal-notifier");
+        build_terminal_notifier_command(
+            &mut cmd,
+            "pi finished",
+            Some("workspace 1"),
+            Some(Path::new("/tmp/herdr-logo.png")),
+            Some("com.mitchellh.ghostty"),
+        );
+        let args = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "-title",
+                "pi finished",
+                "-message",
+                "workspace 1",
+                "-appIcon",
+                "/tmp/herdr-logo.png",
+                "-activate",
+                "com.mitchellh.ghostty"
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_notifier_success_skips_osascript() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-terminal-notifier-args-{}",
+            std::process::id()
+        ));
+        let script = "printf '%s:%s\\n' \"$0\" \"$*\" >> \"$HERDR_NOTIFY_ARGS\"";
+        let mut command = |program: &str| {
             let mut cmd = Command::new("sh");
             cmd.arg("-c")
                 .arg(script)
-                .arg("osascript")
+                .arg(program)
                 .env("HERDR_NOTIFY_ARGS", &path);
             cmd
-        })
-        .expect("notification command should run");
+        };
+
+        let shown = show_terminal_notifier_notification_with_options(
+            "title",
+            Some("body"),
+            Some(Path::new("/tmp/herdr-logo.png")),
+            Some("com.mitchellh.ghostty"),
+            &mut command,
+        )
+        .expect("terminal-notifier command should run");
+
+        assert!(shown);
+        let args = std::fs::read_to_string(&path).expect("args file");
+        let _ = std::fs::remove_file(&path);
+        assert!(args.starts_with("terminal-notifier:"), "{args}");
+        assert!(args.contains("-appIcon /tmp/herdr-logo.png"), "{args}");
+        assert!(args.contains("-activate com.mitchellh.ghostty"), "{args}");
+        assert!(!args.contains("osascript"), "{args}");
+    }
+
+    #[test]
+    fn desktop_notification_falls_back_to_osascript_when_terminal_notifier_fails() {
+        let path =
+            std::env::temp_dir().join(format!("herdr-osascript-args-{}", std::process::id()));
+        let script = r#"
+if [ "$0" = "terminal-notifier" ]; then
+  exit 1
+fi
+printf '%s\n' "$@" > "$HERDR_NOTIFY_ARGS"
+"#;
+        let mut command = |program: &str| {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c")
+                .arg(script)
+                .arg(program)
+                .env("HERDR_NOTIFY_ARGS", &path);
+            cmd
+        };
+        let shown = show_desktop_notification_with_command("title", Some("body"), &mut command)
+            .expect("osascript fallback should run");
 
         assert!(shown);
         let args = std::fs::read_to_string(&path).expect("args file");
