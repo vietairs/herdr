@@ -56,6 +56,12 @@ struct ClientState {
     kitty_graphics_enabled: bool,
 }
 
+impl ClientState {
+    fn request_full_redraw(&mut self) {
+        self.blit_encoder = blit::BlitEncoder::new();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
@@ -497,6 +503,10 @@ async fn run_client_loop(
 
         match event {
             ClientLoopEvent::StdinInput(data) => {
+                let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+                if crate::raw_input::events_require_host_surface_redraw(&events) {
+                    state.request_full_redraw();
+                }
                 let msg = ClientMessage::Input { data };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
                     return Err(ClientError::ConnectionLost(e));

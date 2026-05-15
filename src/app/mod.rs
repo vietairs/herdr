@@ -80,6 +80,7 @@ pub struct App {
         HashSet<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     pub render_notify: Arc<Notify>,
     pub render_dirty: Arc<AtomicBool>,
+    pub(crate) full_redraw_pending: bool,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
     pub(crate) local_terminal_notifications: bool,
 }
@@ -441,9 +442,14 @@ impl App {
             last_terminal_size: terminal::size().ok(),
             render_notify,
             render_dirty,
+            full_redraw_pending: false,
             overlay_panes: HashMap::new(),
             local_terminal_notifications: true,
         }
+    }
+
+    fn request_full_redraw(&mut self) {
+        self.full_redraw_pending = true;
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -507,6 +513,10 @@ impl App {
             if needs_render && self.can_render_now(now) {
                 self.render_dirty.swap(false, Ordering::AcqRel);
                 let _sync_output = SyncOutputGuard::begin()?;
+                if self.full_redraw_pending {
+                    terminal.clear()?;
+                    self.full_redraw_pending = false;
+                }
                 let kitty_graphics_enabled = self.state.kitty_graphics_enabled;
                 let mut cell_size = crate::kitty_graphics::HostCellSize::default();
                 terminal.draw(|frame| {

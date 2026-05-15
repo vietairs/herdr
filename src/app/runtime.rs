@@ -95,8 +95,10 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {
+                self.request_full_redraw();
                 self.state.outer_terminal_focus = Some(true);
-                self.state.mark_active_tab_seen()
+                self.state.mark_active_tab_seen();
+                true
             }
             crate::raw_input::RawInputEvent::OuterFocusLost => {
                 self.state.outer_terminal_focus = Some(false);

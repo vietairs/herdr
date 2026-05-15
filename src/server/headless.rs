@@ -244,6 +244,14 @@ impl ClientConnection {
             writer,
         }
     }
+
+    fn request_full_redraw(&mut self) {
+        self.render_state.reset_baseline();
+    }
+
+    fn request_semantic_redraw_after_input(&mut self) {
+        self.render_state.reset_semantic_input_baseline();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -529,7 +537,7 @@ impl HeadlessServer {
         // rendering semantics. Force one fresh frame to every remaining client
         // even if the next rendered buffer compares equal to its cached frame.
         for client in self.clients.values_mut() {
-            client.render_state.reset_baseline();
+            client.request_full_redraw();
         }
     }
 
@@ -1154,14 +1162,20 @@ impl HeadlessServer {
             }
             ServerEvent::ClientInput { client_id, data } => {
                 debug!(client_id, len = data.len(), "client input received");
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    // Ensure semantic clients receive one post-input frame even if the
-                    // semantic buffer compares equal. Terminal-ANSI clients must keep their
-                    // server-side blit baseline; resetting it here forces a full redraw on
-                    // every keypress and makes remote sessions feel extremely slow.
-                    client.render_state.reset_semantic_input_baseline();
-                }
                 let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
+                let host_surface_redraw =
+                    crate::raw_input::events_require_host_surface_redraw(&events);
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    if host_surface_redraw {
+                        client.request_full_redraw();
+                    } else {
+                        // Ensure semantic clients receive one post-input frame even if the
+                        // semantic buffer compares equal. Terminal-ANSI clients must keep their
+                        // server-side blit baseline; resetting it here forces a full redraw on
+                        // every keypress and makes remote sessions feel extremely slow.
+                        client.request_semantic_redraw_after_input();
+                    }
+                }
                 self.update_client_outer_focus_from_events(client_id, &events);
                 let interaction = Self::events_include_interaction(&events);
                 let foreground_changed = if interaction {
@@ -2617,6 +2631,45 @@ mod tests {
             1
         );
         assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn outer_focus_gained_forces_terminal_ansi_full_redraw() {
+        let mut server = test_headless_server();
+        let (client_tx, _client_control_rx, client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::TerminalAnsi,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        server.render_and_stream();
+        let _ = client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial terminal frame");
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        }));
+        server.render_and_stream();
+
+        match read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()) {
+            ServerMessage::Terminal(frame) => {
+                assert_eq!(frame.seq, 2);
+                assert!(frame.full);
+            }
+            other => panic!("expected terminal frame, got {other:?}"),
+        }
     }
 
     #[test]
