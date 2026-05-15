@@ -981,12 +981,14 @@ impl AppState {
     pub(super) fn find_border_at(&self, col: u16, row: u16) -> Option<&SplitBorder> {
         self.view.split_borders.iter().find(|b| match b.direction {
             Direction::Horizontal => {
-                (col as i32 - b.pos as i32).unsigned_abs() <= 1
+                col >= b.pos.saturating_sub(1)
+                    && col <= b.pos
                     && row >= b.area.y
                     && row < b.area.y + b.area.height
             }
             Direction::Vertical => {
-                (row as i32 - b.pos as i32).unsigned_abs() <= 1
+                row >= b.pos.saturating_sub(1)
+                    && row <= b.pos
                     && col >= b.area.x
                     && col < b.area.x + b.area.width
             }
@@ -1465,6 +1467,118 @@ mod tests {
 
         let after = capture_snapshot(&app.state);
         assert_ne!(root_layout_ratio(&before), root_layout_ratio(&after));
+    }
+
+    #[test]
+    fn pane_split_hitbox_does_not_overlap_right_pane_content() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let border = app.state.view.split_borders[0].clone();
+        let row = border.area.y.saturating_add(1);
+
+        assert!(app
+            .state
+            .find_border_at(border.pos.saturating_sub(1), row)
+            .is_some());
+        assert!(app.state.find_border_at(border.pos, row).is_some());
+        assert!(app
+            .state
+            .find_border_at(border.pos.saturating_add(1), row)
+            .is_none());
+    }
+
+    #[test]
+    fn pane_split_hitbox_does_not_overlap_bottom_pane_content() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.workspaces[0].test_split(Direction::Vertical);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let border = app.state.view.split_borders[0].clone();
+        let col = border.area.x.saturating_add(1);
+
+        assert!(app
+            .state
+            .find_border_at(col, border.pos.saturating_sub(1))
+            .is_some());
+        assert!(app.state.find_border_at(col, border.pos).is_some());
+        assert!(app
+            .state
+            .find_border_at(col, border.pos.saturating_add(1))
+            .is_none());
+    }
+
+    #[test]
+    fn selecting_from_right_pane_first_content_column_starts_selection() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let second_pane = ws.test_split(Direction::Horizontal);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let second_info = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == second_pane)
+            .expect("second pane info")
+            .clone();
+        let col = second_info.inner_rect.x;
+        let row = second_info.inner_rect.y;
+
+        assert!(app.state.find_border_at(col, row).is_none());
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+
+        assert!(app.state.drag.is_none());
+        assert_eq!(
+            app.state
+                .selection
+                .as_ref()
+                .map(|selection| selection.pane_id),
+            Some(second_pane)
+        );
+    }
+
+    #[test]
+    fn selecting_from_bottom_pane_first_content_row_starts_selection() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let second_pane = ws.test_split(Direction::Vertical);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let second_info = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == second_pane)
+            .expect("second pane info")
+            .clone();
+        let col = second_info.inner_rect.x;
+        let row = second_info.inner_rect.y;
+
+        assert!(app.state.find_border_at(col, row).is_none());
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+
+        assert!(app.state.drag.is_none());
+        assert_eq!(
+            app.state
+                .selection
+                .as_ref()
+                .map(|selection| selection.pane_id),
+            Some(second_pane)
+        );
     }
 
     #[tokio::test]
