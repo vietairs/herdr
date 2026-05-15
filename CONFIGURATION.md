@@ -402,6 +402,8 @@ Set `allow_nested = true` only for debugging or intentionally nested setups.
 
 It requires a Kitty graphics-compatible outer terminal.
 
+Known limitation: resizing the terminal window or changing the terminal font while images are visible can leave existing images misplaced or stale. Restart the pane app or clear and redraw the image output after changing size or font. Please report any findings so this experimental path can improve.
+
 ## advanced
 
 ```toml
