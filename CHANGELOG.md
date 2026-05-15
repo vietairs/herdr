@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.9] - 2026-05-15
+
 ### Added
 - Added experimental Kitty graphics rendering for local panes and attached clients behind `experimental.kitty_graphics`, including support for larger graphics frames.
 - Added `ui.toast.delivery = "system"` for OS-level background notifications, using `notify-send` on Linux and `terminal-notifier` or `osascript` on macOS.
