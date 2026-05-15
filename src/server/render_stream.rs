@@ -151,6 +151,7 @@ impl CursorTrackingBackend {
             x: pos.x,
             y: pos.y,
             visible: true,
+            shape: 0,
         })
     }
 }
@@ -296,5 +297,6 @@ fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
         x: cursor.x,
         y: cursor.y,
         visible: cursor.visible && !crate::ui::pane_is_scrolled_back(rt),
+        shape: cursor.shape,
     })
 }

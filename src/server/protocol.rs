@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -103,6 +103,13 @@ pub struct CellData {
     pub hyperlink: Option<u32>,
 }
 
+/// Cursor shape encoded as a DECSCUSR parameter.
+///
+/// 0 = terminal default, 1 = blinking block, 2 = steady block,
+/// 3 = blinking underline, 4 = steady underline, 5 = blinking bar,
+/// 6 = steady bar.
+pub type CursorShapeParam = u8;
+
 /// Cursor position within a rendered frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CursorState {
@@ -112,6 +119,9 @@ pub struct CursorState {
     pub y: u16,
     /// Whether the cursor is visible.
     pub visible: bool,
+    /// Cursor shape as a DECSCUSR parameter.
+    #[serde(default)]
+    pub shape: CursorShapeParam,
 }
 
 /// A rendered frame to be displayed by the client.
@@ -725,6 +735,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 visible: true,
+                shape: 6,
             }),
             hyperlinks: vec!["https://example.com".to_owned()],
             graphics: Vec::new(),
@@ -875,6 +886,7 @@ mod tests {
                 x: 10,
                 y: 5,
                 visible: true,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),
@@ -1151,6 +1163,7 @@ mod tests {
             x: 1,
             y: 0,
             visible: true,
+            shape: 0,
         };
         let frame = FrameData::from_ratatui_buffer(&buffer, Some(cursor.clone()));
 

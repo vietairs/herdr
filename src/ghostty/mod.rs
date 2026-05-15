@@ -204,6 +204,31 @@ pub struct KittyPlacementRenderInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorVisualStyle {
+    Bar,
+    Block,
+    Underline,
+    BlockHollow,
+}
+
+impl CursorVisualStyle {
+    fn from_raw(value: ffi::GhosttyRenderStateCursorVisualStyle) -> Self {
+        match value {
+            ffi::GhosttyRenderStateCursorVisualStyle_GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK => {
+                Self::Block
+            }
+            ffi::GhosttyRenderStateCursorVisualStyle_GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE => {
+                Self::Underline
+            }
+            ffi::GhosttyRenderStateCursorVisualStyle_GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW => {
+                Self::BlockHollow
+            }
+            _ => Self::Bar,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveScreen {
     Primary,
     Alternate,
@@ -1276,6 +1301,24 @@ impl RenderState {
 
     pub fn cursor_visible(&self) -> Result<bool, Error> {
         self.get_bool(ffi::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE)
+    }
+
+    pub fn cursor_blinking(&self) -> Result<bool, Error> {
+        self.get_bool(ffi::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_CURSOR_BLINKING)
+    }
+
+    pub fn cursor_visual_style(&self) -> Result<CursorVisualStyle, Error> {
+        let mut out: ffi::GhosttyRenderStateCursorVisualStyle = 0;
+        // SAFETY: out points to the matching enum storage for the requested data kind.
+        unsafe {
+            ffi::ghostty_render_state_get(
+                self.raw,
+                ffi::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE,
+                (&mut out as *mut ffi::GhosttyRenderStateCursorVisualStyle).cast(),
+            )
+            .into_result()?;
+        }
+        Ok(CursorVisualStyle::from_raw(out))
     }
 
     pub fn cursor_viewport(&self) -> Result<Option<CursorViewport>, Error> {

@@ -18,6 +18,7 @@
 //! - `CSI H` (CUP) — move cursor to (row, col)
 //! - `CSI m` (SGR) — set graphic rendition (colors, bold, etc.)
 //! - `CSI ? 2026 h/l` — begin/end synchronized output
+//! - `CSI Ps SP q` — DECSCUSR cursor shape
 //! - `ESC ] 52 ; c ; <base64> BEL` — OSC 52 clipboard write
 //!
 //! The goal is minimal output: skip unchanged cells, batch adjacent changes,
@@ -37,6 +38,7 @@ pub(crate) struct EncodedBlit {
     /// Whether this frame was encoded as a full redraw.
     pub(crate) full: bool,
     next_last_visible_cursor: Option<(u16, u16)>,
+    next_last_cursor_shape: u8,
 }
 
 /// Stateful encoder that diffs semantic frames into terminal ANSI bytes.
@@ -44,6 +46,7 @@ pub(crate) struct EncodedBlit {
 pub(crate) struct BlitEncoder {
     last_frame: Option<FrameData>,
     last_visible_cursor: Option<(u16, u16)>,
+    last_cursor_shape: u8,
 }
 
 impl BlitEncoder {
@@ -62,16 +65,25 @@ impl BlitEncoder {
             || prev.is_some_and(|p| p.width != frame.width || p.height != frame.height);
         let mut bytes = Vec::new();
         let mut next_last_visible_cursor = self.last_visible_cursor;
-        blit_frame_to_with_cursor_memory(&mut bytes, frame, prev, &mut next_last_visible_cursor);
+        let mut next_last_cursor_shape = self.last_cursor_shape;
+        blit_frame_to_with_cursor_memory(
+            &mut bytes,
+            frame,
+            prev,
+            &mut next_last_visible_cursor,
+            &mut next_last_cursor_shape,
+        );
         EncodedBlit {
             bytes,
             full,
             next_last_visible_cursor,
+            next_last_cursor_shape,
         }
     }
 
     pub(crate) fn commit(&mut self, frame: FrameData, encoded: EncodedBlit) {
         self.last_visible_cursor = encoded.next_last_visible_cursor;
+        self.last_cursor_shape = encoded.next_last_cursor_shape;
         self.last_frame = Some(frame);
     }
 
@@ -244,7 +256,14 @@ fn cells_equal(a: &CellData, b: &CellData) -> bool {
 #[cfg(test)]
 fn blit_frame_to(writer: impl Write, frame: &FrameData, prev: Option<&FrameData>) {
     let mut last_visible_cursor = None;
-    blit_frame_to_with_cursor_memory(writer, frame, prev, &mut last_visible_cursor);
+    let mut last_cursor_shape = 0;
+    blit_frame_to_with_cursor_memory(
+        writer,
+        frame,
+        prev,
+        &mut last_visible_cursor,
+        &mut last_cursor_shape,
+    );
 }
 
 fn blit_frame_to_with_cursor_memory(
@@ -252,6 +271,7 @@ fn blit_frame_to_with_cursor_memory(
     frame: &FrameData,
     prev: Option<&FrameData>,
     last_visible_cursor: &mut Option<(u16, u16)>,
+    last_cursor_shape: &mut u8,
 ) {
     // On first frame or size change, do a full redraw.
     let full_redraw =
@@ -288,7 +308,7 @@ fn blit_frame_to_with_cursor_memory(
     // hides its cursor, still park the host cursor intentionally so IMEs do not
     // anchor to whichever cell happened to be painted last.
     let host_cursor = resolve_host_cursor_state(frame, last_visible_cursor);
-    write_host_cursor_state(&mut writer, host_cursor);
+    write_host_cursor_state(&mut writer, host_cursor, last_cursor_shape);
 
     // End the synchronized output block immediately after the final cursor
     // state is emitted so supporting terminals can present the frame atomically.
@@ -312,6 +332,8 @@ fn cell_width(cell: &CellData) -> usize {
 struct HostCursorState {
     position: (u16, u16),
     visible: bool,
+    /// DECSCUSR parameter (0–6). 0 means terminal default.
+    shape: u8,
 }
 
 fn resolve_host_cursor_state(
@@ -325,6 +347,7 @@ fn resolve_host_cursor_state(
             return HostCursorState {
                 position,
                 visible: true,
+                shape: normalize_cursor_shape(cursor.shape),
             };
         }
 
@@ -332,6 +355,7 @@ fn resolve_host_cursor_state(
         return HostCursorState {
             position,
             visible: false,
+            shape: normalize_cursor_shape(cursor.shape),
         };
     }
 
@@ -341,6 +365,15 @@ fn resolve_host_cursor_state(
     HostCursorState {
         position,
         visible: false,
+        shape: 0,
+    }
+}
+
+fn normalize_cursor_shape(shape: u8) -> u8 {
+    if shape <= 6 {
+        shape
+    } else {
+        0
     }
 }
 
@@ -363,8 +396,12 @@ fn write_cursor_position(writer: &mut impl Write, (x, y): (u16, u16)) {
     let _ = write!(writer, "\x1b[{};{}H", y + 1, x + 1);
 }
 
-fn write_host_cursor_state(writer: &mut impl Write, cursor: HostCursorState) {
+fn write_host_cursor_state(writer: &mut impl Write, cursor: HostCursorState, last_shape: &mut u8) {
     write_cursor_position(writer, cursor.position);
+    if cursor.shape != *last_shape {
+        let _ = write!(writer, "\x1b[{} q", cursor.shape);
+        *last_shape = cursor.shape;
+    }
     if cursor.visible {
         // Show cursor only after it is already at the final position.
         let _ = writer.write_all(b"\x1b[?25h");
@@ -780,6 +817,7 @@ mod tests {
                 x: 2,
                 y: 1,
                 visible: true,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),
@@ -800,6 +838,43 @@ mod tests {
     }
 
     #[test]
+    fn blit_frame_emits_cursor_shape_before_visibility_without_touching_ime_anchor() {
+        let frame = FrameData {
+            cells: vec![make_cell("A", 0, 0, 0)],
+            width: 1,
+            height: 1,
+            cursor: Some(CursorState {
+                x: 0,
+                y: 0,
+                visible: true,
+                shape: 6,
+            }),
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &frame, None);
+
+        let output_str = String::from_utf8(output).unwrap();
+        let final_cursor = output_str
+            .find("\x1b[1;1H\x1b[6 q\x1b[?25h")
+            .expect("should set cursor shape before showing cursor");
+        let sync_end = output_str
+            .find("\x1b[?2026l")
+            .expect("should end synchronized output");
+        assert!(
+            final_cursor < sync_end,
+            "shape should be part of the synchronized final cursor state"
+        );
+        let trailing_cursor = &output_str[sync_end + "\x1b[?2026l".len()..];
+        assert_eq!(
+            trailing_cursor, "\x1b[1;1H\x1b[?25h",
+            "IME anchor update should preserve the existing position/visibility-only contract"
+        );
+    }
+
+    #[test]
     fn blit_frame_repeats_explicit_hidden_cursor_anchor_after_synchronized_output() {
         let visible = FrameData {
             cells: vec![make_cell("A", 0, 0, 0); 9],
@@ -809,6 +884,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 visible: true,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),
@@ -821,20 +897,29 @@ mod tests {
                 x: 2,
                 y: 1,
                 visible: false,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),
         };
         let mut last_visible_cursor = None;
+        let mut last_cursor_shape = 0;
         let mut output = Vec::new();
 
-        blit_frame_to_with_cursor_memory(&mut output, &visible, None, &mut last_visible_cursor);
+        blit_frame_to_with_cursor_memory(
+            &mut output,
+            &visible,
+            None,
+            &mut last_visible_cursor,
+            &mut last_cursor_shape,
+        );
         output.clear();
         blit_frame_to_with_cursor_memory(
             &mut output,
             &hidden,
             Some(&visible),
             &mut last_visible_cursor,
+            &mut last_cursor_shape,
         );
 
         let output_str = String::from_utf8(output).unwrap();
@@ -976,6 +1061,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 visible: true,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),
@@ -1001,6 +1087,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 visible: false,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),
@@ -1048,6 +1135,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 visible: false,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),
@@ -1069,6 +1157,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 visible: true,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),
@@ -1097,6 +1186,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 visible: true,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),
@@ -1107,6 +1197,7 @@ mod tests {
             x: 2,
             y: 2,
             visible: true,
+            shape: 0,
         });
 
         let mut output = Vec::new();
@@ -1135,6 +1226,7 @@ mod tests {
                 x: 1,
                 y: 1,
                 visible: true,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),
@@ -1148,15 +1240,23 @@ mod tests {
             graphics: Vec::new(),
         };
         let mut last_visible_cursor = None;
+        let mut last_cursor_shape = 0;
         let mut output = Vec::new();
 
-        blit_frame_to_with_cursor_memory(&mut output, &visible, None, &mut last_visible_cursor);
+        blit_frame_to_with_cursor_memory(
+            &mut output,
+            &visible,
+            None,
+            &mut last_visible_cursor,
+            &mut last_cursor_shape,
+        );
         output.clear();
         blit_frame_to_with_cursor_memory(
             &mut output,
             &hidden,
             Some(&visible),
             &mut last_visible_cursor,
+            &mut last_cursor_shape,
         );
 
         let output_str = String::from_utf8(output).unwrap();
@@ -1180,9 +1280,16 @@ mod tests {
             graphics: Vec::new(),
         };
         let mut last_visible_cursor = None;
+        let mut last_cursor_shape = 0;
         let mut output = Vec::new();
 
-        blit_frame_to_with_cursor_memory(&mut output, &frame, None, &mut last_visible_cursor);
+        blit_frame_to_with_cursor_memory(
+            &mut output,
+            &frame,
+            None,
+            &mut last_visible_cursor,
+            &mut last_cursor_shape,
+        );
 
         let output_str = String::from_utf8(output).unwrap();
         assert!(
@@ -1201,6 +1308,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 visible: true,
+                shape: 0,
             }),
             hyperlinks: Vec::new(),
             graphics: Vec::new(),

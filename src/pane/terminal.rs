@@ -39,6 +39,21 @@ pub struct TerminalCursorState {
     pub x: u16,
     pub y: u16,
     pub visible: bool,
+    /// DECSCUSR parameter (0–6). 0 means terminal default.
+    pub shape: u8,
+}
+
+fn decscusr_cursor_shape(style: crate::ghostty::CursorVisualStyle, blinking: bool) -> u8 {
+    match (style, blinking) {
+        (crate::ghostty::CursorVisualStyle::Block, true)
+        | (crate::ghostty::CursorVisualStyle::BlockHollow, true) => 1,
+        (crate::ghostty::CursorVisualStyle::Block, false)
+        | (crate::ghostty::CursorVisualStyle::BlockHollow, false) => 2,
+        (crate::ghostty::CursorVisualStyle::Underline, true) => 3,
+        (crate::ghostty::CursorVisualStyle::Underline, false) => 4,
+        (crate::ghostty::CursorVisualStyle::Bar, true) => 5,
+        (crate::ghostty::CursorVisualStyle::Bar, false) => 6,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,10 +545,17 @@ impl GhosttyPaneTerminal {
         } = &mut *core;
         render_state.update(terminal).ok()?;
         let cursor = render_state.cursor_viewport().ok()??;
+        let shape = render_state
+            .cursor_visual_style()
+            .ok()
+            .zip(render_state.cursor_blinking().ok())
+            .map(|(style, blinking)| decscusr_cursor_shape(style, blinking))
+            .unwrap_or(0);
         Some(TerminalCursorState {
             x: cursor.x,
             y: cursor.y,
             visible: render_state.cursor_visible().ok()?,
+            shape,
         })
     }
 
@@ -1200,6 +1222,38 @@ mod tests {
             terminal.write(format!("WRAP-{i:03}-abcdefghijklmnopqrstuvwxyz\r\n").as_bytes());
         }
         terminal.write(b"END");
+    }
+
+    #[test]
+    fn decscusr_cursor_shape_preserves_blinking_variants() {
+        assert_eq!(
+            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Block, true),
+            1
+        );
+        assert_eq!(
+            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Block, false),
+            2
+        );
+        assert_eq!(
+            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Underline, true),
+            3
+        );
+        assert_eq!(
+            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Underline, false),
+            4
+        );
+        assert_eq!(
+            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Bar, true),
+            5
+        );
+        assert_eq!(
+            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::Bar, false),
+            6
+        );
+        assert_eq!(
+            decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::BlockHollow, false),
+            2
+        );
     }
 
     #[test]

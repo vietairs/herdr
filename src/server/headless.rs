@@ -2137,6 +2137,7 @@ mod tests {
                 x: pane.inner_rect.x + 4,
                 y: pane.inner_rect.y,
                 visible: true,
+                shape: cursor.as_ref().map(|c| c.shape).unwrap_or(0),
             })
         );
     }
@@ -2172,6 +2173,7 @@ mod tests {
                 x: pane.inner_rect.x + 4,
                 y: pane.inner_rect.y,
                 visible: false,
+                shape: cursor.as_ref().map(|c| c.shape).unwrap_or(0),
             })
         );
     }

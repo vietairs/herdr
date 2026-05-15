@@ -549,7 +549,7 @@ fn client_handshake(
 
 fn connect_raw_client(client_socket: &Path, cols: u16, rows: u16) -> UnixStream {
     let mut stream = UnixStream::connect(client_socket).expect("should connect to client socket");
-    client_handshake(&mut stream, 5, cols, rows).expect("handshake should succeed");
+    client_handshake(&mut stream, 6, cols, rows).expect("handshake should succeed");
     stream
 }
 
@@ -599,6 +599,7 @@ struct CursorWire {
     x: u16,
     y: u16,
     visible: bool,
+    shape: u8,
 }
 
 fn decode_frame_payload(payload: &[u8]) -> io::Result<FrameWire> {
@@ -714,7 +715,7 @@ fn frame_contains_text(frame: &FrameWire, needle: &str) -> bool {
 
     let _ = (frame.height, frame.graphics.len());
     if let Some(cursor) = frame.cursor.as_ref() {
-        let _ = (cursor.x, cursor.y, cursor.visible);
+        let _ = (cursor.x, cursor.y, cursor.visible, cursor.shape);
     }
 
     full_text.contains(needle)
