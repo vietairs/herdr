@@ -25,6 +25,7 @@ pub enum AppEvent {
         agent_label: String,
         state: AgentState,
         message: Option<String>,
+        custom_status: Option<String>,
         seq: Option<u64>,
     },
     /// Hook authority was explicitly cleared for a pane.

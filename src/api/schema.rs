@@ -211,6 +211,8 @@ pub struct PaneReportAgentParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
 }
 
@@ -546,6 +548,8 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     pub agent_status: AgentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_status: Option<String>,
     pub revision: u64,
 }
 
@@ -612,6 +616,8 @@ pub struct PaneAgentStatusChangedEvent {
     pub agent_status: AgentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -676,6 +682,8 @@ pub enum EventData {
         pane_id: String,
         workspace_id: String,
         agent_status: AgentStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        custom_status: Option<String>,
     },
 }
 
@@ -734,6 +742,7 @@ mod tests {
                 agent: "pi".into(),
                 state: PaneAgentState::Working,
                 message: Some("thinking".into()),
+                custom_status: Some("indexing".into()),
                 seq: Some(42),
             }),
         };
@@ -1026,6 +1035,7 @@ mod tests {
                     label: None,
                     agent: None,
                     agent_status: AgentStatus::Unknown,
+                    custom_status: None,
                     revision: 0,
                 },
             },

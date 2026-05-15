@@ -3069,6 +3069,7 @@ mod tests {
                     agent: "pi".into(),
                     state: api::schema::PaneAgentState::Idle,
                     message: None,
+                    custom_status: None,
                     seq: Some(19),
                 }),
             },

@@ -24,6 +24,7 @@ pub(crate) struct AgentPanelEntry {
     pub agent_label: Option<String>,
     pub state: AgentState,
     pub seen: bool,
+    pub custom_status: Option<String>,
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -126,6 +127,7 @@ pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
                     agent_label: None,
                     state: detail.state,
                     seen: detail.seen,
+                    custom_status: detail.custom_status,
                 })
                 .collect()
         }
@@ -147,6 +149,7 @@ pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
                         agent_label: Some(detail.agent_label),
                         state: detail.state,
                         seen: detail.seen,
+                        custom_status: detail.custom_status,
                     })
             })
             .collect(),
@@ -836,6 +839,10 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
             status_spans.push(Span::styled(" · ", agent_style));
             status_spans.push(Span::styled(agent_label, agent_style));
         }
+        if let Some(custom_status) = &detail.custom_status {
+            status_spans.push(Span::styled(" · ", agent_style));
+            status_spans.push(Span::styled(custom_status.clone(), agent_style));
+        }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)).style(row_style),
             Rect::new(body.x, row_y, body.width, 1),
@@ -934,6 +941,7 @@ mod tests {
             agent_label: Some("claude".into()),
             state: AgentState::Idle,
             seen: true,
+            custom_status: None,
         };
 
         let label = format_agent_panel_primary_label(&entry, 18);

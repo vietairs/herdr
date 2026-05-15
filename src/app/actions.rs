@@ -683,10 +683,18 @@ impl AppState {
                 agent_label,
                 state,
                 message,
+                custom_status,
                 seq,
             } => self
                 .update_pane_state(pane_id, |pane| {
-                    pane.set_hook_authority(source, agent_label, state, message, seq)
+                    pane.set_hook_authority_with_custom_status(
+                        source,
+                        agent_label,
+                        state,
+                        message,
+                        custom_status,
+                        seq,
+                    )
                 })
                 .into_iter()
                 .collect(),
@@ -1365,6 +1373,7 @@ mod tests {
             agent_label: "hermes".into(),
             state: AgentState::Blocked,
             message: None,
+            custom_status: None,
             seq: None,
         });
 

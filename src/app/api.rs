@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use super::{
     api_helpers::{
-        detect_state_from_api, encode_api_keys, encode_api_text, normalize_reported_agent_label,
-        pane_agent_status,
+        detect_state_from_api, encode_api_keys, encode_api_text, normalize_custom_status,
+        normalize_reported_agent_label, pane_agent_status,
     },
     App, Mode, OverlayPaneState, ToastKind,
 };
@@ -193,12 +193,19 @@ impl App {
                 .and_then(|ws| ws.pane_state(update.pane_id))
                 .map(|pane| pane_agent_status(pane.state, pane.seen))
                 .unwrap_or_else(|| pane_agent_status(update.state, true));
+            let custom_status = self
+                .state
+                .workspaces
+                .get(update.ws_idx)
+                .and_then(|ws| ws.pane_state(update.pane_id))
+                .and_then(|pane| pane.effective_custom_status().map(str::to_string));
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::PaneAgentStatusChanged,
                 data: crate::api::schema::EventData::PaneAgentStatusChanged {
                     pane_id,
                     workspace_id,
                     agent_status,
+                    custom_status,
                 },
             });
         }
@@ -1067,6 +1074,7 @@ impl App {
                     agent_label,
                     state: detect_state_from_api(params.state),
                     message: params.message,
+                    custom_status: normalize_custom_status(params.custom_status),
                     seq: params.seq,
                 });
                 SuccessResponse {

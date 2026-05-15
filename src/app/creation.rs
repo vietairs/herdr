@@ -248,6 +248,7 @@ impl App {
             label: pane.manual_label.clone(),
             agent: pane.effective_agent_label().map(str::to_string),
             agent_status: pane_agent_status(pane.state, pane.seen),
+            custom_status: pane.effective_custom_status().map(str::to_string),
             revision: 0,
         })
     }

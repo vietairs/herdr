@@ -6,11 +6,12 @@ use serde::Serialize;
 
 use crate::api;
 use crate::api::schema::{
-    AgentStatus, EmptyParams, IntegrationTarget, Method, OutputMatch, PaneListParams,
-    PaneReadParams, PaneRenameParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams,
-    PaneSplitParams, PaneTarget, PaneWaitForOutputParams, PingParams, ReadFormat, ReadSource,
-    Request, SplitDirection, Subscription, TabCreateParams, TabListParams, TabRenameParams,
-    TabTarget, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
+    AgentStatus, EmptyParams, IntegrationTarget, Method, OutputMatch, PaneAgentState,
+    PaneListParams, PaneReadParams, PaneRenameParams, PaneReportAgentParams, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneTarget, PaneWaitForOutputParams,
+    PingParams, ReadFormat, ReadSource, Request, SplitDirection, Subscription, TabCreateParams,
+    TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams,
+    WorkspaceTarget,
 };
 
 pub enum CommandOutcome {
@@ -279,6 +280,7 @@ fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "close" => pane_close(&args[1..]),
         "send-text" => pane_send_text(&args[1..]),
         "send-keys" => pane_send_keys(&args[1..]),
+        "report-agent" => pane_report_agent(&args[1..]),
         "run" => pane_run(&args[1..]),
         "help" | "--help" | "-h" => {
             print_pane_help();
@@ -1009,6 +1011,102 @@ fn pane_run(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
+fn pane_report_agent(args: &[String]) -> std::io::Result<i32> {
+    let Some(raw_pane_id) = args.first() else {
+        eprintln!("usage: herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N]");
+        return Ok(2);
+    };
+
+    let pane_id = normalize_pane_id(raw_pane_id);
+    let mut source = None;
+    let mut agent = None;
+    let mut state = None;
+    let mut message = None;
+    let mut custom_status = None;
+    let mut seq = None;
+
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --source");
+                    return Ok(2);
+                };
+                source = Some(value.clone());
+                index += 2;
+            }
+            "--agent" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --agent");
+                    return Ok(2);
+                };
+                agent = Some(value.clone());
+                index += 2;
+            }
+            "--state" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --state");
+                    return Ok(2);
+                };
+                state = Some(parse_pane_agent_state(value)?);
+                index += 2;
+            }
+            "--message" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --message");
+                    return Ok(2);
+                };
+                message = Some(value.clone());
+                index += 2;
+            }
+            "--custom-status" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --custom-status");
+                    return Ok(2);
+                };
+                custom_status = Some(value.clone());
+                index += 2;
+            }
+            "--seq" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --seq");
+                    return Ok(2);
+                };
+                seq = Some(parse_u64_flag("--seq", value)?);
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+
+    let Some(source) = source else {
+        eprintln!("missing required --source");
+        return Ok(2);
+    };
+    let Some(agent) = agent else {
+        eprintln!("missing required --agent");
+        return Ok(2);
+    };
+    let Some(state) = state else {
+        eprintln!("missing required --state");
+        return Ok(2);
+    };
+
+    send_ok_request(Method::PaneReportAgent(PaneReportAgentParams {
+        pane_id,
+        source,
+        agent,
+        state,
+        message,
+        custom_status,
+        seq,
+    }))
+}
+
 fn integration_status(args: &[String]) -> std::io::Result<i32> {
     let outdated_only = match args {
         [] => false,
@@ -1408,6 +1506,18 @@ fn parse_agent_status(value: &str) -> std::io::Result<AgentStatus> {
     }
 }
 
+fn parse_pane_agent_state(value: &str) -> std::io::Result<PaneAgentState> {
+    match value {
+        "idle" => Ok(PaneAgentState::Idle),
+        "working" => Ok(PaneAgentState::Working),
+        "blocked" => Ok(PaneAgentState::Blocked),
+        "unknown" => Ok(PaneAgentState::Unknown),
+        _ => Err(std::io::Error::other(format!(
+            "invalid pane agent state: {value} (expected idle, working, blocked, or unknown)"
+        ))),
+    }
+}
+
 fn parse_u32_flag(flag: &str, value: &str) -> std::io::Result<u32> {
     value
         .parse::<u32>()
@@ -1530,6 +1640,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane close <pane_id>");
     eprintln!("  herdr pane send-text <pane_id> <text>");
     eprintln!("  herdr pane send-keys <pane_id> <key> [key ...]");
+    eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N]");
     eprintln!("  herdr pane run <pane_id> <command>");
 }
 

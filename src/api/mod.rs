@@ -941,6 +941,7 @@ impl ActiveAgentStatusChangedSubscription {
                 workspace_id: pane.workspace_id,
                 agent_status: current_status,
                 agent: pane.agent,
+                custom_status: pane.custom_status,
             }),
         })
     }

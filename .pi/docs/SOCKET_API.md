@@ -148,6 +148,7 @@ for backward compatibility, requests also accept the older positional forms like
   "label": "reviewer",
   "agent": "pi",
   "agent_status": "working",
+  "custom_status": "indexing",
   "revision": 0
 }
 ```
@@ -159,6 +160,8 @@ for backward compatibility, requests also accept the older positional forms like
 - when herdr detects a built-in agent, this is that built-in name like `pi` or `claude`
 - when a hook or plugin reports a custom agent through `pane.report_agent`, this can be any non-empty label like `hermes`
 - when no agent identity is known, it is omitted
+
+`custom_status` is an optional hook-owned display label. It is present only while hook authority is active. It does not change `agent_status`, `done` semantics, waits, notifications, or workspace/tab rollup priority.
 
 `pane_read` responses contain objects like:
 
@@ -624,7 +627,8 @@ params:
   "source": "custom:hermes",
   "agent": "hermes",
   "state": "working",
-  "message": "running tools"
+  "message": "running tools",
+  "custom_status": "indexing"
 }
 ```
 
@@ -637,6 +641,9 @@ notes:
 - while this authority is active, the reported `agent` and `state` override heuristic display for that pane
 - process detection still owns pane liveness and fallback when hook authority is cleared or released
 - `message` is optional metadata for the reporting integration
+- `custom_status` is an optional short display label such as `scheduled`, `indexing`, or `stuck`
+- `custom_status` is visual-only; use `state` for semantic behavior like working or blocked
+- omitting `custom_status` clears any previous custom status from this reporting source
 
 returns `ok`.
 
@@ -916,12 +923,13 @@ example pushed `pane.agent_status_changed` event:
     "pane_id": "1-1",
     "workspace_id": "1",
     "agent_status": "done",
-    "agent": "pi"
+    "agent": "pi",
+    "custom_status": "scheduled"
   }
 }
 ```
 
-`agent` in pushed events follows the same rules as `pane_info.agent`: it may be a built-in detected name, a custom hook-reported label, or omitted.
+`agent` in pushed events follows the same rules as `pane_info.agent`: it may be a built-in detected name, a custom hook-reported label, or omitted. `custom_status` may be included when the pane has hook-owned custom status metadata at the time of the semantic status transition.
 ## cli wrappers
 
 these commands provide the shell-facing control surface. most command groups talk to the local socket; `status client` only inspects the local executable.
@@ -971,6 +979,7 @@ herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-f
 herdr pane close <pane_id>
 herdr pane send-text <pane_id> <text>
 herdr pane send-keys <pane_id> <key> [key ...]
+herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N]
 herdr pane run <pane_id> <command>
 ```
 
@@ -998,7 +1007,7 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 - `pane read` prints **text**, not json
 - `pane read --format ansi` and `pane read --ansi` print a rendered ANSI snapshot with colors/styles preserved
 - `pane read --source recent-unwrapped` returns recent terminal text with soft wraps joined back together
-- `pane send-text`, `pane send-keys`, and `pane run` print nothing on success
+- `pane send-text`, `pane send-keys`, `pane report-agent`, and `pane run` print nothing on success
 - list/get/create/split/wait commands print json on success
 - `pane run` is a convenience wrapper for `pane.send_input` with the command text followed by a real `Enter` keypress
 - `wait agent-status` is a cli convenience built on top of event subscriptions

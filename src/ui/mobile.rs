@@ -599,6 +599,9 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     if let Some(agent_label) = entry.agent_label.as_deref() {
         parts.push(agent_label.to_string());
     }
+    if let Some(custom_status) = entry.custom_status.as_deref() {
+        parts.push(custom_status.to_string());
+    }
 
     format!("  {}", parts.join(" · "))
 }
@@ -909,6 +912,7 @@ mod tests {
             agent_label: agent_label.map(str::to_string),
             state: AgentState::Idle,
             seen: true,
+            custom_status: None,
         }
     }
 

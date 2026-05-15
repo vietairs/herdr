@@ -10,6 +10,7 @@ pub struct HookAuthority {
     pub agent_label: String,
     pub state: AgentState,
     pub message: Option<String>,
+    pub custom_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,12 +72,25 @@ impl PaneState {
         self.recompute_effective_state(previous_agent_label, previous_known_agent, previous_state)
     }
 
+    #[cfg(test)]
     pub fn set_hook_authority(
         &mut self,
         source: String,
         agent_label: String,
         state: AgentState,
         message: Option<String>,
+        seq: Option<u64>,
+    ) -> Option<EffectiveStateChange> {
+        self.set_hook_authority_with_custom_status(source, agent_label, state, message, None, seq)
+    }
+
+    pub fn set_hook_authority_with_custom_status(
+        &mut self,
+        source: String,
+        agent_label: String,
+        state: AgentState,
+        message: Option<String>,
+        custom_status: Option<String>,
         seq: Option<u64>,
     ) -> Option<EffectiveStateChange> {
         if !self.accept_hook_report(&source, seq) {
@@ -91,6 +105,7 @@ impl PaneState {
             agent_label,
             state,
             message,
+            custom_status,
         });
         self.recompute_effective_state(previous_agent_label, previous_known_agent, previous_state)
     }
@@ -184,6 +199,12 @@ impl PaneState {
             return crate::detect::parse_agent_label(&authority.agent_label);
         }
         self.detected_agent
+    }
+
+    pub fn effective_custom_status(&self) -> Option<&str> {
+        self.hook_authority
+            .as_ref()
+            .and_then(|authority| authority.custom_status.as_deref())
     }
 
     pub fn set_manual_label(&mut self, label: String) {
@@ -456,6 +477,27 @@ mod tests {
         assert_eq!(pane.detected_agent, None);
         assert_eq!(pane.fallback_state, AgentState::Unknown);
         assert_eq!(pane.state, AgentState::Unknown);
+    }
+
+    #[test]
+    fn custom_status_is_hook_authority_metadata() {
+        let mut pane = PaneState::new();
+        pane.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        pane.set_hook_authority_with_custom_status(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            Some("scheduled".into()),
+            None,
+        );
+
+        assert_eq!(pane.state, AgentState::Idle);
+        assert_eq!(pane.effective_custom_status(), Some("scheduled"));
+
+        pane.clear_hook_authority(Some("herdr:claude"), None);
+
+        assert_eq!(pane.effective_custom_status(), None);
     }
 
     #[test]

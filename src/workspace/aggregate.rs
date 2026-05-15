@@ -14,6 +14,7 @@ pub struct PaneDetail {
     pub agent: Option<Agent>,
     pub state: AgentState,
     pub seen: bool,
+    pub custom_status: Option<String>,
 }
 
 impl Tab {
@@ -39,6 +40,7 @@ impl Tab {
                     agent: pane.effective_known_agent(),
                     state: pane.state,
                     seen: pane.seen,
+                    custom_status: pane.effective_custom_status().map(str::to_string),
                 })
             })
             .collect()
