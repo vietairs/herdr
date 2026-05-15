@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Added
+- Added experimental Kitty graphics rendering for local panes and attached clients behind `experimental.kitty_graphics`, including support for larger graphics frames.
+- Added `ui.toast.delivery = "system"` for OS-level background notifications, using `notify-send` on Linux and `terminal-notifier` or `osascript` on macOS.
+- Added light variants for Catppuccin, Tokyo Night, Gruvbox, One, Solarized, Kanagawa, and Rosé Pine themes.
+- Added `ui.mouse_capture = false` for tmux-style mouse behavior, letting the terminal handle normal clicks while still forwarding mouse input to pane apps that request it.
+
+### Changed
+- Moved experimental settings into `[experimental]`.
+
+### Fixed
+- PageUp and PageDown now scroll Herdr pane scrollback for normal panes while still forwarding keys to full-screen or mouse-reporting apps.
+- Enhanced tilde key sequences now parse correctly, improving compatibility with terminals that emit them.
+- `herdr integration install codex` now enables the current Codex `[features] hooks = true` flag and migrates the deprecated top-level `codex_hooks` flag.
+
+### Breaking Changes
+- `advanced.allow_nested` has moved to `experimental.allow_nested`; update configs that allow nested Herdr launches.
+- The client/server protocol is now version 5. Stop and restart any running v0.5.8 server before attaching with this release.
+
 ## [0.5.8] - 2026-05-12
 
 ### Added

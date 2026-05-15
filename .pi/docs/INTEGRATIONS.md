@@ -126,7 +126,8 @@ this:
 
 - writes the hook script to `~/.codex/herdr-agent-state.sh`
 - updates `~/.codex/hooks.json`
-- ensures `codex_hooks = true` in `~/.codex/config.toml`
+- ensures `hooks = true` under `[features]` in `~/.codex/config.toml`
+- migrates the deprecated top-level `[features] codex_hooks = true` setting to `hooks = true`
 
 bundled source: [`src/integration/assets/codex/herdr-agent-state.sh`](./src/integration/assets/codex/herdr-agent-state.sh)
 
@@ -156,7 +157,7 @@ this:
 - removes herdr-owned hook entries from `~/.codex/hooks.json`
 - intentionally leaves `~/.codex/config.toml` alone
 
-that last point is deliberate: herdr does **not** try to guess whether `codex_hooks = true` is still needed for some other codex hook setup.
+that last point is deliberate: herdr does **not** try to guess whether `hooks = true` is still needed for some other codex hook setup.
 
 ## opencode
 

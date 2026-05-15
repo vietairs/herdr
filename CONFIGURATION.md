@@ -44,12 +44,13 @@ Reloadable now:
 - `ui.agent_panel_scope`
 - `ui.toast.delivery`
 - server-side `ui.sound` policy; attached thin clients refresh local sound config after a successful sound-policy change
+- `experimental.kitty_graphics`
 - `advanced.scrollback_limit_bytes` for panes created after reload
 - `ui.sidebar_width` as the default width; current width updates only while it is still config-owned
 
 Startup-only or special-case:
 - `onboarding` does not reopen onboarding during reload
-- `advanced.allow_nested` is checked before launch and needs a restart
+- `experimental.allow_nested` is checked before launch and needs a restart
 - existing pane scrollback buffers are not resized during reload
 - terminal notifications and sounds are client-local side effects and are sent to the foreground attached client
 
@@ -189,7 +190,7 @@ command = "notify-send herdr 'custom command ran'"
 
 ## theme
 
-herdr ships with 10 built-in color themes. set one in config:
+herdr ships with 17 built-in color themes. set one in config:
 
 ```toml
 [theme]
@@ -201,14 +202,21 @@ name = "tokyo-night"
 | name | description |
 |------|-------------|
 | `catppuccin` | soft pastel mocha palette (default) |
+| `catppuccin-latte` | light catppuccin palette |
 | `tokyo-night` | blue-purple aesthetic |
+| `tokyo-night-day` | light tokyo night palette |
 | `dracula` | purple/pink/green classic |
 | `nord` | frosty scandinavian blues |
 | `gruvbox` | warm retro browns/oranges |
-| `one-dark` | atom's beloved palette |
-| `solarized` | ethan schoonover's classic |
+| `gruvbox-light` | light gruvbox palette |
+| `one-dark` | atom's beloved dark palette |
+| `one-light` | atom's light palette |
+| `solarized` | ethan schoonover's classic dark palette |
+| `solarized-light` | ethan schoonover's classic light palette |
 | `kanagawa` | hokusai-inspired |
+| `kanagawa-lotus` | light kanagawa palette |
 | `rose-pine` | muted, elegant |
+| `rose-pine-dawn` | light rosé pine palette |
 | `vesper` | high-contrast monochrome with peach and mint accents |
 
 theme names are flexible: `tokyo-night`, `tokyonight`, and `tokyo_night` all work.
@@ -260,6 +268,7 @@ for `panel_bg`, you can also use `reset`, `default`, `none`, or `transparent` to
 ```toml
 [ui]
 sidebar_width = 26
+mouse_capture = true
 confirm_close = true
 show_agent_labels_on_pane_borders = false
 agent_panel_scope = "all"
@@ -271,6 +280,7 @@ accent = "cyan"
 | option | default | description |
 |--------|---------|-------------|
 | `sidebar_width` | `26` | base sidebar width before auto-scaling |
+| `mouse_capture` | `true` | capture mouse input for Herdr's mouse UI; set false to let the terminal handle normal clicks while still forwarding mouse to pane apps that request it |
 | `confirm_close` | `true` | ask before closing a workspace |
 | `show_agent_labels_on_pane_borders` | `false` | show detected/reported agent labels in split pane borders when no manual pane name is set |
 | `agent_panel_scope` | `all` | sidebar agent list scope: `current` or `all` |
@@ -299,7 +309,20 @@ delivery = "off"
 available values:
 - `off` — disable popup notifications
 - `herdr` — show top-right in-app toasts
-- `terminal` — ask the outer terminal to show a desktop notification
+- `terminal` — ask the outer terminal to show a desktop notification. some terminals suppress foreground notifications, including ghostty on macos.
+- `system` — ask the os notification service directly. on macos, herdr uses `terminal-notifier` when available and falls back to built-in `osascript`. on linux, `system` requires `notify-send`.
+
+### macos system notifications
+
+for best macos support, install `terminal-notifier`:
+
+```sh
+brew install terminal-notifier
+```
+
+when `terminal-notifier` is installed, herdr tries to focus the hosting terminal when a notification is clicked. click-to-return is supported for detected ghostty, iterm2, wezterm, kitty, alacritty, and terminal.app sessions.
+
+without `terminal-notifier`, herdr falls back to built-in `osascript`. this still shows a macos notification, but clicking the notification may focus the apple script runner instead of returning to your terminal.
 
 compatibility note:
 - older configs may still use `ui.toast.enabled = true|false`
@@ -312,7 +335,9 @@ current behavior:
 - shown for background agent events like `needs attention` and `finished`
 - suppression is tab-aware: the active tab stays quiet, but background tabs in the same workspace can still notify
 - `terminal` delivery is best-effort and depends on terminal support
-- currently targets terminals such as Ghostty, Kitty, iTerm2, and WezTerm
+- `system` delivery is best-effort and depends on the os helper being available
+- macos `system` delivery prefers `terminal-notifier` when present and falls back to `osascript`
+- currently targets terminals such as ghostty, kitty, iterm2, and wezterm
 - inside tmux, herdr wraps notification escapes with tmux passthrough
 
 ## sound
@@ -350,11 +375,37 @@ available agent keys:
 - `droid`
 - `amp`
 
+## experimental
+
+```toml
+[experimental]
+allow_nested = false
+kitty_graphics = false
+```
+
+### options
+
+| option | default | description |
+|--------|---------|-------------|
+| `experimental.allow_nested` | `false` | allow launching herdr from inside a herdr-managed pane |
+| `experimental.kitty_graphics` | `false` | enable experimental local Kitty graphics rendering for attached clients |
+
+### nested launches
+
+By default, herdr blocks nested launches when `HERDR_ENV=1` is already present.
+
+Set `allow_nested = true` only for debugging or intentionally nested setups.
+
+### Kitty graphics
+
+`kitty_graphics` enables experimental local Kitty graphics rendering for attached clients.
+
+It requires a Kitty graphics-compatible outer terminal.
+
 ## advanced
 
 ```toml
 [advanced]
-allow_nested = false
 scrollback_limit_bytes = 10000000
 ```
 
@@ -362,14 +413,7 @@ scrollback_limit_bytes = 10000000
 
 | option | default | description |
 |--------|---------|-------------|
-| `advanced.allow_nested` | `false` | allow launching herdr from inside a herdr-managed pane |
 | `advanced.scrollback_limit_bytes` | `10000000` | maximum scrollback buffer size in bytes retained per pane terminal |
-
-### nested launches
-
-By default, herdr blocks nested launches when `HERDR_ENV=1` is already present.
-
-Set `allow_nested = true` only for debugging or intentionally nested setups.
 
 ### scrollback
 
@@ -379,7 +423,7 @@ The default matches Ghostty's `scrollback-limit` value.
 
 Set `scrollback_limit_bytes = 0` to disable pane scrollback entirely.
 
-The old `advanced.scrollback_lines` key is still accepted as a compatibility alias, but it uses the same byte-based value.
+The legacy `scrollback_lines` key is still accepted inside `[advanced]`, but it uses the same byte-based value.
 
 ## environment variables
 

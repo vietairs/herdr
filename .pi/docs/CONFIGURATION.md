@@ -190,7 +190,7 @@ command = "notify-send herdr 'custom command ran'"
 
 ## theme
 
-herdr ships with 10 built-in color themes. set one in config:
+herdr ships with 17 built-in color themes. set one in config:
 
 ```toml
 [theme]
@@ -202,14 +202,21 @@ name = "tokyo-night"
 | name | description |
 |------|-------------|
 | `catppuccin` | soft pastel mocha palette (default) |
+| `catppuccin-latte` | light catppuccin palette |
 | `tokyo-night` | blue-purple aesthetic |
+| `tokyo-night-day` | light tokyo night palette |
 | `dracula` | purple/pink/green classic |
 | `nord` | frosty scandinavian blues |
 | `gruvbox` | warm retro browns/oranges |
-| `one-dark` | atom's beloved palette |
-| `solarized` | ethan schoonover's classic |
+| `gruvbox-light` | light gruvbox palette |
+| `one-dark` | atom's beloved dark palette |
+| `one-light` | atom's light palette |
+| `solarized` | ethan schoonover's classic dark palette |
+| `solarized-light` | ethan schoonover's classic light palette |
 | `kanagawa` | hokusai-inspired |
+| `kanagawa-lotus` | light kanagawa palette |
 | `rose-pine` | muted, elegant |
+| `rose-pine-dawn` | light rosé pine palette |
 | `vesper` | high-contrast monochrome with peach and mint accents |
 
 theme names are flexible: `tokyo-night`, `tokyonight`, and `tokyo_night` all work.
@@ -261,6 +268,7 @@ for `panel_bg`, you can also use `reset`, `default`, `none`, or `transparent` to
 ```toml
 [ui]
 sidebar_width = 26
+mouse_capture = true
 confirm_close = true
 show_agent_labels_on_pane_borders = false
 agent_panel_scope = "all"
@@ -272,6 +280,7 @@ accent = "cyan"
 | option | default | description |
 |--------|---------|-------------|
 | `sidebar_width` | `26` | base sidebar width before auto-scaling |
+| `mouse_capture` | `true` | capture mouse input for Herdr's mouse UI; set false to let the terminal handle normal clicks while still forwarding mouse to pane apps that request it |
 | `confirm_close` | `true` | ask before closing a workspace |
 | `show_agent_labels_on_pane_borders` | `false` | show detected/reported agent labels in split pane borders when no manual pane name is set |
 | `agent_panel_scope` | `all` | sidebar agent list scope: `current` or `all` |
