@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-### Changed
-- Moved next-release changelog work into `.pi/docs/CHANGELOG.md` and replaced the end-of-cycle draft prompt with a pre-release audit flow that verifies changelog and documentation coverage before release.
+### Fixed
+- GitHub Copilot is now correctly detected when its process name is `copilot`.
 
 ## [0.5.9] - 2026-05-15
 

@@ -79,7 +79,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "cursor" => Some(Agent::Cursor),
         "cline" => Some(Agent::Cline),
         "opencode" | "open-code" => Some(Agent::OpenCode),
-        "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
+        "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
         "kimi" => Some(Agent::Kimi),
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
@@ -687,6 +687,7 @@ mod tests {
         assert_eq!(identify_agent("cline"), Some(Agent::Cline));
         assert_eq!(identify_agent("opencode"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("kimi"), Some(Agent::Kimi));
+        assert_eq!(identify_agent("copilot"), Some(Agent::GithubCopilot));
         assert_eq!(identify_agent("ghcs"), Some(Agent::GithubCopilot));
     }
 
