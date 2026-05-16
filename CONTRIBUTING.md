@@ -46,6 +46,23 @@ If your issue does not make the direction clear, it will likely be closed.
 
 If you plan to implement the change yourself, say that directly in the issue and use the `intends-to-pr` label. That signals intent. It is not approval.
 
+## Documentation for unreleased changes
+
+The root docs describe the latest released version of herdr. Do not update root `README.md`, `CONFIGURATION.md`, `INTEGRATIONS.md`, `SOCKET_API.md`, or `CHANGELOG.md` for normal PRs.
+
+If your PR changes user-facing behavior, update the matching next-release docs under `docs/next/` instead.
+
+Examples:
+
+- config changes: update `docs/next/CONFIGURATION.md`
+- integration changes: update `docs/next/INTEGRATIONS.md`
+- socket/API changes: update `docs/next/SOCKET_API.md`
+- workflow or usage changes: update `docs/next/README.md`
+
+You do not need to edit the changelog for normal PRs. Maintainers prepare `docs/next/CHANGELOG.md` during release review.
+
+If you are unsure whether docs are needed, mention it in the PR.
+
 ## Before submitting a PR
 
 Install the repo hook once in your clone.

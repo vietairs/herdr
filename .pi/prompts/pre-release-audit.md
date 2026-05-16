@@ -44,10 +44,10 @@ Process:
      - formatting-only changes
      - comment-only/doc-only changes unless they materially affect users
 
-6. Audit `.pi/docs/CHANGELOG.md` and issue references.
+6. Audit `docs/next/CHANGELOG.md` and issue references.
    - Treat root `CHANGELOG.md` as the latest released changelog.
-   - Treat `.pi/docs/CHANGELOG.md` as the next-release changelog.
-   - Compare meaningful user-facing changes in the commit range against `.pi/docs/CHANGELOG.md`.
+   - Treat `docs/next/CHANGELOG.md` as the next-release changelog.
+   - Compare meaningful user-facing changes in the commit range against `docs/next/CHANGELOG.md`.
    - Flag missing entries for new features, bug fixes, removals, breaking changes, defaults, compatibility changes, user-visible command/config/API behavior, and security-relevant changes.
    - Inspect commit bodies for issue reference lines in the form `refs #<issue-number>`.
    - Flag normal commits that use GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue-number>`, or `resolves #<issue-number>`, because they close issues before release when they land on `master`.
@@ -60,14 +60,14 @@ Process:
 
 7. Audit next-release public docs.
    - Treat root `README.md`, `CONFIGURATION.md`, `INTEGRATIONS.md`, and `SOCKET_API.md` as the latest released public docs.
-   - Treat `.pi/docs/README.md`, `.pi/docs/CONFIGURATION.md`, `.pi/docs/INTEGRATIONS.md`, and `.pi/docs/SOCKET_API.md` as the next-release versions.
-   - Compare meaningful user-facing changes in the range against `.pi/docs/` first.
+   - Treat `docs/next/README.md`, `docs/next/CONFIGURATION.md`, `docs/next/INTEGRATIONS.md`, and `docs/next/SOCKET_API.md` as the next-release versions.
+   - Compare meaningful user-facing changes in the range against `docs/next/` first.
    - Flag missing next-release docs for new or changed features, commands, config keys, protocol behavior, integrations, defaults, and compatibility notes.
-   - Compare `.pi/docs/` against the root docs. Flag each difference as intended to ship in this release, stale, or needing user decision.
+   - Compare `docs/next/` against the root docs. Flag each difference as intended to ship in this release, stale, or needing user decision.
    - Also audit `website/` and example config snippets for release readiness, but keep them aligned with the latest published release unless the user explicitly asks for prerelease docs.
 
 8. Verify finalization state.
-   - Before `just release`, approved `.pi/docs/*` files must be copied to their root counterparts.
+   - Before `just release`, approved `docs/next/*` files must be copied to their root counterparts.
    - Run or recommend:
      ```bash
      just release-docs-check
@@ -77,8 +77,8 @@ Process:
 
 9. Apply changes only when asked.
    - Do not edit files during the audit unless the user explicitly asks you to apply fixes.
-   - When asked to apply audit fixes, update `.pi/docs/CHANGELOG.md` and any relevant `.pi/docs/` files first.
-   - When asked to finalize release docs, copy approved `.pi/docs/` files into the matching root files and run `just release-docs-check`.
+   - When asked to apply audit fixes, update `docs/next/CHANGELOG.md` and any relevant `docs/next/` files first.
+   - When asked to finalize release docs, copy approved `docs/next/` files into the matching root files and run `just release-docs-check`.
 
 Output format:
 
