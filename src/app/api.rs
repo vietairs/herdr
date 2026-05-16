@@ -58,8 +58,12 @@ impl App {
             None
         };
 
-        let update_ready_version = if let AppEvent::UpdateReady { version } = &ev {
-            Some(version.clone())
+        let update_ready = if let AppEvent::UpdateReady {
+            version,
+            install_command,
+        } = &ev
+        {
+            Some((version.clone(), install_command.clone()))
         } else {
             None
         };
@@ -93,10 +97,10 @@ impl App {
                 _ => unreachable!("toast delivery was checked above"),
             };
 
-            if let Some(version) = update_ready_version {
+            if let Some((version, install_command)) = update_ready {
                 let _ = notify(
                     &format!("v{version} available"),
-                    Some("detach, then run `herdr update`"),
+                    Some(&format!("detach, then run `{install_command}`")),
                 );
             } else {
                 for update in &pane_updates {
