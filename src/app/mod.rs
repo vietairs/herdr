@@ -5,6 +5,7 @@
 //! - `input.rs` — key/mouse → action translation
 
 pub(crate) mod actions;
+mod agents;
 mod api;
 mod api_helpers;
 mod config_io;
@@ -14,6 +15,7 @@ mod input;
 mod runtime;
 mod session;
 pub mod state;
+mod terminal_targets;
 mod theme_sync;
 
 use std::collections::{HashMap, HashSet};
@@ -1512,6 +1514,8 @@ mod tests {
         assert_eq!(tab.workspace_id, workspace.workspace_id);
         assert_eq!(root_pane.workspace_id, workspace.workspace_id);
         assert_eq!(root_pane.tab_id, tab.tab_id);
+        assert!(root_pane.terminal_id.starts_with("term_"));
+        assert_ne!(root_pane.terminal_id, root_pane.pane_id);
     }
 
     #[test]
@@ -1622,6 +1626,103 @@ mod tests {
             .unwrap()
             .manual_label
             .is_none());
+    }
+
+    #[test]
+    fn terminal_target_resolves_terminal_id() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("terminal-target-id");
+        let pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane).unwrap().to_string();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let resolved = app.resolve_terminal_target(&terminal_id).unwrap();
+
+        assert_eq!(resolved.ws_idx, 0);
+        assert_eq!(resolved.pane_id, pane);
+        assert_eq!(resolved.terminal_id, terminal_id);
+    }
+
+    #[test]
+    fn terminal_target_resolves_legacy_pane_id() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("terminal-target-pane");
+        let pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane).unwrap().to_string();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane_id = app.public_pane_id(0, pane).unwrap();
+
+        let resolved = app.resolve_terminal_target(&pane_id).unwrap();
+
+        assert_eq!(resolved.pane_id, pane);
+        assert_eq!(resolved.terminal_id, terminal_id);
+    }
+
+    #[test]
+    fn terminal_target_resolves_unique_manual_name() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("terminal-target-name");
+        let pane = workspace.tabs[0].root_pane;
+        workspace.pane_state_mut(pane).unwrap().manual_label = Some("reviewer".into());
+        let terminal_id = workspace.terminal_id(pane).unwrap().to_string();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let resolved = app.resolve_terminal_target("reviewer").unwrap();
+
+        assert_eq!(resolved.pane_id, pane);
+        assert_eq!(resolved.terminal_id, terminal_id);
+    }
+
+    #[test]
+    fn terminal_target_reports_missing_target() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("terminal-target-missing")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let err = app.resolve_terminal_target("missing-agent").unwrap_err();
+
+        assert_eq!(
+            err,
+            crate::app::terminal_targets::TerminalTargetError::NotFound {
+                target: "missing-agent".into()
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_target_reports_ambiguous_duplicate_manual_name() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("terminal-target-ambiguous");
+        let first = workspace.tabs[0].root_pane;
+        let second = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.pane_state_mut(first).unwrap().manual_label = Some("worker".into());
+        workspace.pane_state_mut(second).unwrap().manual_label = Some("worker".into());
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let err = app.resolve_terminal_target("worker").unwrap_err();
+
+        let crate::app::terminal_targets::TerminalTargetError::Ambiguous { target, candidates } =
+            err
+        else {
+            panic!("expected ambiguous terminal target");
+        };
+        assert_eq!(target, "worker");
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|candidate| {
+            candidate.terminal_id.starts_with("term_")
+                && candidate.pane_id.starts_with(&app.state.workspaces[0].id)
+                && candidate.workspace_id == app.state.workspaces[0].id
+                && candidate.cwd.is_some()
+        }));
     }
 
     #[tokio::test]

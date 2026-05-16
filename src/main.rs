@@ -42,6 +42,7 @@ mod selection;
 mod server;
 mod session;
 mod sound;
+mod terminal;
 mod terminal_notify;
 mod terminal_theme;
 mod ui;
@@ -280,6 +281,7 @@ fn main() -> io::Result<()> {
         println!("       herdr server reload-config");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
+        println!("       herdr agent <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr wait <subcommand> ...");
         println!("       herdr session <subcommand> ...");
@@ -306,6 +308,10 @@ fn main() -> io::Result<()> {
                 "Workspace helpers over the socket API",
             ),
             ("herdr tab <subcommand>", "Tab helpers over the socket API"),
+            (
+                "herdr agent <subcommand>",
+                "Agent/terminal helpers over the socket API",
+            ),
             (
                 "herdr pane <subcommand>",
                 "Pane control helpers over the socket API",

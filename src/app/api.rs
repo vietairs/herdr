@@ -828,6 +828,153 @@ impl App {
                     result: ResponseResult::Ok {},
                 }
             }
+            Method::AgentList(_) => SuccessResponse {
+                id: request.id,
+                result: ResponseResult::AgentList {
+                    agents: self.collect_agent_infos(),
+                },
+            },
+            Method::AgentGet(target) => {
+                let agent = match self.agent_info_for_target(&target.target) {
+                    Ok(agent) => agent,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: self.agent_target_error_body(err),
+                        })
+                        .unwrap();
+                    }
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::AgentInfo { agent },
+                }
+            }
+            Method::AgentFocus(target) => {
+                let agent = match self.focus_agent_target(&target.target) {
+                    Ok(agent) => agent,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: self.agent_target_error_body(err),
+                        })
+                        .unwrap();
+                    }
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::AgentInfo { agent },
+                }
+            }
+            Method::AgentRename(params) => {
+                let agent = match self.rename_agent_target(&params.target, params.name) {
+                    Ok(agent) => agent,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: self.agent_rename_error_body(err),
+                        })
+                        .unwrap();
+                    }
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::AgentInfo { agent },
+                }
+            }
+            Method::AgentRead(params) => {
+                let resolved = match self.resolve_terminal_target(&params.target) {
+                    Ok(resolved) => resolved,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: self.agent_target_error_body(err),
+                        })
+                        .unwrap();
+                    }
+                };
+                let Some((pane, workspace_id)) =
+                    self.lookup_runtime(resolved.ws_idx, resolved.pane_id)
+                else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "agent_not_found".into(),
+                            message: format!("agent target {} not found", params.target),
+                        },
+                    })
+                    .unwrap();
+                };
+                let requested_lines = params.lines.unwrap_or(80).min(1000) as usize;
+                let text = match params.format {
+                    ReadFormat::Text => match params.source {
+                        ReadSource::Visible => pane.visible_text(),
+                        ReadSource::Recent => pane.recent_text(requested_lines),
+                        ReadSource::RecentUnwrapped => pane.recent_unwrapped_text(requested_lines),
+                    },
+                    ReadFormat::Ansi => match params.source {
+                        ReadSource::Visible => pane.visible_ansi(),
+                        ReadSource::Recent => pane.recent_ansi(requested_lines),
+                        ReadSource::RecentUnwrapped => pane.recent_unwrapped_ansi(requested_lines),
+                    },
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::PaneRead {
+                        read: PaneReadResult {
+                            pane_id: self
+                                .public_pane_id(resolved.ws_idx, resolved.pane_id)
+                                .unwrap_or_else(|| params.target.clone()),
+                            workspace_id,
+                            tab_id: self
+                                .public_tab_id(resolved.ws_idx, resolved.tab_idx)
+                                .unwrap(),
+                            source: params.source,
+                            format: params.format,
+                            text,
+                            revision: 0,
+                            truncated: false,
+                        },
+                    },
+                }
+            }
+            Method::AgentSend(params) => {
+                let resolved = match self.resolve_terminal_target(&params.target) {
+                    Ok(resolved) => resolved,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: self.agent_target_error_body(err),
+                        })
+                        .unwrap();
+                    }
+                };
+                let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id)
+                else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "agent_not_found".into(),
+                            message: format!("agent target {} not found", params.target),
+                        },
+                    })
+                    .unwrap();
+                };
+                if let Err(err) = runtime.try_send_bytes(Bytes::from(params.text)) {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "agent_send_failed".into(),
+                            message: err.to_string(),
+                        },
+                    })
+                    .unwrap();
+                }
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::Ok {},
+                }
+            }
             Method::PaneSplit(params) => {
                 let Some((ws_idx, target_pane_id)) = self.parse_pane_id(&params.target_pane_id)
                 else {

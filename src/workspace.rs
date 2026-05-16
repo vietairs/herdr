@@ -13,6 +13,7 @@ use crate::layout::PaneId;
 #[cfg(test)]
 use crate::layout::TileLayout;
 use crate::pane::{PaneRuntime, PaneState};
+use crate::terminal::TerminalId;
 
 mod aggregate;
 mod git;
@@ -418,6 +419,10 @@ impl Workspace {
         self.tabs.iter().find_map(|tab| tab.runtimes.get(&pane_id))
     }
 
+    pub fn terminal_id(&self, pane_id: PaneId) -> Option<&TerminalId> {
+        self.tabs.iter().find_map(|tab| tab.terminal_id(pane_id))
+    }
+
     pub fn focused_pane_id(&self) -> Option<PaneId> {
         self.active_tab().map(|tab| tab.layout.focused())
     }
@@ -497,6 +502,8 @@ impl Workspace {
         panes.insert(root_id, PaneState::new());
         let mut pane_cwds = HashMap::new();
         pane_cwds.insert(root_id, identity_cwd.clone());
+        let mut terminal_ids = HashMap::new();
+        terminal_ids.insert(root_id, TerminalId::alloc());
         let tab = Tab {
             custom_name: None,
             number: 1,
@@ -504,6 +511,7 @@ impl Workspace {
             layout,
             panes,
             pane_cwds,
+            terminal_ids,
             runtimes: HashMap::new(),
             zoomed: false,
             events,
@@ -531,6 +539,7 @@ impl Workspace {
         tab.panes.insert(new_id, PaneState::new());
         let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
         tab.pane_cwds.insert(new_id, cwd);
+        tab.terminal_ids.insert(new_id, TerminalId::alloc());
         self.register_new_pane(new_id);
         new_id
     }
@@ -545,6 +554,8 @@ impl Workspace {
         let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
         let mut pane_cwds = HashMap::new();
         pane_cwds.insert(root_id, cwd);
+        let mut terminal_ids = HashMap::new();
+        terminal_ids.insert(root_id, TerminalId::alloc());
         let tab = Tab {
             custom_name: name.map(str::to_string),
             number: self.tabs.len() + 1,
@@ -552,6 +563,7 @@ impl Workspace {
             layout,
             panes,
             pane_cwds,
+            terminal_ids,
             runtimes: HashMap::new(),
             zoomed: false,
             events,

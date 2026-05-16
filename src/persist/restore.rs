@@ -111,6 +111,7 @@ fn restore_tab(
 
     let mut panes = HashMap::new();
     let mut pane_cwds = HashMap::new();
+    let mut terminal_ids = HashMap::new();
     let mut runtimes = HashMap::new();
     for id in &pane_ids {
         let saved_cwd = reverse_id_map
@@ -157,6 +158,7 @@ fn restore_tab(
                 pane_state.manual_label = saved_label;
                 panes.insert(*id, pane_state);
                 pane_cwds.insert(*id, cwd.clone());
+                terminal_ids.insert(*id, crate::terminal::TerminalId::alloc());
                 runtimes.insert(*id, runtime);
             }
             Err(e) => {
@@ -198,6 +200,7 @@ fn restore_tab(
         layout,
         panes,
         pane_cwds,
+        terminal_ids,
         runtimes,
         zoomed: snap.zoomed,
         events,

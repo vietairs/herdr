@@ -6,12 +6,12 @@ use serde::Serialize;
 
 use crate::api;
 use crate::api::schema::{
-    AgentStatus, EmptyParams, IntegrationTarget, Method, OutputMatch, PaneAgentState,
-    PaneListParams, PaneReadParams, PaneRenameParams, PaneReportAgentParams, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneTarget, PaneWaitForOutputParams,
-    PingParams, ReadFormat, ReadSource, Request, SplitDirection, Subscription, TabCreateParams,
-    TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams,
-    WorkspaceTarget,
+    AgentReadParams, AgentRenameParams, AgentSendParams, AgentStatus, AgentTarget, EmptyParams,
+    IntegrationTarget, Method, OutputMatch, PaneAgentState, PaneListParams, PaneReadParams,
+    PaneRenameParams, PaneReportAgentParams, PaneSendInputParams, PaneSendKeysParams,
+    PaneSendTextParams, PaneSplitParams, PaneTarget, PaneWaitForOutputParams, PingParams,
+    ReadFormat, ReadSource, Request, SplitDirection, Subscription, TabCreateParams, TabListParams,
+    TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
 };
 
 pub enum CommandOutcome {
@@ -34,6 +34,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "status" => run_status_command(&args[2..])?,
         "workspace" => run_workspace_command(&args[2..])?,
         "tab" => run_tab_command(&args[2..])?,
+        "agent" => run_agent_command(&args[2..])?,
         "pane" => run_pane_command(&args[2..])?,
         "wait" => run_wait_command(&args[2..])?,
         "integration" => run_integration_command(&args[2..])?,
@@ -260,6 +261,30 @@ fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
         }
         _ => {
             print_tab_help();
+            Ok(2)
+        }
+    }
+}
+
+fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
+    let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
+        print_agent_help();
+        return Ok(2);
+    };
+
+    match subcommand {
+        "list" => agent_list(&args[1..]),
+        "get" => agent_get(&args[1..]),
+        "read" => agent_read(&args[1..]),
+        "send" => agent_send(&args[1..]),
+        "rename" => agent_rename(&args[1..]),
+        "focus" => agent_focus(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_agent_help();
+            Ok(0)
+        }
+        _ => {
+            print_agent_help();
             Ok(2)
         }
     }
@@ -742,6 +767,156 @@ fn tab_close(args: &[String]) -> std::io::Result<i32> {
         id: "cli:tab:close".into(),
         method: Method::TabClose(TabTarget {
             tab_id: normalize_tab_id(raw_tab_id),
+        }),
+    })?)
+}
+
+fn agent_list(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: herdr agent list");
+        return Ok(2);
+    }
+
+    print_response(&send_request(&Request {
+        id: "cli:agent:list".into(),
+        method: Method::AgentList(EmptyParams::default()),
+    })?)
+}
+
+fn agent_get(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first() else {
+        eprintln!("usage: herdr agent get <target>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr agent get <target>");
+        return Ok(2);
+    }
+
+    print_response(&send_request(&Request {
+        id: "cli:agent:get".into(),
+        method: Method::AgentGet(AgentTarget {
+            target: target.clone(),
+        }),
+    })?)
+}
+
+fn agent_focus(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first() else {
+        eprintln!("usage: herdr agent focus <target>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr agent focus <target>");
+        return Ok(2);
+    }
+
+    print_response(&send_request(&Request {
+        id: "cli:agent:focus".into(),
+        method: Method::AgentFocus(AgentTarget {
+            target: target.clone(),
+        }),
+    })?)
+}
+
+fn agent_rename(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first() else {
+        eprintln!("usage: herdr agent rename <target> <name>|--clear");
+        return Ok(2);
+    };
+    if args.len() < 2 {
+        eprintln!("usage: herdr agent rename <target> <name>|--clear");
+        return Ok(2);
+    }
+    let name = if args.len() == 2 && args[1] == "--clear" {
+        None
+    } else {
+        Some(args[1..].join(" "))
+    };
+
+    print_response(&send_request(&Request {
+        id: "cli:agent:rename".into(),
+        method: Method::AgentRename(AgentRenameParams {
+            target: target.clone(),
+            name,
+        }),
+    })?)
+}
+
+fn agent_send(args: &[String]) -> std::io::Result<i32> {
+    if args.len() < 2 {
+        eprintln!("usage: herdr agent send <target> <text>");
+        return Ok(2);
+    }
+
+    print_response(&send_request(&Request {
+        id: "cli:agent:send".into(),
+        method: Method::AgentSend(AgentSendParams {
+            target: args[0].clone(),
+            text: args[1..].join(" "),
+        }),
+    })?)
+}
+
+fn agent_read(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first() else {
+        eprintln!("usage: herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
+        return Ok(2);
+    };
+
+    let mut source = ReadSource::Recent;
+    let mut lines = None;
+    let mut format = ReadFormat::Text;
+    let mut strip_ansi = true;
+
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --source");
+                    return Ok(2);
+                };
+                source = parse_read_source(value)?;
+                index += 2;
+            }
+            "--lines" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --lines");
+                    return Ok(2);
+                };
+                lines = Some(parse_u32_flag("--lines", value)?);
+                index += 2;
+            }
+            "--format" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --format");
+                    return Ok(2);
+                };
+                format = parse_read_format(value)?;
+                strip_ansi = !matches!(format, ReadFormat::Ansi);
+                index += 2;
+            }
+            "--ansi" => {
+                format = ReadFormat::Ansi;
+                strip_ansi = false;
+                index += 1;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+
+    print_response(&send_request(&Request {
+        id: "cli:agent:read".into(),
+        method: Method::AgentRead(AgentReadParams {
+            target: target.clone(),
+            source,
+            lines,
+            format,
+            strip_ansi,
         }),
     })?)
 }
@@ -1626,6 +1801,17 @@ fn print_tab_help() {
     eprintln!("  herdr tab focus <tab_id>");
     eprintln!("  herdr tab rename <tab_id> <label>");
     eprintln!("  herdr tab close <tab_id>");
+}
+
+fn print_agent_help() {
+    eprintln!("herdr agent commands:");
+    eprintln!("  herdr agent list");
+    eprintln!("  herdr agent get <target>");
+    eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
+    eprintln!("  herdr agent send <target> <text>");
+    eprintln!("  herdr agent rename <target> <name>|--clear");
+    eprintln!("  herdr agent focus <target>");
+    eprintln!("  targets accept terminal ids, unique agent names, and legacy pane ids");
 }
 
 fn print_pane_help() {

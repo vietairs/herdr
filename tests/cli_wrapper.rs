@@ -1220,6 +1220,63 @@ fn tab_management_commands_work() {
 }
 
 #[test]
+fn agent_commands_work() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = run_cli(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    assert!(created.status.success());
+    let created_json: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let root_pane_id = created_json["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let terminal_id = created_json["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let renamed = run_cli(&socket_path, &["pane", "rename", &root_pane_id, "worker"]);
+    assert!(renamed.status.success());
+
+    let listed = run_cli_json(&socket_path, &["agent", "list"]);
+    assert_eq!(listed["result"]["type"], "agent_list");
+    assert_eq!(listed["result"]["agents"][0]["terminal_id"], terminal_id);
+    assert_eq!(listed["result"]["agents"][0]["name"], "worker");
+
+    let fetched = run_cli_json(&socket_path, &["agent", "get", "worker"]);
+    assert_eq!(fetched["result"]["agent"]["pane_id"], root_pane_id);
+
+    let read = run_cli_json(
+        &socket_path,
+        &["agent", "read", &terminal_id, "--source", "visible"],
+    );
+    assert_eq!(read["result"]["type"], "pane_read");
+
+    let sent = run_cli(
+        &socket_path,
+        &["agent", "send", "worker", "echo cli-agent-ok\n"],
+    );
+    assert!(sent.status.success());
+
+    let agent_renamed = run_cli_json(&socket_path, &["agent", "rename", "worker", "reviewer"]);
+    assert_eq!(agent_renamed["result"]["agent"]["name"], "reviewer");
+
+    let focused = run_cli_json(&socket_path, &["agent", "focus", "reviewer"]);
+    assert_eq!(focused["result"]["agent"]["focused"], true);
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn pane_close_only_removes_the_target_tab_when_other_tabs_exist() {
     let base = unique_test_dir();
     let config_home = base.join("config");

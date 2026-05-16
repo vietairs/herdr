@@ -273,6 +273,12 @@ fn workspace_list_and_create_round_trip() {
         .as_str()
         .unwrap()
         .to_string();
+    let root_terminal_id = created["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(root_terminal_id.starts_with("term_"));
+    assert_ne!(root_terminal_id, root_pane_id);
     assert_eq!(created["result"]["workspace"]["number"], 1);
     assert_eq!(created["result"]["workspace"]["focused"], true);
     assert_eq!(created["result"]["workspace"]["tab_count"], 1);
@@ -307,6 +313,7 @@ fn workspace_list_and_create_round_trip() {
     assert_eq!(panes[0]["tab_id"], active_tab_id);
     let pane_id = panes[0]["pane_id"].as_str().unwrap().to_string();
     assert_eq!(pane_id, root_pane_id);
+    assert_eq!(panes[0]["terminal_id"], root_terminal_id);
 
     let pane = send_request(
         &socket_path,
@@ -316,6 +323,7 @@ fn workspace_list_and_create_round_trip() {
         ),
     );
     assert_eq!(pane["result"]["pane"]["pane_id"], pane_id);
+    assert_eq!(pane["result"]["pane"]["terminal_id"], root_terminal_id);
 
     let read = send_request(
         &socket_path,
@@ -467,6 +475,12 @@ fn tab_methods_round_trip_over_socket() {
         .as_str()
         .unwrap()
         .to_string();
+    let second_root_terminal_id = tab_created["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(second_root_terminal_id.starts_with("term_"));
+    assert_ne!(second_root_terminal_id, second_root_pane_id);
     assert_eq!(second_tab_id, format!("{workspace_id}:2"));
     assert_eq!(tab_created["result"]["tab"]["focused"], true);
     assert_eq!(tab_created["result"]["root_pane"]["tab_id"], second_tab_id);
@@ -490,9 +504,9 @@ fn tab_methods_round_trip_over_socket() {
         ),
     );
     let panes = panes["result"]["panes"].as_array().unwrap();
-    assert!(panes
-        .iter()
-        .any(|pane| pane["pane_id"] == second_root_pane_id));
+    assert!(panes.iter().any(|pane| {
+        pane["pane_id"] == second_root_pane_id && pane["terminal_id"] == second_root_terminal_id
+    }));
     assert_eq!(tabs[1]["tab_id"], second_tab_id);
 
     let tab_get = send_request(
@@ -536,6 +550,155 @@ fn tab_methods_round_trip_over_socket() {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[test]
+fn agent_methods_round_trip_over_socket() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_ws","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let terminal_id = created["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let renamed = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_rename_pane","method":"pane.rename","params":{{"pane_id":"{}","label":"worker"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(renamed["result"]["pane"]["label"], "worker");
+
+    let reported = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_report","method":"pane.report_agent","params":{{"pane_id":"{}","source":"test","agent":"pi","state":"working"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(reported["result"]["type"], "ok");
+
+    let listed = send_request(
+        &socket_path,
+        r#"{"id":"agent_list","method":"agent.list","params":{}}"#,
+    );
+    let agents = listed["result"]["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0]["terminal_id"], terminal_id);
+    assert_eq!(agents[0]["name"], "worker");
+    assert_eq!(agents[0]["agent"], "pi");
+    assert_eq!(agents[0]["agent_status"], "working");
+    assert_eq!(agents[0]["pane_id"], pane_id);
+
+    let fetched_by_name = send_request(
+        &socket_path,
+        r#"{"id":"agent_get_name","method":"agent.get","params":{"target":"worker"}}"#,
+    );
+    assert_eq!(
+        fetched_by_name["result"]["agent"]["terminal_id"],
+        terminal_id
+    );
+
+    let fetched_by_terminal = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_get_terminal","method":"agent.get","params":{{"target":"{}"}}}}"#,
+            terminal_id
+        ),
+    );
+    assert_eq!(fetched_by_terminal["result"]["agent"]["name"], "worker");
+
+    let read = send_request(
+        &socket_path,
+        r#"{"id":"agent_read","method":"agent.read","params":{"target":"worker","source":"visible"}}"#,
+    );
+    assert_eq!(read["result"]["type"], "pane_read");
+    assert_eq!(read["result"]["read"]["pane_id"], pane_id);
+
+    let sent = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_send","method":"agent.send","params":{{"target":"{}","text":"echo agent-send-ok\n"}}}}"#,
+            terminal_id
+        ),
+    );
+    assert_eq!(sent["result"]["type"], "ok");
+
+    let tab_created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_tab","method":"tab.create","params":{{"workspace_id":"{}","focus":false}}}}"#,
+            workspace_id
+        ),
+    );
+    let second_tab_id = tab_created["result"]["tab"]["tab_id"].as_str().unwrap();
+    let second_pane_id = tab_created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap();
+    let second_terminal_id = tab_created["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .unwrap();
+
+    let second_renamed = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_second_rename","method":"pane.rename","params":{{"pane_id":"{}","label":"reviewer"}}}}"#,
+            second_pane_id
+        ),
+    );
+    assert_eq!(second_renamed["result"]["pane"]["label"], "reviewer");
+
+    let duplicate = send_request(
+        &socket_path,
+        r#"{"id":"agent_duplicate","method":"agent.rename","params":{"target":"reviewer","name":"worker"}}"#,
+    );
+    assert_eq!(duplicate["error"]["code"], "agent_name_taken");
+    assert!(duplicate["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(&terminal_id));
+
+    let agent_renamed = send_request(
+        &socket_path,
+        r#"{"id":"agent_rename","method":"agent.rename","params":{"target":"reviewer","name":"qa"}}"#,
+    );
+    assert_eq!(agent_renamed["result"]["agent"]["name"], "qa");
+
+    let focused = send_request(
+        &socket_path,
+        r#"{"id":"agent_focus","method":"agent.focus","params":{"target":"qa"}}"#,
+    );
+    assert_eq!(
+        focused["result"]["agent"]["terminal_id"],
+        second_terminal_id
+    );
+    assert_eq!(focused["result"]["agent"]["tab_id"], second_tab_id);
+    assert_eq!(focused["result"]["agent"]["focused"], true);
+
+    cleanup_spawned_herdr(child, base);
+}
+
 #[test]
 fn tab_create_with_no_focus_preserves_active_tab() {
     let _lock = test_lock();

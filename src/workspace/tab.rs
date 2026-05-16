@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, Notify};
 use crate::events::AppEvent;
 use crate::layout::{PaneId, TileLayout};
 use crate::pane::{PaneRuntime, PaneState};
+use crate::terminal::TerminalId;
 
 pub struct Tab {
     pub custom_name: Option<String>,
@@ -20,6 +21,8 @@ pub struct Tab {
     pub panes: HashMap<PaneId, PaneState>,
     /// Best-effort cwd cache per pane. Live runtime cwd wins when available.
     pub pane_cwds: HashMap<PaneId, PathBuf>,
+    /// One-to-one terminal identity for each pane-backed PTY during the transition.
+    pub terminal_ids: HashMap<PaneId, TerminalId>,
     /// Pane runtimes — only present in production (empty in tests).
     pub runtimes: HashMap<PaneId, PaneRuntime>,
     pub zoomed: bool,
@@ -66,6 +69,8 @@ impl Tab {
         panes.insert(root_id, PaneState::new());
         let mut pane_cwds = HashMap::new();
         pane_cwds.insert(root_id, initial_cwd);
+        let mut terminal_ids = HashMap::new();
+        terminal_ids.insert(root_id, TerminalId::alloc());
         let mut runtimes = HashMap::new();
         runtimes.insert(root_id, runtime);
 
@@ -76,6 +81,7 @@ impl Tab {
             layout,
             panes,
             pane_cwds,
+            terminal_ids,
             runtimes,
             zoomed: false,
             events,
@@ -182,6 +188,7 @@ impl Tab {
         };
         self.panes.insert(new_id, PaneState::new());
         self.pane_cwds.insert(new_id, actual_cwd);
+        self.terminal_ids.insert(new_id, TerminalId::alloc());
         self.runtimes.insert(new_id, runtime);
         self.zoomed = false;
         Ok(new_id)
@@ -218,6 +225,7 @@ impl Tab {
 
         self.panes.remove(&pane_id);
         self.pane_cwds.remove(&pane_id);
+        self.terminal_ids.remove(&pane_id);
         let runtime = self.runtimes.remove(&pane_id);
         self.zoomed = false;
         if let Some(next_root) = next_root {
@@ -235,6 +243,10 @@ impl Tab {
 
     pub fn focused_runtime(&self) -> Option<&PaneRuntime> {
         self.runtimes.get(&self.layout.focused())
+    }
+
+    pub fn terminal_id(&self, pane_id: PaneId) -> Option<&TerminalId> {
+        self.terminal_ids.get(&pane_id)
     }
 
     pub fn cwd_for_pane(&self, pane_id: PaneId) -> Option<PathBuf> {

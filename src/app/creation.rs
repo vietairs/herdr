@@ -239,6 +239,7 @@ impl App {
                 .is_some_and(|focused| focused == pane_id);
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
+            terminal_id: ws.terminal_id(pane_id)?.to_string(),
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             focused,

@@ -40,6 +40,18 @@ pub enum Method {
     TabRename(TabRenameParams),
     #[serde(rename = "tab.close")]
     TabClose(TabTarget),
+    #[serde(rename = "agent.list")]
+    AgentList(EmptyParams),
+    #[serde(rename = "agent.get")]
+    AgentGet(AgentTarget),
+    #[serde(rename = "agent.read")]
+    AgentRead(AgentReadParams),
+    #[serde(rename = "agent.send")]
+    AgentSend(AgentSendParams),
+    #[serde(rename = "agent.rename")]
+    AgentRename(AgentRenameParams),
+    #[serde(rename = "agent.focus")]
+    AgentFocus(AgentTarget),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.list")]
@@ -135,6 +147,36 @@ pub struct TabListParams {
 pub struct TabRenameParams {
     pub tab_id: String,
     pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTarget {
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReadParams {
+    pub target: String,
+    pub source: ReadSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<u32>,
+    #[serde(default)]
+    pub format: ReadFormat,
+    #[serde(default = "default_true")]
+    pub strip_ansi: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSendParams {
+    pub target: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRenameParams {
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -478,6 +520,12 @@ pub enum ResponseResult {
     TabList {
         tabs: Vec<TabInfo>,
     },
+    AgentInfo {
+        agent: AgentInfo,
+    },
+    AgentList {
+        agents: Vec<AgentInfo>,
+    },
     PaneInfo {
         pane: PaneInfo,
     },
@@ -536,8 +584,26 @@ pub struct TabInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInfo {
+    pub terminal_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub agent_status: AgentStatus,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub pane_id: String,
+    pub focused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneInfo {
     pub pane_id: String,
+    pub terminal_id: String,
     pub workspace_id: String,
     pub tab_id: String,
     pub focused: bool,
@@ -1028,6 +1094,7 @@ mod tests {
                 },
                 root_pane: PaneInfo {
                     pane_id: "w_1-3".into(),
+                    terminal_id: "term_example".into(),
                     workspace_id: "w_1".into(),
                     tab_id: "w_1:2".into(),
                     focused: false,
