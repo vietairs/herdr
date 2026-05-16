@@ -128,6 +128,72 @@ jobs:
             herdr-macos-aarch64/herdr-macos-aarch64
           body_path: RELEASE_NOTES.md
 
+  close-released-issues:
+    needs: release
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Close issues referenced by released commits
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          CURRENT_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          PREVIOUS_TAG="$(git describe --first-parent --tags --match 'v[0-9]*' --abbrev=0 "${CURRENT_COMMIT}^" 2>/dev/null || true)"
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous release tag found; skipping issue close."
+            exit 0
+          fi
+
+          echo "Scanning released commits in $PREVIOUS_TAG..$GITHUB_REF_NAME for refs #<issue> lines."
+          mapfile -t ISSUES < <(
+            git log --format=%b "$PREVIOUS_TAG..$CURRENT_COMMIT" \
+              | perl -ne 'print "$1\n" if /^\s*refs\s+#([0-9]+)\s*$/i' \
+              | sort -nu
+          )
+
+          if [ "${#ISSUES[@]}" -eq 0 ]; then
+            echo "No released issue refs found."
+            exit 0
+          fi
+
+          RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/v${VERSION}"
+
+          for issue in "${ISSUES[@]}"; do
+            echo "Checking #$issue"
+            if ! data="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${issue}")"; then
+              echo "::warning::Could not read issue #$issue; skipping."
+              continue
+            fi
+
+            if jq -e 'has("pull_request")' <<<"$data" >/dev/null; then
+              echo "Skipping #$issue because it is a pull request."
+              continue
+            fi
+
+            if [ "$(jq -r '.state' <<<"$data")" != "open" ]; then
+              echo "Skipping #$issue because it is not open."
+              continue
+            fi
+
+            if ! gh issue close "$issue" --repo "$GITHUB_REPOSITORY" --reason completed --comment "Released in [v${VERSION}](${RELEASE_URL})."; then
+              echo "::warning::Could not close issue #$issue."
+              continue
+            fi
+          done
+
   update-latest-json:
     needs: release
     runs-on: ubuntu-latest

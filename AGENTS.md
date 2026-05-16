@@ -57,7 +57,13 @@ Unit tests live next to the code (`#[cfg(test)] mod tests`). If you add behavior
 - Before release, copy the approved `.pi/docs/` versions into the root public docs. `just release` blocks until each root public doc and `CHANGELOG.md` are identical to their `.pi/docs/` counterparts.
 - Keep website copy and config examples aligned with the latest published release unless the user explicitly asks for prerelease docs.
 - Put local PRDs, planning notes, and exploratory specs under `.prd/`; that directory is ignored and locally controlled.
-- When a commit fully fixes a GitHub issue, include `fixes #<issue-number>` in the commit body so GitHub closes it on merge.
+- When a normal feature or fix commit relates to a GitHub issue, add a commit body line `refs #<issue-number>` after the subject. Use this shape:
+  ```text
+  fix: handle pane focus
+
+  refs #82
+  ```
+  Do not use GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue-number>`, or `resolves #<issue-number>` in normal commits, because `master` contains unreleased work and those keywords close issues before release. Release CI scans `refs #<issue-number>` body lines between release tags and closes the referenced issues after the GitHub Release is created.
 - Rust: no `unwrap()` in production code. `tracing` for logging. `#[allow]` only with a comment explaining why.
 - Don't bypass checks. If tests fail, fix them before committing.
 - Don't add dependencies without a reason. Check if the existing deps cover it first.

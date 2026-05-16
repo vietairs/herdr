@@ -20,9 +20,9 @@ Process:
      ```bash
      git log --first-parent --reverse --format='%H%x09%s' <base>..HEAD
      ```
-   - Also inspect full commits when needed:
+   - Also inspect full commits and commit bodies when needed:
      ```bash
-     git log --reverse --format='%H%x09%s' <base>..HEAD
+     git log --reverse --format='%H%x09%s%n%b' <base>..HEAD
      ```
 
 3. Detect merged PRs if any.
@@ -44,11 +44,16 @@ Process:
      - formatting-only changes
      - comment-only/doc-only changes unless they materially affect users
 
-6. Audit `.pi/docs/CHANGELOG.md`.
+6. Audit `.pi/docs/CHANGELOG.md` and issue references.
    - Treat root `CHANGELOG.md` as the latest released changelog.
    - Treat `.pi/docs/CHANGELOG.md` as the next-release changelog.
    - Compare meaningful user-facing changes in the commit range against `.pi/docs/CHANGELOG.md`.
    - Flag missing entries for new features, bug fixes, removals, breaking changes, defaults, compatibility changes, user-visible command/config/API behavior, and security-relevant changes.
+   - Inspect commit bodies for issue reference lines in the form `refs #<issue-number>`.
+   - Flag normal commits that use GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue-number>`, or `resolves #<issue-number>`, because they close issues before release when they land on `master`.
+   - For each shipped issue reference, check whether the changelog has a matching user-facing entry that mentions `#<issue-number>` when appropriate.
+   - Do not require or add GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue-number>`, or `resolves #<issue-number>` to changelog entries or release notes.
+   - List shipped issue references under `Issue references to close after release:` so the release operator can verify what release CI will close after the GitHub Release is published.
    - Flag stale entries that do not appear to correspond to shipped changes in the range.
    - Flag entries that are too implementation-focused or unclear for end users.
    - Preserve the existing changelog style and sections: `Added`, `Changed`, `Fixed`, `Removed`, and `Breaking Changes` when applicable.
@@ -82,6 +87,7 @@ Output format:
 - `Direct commits included:`
 - `Excluded as housekeeping:`
 - `Next-release changelog audit:`
+- `Issue references to close after release:`
 - `Next-release docs audit:`
 - `Root finalization status:`
 - `Required changes before release:`
