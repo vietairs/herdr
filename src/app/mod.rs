@@ -371,6 +371,7 @@ impl App {
             agent_panel_scope,
             mouse_capture: config.ui.mouse_capture,
             confirm_close: config.ui.confirm_close,
+            prompt_new_tab_name: config.ui.prompt_new_tab_name,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             kitty_graphics_enabled: config.experimental.kitty_graphics,
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
@@ -716,6 +717,7 @@ impl App {
             }
             self.state.mouse_capture = config.ui.mouse_capture;
             self.state.confirm_close = config.ui.confirm_close;
+            self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
             self.state.show_agent_labels_on_pane_borders =
                 config.ui.show_agent_labels_on_pane_borders;
             self.state.agent_panel_scope =

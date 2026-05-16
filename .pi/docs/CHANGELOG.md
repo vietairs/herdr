@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added `ui.prompt_new_tab_name = false` for creating new tabs immediately with generated names instead of opening the rename dialog.
 - Added optional `keys.edit_scrollback` to open the focused pane's retained scrollback in `$EDITOR` inside a temporary zoomed pane.
 
 ### Fixed

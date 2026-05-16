@@ -150,6 +150,8 @@ pub struct UiConfig {
     pub mouse_capture: bool,
     /// Ask for confirmation before closing a workspace. Default: true.
     pub confirm_close: bool,
+    /// Ask for a tab name before creating a new tab. Default: true.
+    pub prompt_new_tab_name: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
     /// Agent sidebar scope. Saved values are "current" or "all". Default: "all".
@@ -223,6 +225,7 @@ impl Default for UiConfig {
             sidebar_width: 26,
             mouse_capture: true,
             confirm_close: true,
+            prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
             agent_panel_scope: AgentPanelScopeConfig::All,
             accent: "cyan".into(),
@@ -295,6 +298,19 @@ show_agent_labels_on_pane_borders = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.ui.show_agent_labels_on_pane_borders);
+    }
+
+    #[test]
+    fn prompt_new_tab_name_defaults_on_and_parses() {
+        let default_config = Config::default();
+        assert!(default_config.ui.prompt_new_tab_name);
+
+        let toml = r#"
+[ui]
+prompt_new_tab_name = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.ui.prompt_new_tab_name);
     }
 
     #[test]

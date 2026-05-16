@@ -682,7 +682,14 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
             state.next_agent();
             leave_navigate_mode(state);
         }
-        NavigateAction::NewTab => super::modal::open_new_tab_dialog(state),
+        NavigateAction::NewTab => {
+            if state.prompt_new_tab_name {
+                super::modal::open_new_tab_dialog(state);
+            } else {
+                state.request_new_tab = true;
+                leave_navigate_mode(state);
+            }
+        }
         NavigateAction::RenameTab => super::modal::open_rename_active_tab(state, false),
         NavigateAction::PreviousTab => {
             state.previous_tab();
@@ -1204,6 +1211,19 @@ mod tests {
         assert!(state.name_input_replace_on_type);
         assert!(!state.request_new_tab);
         assert_eq!(state.workspaces[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn new_tab_action_can_skip_rename_dialog() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.prompt_new_tab_name = false;
+
+        execute_navigate_action(&mut state, NavigateAction::NewTab);
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.creating_new_tab);
+        assert!(state.request_new_tab);
+        assert!(state.requested_new_tab_name.is_none());
     }
 
     #[test]

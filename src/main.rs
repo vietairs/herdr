@@ -136,6 +136,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Ask for confirmation before closing a workspace
 # confirm_close = true
 
+# Ask for a tab name before creating a new tab.
+# Set false to create tabs immediately with generated names.
+# prompt_new_tab_name = true
+
 # Show detected/reported agent labels in split pane borders when no manual pane name is set.
 # show_agent_labels_on_pane_borders = false
 

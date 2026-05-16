@@ -881,6 +881,7 @@ pub struct AppState {
     /// captures mouse while the focused pane app requests mouse reporting.
     pub mouse_capture: bool,
     pub confirm_close: bool,
+    pub prompt_new_tab_name: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub kitty_graphics_enabled: bool,
     pub pane_scrollback_limit_bytes: usize,
@@ -1064,6 +1065,7 @@ impl AppState {
             agent_panel_scope: AgentPanelScope::AllWorkspaces,
             mouse_capture: true,
             confirm_close: true,
+            prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
             kitty_graphics_enabled: false,
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,
