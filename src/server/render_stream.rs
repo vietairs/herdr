@@ -272,7 +272,10 @@ pub(crate) fn visible_hyperlinks(app_state: &AppState) -> Vec<((u16, u16), Strin
 
     let mut links = Vec::new();
     for info in &app_state.view.pane_infos {
-        if let Some(runtime) = tab.runtimes.get(&info.id) {
+        if let Some(runtime) = tab
+            .terminal_id(info.id)
+            .and_then(|terminal_id| app_state.terminal_runtimes.get(terminal_id))
+        {
             links.extend(runtime.visible_hyperlinks(info.inner_rect));
         }
     }
@@ -285,13 +288,12 @@ fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
     }
 
     let ws_idx = app_state.active?;
-    let ws = app_state.workspaces.get(ws_idx)?;
     let info = app_state
         .view
         .pane_infos
         .iter()
         .find(|info| info.is_focused)?;
-    let rt = ws.runtime(info.id)?;
+    let rt = app_state.runtime_for_pane_in_workspace(ws_idx, info.id)?;
     let cursor = rt.cursor_state(info.inner_rect, true)?;
     Some(CursorState {
         x: cursor.x,

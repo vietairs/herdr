@@ -126,7 +126,10 @@ fn toast_message_from_state_change(
         .find_map(|(ws_idx, ws)| {
             ws.tabs.iter().find_map(|tab| {
                 let pane = tab.panes.get(&pane_id)?;
-                let agent_label = pane.effective_agent_label()?;
+                let agent_label = state
+                    .terminals
+                    .get(&pane.attached_terminal_id)
+                    .and_then(|terminal| terminal.effective_agent_label())?;
                 Some(format!(
                     "{} {}: {}",
                     agent_label,
@@ -762,9 +765,14 @@ impl HeadlessServer {
             .workspaces
             .iter()
             .find_map(|ws| {
-                ws.tabs
-                    .iter()
-                    .find_map(|tab| tab.panes.get(&pane_id).map(|pane| pane.state))
+                ws.tabs.iter().find_map(|tab| {
+                    let pane = tab.panes.get(&pane_id)?;
+                    self.app
+                        .state
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .map(|terminal| terminal.state)
+                })
             })
             .unwrap_or(crate::detect::AgentState::Unknown)
     }
@@ -1332,7 +1340,8 @@ impl HeadlessServer {
         // bypasses drain_internal_events_with_forwarding. Headless mode disables
         // local sound playback, so sound notifications need to be forwarded here.
         let toast_before = self.app.state.toast.clone();
-        let pane_states_before: Vec<(usize, crate::layout::PaneId, crate::detect::AgentState)> =
+        let pane_states_before: Vec<(usize, crate::layout::PaneId, crate::detect::AgentState)> = {
+            let terminals = &self.app.state.terminals;
             self.app
                 .state
                 .workspaces
@@ -1340,12 +1349,15 @@ impl HeadlessServer {
                 .enumerate()
                 .flat_map(|(ws_idx, ws)| {
                     ws.tabs.iter().flat_map(move |tab| {
-                        tab.panes
-                            .iter()
-                            .map(move |(&pane_id, pane)| (ws_idx, pane_id, pane.state))
+                        tab.panes.iter().filter_map(move |(&pane_id, pane)| {
+                            terminals
+                                .get(&pane.attached_terminal_id)
+                                .map(|terminal| (ws_idx, pane_id, terminal.state))
+                        })
                     })
                 })
-                .collect();
+                .collect()
+        };
 
         self.sync_foreground_client_state();
         let response = self.app.handle_api_request(msg.request);
@@ -1391,7 +1403,16 @@ impl HeadlessServer {
                 continue;
             };
 
-            let new_state = pane_after.state;
+            let Some(terminal_after) = self
+                .app
+                .state
+                .terminals
+                .get(&pane_after.attached_terminal_id)
+            else {
+                continue;
+            };
+
+            let new_state = terminal_after.state;
             if new_state == *prev_state {
                 continue;
             }
@@ -1400,7 +1421,7 @@ impl HeadlessServer {
             let suppress_active_tab_notifications =
                 self.active_tab_suppresses_notifications(is_active_tab);
 
-            let agent = pane_after.effective_known_agent();
+            let agent = terminal_after.effective_known_agent();
 
             debug!(
                 ws_idx,
@@ -1419,7 +1440,13 @@ impl HeadlessServer {
                     *prev_state,
                     new_state,
                 ) {
-                    if let Some(agent_label) = pane_after.effective_agent_label() {
+                    if let Some(agent_label) = self
+                        .app
+                        .state
+                        .terminals
+                        .get(&pane_after.attached_terminal_id)
+                        .and_then(|terminal| terminal.effective_agent_label())
+                    {
                         let event_text = match kind {
                             crate::app::state::ToastKind::NeedsAttention => "needs attention",
                             crate::app::state::ToastKind::Finished => "finished",
@@ -2129,9 +2156,9 @@ mod tests {
         let mut state = AppState::test_new();
         let mut ws = crate::workspace::Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
-        ws.tabs[0].runtimes.insert(
+        ws.insert_test_runtime(
             pane_id,
-            crate::pane::PaneRuntime::test_with_screen_bytes(20, 5, b"left"),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"left"),
         );
 
         state.workspaces = vec![ws];
@@ -2165,9 +2192,9 @@ mod tests {
         let mut state = AppState::test_new();
         let mut ws = crate::workspace::Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
-        ws.tabs[0].runtimes.insert(
+        ws.insert_test_runtime(
             pane_id,
-            crate::pane::PaneRuntime::test_with_screen_bytes(20, 5, b"left\x1b[?25l"),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"left\x1b[?25l"),
         );
 
         state.workspaces = vec![ws];
@@ -2201,9 +2228,9 @@ mod tests {
         let mut state = AppState::test_new();
         let mut ws = crate::workspace::Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
-        ws.tabs[0].runtimes.insert(
+        ws.insert_test_runtime(
             pane_id,
-            crate::pane::PaneRuntime::test_with_screen_bytes(20, 5, b"left"),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"left"),
         );
 
         state.workspaces = vec![ws];
@@ -2227,8 +2254,9 @@ mod tests {
         for line in 0..80 {
             bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
         }
-        let runtime = crate::pane::PaneRuntime::test_with_scrollback_bytes(20, 5, 4096, &bytes);
-        ws.tabs[0].runtimes.insert(pane_id, runtime);
+        let runtime =
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(20, 5, 4096, &bytes);
+        ws.insert_test_runtime(pane_id, runtime);
 
         state.workspaces = vec![ws];
         state.active = Some(0);
@@ -2237,8 +2265,8 @@ mod tests {
 
         let area = Rect::new(0, 0, 80, 24);
         let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
-        let runtime = state.workspaces[0]
-            .runtime(pane_id)
+        let runtime = state
+            .runtime_for_pane(pane_id)
             .expect("pane runtime after initial render");
         runtime.scroll_up(6);
         assert!(crate::ui::pane_is_scrolled_back(runtime));
@@ -2498,11 +2526,11 @@ mod tests {
         let background_pane = workspace.tabs[background_tab].root_pane;
         workspace.tabs[0].runtimes.insert(
             active_pane,
-            crate::pane::PaneRuntime::test_with_screen_bytes(80, 24, b""),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
         );
         workspace.tabs[background_tab].runtimes.insert(
             background_pane,
-            crate::pane::PaneRuntime::test_with_screen_bytes(80, 24, b""),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
         );
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
@@ -2528,11 +2556,20 @@ mod tests {
         let terminal_area = server.app.state.view.terminal_area;
         let expected = (terminal_area.height, terminal_area.width.saturating_sub(1));
         assert_eq!(
-            server.app.state.workspaces[0].tabs[0].runtimes[&active_pane].current_size(),
+            server
+                .app
+                .state
+                .runtime_for_pane(active_pane)
+                .unwrap()
+                .current_size(),
             expected
         );
         assert_eq!(
-            server.app.state.workspaces[0].tabs[background_tab].runtimes[&background_pane]
+            server
+                .app
+                .state
+                .runtime_for_pane(background_pane)
+                .unwrap()
                 .current_size(),
             expected
         );
@@ -3029,12 +3066,22 @@ mod tests {
     #[test]
     fn stale_api_agent_report_does_not_forward_done_sound() {
         let mut server = test_headless_server();
-        let mut background = crate::workspace::Workspace::test_new("background");
+        let background = crate::workspace::Workspace::test_new("background");
         let pane_id = background.tabs[0].root_pane;
         let public_pane_id = format!("{}-1", background.id);
-        background.tabs[0]
-            .panes
-            .get_mut(&pane_id)
+        let foreground = crate::workspace::Workspace::test_new("foreground");
+        server.app.state.workspaces = vec![background, foreground];
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server.app.state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
             .unwrap()
             .set_hook_authority(
                 "herdr:pi".into(),
@@ -3043,8 +3090,6 @@ mod tests {
                 None,
                 Some(20),
             );
-        let foreground = crate::workspace::Workspace::test_new("foreground");
-        server.app.state.workspaces = vec![background, foreground];
         server.app.state.active = Some(1);
         server.app.state.selected = 1;
         server.app.state.mode = crate::app::Mode::Terminal;
@@ -3085,10 +3130,7 @@ mod tests {
         assert!(changed);
         assert!(response_rx.recv_timeout(Duration::from_millis(100)).is_ok());
         assert_eq!(
-            server.app.state.workspaces[0]
-                .pane_state(pane_id)
-                .unwrap()
-                .state,
+            server.app.state.terminals.get(&terminal_id).unwrap().state,
             crate::detect::AgentState::Working
         );
         assert!(

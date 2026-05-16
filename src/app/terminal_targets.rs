@@ -61,9 +61,11 @@ impl App {
             .terminal_targets()
             .into_iter()
             .filter(|candidate| {
-                self.state.workspaces[candidate.ws_idx]
-                    .pane_state(candidate.pane_id)
-                    .and_then(|pane| pane.manual_label.as_deref())
+                self.state
+                    .terminals
+                    .values()
+                    .find(|terminal| terminal.id.to_string() == candidate.terminal_id)
+                    .and_then(|terminal| terminal.manual_label.as_deref())
                     .is_some_and(|label| label == target)
             })
             .collect();
@@ -151,15 +153,20 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
         let pane = ws.pane_state(pane_id)?;
+        let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
         Some(TerminalTargetCandidate {
-            terminal_id: ws.terminal_id(pane_id)?.to_string(),
+            terminal_id: terminal.id.to_string(),
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             cwd: ws.tabs[tab_idx]
-                .cwd_for_pane(pane_id)
+                .cwd_for_pane(
+                    pane_id,
+                    &self.state.terminals,
+                    &self.state.terminal_runtimes,
+                )
                 .map(|cwd| cwd.display().to_string()),
-            agent_status: pane_agent_status(pane.state, pane.seen),
+            agent_status: pane_agent_status(terminal.state, pane.seen),
         })
     }
 }

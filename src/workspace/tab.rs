@@ -8,8 +8,16 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
 use crate::layout::{PaneId, TileLayout};
-use crate::pane::{PaneRuntime, PaneState};
-use crate::terminal::TerminalId;
+use crate::pane::PaneState;
+use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
+
+pub(crate) type DetachedPane = (PaneId, TerminalId);
+
+pub struct NewPane {
+    pub pane_id: PaneId,
+    pub terminal: TerminalState,
+    pub runtime: TerminalRuntime,
+}
 
 enum SplitCommand<'a> {
     Shell {
@@ -27,27 +35,14 @@ pub struct Tab {
     /// Identity source for this tab's pane tree.
     pub root_pane: PaneId,
     pub layout: TileLayout,
-    /// Pane state — always present, testable without PTYs.
+    /// Pane viewport state — always present, testable without PTYs.
     pub panes: HashMap<PaneId, PaneState>,
-    /// Best-effort cwd cache per pane. Live runtime cwd wins when available.
-    pub pane_cwds: HashMap<PaneId, PathBuf>,
-    /// One-to-one terminal identity for each pane-backed PTY during the transition.
-    pub terminal_ids: HashMap<PaneId, TerminalId>,
-    /// Pane runtimes — only present in production (empty in tests).
-    pub runtimes: HashMap<PaneId, PaneRuntime>,
+    #[cfg(test)]
+    pub runtimes: HashMap<PaneId, TerminalRuntime>,
     pub zoomed: bool,
     pub events: mpsc::Sender<AppEvent>,
     pub(crate) render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<AtomicBool>,
-}
-
-impl Drop for Tab {
-    fn drop(&mut self) {
-        let runtimes = std::mem::take(&mut self.runtimes);
-        for (pane_id, runtime) in runtimes {
-            runtime.shutdown(pane_id);
-        }
-    }
 }
 
 impl Tab {
@@ -61,7 +56,7 @@ impl Tab {
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
-    ) -> std::io::Result<Self> {
+    ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_runtime(
             number,
             initial_cwd,
@@ -87,7 +82,7 @@ impl Tab {
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
-    ) -> std::io::Result<Self> {
+    ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_runtime(
             number,
             initial_cwd,
@@ -114,10 +109,10 @@ impl Tab {
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
         argv: Option<&[String]>,
-    ) -> std::io::Result<Self> {
+    ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         let (layout, root_id) = TileLayout::new();
         let runtime = if let Some(argv) = argv {
-            PaneRuntime::spawn_argv_command(
+            TerminalRuntime::spawn_argv_command(
                 root_id,
                 rows,
                 cols,
@@ -130,7 +125,7 @@ impl Tab {
                 render_dirty.clone(),
             )?
         } else {
-            PaneRuntime::spawn(
+            TerminalRuntime::spawn(
                 root_id,
                 rows,
                 cols,
@@ -143,29 +138,33 @@ impl Tab {
             )?
         };
 
+        let terminal_id = TerminalId::alloc();
+        let terminal = match argv {
+            Some(argv) => {
+                TerminalState::new(terminal_id.clone(), initial_cwd).with_launch_argv(argv.to_vec())
+            }
+            None => TerminalState::new(terminal_id.clone(), initial_cwd),
+        };
         let mut panes = HashMap::new();
-        panes.insert(root_id, PaneState::new());
-        let mut pane_cwds = HashMap::new();
-        pane_cwds.insert(root_id, initial_cwd);
-        let mut terminal_ids = HashMap::new();
-        terminal_ids.insert(root_id, TerminalId::alloc());
-        let mut runtimes = HashMap::new();
-        runtimes.insert(root_id, runtime);
+        panes.insert(root_id, PaneState::new(terminal_id));
 
-        Ok(Self {
-            custom_name: None,
-            number,
-            root_pane: root_id,
-            layout,
-            panes,
-            pane_cwds,
-            terminal_ids,
-            runtimes,
-            zoomed: false,
-            events,
-            render_notify,
-            render_dirty,
-        })
+        Ok((
+            Self {
+                custom_name: None,
+                number,
+                root_pane: root_id,
+                layout,
+                panes,
+                #[cfg(test)]
+                runtimes: HashMap::new(),
+                zoomed: false,
+                events,
+                render_notify,
+                render_dirty,
+            },
+            terminal,
+            runtime,
+        ))
     }
 
     pub fn display_name(&self) -> String {
@@ -190,7 +189,7 @@ impl Tab {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<PaneId> {
+    ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
             rows,
@@ -212,7 +211,7 @@ impl Tab {
         extra_env: &[(String, String)],
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<PaneId> {
+    ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
             rows,
@@ -233,7 +232,7 @@ impl Tab {
         argv: &[String],
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<PaneId> {
+    ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
             rows,
@@ -254,25 +253,33 @@ impl Tab {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         command: Option<SplitCommand<'_>>,
-    ) -> std::io::Result<PaneId> {
+    ) -> std::io::Result<NewPane> {
+        let previous_focus = self.layout.focused();
         let new_id = self.layout.split_focused(direction);
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
+        let launch_argv = if let Some(SplitCommand::Argv { argv }) = &command {
+            Some((*argv).to_vec())
+        } else {
+            None
+        };
         let runtime = match command {
-            Some(SplitCommand::Shell { command, extra_env }) => PaneRuntime::spawn_shell_command(
-                new_id,
-                rows,
-                cols,
-                actual_cwd.clone(),
-                command,
-                extra_env,
-                scrollback_limit_bytes,
-                host_terminal_theme,
-                self.events.clone(),
-                self.render_notify.clone(),
-                self.render_dirty.clone(),
-            )?,
-            Some(SplitCommand::Argv { argv }) => PaneRuntime::spawn_argv_command(
+            Some(SplitCommand::Shell { command, extra_env }) => {
+                TerminalRuntime::spawn_shell_command(
+                    new_id,
+                    rows,
+                    cols,
+                    actual_cwd.clone(),
+                    command,
+                    extra_env,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                    self.events.clone(),
+                    self.render_notify.clone(),
+                    self.render_dirty.clone(),
+                )
+            }
+            Some(SplitCommand::Argv { argv }) => TerminalRuntime::spawn_argv_command(
                 new_id,
                 rows,
                 cols,
@@ -283,8 +290,8 @@ impl Tab {
                 self.events.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
-            )?,
-            None => PaneRuntime::spawn(
+            ),
+            None => TerminalRuntime::spawn(
                 new_id,
                 rows,
                 cols,
@@ -294,30 +301,46 @@ impl Tab {
                 self.events.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
-            )?,
+            ),
         };
-        self.panes.insert(new_id, PaneState::new());
-        self.pane_cwds.insert(new_id, actual_cwd);
-        self.terminal_ids.insert(new_id, TerminalId::alloc());
-        self.runtimes.insert(new_id, runtime);
+        let runtime = match runtime {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                self.layout.close_focused();
+                self.layout.focus_pane(previous_focus);
+                return Err(err);
+            }
+        };
+        let terminal_id = TerminalId::alloc();
+        let terminal = match launch_argv {
+            Some(argv) => {
+                TerminalState::new(terminal_id.clone(), actual_cwd).with_launch_argv(argv)
+            }
+            None => TerminalState::new(terminal_id.clone(), actual_cwd),
+        };
+        self.panes.insert(new_id, PaneState::new(terminal_id));
         self.zoomed = false;
-        Ok(new_id)
+        Ok(NewPane {
+            pane_id: new_id,
+            terminal,
+            runtime,
+        })
     }
 
-    pub fn close_focused(&mut self) -> Option<(PaneId, Option<PaneRuntime>)> {
+    pub fn close_focused(&mut self) -> Option<DetachedPane> {
         let pane_id = self.layout.focused();
         self.detach_pane(pane_id)
     }
 
-    pub fn close_pane(&mut self, pane_id: PaneId) -> Option<(PaneId, Option<PaneRuntime>)> {
+    pub fn close_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {
         self.detach_pane(pane_id)
     }
 
-    pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<(PaneId, Option<PaneRuntime>)> {
+    pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {
         self.detach_pane(pane_id)
     }
 
-    fn detach_pane(&mut self, pane_id: PaneId) -> Option<(PaneId, Option<PaneRuntime>)> {
+    fn detach_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {
         if self.layout.pane_count() <= 1 {
             return None;
         }
@@ -333,15 +356,13 @@ impl Tab {
             self.layout.focus_pane(prev_focus);
         }
 
-        self.panes.remove(&pane_id);
-        self.pane_cwds.remove(&pane_id);
-        self.terminal_ids.remove(&pane_id);
-        let runtime = self.runtimes.remove(&pane_id);
+        let pane = self.panes.remove(&pane_id)?;
+        let terminal_id = pane.attached_terminal_id;
         self.zoomed = false;
         if let Some(next_root) = next_root {
             self.root_pane = next_root;
         }
-        Some((pane_id, runtime))
+        Some((pane_id, terminal_id))
     }
 
     fn promoted_root_if_needed(&self, closing: PaneId) -> Option<PaneId> {
@@ -351,37 +372,26 @@ impl Tab {
         self.layout.pane_ids().into_iter().find(|id| *id != closing)
     }
 
-    pub fn focused_runtime(&self) -> Option<&PaneRuntime> {
-        self.runtimes.get(&self.layout.focused())
-    }
-
     pub fn terminal_id(&self, pane_id: PaneId) -> Option<&TerminalId> {
-        self.terminal_ids.get(&pane_id)
-    }
-
-    pub fn cwd_for_pane(&self, pane_id: PaneId) -> Option<PathBuf> {
-        self.runtimes
+        self.panes
             .get(&pane_id)
+            .map(|pane| &pane.attached_terminal_id)
+    }
+
+    pub fn cwd_for_pane(
+        &self,
+        pane_id: PaneId,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &HashMap<TerminalId, TerminalRuntime>,
+    ) -> Option<PathBuf> {
+        let terminal_id = self.terminal_id(pane_id)?;
+        terminal_runtimes
+            .get(terminal_id)
             .and_then(|rt| rt.cwd())
-            .or_else(|| self.pane_cwds.get(&pane_id).cloned())
-    }
-
-    pub fn root_cwd(&self) -> Option<PathBuf> {
-        self.cwd_for_pane(self.root_pane)
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)] // retained for focused layout-order assertions in tests
-    pub fn pane_states(&self) -> Vec<(crate::detect::AgentState, bool)> {
-        self.layout
-            .pane_ids()
-            .iter()
-            .map(|id| {
-                self.panes
-                    .get(id)
-                    .map(|p| (p.state, p.seen))
-                    .unwrap_or((crate::detect::AgentState::Unknown, true))
+            .or_else(|| {
+                terminals
+                    .get(terminal_id)
+                    .map(|terminal| terminal.cwd.clone())
             })
-            .collect()
     }
 }

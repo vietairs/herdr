@@ -30,7 +30,7 @@ fn parse_api_key(key: &str) -> Option<crossterm::event::KeyEvent> {
     }
 }
 
-pub(super) fn encode_api_text(runtime: &crate::pane::PaneRuntime, text: &str) -> Vec<u8> {
+pub(super) fn encode_api_text(runtime: &crate::terminal::TerminalRuntime, text: &str) -> Vec<u8> {
     let bracketed = runtime
         .input_state()
         .map(|state| state.bracketed_paste)
@@ -43,7 +43,7 @@ pub(super) fn encode_api_text(runtime: &crate::pane::PaneRuntime, text: &str) ->
 }
 
 pub(super) fn encode_api_keys(
-    runtime: &crate::pane::PaneRuntime,
+    runtime: &crate::terminal::TerminalRuntime,
     keys: &[String],
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut encoded_keys = Vec::with_capacity(keys.len());

@@ -9,7 +9,8 @@ use tracing::{error, warn};
 
 use crate::events::AppEvent;
 use crate::layout::{Node, PaneId, TileLayout};
-use crate::pane::{PaneRuntime, PaneState};
+use crate::pane::PaneState;
+use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
 use crate::workspace::Workspace;
 
 use super::{DirectionSnapshot, LayoutSnapshot, SessionSnapshot, TabSnapshot, WorkspaceSnapshot};
@@ -23,22 +24,32 @@ pub fn restore(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
-) -> Vec<Workspace> {
-    snapshot
-        .workspaces
-        .iter()
-        .filter_map(|ws_snap| {
-            restore_workspace(
-                ws_snap,
-                rows,
-                cols,
-                scrollback_limit_bytes,
-                events.clone(),
-                render_notify.clone(),
-                render_dirty.clone(),
-            )
-        })
-        .collect()
+) -> (
+    Vec<Workspace>,
+    HashMap<TerminalId, TerminalState>,
+    HashMap<TerminalId, TerminalRuntime>,
+) {
+    let mut workspaces = Vec::new();
+    let mut terminals = HashMap::new();
+    let mut terminal_runtimes = HashMap::new();
+    for ws_snap in &snapshot.workspaces {
+        if let Some((workspace, restored_terminals, restored_runtimes)) = restore_workspace(
+            ws_snap,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            events.clone(),
+            render_notify.clone(),
+            render_dirty.clone(),
+        ) {
+            for terminal in restored_terminals {
+                terminals.insert(terminal.id.clone(), terminal);
+            }
+            terminal_runtimes.extend(restored_runtimes);
+            workspaces.push(workspace);
+        }
+    }
+    (workspaces, terminals, terminal_runtimes)
 }
 
 fn restore_workspace(
@@ -49,13 +60,19 @@ fn restore_workspace(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
-) -> Option<Workspace> {
+) -> Option<(
+    Workspace,
+    Vec<TerminalState>,
+    HashMap<TerminalId, TerminalRuntime>,
+)> {
     let mut tabs = Vec::new();
+    let mut terminals = Vec::new();
+    let mut terminal_runtimes = HashMap::new();
     let mut public_pane_numbers = HashMap::new();
     let mut next_public_pane_number = 1;
 
     for (idx, tab_snap) in snap.tabs.iter().enumerate() {
-        let tab = restore_tab(
+        let (tab, restored_terminals, restored_runtimes) = restore_tab(
             tab_snap,
             idx + 1,
             rows,
@@ -69,6 +86,8 @@ fn restore_workspace(
             public_pane_numbers.insert(pane_id, next_public_pane_number);
             next_public_pane_number += 1;
         }
+        terminals.extend(restored_terminals);
+        terminal_runtimes.extend(restored_runtimes);
         tabs.push(tab);
     }
 
@@ -76,20 +95,26 @@ fn restore_workspace(
         return None;
     }
 
-    Some(Workspace {
-        id: snap
-            .id
-            .clone()
-            .unwrap_or_else(crate::workspace::generate_workspace_id),
-        custom_name: snap.custom_name.clone(),
-        identity_cwd: snap.identity_cwd.clone(),
-        cached_git_branch: None,
-        cached_git_ahead_behind: None,
-        public_pane_numbers,
-        next_public_pane_number,
-        active_tab: snap.active_tab.min(tabs.len().saturating_sub(1)),
-        tabs,
-    })
+    Some((
+        Workspace {
+            id: snap
+                .id
+                .clone()
+                .unwrap_or_else(crate::workspace::generate_workspace_id),
+            custom_name: snap.custom_name.clone(),
+            identity_cwd: snap.identity_cwd.clone(),
+            cached_git_branch: None,
+            cached_git_ahead_behind: None,
+            public_pane_numbers,
+            next_public_pane_number,
+            active_tab: snap.active_tab.min(tabs.len().saturating_sub(1)),
+            tabs,
+            #[cfg(test)]
+            test_runtimes: HashMap::new(),
+        },
+        terminals,
+        terminal_runtimes,
+    ))
 }
 
 fn restore_tab(
@@ -101,7 +126,11 @@ fn restore_tab(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
-) -> Option<crate::workspace::Tab> {
+) -> Option<(
+    crate::workspace::Tab,
+    Vec<TerminalState>,
+    HashMap<TerminalId, TerminalRuntime>,
+)> {
     let (node, id_map) = restore_node_remapped(&snap.layout);
     let reverse_id_map: HashMap<PaneId, u32> = id_map
         .iter()
@@ -110,9 +139,8 @@ fn restore_tab(
     let pane_ids = collect_pane_ids(&node);
 
     let mut panes = HashMap::new();
-    let mut pane_cwds = HashMap::new();
-    let mut terminal_ids = HashMap::new();
-    let mut runtimes = HashMap::new();
+    let mut terminals = Vec::new();
+    let mut terminal_runtimes = HashMap::new();
     for id in &pane_ids {
         let saved_cwd = reverse_id_map
             .get(id)
@@ -142,7 +170,7 @@ fn restore_tab(
             .and_then(|old_id| snap.panes.get(old_id))
             .and_then(|p| p.label.clone());
 
-        match PaneRuntime::spawn(
+        match TerminalRuntime::spawn(
             *id,
             rows,
             cols,
@@ -154,12 +182,14 @@ fn restore_tab(
             render_dirty.clone(),
         ) {
             Ok(runtime) => {
-                let mut pane_state = PaneState::new();
-                pane_state.manual_label = saved_label;
-                panes.insert(*id, pane_state);
-                pane_cwds.insert(*id, cwd.clone());
-                terminal_ids.insert(*id, crate::terminal::TerminalId::alloc());
-                runtimes.insert(*id, runtime);
+                let terminal_id = TerminalId::alloc();
+                let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
+                if let Some(label) = saved_label {
+                    terminal.set_manual_label(label);
+                }
+                panes.insert(*id, PaneState::new(terminal_id.clone()));
+                terminal_runtimes.insert(terminal_id, runtime);
+                terminals.push(terminal);
             }
             Err(e) => {
                 error!(
@@ -193,20 +223,23 @@ fn restore_tab(
     let root_pane = resolve_restored_pane(snap.root_pane, &id_map, &surviving, &pane_ids)?;
     let layout = TileLayout::from_saved(node, focus);
 
-    Some(crate::workspace::Tab {
-        custom_name: snap.custom_name.clone(),
-        number,
-        root_pane,
-        layout,
-        panes,
-        pane_cwds,
-        terminal_ids,
-        runtimes,
-        zoomed: snap.zoomed,
-        events,
-        render_notify,
-        render_dirty,
-    })
+    Some((
+        crate::workspace::Tab {
+            custom_name: snap.custom_name.clone(),
+            number,
+            root_pane,
+            layout,
+            panes,
+            #[cfg(test)]
+            runtimes: HashMap::new(),
+            zoomed: snap.zoomed,
+            events,
+            render_notify,
+            render_dirty,
+        },
+        terminals,
+        terminal_runtimes,
+    ))
 }
 
 pub(super) fn prune_restored_node(node: Node, surviving: &HashSet<PaneId>) -> Option<Node> {

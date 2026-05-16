@@ -77,19 +77,19 @@ impl App {
             }
         }
 
-        let Some(ws) = self.state.workspaces.get_mut(resolved.ws_idx) else {
-            return Err(AgentRenameError::Target(TerminalTargetError::NotFound {
-                target: target.to_string(),
-            }));
-        };
-        let Some(pane_state) = ws.pane_state_mut(resolved.pane_id) else {
+        let Some(terminal) = self
+            .state
+            .terminals
+            .values_mut()
+            .find(|terminal| terminal.id.to_string() == resolved.terminal_id)
+        else {
             return Err(AgentRenameError::Target(TerminalTargetError::NotFound {
                 target: target.to_string(),
             }));
         };
         match normalized_name {
-            Some(name) => pane_state.set_manual_label(name),
-            None => pane_state.clear_manual_label(),
+            Some(name) => terminal.set_manual_label(name),
+            None => terminal.clear_manual_label(),
         }
         self.state.mark_session_dirty();
         self.agent_info(resolved.ws_idx, resolved.pane_id)
@@ -185,13 +185,17 @@ impl App {
             )?
         };
 
-        let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
-            return Err(AgentStartError::SpawnFailed("workspace disappeared".into()));
+        let terminal_id = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.terminal_id(pane_id))
+            .cloned()
+            .ok_or_else(|| AgentStartError::SpawnFailed("terminal disappeared".into()))?;
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return Err(AgentStartError::SpawnFailed("terminal disappeared".into()));
         };
-        let Some(pane_state) = ws.pane_state_mut(pane_id) else {
-            return Err(AgentStartError::SpawnFailed("pane disappeared".into()));
-        };
-        pane_state.set_manual_label(name);
+        terminal.set_manual_label(name);
         self.state.mark_session_dirty();
 
         let agent = self
@@ -317,7 +321,7 @@ impl App {
         argv: &[String],
         focus: bool,
     ) -> Result<(usize, usize, crate::layout::PaneId), AgentStartError> {
-        let ws = crate::workspace::Workspace::new_argv_command(
+        let (ws, terminal, runtime) = crate::workspace::Workspace::new_argv_command(
             cwd,
             rows,
             cols,
@@ -329,6 +333,10 @@ impl App {
             self.render_dirty.clone(),
         )
         .map_err(|err| AgentStartError::SpawnFailed(err.to_string()))?;
+        self.state
+            .terminal_runtimes
+            .insert(terminal.id.clone(), runtime);
+        self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);
         let ws_idx = self.state.workspaces.len() - 1;
         if focus || self.state.active.is_none() {
@@ -375,13 +383,19 @@ impl App {
                 target: target_pane.raw().to_string(),
             })?
             .map_err(|err| AgentStartError::SpawnFailed(err.to_string()))?;
+        self.state
+            .terminal_runtimes
+            .insert(result.1.terminal.id.clone(), result.1.runtime);
+        self.state
+            .terminals
+            .insert(result.1.terminal.id.clone(), result.1.terminal);
         if focus {
             self.state.switch_workspace(ws_idx);
             self.state.switch_tab(result.0);
             self.state.mode = Mode::Terminal;
         }
         self.schedule_session_save();
-        Ok((ws_idx, result.0, result.1))
+        Ok((ws_idx, result.0, result.1.pane_id))
     }
 
     fn agent_info(
@@ -409,23 +423,11 @@ impl App {
         name: &str,
         except_terminal_id: &str,
     ) -> Vec<crate::api::schema::AgentInfo> {
-        self.state
-            .workspaces
-            .iter()
-            .enumerate()
-            .flat_map(|(ws_idx, ws)| {
-                ws.tabs.iter().flat_map(move |tab| {
-                    tab.layout
-                        .pane_ids()
-                        .into_iter()
-                        .filter_map(move |pane_id| {
-                            let pane_state = ws.pane_state(pane_id)?;
-                            (pane_state.manual_label.as_deref() == Some(name))
-                                .then(|| self.agent_info(ws_idx, pane_id))?
-                        })
-                })
+        self.collect_agent_infos()
+            .into_iter()
+            .filter(|agent| {
+                agent.name.as_deref() == Some(name) && agent.terminal_id != except_terminal_id
             })
-            .filter(|agent| agent.terminal_id != except_terminal_id)
             .collect()
     }
 }

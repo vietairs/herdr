@@ -195,6 +195,14 @@ fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
 /// Capture the current app state into a serializable snapshot.
 pub fn capture(
     workspaces: &[Workspace],
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    terminal_runtimes: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalRuntime,
+    >,
     active: Option<usize>,
     selected: usize,
     agent_panel_scope: crate::app::state::AgentPanelScope,
@@ -203,7 +211,10 @@ pub fn capture(
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
-        workspaces: workspaces.iter().map(capture_workspace).collect(),
+        workspaces: workspaces
+            .iter()
+            .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
+            .collect(),
         active,
         selected,
         agent_panel_scope,
@@ -212,25 +223,53 @@ pub fn capture(
     }
 }
 
-fn capture_workspace(ws: &Workspace) -> WorkspaceSnapshot {
+fn capture_workspace(
+    ws: &Workspace,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    terminal_runtimes: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalRuntime,
+    >,
+) -> WorkspaceSnapshot {
     WorkspaceSnapshot {
         id: Some(ws.id.clone()),
         custom_name: ws.custom_name.clone(),
         identity_cwd: ws
             .resolved_identity_cwd()
             .unwrap_or_else(|| ws.identity_cwd.clone()),
-        tabs: ws.tabs.iter().map(capture_tab).collect(),
+        tabs: ws
+            .tabs
+            .iter()
+            .map(|tab| capture_tab(tab, terminals, terminal_runtimes))
+            .collect(),
         active_tab: ws.active_tab,
     }
 }
 
-fn capture_tab(tab: &crate::workspace::Tab) -> TabSnapshot {
+fn capture_tab(
+    tab: &crate::workspace::Tab,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    terminal_runtimes: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalRuntime,
+    >,
+) -> TabSnapshot {
     let mut panes = HashMap::new();
     for id in tab.panes.keys() {
         let cwd = tab
-            .cwd_for_pane(*id)
+            .cwd_for_pane(*id, terminals, terminal_runtimes)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        let label = tab.panes.get(id).and_then(|pane| pane.manual_label.clone());
+        let label = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.manual_label.clone());
         panes.insert(id.raw(), PaneSnapshot { cwd, label });
     }
     TabSnapshot {
@@ -310,6 +349,7 @@ mod tests {
     fn state_with_workspaces(names: &[&str]) -> AppState {
         let mut state = AppState::test_new();
         state.workspaces = names.iter().map(|name| Workspace::test_new(name)).collect();
+        state.ensure_test_terminals();
         if !state.workspaces.is_empty() {
             state.active = Some(0);
             state.selected = 0;
@@ -321,6 +361,8 @@ mod tests {
     fn capture_from_state(state: &AppState) -> SessionSnapshot {
         capture(
             &state.workspaces,
+            &state.terminals,
+            &state.terminal_runtimes,
             state.active,
             state.selected,
             state.agent_panel_scope,
@@ -657,13 +699,17 @@ mod tests {
     fn capture_contract_tracks_workspace_identity_and_pane_cwds() {
         let mut state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
-        state.workspaces[0].tabs[0]
-            .pane_cwds
-            .insert(root, PathBuf::from("/tmp/pion"));
+        state.workspaces[0].identity_cwd = PathBuf::from("/tmp/pion");
         let second = state.workspaces[0].test_split(Direction::Horizontal);
-        state.workspaces[0].tabs[0]
-            .pane_cwds
-            .insert(second, PathBuf::from("/tmp/herdr"));
+        state.ensure_test_terminals();
+        let root_terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&root_terminal_id).unwrap().cwd = PathBuf::from("/tmp/pion");
+        let second_terminal_id = state.workspaces[0].tabs[0].panes[&second]
+            .attached_terminal_id
+            .clone();
+        state.terminals.get_mut(&second_terminal_id).unwrap().cwd = PathBuf::from("/tmp/herdr");
 
         let snapshot = capture_from_state(&state);
         let workspace = &snapshot.workspaces[0];

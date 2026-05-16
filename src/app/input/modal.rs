@@ -190,11 +190,14 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     let Some(pane) = ws.pane_state(pane_id) else {
         return;
     };
+    let terminal = state.terminals.get(&pane.attached_terminal_id);
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.rename_pane_target = Some(pane_id);
-    state.name_input = pane.manual_label.clone().unwrap_or_default();
-    state.name_input_replace_on_type = pane.manual_label.is_none();
+    state.name_input = terminal
+        .and_then(|t| t.manual_label.clone())
+        .unwrap_or_default();
+    state.name_input_replace_on_type = terminal.and_then(|t| t.manual_label.as_ref()).is_none();
     state.mode = Mode::RenamePane;
 }
 
@@ -316,10 +319,13 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 Mode::RenamePane => {
                     if let (Some(ws_idx), Some(pane_id)) = (state.active, state.rename_pane_target)
                     {
-                        if let Some(ws) = state.workspaces.get_mut(ws_idx) {
-                            if let Some(pane) = ws.pane_state_mut(pane_id) {
-                                pane.set_manual_label(new_name);
-                                state.mark_session_dirty();
+                        if let Some(ws) = state.workspaces.get(ws_idx) {
+                            if let Some(pane) = ws.pane_state(pane_id) {
+                                let terminal_id = pane.attached_terminal_id.clone();
+                                if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
+                                    terminal.set_manual_label(new_name);
+                                    state.mark_session_dirty();
+                                }
                             }
                         }
                     }
@@ -468,10 +474,13 @@ pub(super) fn apply_context_menu_action(state: &mut AppState, menu: ContextMenuS
         }
         (ContextMenuKind::Pane { pane_id, .. }, Some("Clear pane name")) => {
             if let Some(ws_idx) = state.active {
-                if let Some(ws) = state.workspaces.get_mut(ws_idx) {
-                    if let Some(pane) = ws.pane_state_mut(pane_id) {
-                        pane.clear_manual_label();
-                        state.mark_session_dirty();
+                if let Some(ws) = state.workspaces.get(ws_idx) {
+                    if let Some(pane) = ws.pane_state(pane_id) {
+                        let terminal_id = pane.attached_terminal_id.clone();
+                        if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
+                            terminal.clear_manual_label();
+                            state.mark_session_dirty();
+                        }
                     }
                 }
             }

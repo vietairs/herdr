@@ -37,12 +37,8 @@ impl App {
             return;
         }
 
-        for workspace in &self.state.workspaces {
-            for tab in &workspace.tabs {
-                for runtime in tab.runtimes.values() {
-                    runtime.apply_host_terminal_theme(self.state.host_terminal_theme);
-                }
-            }
+        for runtime in self.state.terminal_runtimes.values() {
+            runtime.apply_host_terminal_theme(self.state.host_terminal_theme);
         }
 
         self.render_dirty.store(true, Ordering::Release);

@@ -198,12 +198,12 @@ impl App {
                 .state
                 .active
                 .and_then(|idx| self.state.workspaces.get(idx))
-                .is_some_and(Workspace::has_working_pane),
+                .is_some_and(|ws| ws.has_working_pane(&self.state.terminals)),
             crate::app::state::AgentPanelScope::AllWorkspaces => self
                 .state
                 .workspaces
                 .iter()
-                .any(Workspace::has_working_pane),
+                .any(|ws| ws.has_working_pane(&self.state.terminals)),
         }
     }
 

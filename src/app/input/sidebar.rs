@@ -351,7 +351,7 @@ impl AppState {
         let ws_idx = self.collapsed_detail_workspace_idx()?;
         let ws = self.workspaces.get(ws_idx)?;
         let detail_idx = (row - detail_content_area.y) as usize;
-        let details = ws.pane_details();
+        let details = ws.pane_details(&self.terminals);
         let detail = details.get(detail_idx)?;
         Some((ws_idx, detail.tab_idx, detail.pane_id))
     }
@@ -633,19 +633,26 @@ mod tests {
         let mut ws = Workspace::test_new("test");
         ws.tabs[0].set_custom_name("main".into());
         let first_pane = ws.tabs[0].root_pane;
-        ws.tabs[0]
-            .panes
-            .get_mut(&first_pane)
+        let first_tab = ws.test_add_tab(Some("logs"));
+        let second_pane = ws.tabs[first_tab].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
             .unwrap()
             .detected_agent = Some(Agent::Pi);
-        let second_tab = ws.test_add_tab(Some("logs"));
-        let second_pane = ws.tabs[second_tab].root_pane;
-        ws.tabs[second_tab]
-            .panes
-            .get_mut(&second_pane)
+        let second_terminal_id = app.state.workspaces[0].tabs[first_tab].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
             .unwrap()
             .detected_agent = Some(Agent::Claude);
-        app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
@@ -659,9 +666,9 @@ mod tests {
         );
         assert_eq!(app.state.mode, Mode::Terminal);
         let snapshot = capture_snapshot(&app.state);
-        assert_eq!(snapshot.workspaces[0].active_tab, second_tab);
+        assert_eq!(snapshot.workspaces[0].active_tab, first_tab);
         assert_eq!(
-            snapshot.workspaces[0].tabs[second_tab].focused,
+            snapshot.workspaces[0].tabs[first_tab].focused,
             Some(second_pane.raw())
         );
     }
@@ -701,23 +708,30 @@ mod tests {
     #[test]
     fn clicking_all_workspaces_agent_row_switches_to_correct_workspace() {
         let mut app = app_for_mouse_test();
-        let mut first = Workspace::test_new("one");
+        let first = Workspace::test_new("one");
         let first_pane = first.tabs[0].root_pane;
-        first.tabs[0]
-            .panes
-            .get_mut(&first_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Pi);
 
-        let mut second = Workspace::test_new("two");
+        let second = Workspace::test_new("two");
         let second_pane = second.tabs[0].root_pane;
-        second.tabs[0]
-            .panes
-            .get_mut(&second_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Claude);
 
         app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
@@ -747,12 +761,8 @@ mod tests {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let first_pane = ws.tabs[0].root_pane;
-        ws.tabs[0]
-            .panes
-            .get_mut(&first_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Pi);
 
+        let mut tabs = Vec::new();
         for (tab_name, agent) in [
             ("logs", Agent::Claude),
             ("review", Agent::Codex),
@@ -760,14 +770,29 @@ mod tests {
         ] {
             let tab_idx = ws.test_add_tab(Some(tab_name));
             let pane_id = ws.tabs[tab_idx].root_pane;
-            ws.tabs[tab_idx]
-                .panes
-                .get_mut(&pane_id)
-                .unwrap()
-                .detected_agent = Some(agent);
+            tabs.push((tab_idx, pane_id, agent));
         }
 
         app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        for (tab_idx, pane_id, agent) in tabs {
+            let terminal_id = app.state.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(agent);
+        }
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
@@ -792,31 +817,43 @@ mod tests {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let first_pane = ws.tabs[0].root_pane;
-        ws.tabs[0]
-            .panes
-            .get_mut(&first_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Pi);
-
         let second_tab = ws.test_add_tab(Some("logs"));
         let second_pane = ws.tabs[second_tab].root_pane;
-        ws.tabs[second_tab]
-            .panes
-            .get_mut(&second_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Claude);
-
+        let mut extra_tabs = Vec::new();
         for (tab_name, agent) in [("review", Agent::Codex), ("ops", Agent::Gemini)] {
             let tab_idx = ws.test_add_tab(Some(tab_name));
             let pane_id = ws.tabs[tab_idx].root_pane;
-            ws.tabs[tab_idx]
-                .panes
-                .get_mut(&pane_id)
-                .unwrap()
-                .detected_agent = Some(agent);
+            extra_tabs.push((tab_idx, pane_id, agent));
         }
 
         app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[0].tabs[second_tab].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        for (tab_idx, pane_id, agent) in extra_tabs {
+            let terminal_id = app.state.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(agent);
+        }
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
@@ -843,19 +880,26 @@ mod tests {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let first_pane = ws.tabs[0].root_pane;
-        ws.tabs[0]
-            .panes
-            .get_mut(&first_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Pi);
         let second_tab = ws.test_add_tab(Some("logs"));
         let second_pane = ws.tabs[second_tab].root_pane;
-        ws.tabs[second_tab]
-            .panes
-            .get_mut(&second_pane)
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.state.workspaces[0].tabs[second_tab].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
             .unwrap()
             .detected_agent = Some(Agent::Claude);
-        app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
@@ -1128,20 +1172,27 @@ mod tests {
         let mut first = Workspace::test_new("a");
         let first_root = first.tabs[0].root_pane;
         first.identity_cwd = first_repo.clone();
-        first.tabs[0]
-            .pane_cwds
-            .insert(first_root, first_repo.clone());
         first.refresh_git_ahead_behind();
 
         let mut second = Workspace::test_new("b");
         let second_root = second.tabs[0].root_pane;
         second.identity_cwd = second_repo.clone();
-        second.tabs[0]
-            .pane_cwds
-            .insert(second_root, second_repo.clone());
         second.refresh_git_ahead_behind();
 
         app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        let first_terminal_id = app.state.workspaces[0].tabs[0].panes[&first_root]
+            .attached_terminal_id
+            .clone();
+        app.state.terminals.get_mut(&first_terminal_id).unwrap().cwd = first_repo.clone();
+        let second_terminal_id = app.state.workspaces[1].tabs[0].panes[&second_root]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .cwd = second_repo.clone();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
         assert_eq!(app.state.workspace_drop_index_at_row(0), Some(0));

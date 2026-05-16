@@ -266,7 +266,7 @@ fn render_header_status(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     };
 
-    let (state, seen) = ws.aggregate_state();
+    let (state, seen) = ws.aggregate_state(&app.terminals);
     let (dot, dot_style) = if matches!(state, AgentState::Working) {
         (
             super::spinner_frame(app.spinner_tick),
@@ -430,7 +430,7 @@ fn render_mobile_switcher_content(app: &AppState, frame: &mut Frame, viewport: R
         let active = Some(idx) == app.active;
         let selected = idx == app.selected;
         let bg = mobile_item_bg(selected, active, p);
-        let (state, seen) = ws.aggregate_state();
+        let (state, seen) = ws.aggregate_state(&app.terminals);
         let (dot, dot_style) = state_dot(state, seen, p);
         let title = Line::from(vec![
             Span::styled("  ", Style::default().bg(bg)),
@@ -824,7 +824,7 @@ fn agent_priority_label(app: &AppState) -> String {
     let mut blocked = 0usize;
     let mut working = 0usize;
     let mut done = 0usize;
-    for detail in ws.pane_details() {
+    for detail in ws.pane_details(&app.terminals) {
         match (detail.state, detail.seen) {
             (AgentState::Blocked, _) => blocked += 1,
             (AgentState::Working, _) => working += 1,

@@ -127,7 +127,7 @@ fn resize_background_tab_panes_to_terminal_area(
             if app.active == Some(ws_idx) && tab_idx == ws.active_tab_index() {
                 continue;
             }
-            resize_tab_panes(tab, terminal_area, cell_size);
+            resize_tab_panes(app, tab, terminal_area, cell_size);
         }
     }
 }
@@ -396,13 +396,13 @@ mod tests {
         let first_pane = ws.tabs[0].root_pane;
         let second_pane = ws.test_split(ratatui::layout::Direction::Horizontal);
 
-        ws.tabs[0].runtimes.insert(
+        ws.insert_test_runtime(
             first_pane,
-            crate::pane::PaneRuntime::test_with_screen_bytes(20, 5, b"left"),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"left"),
         );
-        ws.tabs[0].runtimes.insert(
+        ws.insert_test_runtime(
             second_pane,
-            crate::pane::PaneRuntime::test_with_screen_bytes(20, 5, b"r\r\nb"),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"r\r\nb"),
         );
         ws.tabs[0].layout.focus_pane(first_pane);
 
@@ -480,10 +480,14 @@ mod tests {
         let repo = temp_git_repo("main");
         ws.identity_cwd = repo.clone();
         let root_pane = ws.tabs[0].root_pane;
-        ws.tabs[0].pane_cwds.insert(root_pane, repo.clone());
         ws.refresh_git_ahead_behind();
 
         app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        let root_terminal_id = app.workspaces[0].tabs[0].panes[&root_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&root_terminal_id).unwrap().cwd = repo.clone();
         app.selected = 0;
         app.mode = Mode::Navigate;
 
@@ -681,9 +685,9 @@ mod tests {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
-        ws.tabs[0].runtimes.insert(
+        ws.insert_test_runtime(
             pane_id,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
                 12,
                 4,
                 4096,

@@ -82,8 +82,8 @@ impl App {
         if self.state.mode != Mode::Terminal {
             return;
         }
-        if let Some(ws) = self.state.active.and_then(|i| self.state.workspaces.get(i)) {
-            if let Some(rt) = ws.focused_runtime() {
+        if let Some(ws_idx) = self.state.active {
+            if let Some(rt) = self.state.focused_runtime_in_workspace(ws_idx) {
                 let _ = rt.send_paste(text).await;
             }
         }
@@ -197,11 +197,17 @@ impl AppState {
         let cwd = self
             .active
             .and_then(|i| self.workspaces.get(i))
-            .and_then(|ws| ws.focused_runtime())
-            .and_then(|rt| rt.cwd());
+            .and_then(|ws| {
+                let tab = ws.active_tab()?;
+                tab.cwd_for_pane(
+                    tab.layout.focused(),
+                    &self.terminals,
+                    &self.terminal_runtimes,
+                )
+            });
 
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
-            if let Ok(new_id) = ws.split_focused(
+            if let Ok(new_pane) = ws.split_focused(
                 direction,
                 new_rows,
                 new_cols,
@@ -209,6 +215,9 @@ impl AppState {
                 self.pane_scrollback_limit_bytes,
                 self.host_terminal_theme,
             ) {
+                let new_id = new_pane.pane_id;
+                self.terminals
+                    .insert(new_pane.terminal.id.clone(), new_pane.terminal);
                 ws.layout.focus_pane(new_id);
                 self.mark_session_dirty();
                 self.mode = Mode::Terminal;
@@ -277,6 +286,8 @@ fn numbered_lines_bytes(count: usize) -> Vec<u8> {
 fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
     crate::persist::capture(
         &state.workspaces,
+        &state.terminals,
+        &state.terminal_runtimes,
         state.active,
         state.selected,
         state.agent_panel_scope,

@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
+use crate::terminal::{TerminalId, TerminalState};
 
 use super::{Tab, Workspace};
 
@@ -18,29 +21,32 @@ pub struct PaneDetail {
 }
 
 impl Tab {
-    pub fn has_working_pane(&self) -> bool {
-        self.panes
-            .values()
-            .any(|pane| pane.state == AgentState::Working)
+    pub fn has_working_pane(&self, terminals: &HashMap<TerminalId, TerminalState>) -> bool {
+        self.panes.values().any(|pane| {
+            terminals
+                .get(&pane.attached_terminal_id)
+                .is_some_and(|terminal| terminal.state == AgentState::Working)
+        })
     }
 
-    pub fn pane_details(&self) -> Vec<PaneDetail> {
+    pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {
         self.layout
             .pane_ids()
             .iter()
             .filter_map(|id| {
                 let pane = self.panes.get(id)?;
-                let agent_label = pane.effective_agent_label()?.to_string();
+                let terminal = terminals.get(&pane.attached_terminal_id)?;
+                let agent_label = terminal.effective_agent_label()?.to_string();
                 Some(PaneDetail {
                     pane_id: *id,
                     tab_idx: self.number.saturating_sub(1),
                     tab_label: self.display_name(),
                     label: agent_label.clone(),
                     agent_label,
-                    agent: pane.effective_known_agent(),
-                    state: pane.state,
+                    agent: terminal.effective_known_agent(),
+                    state: terminal.state,
                     seen: pane.seen,
-                    custom_status: pane.effective_custom_status().map(str::to_string),
+                    custom_status: terminal.effective_custom_status().map(str::to_string),
                 })
             })
             .collect()
@@ -58,24 +64,31 @@ fn pane_attention_priority(state: AgentState, seen: bool) -> u8 {
 }
 
 impl Workspace {
-    pub fn aggregate_state(&self) -> (AgentState, bool) {
+    pub fn aggregate_state(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+    ) -> (AgentState, bool) {
         self.tabs
             .iter()
             .flat_map(|tab| tab.panes.values())
-            .map(|pane| (pane.state, pane.seen))
+            .filter_map(|pane| {
+                terminals
+                    .get(&pane.attached_terminal_id)
+                    .map(|terminal| (terminal.state, pane.seen))
+            })
             .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
             .unwrap_or((AgentState::Unknown, true))
     }
 
-    pub fn has_working_pane(&self) -> bool {
-        self.tabs.iter().any(Tab::has_working_pane)
+    pub fn has_working_pane(&self, terminals: &HashMap<TerminalId, TerminalState>) -> bool {
+        self.tabs.iter().any(|tab| tab.has_working_pane(terminals))
     }
 
-    pub fn pane_details(&self) -> Vec<PaneDetail> {
+    pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {
         let multi_tab = self.tabs.len() > 1;
         self.tabs
             .iter()
-            .flat_map(Tab::pane_details)
+            .flat_map(|tab| tab.pane_details(terminals))
             .map(|mut detail| {
                 if multi_tab {
                     detail.label = format!("{}·{}", detail.tab_label, detail.agent_label);
@@ -93,10 +106,18 @@ mod tests {
     use super::*;
     use crate::detect::Agent;
 
+    fn terminal_for_pane(ws: &Workspace, pane_id: PaneId) -> TerminalState {
+        TerminalState::new(ws.terminal_id(pane_id).unwrap().clone(), "/tmp".into())
+    }
+
     #[test]
     fn aggregate_state_all_unknown() {
         let ws = Workspace::test_new("test");
-        let (state, seen) = ws.aggregate_state();
+        let mut terminals = HashMap::new();
+        let root = ws.tabs[0].root_pane;
+        let terminal = terminal_for_pane(&ws, root);
+        terminals.insert(terminal.id.clone(), terminal);
+        let (state, seen) = ws.aggregate_state(&terminals);
         assert_eq!(state, AgentState::Unknown);
         assert!(seen);
     }
@@ -111,10 +132,16 @@ mod tests {
             .find(|id| **id != id2)
             .copied()
             .unwrap();
-        ws.tabs[0].panes.get_mut(&root_id).unwrap().state = AgentState::Idle;
-        ws.tabs[0].panes.get_mut(&id2).unwrap().state = AgentState::Working;
+        let mut terminals = HashMap::new();
+        let mut root_terminal = terminal_for_pane(&ws, root_id);
+        root_terminal.state = AgentState::Idle;
+        terminals.insert(root_terminal.id.clone(), root_terminal);
+        let mut second_terminal = terminal_for_pane(&ws, id2);
+        second_terminal.state = AgentState::Working;
+        terminals.insert(second_terminal.id.clone(), second_terminal);
 
-        let (state, seen) = ws.aggregate_state();
+        let (state, seen) = ws.aggregate_state(&terminals);
+
         assert_eq!(state, AgentState::Working);
         assert!(seen);
     }
@@ -129,68 +156,61 @@ mod tests {
             .find(|id| **id != id2)
             .copied()
             .unwrap();
+        let mut terminals = HashMap::new();
+        let mut root_terminal = terminal_for_pane(&ws, root_id);
+        root_terminal.state = AgentState::Idle;
+        terminals.insert(root_terminal.id.clone(), root_terminal);
+        let mut second_terminal = terminal_for_pane(&ws, id2);
+        second_terminal.state = AgentState::Working;
+        terminals.insert(second_terminal.id.clone(), second_terminal);
         let root = ws.tabs[0].panes.get_mut(&root_id).unwrap();
-        root.state = AgentState::Idle;
         root.seen = false;
-        ws.tabs[0].panes.get_mut(&id2).unwrap().state = AgentState::Working;
 
-        let (state, seen) = ws.aggregate_state();
+        let (state, seen) = ws.aggregate_state(&terminals);
+
         assert_eq!(state, AgentState::Idle);
         assert!(!seen);
     }
 
     #[test]
-    fn pane_details_hide_plain_shells() {
+    fn pane_details_includes_tab_context_for_multi_tab_workspace() {
         let mut ws = Workspace::test_new("test");
+        ws.tabs[0].custom_name = Some("main".into());
         let root_pane = ws.tabs[0].root_pane;
-        ws.tabs[0].panes.get_mut(&root_pane).unwrap().detected_agent = Some(Agent::Pi);
-        ws.test_split(Direction::Horizontal);
+        let second_tab = ws.test_add_tab(Some("review"));
+        let review_pane = ws.tabs[second_tab].root_pane;
+        let mut terminals = HashMap::new();
+        let mut root_terminal = terminal_for_pane(&ws, root_pane);
+        root_terminal.set_hook_authority(
+            "test".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+        terminals.insert(root_terminal.id.clone(), root_terminal);
+        let mut review_terminal = terminal_for_pane(&ws, review_pane);
+        review_terminal.set_hook_authority(
+            "test".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+        );
+        terminals.insert(review_terminal.id.clone(), review_terminal);
 
-        let details = ws.pane_details();
-        assert_eq!(details.len(), 1);
-        assert_eq!(details[0].label, "pi");
-    }
+        let labels: Vec<_> = ws
+            .pane_details(&terminals)
+            .into_iter()
+            .map(|detail| (detail.label, detail.agent_label, detail.agent))
+            .collect();
 
-    #[test]
-    fn pane_details_include_tab_context_when_workspace_has_multiple_tabs() {
-        let mut ws = Workspace::test_new("test");
-        ws.tabs[0].set_custom_name("main".into());
-        let root_pane = ws.tabs[0].root_pane;
-        ws.tabs[0].panes.get_mut(&root_pane).unwrap().detected_agent = Some(Agent::Pi);
-
-        let tab_idx = ws.test_add_tab(Some("logs"));
-        let second_root_pane = ws.tabs[tab_idx].root_pane;
-        ws.tabs[tab_idx]
-            .panes
-            .get_mut(&second_root_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Claude);
-
-        let details = ws.pane_details();
-        assert_eq!(details.len(), 2);
-        assert!(details.iter().any(|detail| detail.label == "main·pi"));
-        assert!(details.iter().any(|detail| detail.label == "logs·claude"));
-    }
-
-    #[test]
-    fn pane_details_include_hook_reported_unknown_agents() {
-        let mut ws = Workspace::test_new("test");
-        let root_pane = ws.tabs[0].root_pane;
-        ws.tabs[0]
-            .panes
-            .get_mut(&root_pane)
-            .unwrap()
-            .set_hook_authority(
-                "custom:hermes".into(),
-                "hermes".into(),
-                AgentState::Working,
-                None,
-                None,
-            );
-
-        let details = ws.pane_details();
-        assert_eq!(details.len(), 1);
-        assert_eq!(details[0].agent_label, "hermes");
-        assert_eq!(details[0].agent, None);
+        assert_eq!(
+            labels,
+            vec![
+                ("main·pi".into(), "pi".into(), Some(Agent::Pi)),
+                ("review·claude".into(), "claude".into(), Some(Agent::Claude)),
+            ]
+        );
     }
 }

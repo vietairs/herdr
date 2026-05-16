@@ -75,7 +75,8 @@ impl App {
         if let Some((pane_id, agent)) = released_agent {
             if pane_updates.iter().any(|update| update.pane_id == pane_id) {
                 if let Some((ws_idx, _)) = self.find_pane(pane_id) {
-                    if let Some(runtime) = self.state.workspaces[ws_idx].runtimes.get(&pane_id) {
+                    if let Some(runtime) = self.state.runtime_for_pane_in_workspace(ws_idx, pane_id)
+                    {
                         runtime.begin_graceful_release(agent);
                     }
                 }
@@ -129,7 +130,12 @@ impl App {
                     else {
                         continue;
                     };
-                    let Some(agent_label) = pane.effective_agent_label() else {
+                    let Some(agent_label) = self
+                        .state
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .and_then(|terminal| terminal.effective_agent_label())
+                    else {
                         continue;
                     };
                     let event_text = match kind {
@@ -199,14 +205,9 @@ impl App {
                 .workspaces
                 .get(update.ws_idx)
                 .and_then(|ws| ws.pane_state(update.pane_id))
-                .map(|pane| pane_agent_status(pane.state, pane.seen))
+                .map(|pane| pane_agent_status(update.state, pane.seen))
                 .unwrap_or_else(|| pane_agent_status(update.state, true));
-            let custom_status = self
-                .state
-                .workspaces
-                .get(update.ws_idx)
-                .and_then(|ws| ws.pane_state(update.pane_id))
-                .and_then(|pane| pane.effective_custom_status().map(str::to_string));
+            let custom_status = update.custom_status.clone();
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::PaneAgentStatusChanged,
                 data: crate::api::schema::EventData::PaneAgentStatusChanged {
@@ -296,7 +297,7 @@ impl App {
             .state
             .workspaces
             .get(ws_idx)
-            .and_then(|ws| ws.runtime(pane_id))
+            .and_then(|_| self.state.runtime_for_pane_in_workspace(ws_idx, pane_id))
         else {
             return;
         };
@@ -629,11 +630,9 @@ impl App {
                 let cwd = cwd
                     .map(std::path::PathBuf::from)
                     .or_else(|| {
-                        self.state.workspaces.get(ws_idx).and_then(|ws| {
-                            ws.active_tab()
-                                .and_then(|tab| tab.focused_runtime())
-                                .and_then(|rt| rt.cwd())
-                        })
+                        self.state
+                            .focused_runtime_in_workspace(ws_idx)
+                            .and_then(|rt| rt.cwd())
                     })
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| std::path::PathBuf::from("/"));
@@ -653,7 +652,11 @@ impl App {
                         )
                     });
                 match result {
-                    Ok(tab_idx) => {
+                    Ok((tab_idx, terminal, runtime)) => {
+                        self.state
+                            .terminal_runtimes
+                            .insert(terminal.id.clone(), runtime);
+                        self.state.terminals.insert(terminal.id.clone(), terminal);
                         if let Some(label) = label {
                             let workspace_id = self.state.workspaces[ws_idx].id.clone();
                             let tab_id = self
@@ -785,6 +788,7 @@ impl App {
                     })
                     .unwrap();
                 };
+                let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
                 let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
@@ -815,6 +819,7 @@ impl App {
                     })
                     .unwrap();
                 }
+                self.state.remove_unattached_terminal_ids(terminal_ids);
                 self.schedule_session_save();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::TabClosed,
@@ -1004,6 +1009,16 @@ impl App {
                     .unwrap();
                 };
                 let (rows, cols) = self.state.estimate_pane_size();
+                let split_cwd = params.cwd.map(std::path::PathBuf::from).or_else(|| {
+                    self.state.workspaces.get(ws_idx).and_then(|ws| {
+                        let tab_idx = ws.find_tab_index_for_pane(target_pane_id)?;
+                        ws.tabs.get(tab_idx)?.cwd_for_pane(
+                            target_pane_id,
+                            &self.state.terminals,
+                            &self.state.terminal_runtimes,
+                        )
+                    })
+                });
                 let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
@@ -1022,12 +1037,12 @@ impl App {
                         ratatui::layout::Direction::Vertical
                     }
                 };
-                let (target_tab_idx, new_pane_id) = match ws.split_pane(
+                let (target_tab_idx, new_pane) = match ws.split_pane(
                     target_pane_id,
                     direction,
                     rows,
                     cols,
-                    params.cwd.map(std::path::PathBuf::from),
+                    split_cwd,
                     self.state.pane_scrollback_limit_bytes,
                     self.state.host_terminal_theme,
                     params.focus,
@@ -1059,8 +1074,14 @@ impl App {
                     self.state.switch_tab(target_tab_idx);
                     self.state.mode = Mode::Terminal;
                 }
+                self.state
+                    .terminal_runtimes
+                    .insert(new_pane.terminal.id.clone(), new_pane.runtime);
+                self.state
+                    .terminals
+                    .insert(new_pane.terminal.id.clone(), new_pane.terminal);
                 self.schedule_session_save();
-                let pane = self.pane_info(ws_idx, new_pane_id).unwrap();
+                let pane = self.pane_info(ws_idx, new_pane.pane_id).unwrap();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::PaneCreated,
                     data: crate::api::schema::EventData::PaneCreated { pane: pane.clone() },
@@ -1122,7 +1143,13 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                let Some(terminal_id) = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.terminal_id(pane_id))
+                    .cloned()
+                else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -1132,7 +1159,7 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(pane_state) = ws.pane_state_mut(pane_id) else {
+                let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
@@ -1143,8 +1170,8 @@ impl App {
                     .unwrap();
                 };
                 match params.label.map(|label| label.trim().to_string()) {
-                    Some(label) if !label.is_empty() => pane_state.set_manual_label(label),
-                    _ => pane_state.clear_manual_label(),
+                    Some(label) if !label.is_empty() => terminal.set_manual_label(label),
+                    _ => terminal.clear_manual_label(),
                 }
                 self.state.mark_session_dirty();
                 let pane = self.pane_info(ws_idx, pane_id).unwrap();
@@ -1419,6 +1446,7 @@ impl App {
                     .unwrap();
                 };
                 let workspace_id = self.state.workspaces[ws_idx].id.clone();
+                let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
                 let should_close_workspace = {
                     let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                         return serde_json::to_string(&ErrorResponse {
@@ -1447,6 +1475,7 @@ impl App {
                         data: crate::api::schema::EventData::WorkspaceClosed { workspace_id },
                     });
                 } else {
+                    self.state.remove_unattached_terminal_ids(terminal_id);
                     self.schedule_session_save();
                     self.emit_event(crate::api::schema::EventEnvelope {
                         event: crate::api::schema::EventKind::PaneClosed,

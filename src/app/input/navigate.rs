@@ -126,10 +126,10 @@ impl App {
     }
 
     fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {
-        let Some(ws) = self.state.active.and_then(|i| self.state.workspaces.get(i)) else {
+        let Some(ws_idx) = self.state.active else {
             return false;
         };
-        let Some(rt) = ws.focused_runtime() else {
+        let Some(rt) = self.state.focused_runtime_in_workspace(ws_idx) else {
             return false;
         };
 
@@ -191,10 +191,13 @@ impl App {
                     if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
                         env.push(("HERDR_ACTIVE_PANE_ID".to_string(), public_pane_id));
                     }
-                    if let Some(pane_cwd) = workspace
-                        .active_tab()
-                        .and_then(|tab| tab.cwd_for_pane(pane_id))
-                    {
+                    if let Some(pane_cwd) = workspace.active_tab().and_then(|tab| {
+                        tab.cwd_for_pane(
+                            pane_id,
+                            &self.state.terminals,
+                            &self.state.terminal_runtimes,
+                        )
+                    }) {
                         env.push((
                             "HERDR_ACTIVE_PANE_CWD".to_string(),
                             pane_cwd.display().to_string(),
@@ -308,10 +311,14 @@ impl App {
             .focused_pane_id()
             .ok_or_else(|| std::io::Error::other("no focused pane"))?;
         let previous_zoomed = ws.active_tab().map(|tab| tab.zoomed).unwrap_or(false);
-        let cwd = ws
-            .active_tab()
-            .and_then(|tab| tab.cwd_for_pane(previous_focus));
-        let new_pane_id = ws.split_focused_command(
+        let cwd = ws.active_tab().and_then(|tab| {
+            tab.cwd_for_pane(
+                previous_focus,
+                &self.state.terminals,
+                &self.state.terminal_runtimes,
+            )
+        });
+        let new_pane = ws.split_focused_command(
             Direction::Horizontal,
             new_rows,
             new_cols,
@@ -321,6 +328,10 @@ impl App {
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
         )?;
+        let new_pane_id = new_pane.pane_id;
+        self.state
+            .terminals
+            .insert(new_pane.terminal.id.clone(), new_pane.terminal);
         ws.active_tab_mut()
             .expect("workspace must have an active tab")
             .layout
@@ -1072,7 +1083,7 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         );
-        let workspace = Workspace::new(
+        let (workspace, terminal, runtime) = Workspace::new(
             std::env::current_dir().unwrap_or_else(|_| "/".into()),
             24,
             80,
@@ -1084,6 +1095,10 @@ mod tests {
         )
         .expect("workspace should spawn");
         app.state.workspaces = vec![workspace];
+        app.state
+            .terminal_runtimes
+            .insert(terminal.id.clone(), runtime);
+        app.state.terminals.insert(terminal.id.clone(), terminal);
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;

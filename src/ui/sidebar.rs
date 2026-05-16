@@ -116,7 +116,7 @@ pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
             let Some(ws) = app.workspaces.get(ws_idx) else {
                 return Vec::new();
             };
-            ws.pane_details()
+            ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(|detail| AgentPanelEntry {
                     ws_idx,
@@ -138,7 +138,7 @@ pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
             .flat_map(|(ws_idx, ws)| {
                 let multi_tab = ws.tabs.len() > 1;
                 let workspace_label = ws.display_name();
-                ws.pane_details()
+                ws.pane_details(&app.terminals)
                     .into_iter()
                     .map(move |detail| AgentPanelEntry {
                         ws_idx,
@@ -429,7 +429,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         if y >= ws_area.y + ws_area.height {
             break;
         }
-        let (agg_state, agg_seen) = ws.aggregate_state();
+        let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
         let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
         let is_selected = visible_idx == app.selected && is_navigating;
         let is_active = Some(visible_idx) == app.active;
@@ -487,7 +487,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     if detail_content_area != Rect::default() {
         if let Some(ws_idx) = detail_ws_idx {
             if let Some(ws) = app.workspaces.get(ws_idx) {
-                for (detail_idx, detail) in ws.pane_details().iter().enumerate() {
+                for (detail_idx, detail) in ws.pane_details(&app.terminals).iter().enumerate() {
                     let y = detail_content_area.y + detail_idx as u16;
                     if y >= detail_content_area.y + detail_content_area.height {
                         break;
@@ -603,7 +603,7 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
         let is_active = Some(i) == app.active;
         let is_dragged = dragged_ws_idx == Some(i);
         let highlighted = selected || is_active || is_dragged;
-        let (agg_state, agg_seen) = ws.aggregate_state();
+        let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
 
         if highlighted {
             let bg = if selected {
@@ -899,24 +899,28 @@ mod tests {
     #[test]
     fn all_workspaces_agent_panel_entries_use_workspace_and_optional_tab_labels() {
         let mut app = crate::app::state::AppState::test_new();
-        let mut first = Workspace::test_new("one");
+        let first = Workspace::test_new("one");
         let first_pane = first.tabs[0].root_pane;
-        first.tabs[0]
-            .panes
-            .get_mut(&first_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Pi);
-
         let mut second = Workspace::test_new("two");
         let second_tab = second.test_add_tab(Some("logs"));
         let second_pane = second.tabs[second_tab].root_pane;
-        second.tabs[second_tab]
-            .panes
-            .get_mut(&second_pane)
-            .unwrap()
-            .detected_agent = Some(Agent::Claude);
 
         app.workspaces = vec![first, second];
+        app.ensure_test_terminals();
+        let first_terminal_id = app.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_terminal_id = app.workspaces[1].tabs[second_tab].panes[&second_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&second_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
         app.active = Some(0);
         app.selected = 0;
         app.agent_panel_scope = AgentPanelScope::AllWorkspaces;

@@ -20,14 +20,12 @@ mod osc;
 mod state;
 mod terminal;
 
-use self::{
-    state::stabilize_agent_state,
-    terminal::{GhosttyPaneTerminal, PaneTerminal},
-};
+use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub use self::{
-    state::{EffectiveStateChange, PaneState},
+    state::PaneState,
     terminal::{InputState, ScrollMetrics, TerminalCursorState},
 };
+use crate::terminal::stabilize_agent_state;
 
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
 const PANE_TERM: &str = "xterm-256color";
@@ -160,6 +158,7 @@ impl AgentDetectionPresence {
 /// PTY runtime for a pane. Owns the terminal, I/O channels, and background tasks.
 /// Dropping this shuts down all background tasks and closes the PTY.
 pub struct PaneRuntime {
+    pane_id: PaneId,
     terminal: Arc<PaneTerminal>,
     sender: mpsc::Sender<Bytes>,
     resize_tx: watch::Sender<(u16, u16, u32, u32)>,
@@ -181,10 +180,11 @@ pub enum WheelRouting {
 
 impl Drop for PaneRuntime {
     fn drop(&mut self) {
-        // Abort detection task immediately.
+        // Abort detection task immediately and terminate the owned session.
         // Reader/writer/resize tasks shut down naturally via channel close
         // and PTY EOF when the rest of PaneRuntime is dropped.
         self.detect_handle.abort();
+        shutdown_pane_processes(self.pane_id, self.child_pid.load(Ordering::Acquire));
     }
 }
 
@@ -251,9 +251,9 @@ fn shutdown_pane_processes(pane_id: PaneId, child_pid: u32) {
 }
 
 impl PaneRuntime {
-    pub fn shutdown(self, pane_id: PaneId) {
+    pub fn shutdown(self) {
         self.detect_handle.abort();
-        shutdown_pane_processes(pane_id, self.child_pid.load(Ordering::Acquire));
+        shutdown_pane_processes(self.pane_id, self.child_pid.load(Ordering::Acquire));
     }
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
@@ -748,6 +748,7 @@ impl PaneRuntime {
         }
 
         Ok(Self {
+            pane_id,
             terminal,
             sender: input_tx,
             resize_tx,
@@ -1039,6 +1040,7 @@ impl PaneRuntime {
 
         (
             Self {
+                pane_id: PaneId::from_raw(0),
                 terminal: Arc::new(PaneTerminal::new(
                     GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
                 )),
@@ -1121,6 +1123,7 @@ mod tests {
             .mode_set(crate::ghostty::MODE_FOCUS_EVENT, true)
             .unwrap();
         let runtime = PaneRuntime {
+            pane_id: PaneId::from_raw(0),
             terminal: Arc::new(PaneTerminal::new(
                 GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
             )),
@@ -1144,6 +1147,7 @@ mod tests {
         let (resize_tx, _resize_rx) = watch::channel((80, 24, 0, 0));
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let runtime = PaneRuntime {
+            pane_id: PaneId::from_raw(0),
             terminal: Arc::new(PaneTerminal::new(
                 GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
             )),

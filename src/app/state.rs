@@ -818,6 +818,10 @@ pub enum SidebarWidthSource {
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
+    pub terminals:
+        std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
+    pub terminal_runtimes:
+        std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalRuntime>,
     pub workspaces: Vec<Workspace>,
     pub active: Option<usize>,
     pub selected: usize,
@@ -953,6 +957,57 @@ impl AppState {
 
     /// Returns true when the given (workspace, tab, pane) refers to the
     /// currently focused pane in the active workspace's active tab.
+    pub(crate) fn runtime_for_pane_in_workspace(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<&crate::terminal::TerminalRuntime> {
+        #[cfg(test)]
+        if let Some(runtime) = self.workspaces.get(ws_idx)?.test_runtimes.get(&pane_id) {
+            return Some(runtime);
+        }
+        #[cfg(test)]
+        if let Some(runtime) = self
+            .workspaces
+            .get(ws_idx)?
+            .tabs
+            .iter()
+            .find_map(|tab| tab.runtimes.get(&pane_id))
+        {
+            return Some(runtime);
+        }
+        let terminal_id = self.workspaces.get(ws_idx)?.terminal_id(pane_id)?;
+        self.terminal_runtimes.get(terminal_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runtime_for_pane(
+        &self,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<&crate::terminal::TerminalRuntime> {
+        self.workspaces.iter().find_map(|ws| {
+            #[cfg(test)]
+            if let Some(runtime) = ws.test_runtimes.get(&pane_id) {
+                return Some(runtime);
+            }
+            #[cfg(test)]
+            if let Some(runtime) = ws.tabs.iter().find_map(|tab| tab.runtimes.get(&pane_id)) {
+                return Some(runtime);
+            }
+            let terminal_id = ws.terminal_id(pane_id)?;
+            self.terminal_runtimes.get(terminal_id)
+        })
+    }
+
+    pub(crate) fn focused_runtime_in_workspace(
+        &self,
+        ws_idx: usize,
+    ) -> Option<&crate::terminal::TerminalRuntime> {
+        let ws = self.workspaces.get(ws_idx)?;
+        let pane_id = ws.focused_pane_id()?;
+        self.runtime_for_pane_in_workspace(ws_idx, pane_id)
+    }
+
     pub fn is_active_pane(
         &self,
         ws_idx: usize,
@@ -1003,6 +1058,8 @@ impl AppState {
     /// Create an AppState for testing — no channels, no PTYs.
     pub fn test_new() -> Self {
         Self {
+            terminals: std::collections::HashMap::new(),
+            terminal_runtimes: std::collections::HashMap::new(),
             workspaces: Vec::new(),
             active: None,
             selected: 0,
@@ -1154,6 +1211,40 @@ impl AppState {
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
         }
+    }
+
+    /// Populate missing `TerminalState` entries for every pane so tests that
+    /// read or write terminal metadata don't need to manually create them.
+    pub fn ensure_test_terminals(&mut self) {
+        use crate::terminal::TerminalState;
+        for ws in &self.workspaces {
+            for tab in &ws.tabs {
+                for pane in tab.panes.values() {
+                    if !self.terminals.contains_key(&pane.attached_terminal_id) {
+                        let cwd = ws.identity_cwd.clone();
+                        self.terminals.insert(
+                            pane.attached_terminal_id.clone(),
+                            TerminalState::new(pane.attached_terminal_id.clone(), cwd),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn insert_test_runtime(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        runtime: crate::terminal::TerminalRuntime,
+    ) {
+        let Some(terminal_id) = self
+            .workspaces
+            .iter()
+            .find_map(|ws| ws.terminal_id(pane_id).cloned())
+        else {
+            return;
+        };
+        self.terminal_runtimes.insert(terminal_id, runtime);
     }
 }
 
