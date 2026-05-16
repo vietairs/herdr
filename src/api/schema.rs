@@ -52,6 +52,8 @@ pub enum Method {
     AgentRename(AgentRenameParams),
     #[serde(rename = "agent.focus")]
     AgentFocus(AgentTarget),
+    #[serde(rename = "agent.start")]
+    AgentStart(AgentStartParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.list")]
@@ -177,6 +179,22 @@ pub struct AgentRenameParams {
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStartParams {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<SplitDirection>,
+    #[serde(default)]
+    pub focus: bool,
+    pub argv: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -522,6 +540,10 @@ pub enum ResponseResult {
     },
     AgentInfo {
         agent: AgentInfo,
+    },
+    AgentStarted {
+        agent: AgentInfo,
+        argv: Vec<String>,
     },
     AgentList {
         agents: Vec<AgentInfo>,

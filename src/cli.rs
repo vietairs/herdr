@@ -6,12 +6,13 @@ use serde::Serialize;
 
 use crate::api;
 use crate::api::schema::{
-    AgentReadParams, AgentRenameParams, AgentSendParams, AgentStatus, AgentTarget, EmptyParams,
-    IntegrationTarget, Method, OutputMatch, PaneAgentState, PaneListParams, PaneReadParams,
-    PaneRenameParams, PaneReportAgentParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneTarget, PaneWaitForOutputParams, PingParams,
-    ReadFormat, ReadSource, Request, SplitDirection, Subscription, TabCreateParams, TabListParams,
-    TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
+    AgentReadParams, AgentRenameParams, AgentSendParams, AgentStartParams, AgentStatus,
+    AgentTarget, EmptyParams, IntegrationTarget, Method, OutputMatch, PaneAgentState,
+    PaneListParams, PaneReadParams, PaneRenameParams, PaneReportAgentParams, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneTarget, PaneWaitForOutputParams,
+    PingParams, ReadFormat, ReadSource, Request, SplitDirection, Subscription, TabCreateParams,
+    TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams,
+    WorkspaceTarget,
 };
 
 pub enum CommandOutcome {
@@ -279,6 +280,7 @@ fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "send" => agent_send(&args[1..]),
         "rename" => agent_rename(&args[1..]),
         "focus" => agent_focus(&args[1..]),
+        "start" => agent_start(&args[1..]),
         "help" | "--help" | "-h" => {
             print_agent_help();
             Ok(0)
@@ -767,6 +769,91 @@ fn tab_close(args: &[String]) -> std::io::Result<i32> {
         id: "cli:tab:close".into(),
         method: Method::TabClose(TabTarget {
             tab_id: normalize_tab_id(raw_tab_id),
+        }),
+    })?)
+}
+
+fn agent_start(args: &[String]) -> std::io::Result<i32> {
+    let Some(name) = args.first() else {
+        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>");
+        return Ok(2);
+    };
+
+    let Some(separator) = args.iter().position(|arg| arg == "--") else {
+        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>");
+        return Ok(2);
+    };
+    if separator == args.len() - 1 {
+        eprintln!("agent start requires argv after --");
+        return Ok(2);
+    }
+
+    let mut cwd = None;
+    let mut workspace_id = None;
+    let mut tab_id = None;
+    let mut split = None;
+    let mut focus = false;
+
+    let mut index = 1;
+    while index < separator {
+        match args[index].as_str() {
+            "--cwd" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --cwd");
+                    return Ok(2);
+                };
+                cwd = Some(value.clone());
+                index += 2;
+            }
+            "--workspace" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --workspace");
+                    return Ok(2);
+                };
+                workspace_id = Some(normalize_workspace_id(value));
+                index += 2;
+            }
+            "--tab" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --tab");
+                    return Ok(2);
+                };
+                tab_id = Some(normalize_tab_id(value));
+                index += 2;
+            }
+            "--split" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --split");
+                    return Ok(2);
+                };
+                split = Some(parse_split_direction(value)?);
+                index += 2;
+            }
+            "--focus" => {
+                focus = true;
+                index += 1;
+            }
+            "--no-focus" => {
+                focus = false;
+                index += 1;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+
+    print_response(&send_request(&Request {
+        id: "cli:agent:start".into(),
+        method: Method::AgentStart(AgentStartParams {
+            name: name.clone(),
+            cwd,
+            workspace_id,
+            tab_id,
+            split,
+            focus,
+            argv: args[separator + 1..].to_vec(),
         }),
     })?)
 }
@@ -1811,6 +1898,7 @@ fn print_agent_help() {
     eprintln!("  herdr agent send <target> <text>");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
+    eprintln!("  herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>");
     eprintln!("  targets accept terminal ids, unique agent names, and legacy pane ids");
 }
 

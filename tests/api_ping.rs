@@ -551,6 +551,61 @@ fn tab_methods_round_trip_over_socket() {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
+fn agent_start_creates_named_terminal_over_socket() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let started = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_start","method":"agent.start","params":{{"name":"main","cwd":"{}","argv":["/bin/sh","-c","printf agent-start-ok; sleep 2"]}}}}"#,
+            base.display()
+        ),
+    );
+    assert_eq!(started["result"]["type"], "agent_started");
+    assert_eq!(started["result"]["agent"]["name"], "main");
+    assert_eq!(
+        started["result"]["agent"]["cwd"],
+        base.display().to_string()
+    );
+    assert_eq!(started["result"]["argv"][0], "/bin/sh");
+    let terminal_id = started["result"]["agent"]["terminal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let listed = send_request(
+        &socket_path,
+        r#"{"id":"agent_start_list","method":"agent.list","params":{}}"#,
+    );
+    let agents = listed["result"]["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0]["terminal_id"], terminal_id);
+    assert_eq!(agents[0]["name"], "main");
+
+    let duplicate = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"agent_start_duplicate","method":"agent.start","params":{{"name":"main","cwd":"{}","argv":["/bin/sh","-c","true"]}}}}"#,
+            base.display()
+        ),
+    );
+    assert_eq!(duplicate["error"]["code"], "agent_name_taken");
+    assert!(duplicate["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(&terminal_id));
+
+    cleanup_spawned_herdr(child, base);
+}
+
+#[test]
 fn agent_methods_round_trip_over_socket() {
     let _lock = test_lock();
     let base = unique_test_dir();

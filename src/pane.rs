@@ -328,6 +328,46 @@ impl PaneRuntime {
         )
     }
 
+    pub fn spawn_argv_command(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        cwd: std::path::PathBuf,
+        argv: &[String],
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        let Some((program, args)) = argv.split_first() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "argv must not be empty",
+            ));
+        };
+        let mut cmd = CommandBuilder::new(program);
+        for arg in args {
+            cmd.arg(arg);
+        }
+        cmd.cwd(cwd);
+        cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
+        apply_pane_terminal_env(&mut cmd);
+        crate::integration::apply_pane_env(&mut cmd, pane_id);
+        Self::spawn_command_builder(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            events,
+            render_notify,
+            render_dirty,
+            cmd,
+            "failed to spawn argv command pane",
+        )
+    }
+
     fn spawn_command_builder(
         pane_id: PaneId,
         rows: u16,

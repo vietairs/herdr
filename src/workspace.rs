@@ -91,9 +91,8 @@ impl Workspace {
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
-        let tab = Tab::new(
-            1,
-            initial_cwd.clone(),
+        Self::new_with_tab(
+            initial_cwd,
             rows,
             cols,
             scrollback_limit_bytes,
@@ -101,7 +100,72 @@ impl Workspace {
             events,
             render_notify,
             render_dirty,
-        )?;
+            None,
+        )
+    }
+
+    pub fn new_argv_command(
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        argv: &[String],
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        Self::new_with_tab(
+            initial_cwd,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            events,
+            render_notify,
+            render_dirty,
+            Some(argv),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_tab(
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+        argv: Option<&[String]>,
+    ) -> std::io::Result<Self> {
+        let tab = if let Some(argv) = argv {
+            Tab::new_argv_command(
+                1,
+                initial_cwd.clone(),
+                rows,
+                cols,
+                argv,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                events,
+                render_notify,
+                render_dirty,
+            )?
+        } else {
+            Tab::new(
+                1,
+                initial_cwd.clone(),
+                rows,
+                cols,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                events,
+                render_notify,
+                render_dirty,
+            )?
+        };
         let mut public_pane_numbers = HashMap::new();
         public_pane_numbers.insert(tab.root_pane, 1);
         Ok(Self {
@@ -152,6 +216,25 @@ impl Workspace {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
     ) -> std::io::Result<usize> {
+        self.create_tab_with_runtime(
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            None,
+        )
+    }
+
+    fn create_tab_with_runtime(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        cwd: PathBuf,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        argv: Option<&[String]>,
+    ) -> std::io::Result<usize> {
         let number = self.tabs.len() + 1;
         let events = self
             .active_tab()
@@ -166,17 +249,32 @@ impl Workspace {
             .map(|tab| tab.render_dirty.clone())
             .expect("workspace must always have at least one tab");
 
-        let tab = Tab::new(
-            number,
-            cwd,
-            rows,
-            cols,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            events,
-            render_notify,
-            render_dirty,
-        )?;
+        let tab = if let Some(argv) = argv {
+            Tab::new_argv_command(
+                number,
+                cwd,
+                rows,
+                cols,
+                argv,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                events,
+                render_notify,
+                render_dirty,
+            )?
+        } else {
+            Tab::new(
+                number,
+                cwd,
+                rows,
+                cols,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                events,
+                render_notify,
+                render_dirty,
+            )?
+        };
         self.register_new_pane(tab.root_pane);
         self.tabs.push(tab);
         Ok(self.tabs.len() - 1)
@@ -264,18 +362,82 @@ impl Workspace {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         focus_new_pane: bool,
     ) -> Option<std::io::Result<(usize, PaneId)>> {
-        let tab_idx = self.find_tab_index_for_pane(pane_id)?;
-        let tab = &mut self.tabs[tab_idx];
-        let previous_focus = tab.layout.focused();
-        tab.layout.focus_pane(pane_id);
-        let new_id = match tab.split_focused(
+        self.split_pane_with_runtime(
+            pane_id,
             direction,
             rows,
             cols,
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
-        ) {
+            focus_new_pane,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_pane_argv_command(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        argv: &[String],
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        focus_new_pane: bool,
+    ) -> Option<std::io::Result<(usize, PaneId)>> {
+        self.split_pane_with_runtime(
+            pane_id,
+            direction,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            focus_new_pane,
+            Some(argv),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn split_pane_with_runtime(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        focus_new_pane: bool,
+        argv: Option<&[String]>,
+    ) -> Option<std::io::Result<(usize, PaneId)>> {
+        let tab_idx = self.find_tab_index_for_pane(pane_id)?;
+        let tab = &mut self.tabs[tab_idx];
+        let previous_focus = tab.layout.focused();
+        tab.layout.focus_pane(pane_id);
+        let new_id = match if let Some(argv) = argv {
+            tab.split_focused_argv_command(
+                direction,
+                rows,
+                cols,
+                cwd,
+                argv,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+            )
+        } else {
+            tab.split_focused(
+                direction,
+                rows,
+                cols,
+                cwd,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+            )
+        } {
             Ok(new_id) => new_id,
             Err(err) => {
                 tab.layout.focus_pane(previous_focus);

@@ -11,6 +11,16 @@ use crate::layout::{PaneId, TileLayout};
 use crate::pane::{PaneRuntime, PaneState};
 use crate::terminal::TerminalId;
 
+enum SplitCommand<'a> {
+    Shell {
+        command: &'a str,
+        extra_env: &'a [(String, String)],
+    },
+    Argv {
+        argv: &'a [String],
+    },
+}
+
 pub struct Tab {
     pub custom_name: Option<String>,
     pub number: usize,
@@ -52,18 +62,86 @@ impl Tab {
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
-        let (layout, root_id) = TileLayout::new();
-        let runtime = PaneRuntime::spawn(
-            root_id,
+        Self::new_with_runtime(
+            number,
+            initial_cwd,
             rows,
             cols,
-            initial_cwd.clone(),
             scrollback_limit_bytes,
             host_terminal_theme,
-            events.clone(),
-            render_notify.clone(),
-            render_dirty.clone(),
-        )?;
+            events,
+            render_notify,
+            render_dirty,
+            None,
+        )
+    }
+
+    pub fn new_argv_command(
+        number: usize,
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        argv: &[String],
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        Self::new_with_runtime(
+            number,
+            initial_cwd,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            events,
+            render_notify,
+            render_dirty,
+            Some(argv),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_runtime(
+        number: usize,
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+        argv: Option<&[String]>,
+    ) -> std::io::Result<Self> {
+        let (layout, root_id) = TileLayout::new();
+        let runtime = if let Some(argv) = argv {
+            PaneRuntime::spawn_argv_command(
+                root_id,
+                rows,
+                cols,
+                initial_cwd.clone(),
+                argv,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                events.clone(),
+                render_notify.clone(),
+                render_dirty.clone(),
+            )?
+        } else {
+            PaneRuntime::spawn(
+                root_id,
+                rows,
+                cols,
+                initial_cwd.clone(),
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                events.clone(),
+                render_notify.clone(),
+                render_dirty.clone(),
+            )?
+        };
 
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new());
@@ -142,7 +220,28 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
-            Some((command, extra_env)),
+            Some(SplitCommand::Shell { command, extra_env }),
+        )
+    }
+
+    pub fn split_focused_argv_command(
+        &mut self,
+        direction: Direction,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        argv: &[String],
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<PaneId> {
+        self.split_focused_with_runtime(
+            direction,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            Some(SplitCommand::Argv { argv }),
         )
     }
 
@@ -154,13 +253,13 @@ impl Tab {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        command: Option<(&str, &[(String, String)])>,
+        command: Option<SplitCommand<'_>>,
     ) -> std::io::Result<PaneId> {
         let new_id = self.layout.split_focused(direction);
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        let runtime = if let Some((command, extra_env)) = command {
-            PaneRuntime::spawn_shell_command(
+        let runtime = match command {
+            Some(SplitCommand::Shell { command, extra_env }) => PaneRuntime::spawn_shell_command(
                 new_id,
                 rows,
                 cols,
@@ -172,9 +271,20 @@ impl Tab {
                 self.events.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
-            )?
-        } else {
-            PaneRuntime::spawn(
+            )?,
+            Some(SplitCommand::Argv { argv }) => PaneRuntime::spawn_argv_command(
+                new_id,
+                rows,
+                cols,
+                actual_cwd.clone(),
+                argv,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                self.events.clone(),
+                self.render_notify.clone(),
+                self.render_dirty.clone(),
+            )?,
+            None => PaneRuntime::spawn(
                 new_id,
                 rows,
                 cols,
@@ -184,7 +294,7 @@ impl Tab {
                 self.events.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
-            )?
+            )?,
         };
         self.panes.insert(new_id, PaneState::new());
         self.pane_cwds.insert(new_id, actual_cwd);

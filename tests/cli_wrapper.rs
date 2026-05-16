@@ -1220,6 +1220,63 @@ fn tab_management_commands_work() {
 }
 
 #[test]
+fn agent_start_command_works() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let started = run_cli_json(
+        &socket_path,
+        &[
+            "agent",
+            "start",
+            "main",
+            "--cwd",
+            base.to_str().unwrap(),
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf cli-agent-start-ok; sleep 2",
+        ],
+    );
+    assert_eq!(started["result"]["type"], "agent_started");
+    assert_eq!(started["result"]["agent"]["name"], "main");
+    assert_eq!(started["result"]["argv"][0], "/bin/sh");
+    let terminal_id = started["result"]["agent"]["terminal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let listed = run_cli_json(&socket_path, &["agent", "list"]);
+    assert_eq!(listed["result"]["agents"][0]["terminal_id"], terminal_id);
+    assert_eq!(listed["result"]["agents"][0]["name"], "main");
+
+    let duplicate = run_cli(
+        &socket_path,
+        &[
+            "agent",
+            "start",
+            "main",
+            "--cwd",
+            base.to_str().unwrap(),
+            "--",
+            "/bin/sh",
+            "-c",
+            "true",
+        ],
+    );
+    assert!(!duplicate.status.success());
+    let duplicate_json: serde_json::Value = serde_json::from_slice(&duplicate.stderr).unwrap();
+    assert_eq!(duplicate_json["error"]["code"], "agent_name_taken");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn agent_commands_work() {
     let base = unique_test_dir();
     let config_home = base.join("config");

@@ -882,6 +882,22 @@ impl App {
                     result: ResponseResult::AgentInfo { agent },
                 }
             }
+            Method::AgentStart(params) => {
+                let (agent, argv) = match self.start_agent(params) {
+                    Ok(started) => started,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: self.agent_start_error_body(err),
+                        })
+                        .unwrap();
+                    }
+                };
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::AgentStarted { agent, argv },
+                }
+            }
             Method::AgentRead(params) => {
                 let resolved = match self.resolve_terminal_target(&params.target) {
                     Ok(resolved) => resolved,

@@ -231,6 +231,7 @@ for backward compatibility, requests also accept the older positional forms like
 | `agent.send` | send literal text to one terminal-backed agent | `ok` |
 | `agent.rename` | set or clear the unique agent/terminal name | `agent_info` |
 | `agent.focus` | show the terminal-backed agent in the TUI | `agent_info` |
+| `agent.start` | start a named terminal-backed agent from argv | `agent_started` |
 | `pane.list` | list panes, optionally filtered by workspace | `pane_list` |
 | `pane.get` | inspect one pane | `pane_info` |
 | `pane.rename` | set or clear a manual pane label | `pane_info` |
@@ -997,9 +998,10 @@ herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N]
 herdr agent send <target> <text>
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
+herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>
 ```
 
-agent targets accept terminal ids, unique agent names, and legacy pane ids. duplicate names fail clearly for `agent.*`; `pane.rename` can still create duplicate pane labels for backward compatibility.
+agent targets accept terminal ids, unique agent names, and legacy pane ids. duplicate names fail clearly for `agent.*`; `pane.rename` can still create duplicate pane labels for backward compatibility. `agent start` treats everything after `--` as argv and does not require agent-specific launch logic.
 
 pane commands:
 
@@ -1038,6 +1040,7 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 - `agent list` shows named panes and detected/reported agents as terminal-backed agents
 - `agent focus` switches the TUI workspace/tab/pane focus; it is not direct terminal attach
 - `agent rename` enforces unique active names; use `pane rename` only when duplicate labels are intentional
+- `agent start <name> -- <argv...>` starts a named pane-backed terminal and returns `result.agent` plus `result.argv`
 - `pane split` keeps focus where it is by default; pass `--focus` to switch to the new pane
 - `pane read` prints **text**, not json
 - `pane read --format ansi` and `pane read --ansi` print a rendered ANSI snapshot with colors/styles preserved

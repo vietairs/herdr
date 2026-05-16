@@ -230,7 +230,6 @@ impl App {
     ) -> Option<crate::api::schema::PaneInfo> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane = ws.pane_state(pane_id)?;
-        let runtime = ws.runtime(pane_id);
         let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
         let focused = self.state.active == Some(ws_idx)
             && ws.active_tab == tab_idx
@@ -243,8 +242,8 @@ impl App {
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             focused,
-            cwd: runtime
-                .and_then(|rt| rt.cwd())
+            cwd: ws.tabs[tab_idx]
+                .cwd_for_pane(pane_id)
                 .map(|cwd| cwd.display().to_string()),
             label: pane.manual_label.clone(),
             agent: pane.effective_agent_label().map(str::to_string),

@@ -41,6 +41,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::TabClose(_)
             | Method::AgentRename(_)
             | Method::AgentFocus(_)
+            | Method::AgentStart(_)
             | Method::PaneSplit(_)
             | Method::PaneRename(_)
             | Method::PaneReportAgent(_)
@@ -407,6 +408,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::AgentSend(_) => "agent.send",
         Method::AgentRename(_) => "agent.rename",
         Method::AgentFocus(_) => "agent.focus",
+        Method::AgentStart(_) => "agent.start",
         Method::PaneSplit(_) => "pane.split",
         Method::PaneList(_) => "pane.list",
         Method::PaneGet(_) => "pane.get",
