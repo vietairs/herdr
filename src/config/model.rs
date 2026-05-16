@@ -103,6 +103,8 @@ pub struct KeysConfig {
     pub close_tab: String,
     /// Rename the focused pane. Unset by default.
     pub rename_pane: String,
+    /// Open the focused pane scrollback in $EDITOR. Unset by default.
+    pub edit_scrollback: String,
     /// Focus the pane to the left in terminal mode. Unset by default.
     pub focus_pane_left: String,
     /// Focus the pane below in terminal mode. Unset by default.
@@ -198,6 +200,7 @@ impl Default for KeysConfig {
             next_tab: "".into(),
             close_tab: "".into(),
             rename_pane: "".into(),
+            edit_scrollback: "".into(),
             focus_pane_left: "".into(),
             focus_pane_down: "".into(),
             focus_pane_up: "".into(),

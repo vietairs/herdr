@@ -97,6 +97,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # next_tab = ""           # optional, unset by default
 # close_tab = ""          # optional, unset by default
 # rename_pane = ""        # optional, unset by default
+# edit_scrollback = ""    # optional, opens focused pane scrollback in $EDITOR
 # focus_pane_left = ""    # optional, unset by default
 # focus_pane_down = ""    # optional, unset by default
 # focus_pane_up = ""      # optional, unset by default

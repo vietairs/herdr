@@ -149,6 +149,10 @@ impl App {
     }
 
     fn restore_overlay_after_exit(&mut self, overlay: OverlayPaneState) {
+        for temp_file in &overlay.temp_files {
+            let _ = std::fs::remove_file(temp_file);
+        }
+
         let Some(ws) = self.state.workspaces.get_mut(overlay.ws_idx) else {
             return;
         };

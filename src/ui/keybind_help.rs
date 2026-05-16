@@ -104,6 +104,10 @@ pub(super) fn keybind_help_groups(
         (kb.split_horizontal_label.clone(), "split horizontal"),
         (kb.close_pane_label.clone(), "close pane"),
         (optional_keybind_label(&kb.rename_pane_label), "rename pane"),
+        (
+            optional_keybind_label(&kb.edit_scrollback_label),
+            "edit scrollback",
+        ),
         (kb.fullscreen_label.clone(), "fullscreen"),
         (kb.resize_mode_label.clone(), "resize mode"),
         (kb.toggle_sidebar_label.clone(), "toggle sidebar"),

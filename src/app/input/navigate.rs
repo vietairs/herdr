@@ -1,4 +1,9 @@
-use std::process::{Command, Stdio};
+use std::{
+    fs, io,
+    io::Write,
+    process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -103,7 +108,11 @@ impl App {
         }
 
         if let Some(action) = navigate_action_for_key(&self.state, &key) {
-            execute_navigate_action(&mut self.state, action);
+            if action == NavigateAction::EditScrollback {
+                self.launch_focused_scrollback_editor();
+            } else {
+                execute_navigate_action(&mut self.state, action);
+            }
             return;
         }
 
@@ -137,7 +146,9 @@ impl App {
         let previous_toast = self.state.toast.clone();
         let result = match binding.action {
             crate::config::CustomCommandAction::Shell => self.spawn_custom_command(&binding),
-            crate::config::CustomCommandAction::Pane => self.spawn_pane_command(&binding.command),
+            crate::config::CustomCommandAction::Pane => {
+                self.spawn_pane_command(&binding.command, Vec::new())
+            }
         };
         match result {
             Ok(()) => leave_navigate_mode(&mut self.state),
@@ -218,7 +229,67 @@ impl App {
         Ok(())
     }
 
-    fn spawn_pane_command(&mut self, command: &str) -> std::io::Result<()> {
+    fn launch_focused_scrollback_editor(&mut self) {
+        let previous_toast = self.state.toast.clone();
+        match self.open_focused_scrollback_in_editor() {
+            Ok(()) => self.sync_toast_deadline(previous_toast),
+            Err(err) => {
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: crate::app::state::ToastKind::NeedsAttention,
+                    title: "edit scrollback failed".to_string(),
+                    context: err.to_string(),
+                    target: None,
+                });
+                self.sync_toast_deadline(previous_toast);
+            }
+        }
+    }
+
+    fn open_focused_scrollback_in_editor(&mut self) -> std::io::Result<()> {
+        let ws_idx = self
+            .state
+            .active
+            .ok_or_else(|| std::io::Error::other("no active workspace"))?;
+        let ws = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .ok_or_else(|| std::io::Error::other("active workspace disappeared"))?;
+        let pane_id = ws
+            .focused_pane_id()
+            .ok_or_else(|| std::io::Error::other("no focused pane"))?;
+        let scrollback = ws
+            .focused_runtime()
+            .ok_or_else(|| std::io::Error::other("focused pane has no scrollback runtime"))?
+            .recent_text(usize::MAX);
+
+        let path = write_scrollback_temp_file(&scrollback)?;
+
+        let quoted_path = shell_quote(&path.display().to_string());
+        let command = format!(
+            r#"scrollback_file={quoted_path}; eval "${{EDITOR:-vi}} \"\$scrollback_file\""; status=$?; rm -f "$scrollback_file"; exit $status"#
+        );
+        if let Err(err) = self.spawn_pane_command(&command, vec![path.clone()]) {
+            let _ = fs::remove_file(&path);
+            return Err(err);
+        }
+
+        if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
+            self.state.toast = Some(crate::app::state::ToastNotification {
+                kind: crate::app::state::ToastKind::Finished,
+                title: "opened scrollback".to_string(),
+                context: format!("focused pane {public_pane_id}"),
+                target: None,
+            });
+        }
+        Ok(())
+    }
+
+    fn spawn_pane_command(
+        &mut self,
+        command: &str,
+        temp_files: Vec<std::path::PathBuf>,
+    ) -> std::io::Result<()> {
         let Some(ws_idx) = self.state.active else {
             return Err(std::io::Error::other("no active workspace"));
         };
@@ -264,6 +335,7 @@ impl App {
                 tab_idx,
                 previous_focus,
                 previous_zoomed,
+                temp_files,
             },
         );
         self.state.mode = Mode::Terminal;
@@ -397,6 +469,7 @@ pub(crate) enum NavigateAction {
     SplitVertical,
     SplitHorizontal,
     ClosePane,
+    EditScrollback,
     Fullscreen,
     EnterResizeMode,
     ToggleSidebar,
@@ -505,6 +578,12 @@ fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateA
         .is_some_and(|(code, mods)| key_matches(key, code, mods))
     {
         return Some(NavigateAction::RenamePane);
+    }
+    if kb
+        .edit_scrollback
+        .is_some_and(|(code, mods)| key_matches(key, code, mods))
+    {
+        return Some(NavigateAction::EditScrollback);
     }
     if key_matches(key, kb.split_vertical.0, kb.split_vertical.1) {
         return Some(NavigateAction::SplitVertical);
@@ -642,6 +721,7 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
             state.close_pane();
             leave_navigate_mode(state);
         }
+        NavigateAction::EditScrollback => {}
         NavigateAction::Fullscreen => {
             state.toggle_fullscreen();
             leave_navigate_mode(state);
@@ -672,6 +752,65 @@ fn leave_navigate_mode(state: &mut AppState) {
     if state.active.is_some() {
         state.mode = Mode::Terminal;
     }
+}
+
+fn write_scrollback_temp_file(content: &str) -> io::Result<std::path::PathBuf> {
+    let mut last_collision = None;
+    for attempt in 0..16 {
+        let path = unique_scrollback_path(attempt);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        match options.open(&path) {
+            Ok(mut file) => {
+                file.write_all(content.as_bytes())?;
+                return Ok(path);
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                last_collision = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(last_collision.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "failed to create unique scrollback temp file",
+        )
+    }))
+}
+
+fn unique_scrollback_path(attempt: u32) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "herdr-scrollback-{}-{nanos}-{attempt}.txt",
+        std::process::id()
+    ))
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '@' | '%' | '_' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
+                )
+        })
+    {
+        return value.to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -976,6 +1115,52 @@ mod tests {
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
         assert!(!app.state.workspaces[0].tabs[0].zoomed);
         assert_eq!(app.state.mode, Mode::Terminal);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[tokio::test]
+    async fn edit_scrollback_key_opens_focused_runtime_scrollback_in_editor_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("test");
+        let root_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].runtimes.insert(
+            root_pane,
+            crate::pane::PaneRuntime::test_with_scrollback_bytes(20, 5, 4096, b"alpha\nbeta\n"),
+        );
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Navigate;
+
+        let output_path = unique_temp_path("edit-scrollback");
+        let previous_editor = std::env::var_os("EDITOR");
+        std::env::set_var(
+            "EDITOR",
+            format!("sh -c 'cp \"$1\" {}' sh", output_path.display()),
+        );
+        app.state.keybinds.edit_scrollback = Some((KeyCode::Char('g'), KeyModifiers::empty()));
+        app.state.keybinds.edit_scrollback_label = Some("g".into());
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()));
+
+        match previous_editor {
+            Some(value) => std::env::set_var("EDITOR", value),
+            None => std::env::remove_var("EDITOR"),
+        }
+
+        let content = wait_for_file(&output_path);
+        assert!(content.contains("alpha"));
+        assert!(content.contains("beta"));
+        assert_eq!(app.state.mode, Mode::Terminal);
+
         let _ = std::fs::remove_file(output_path);
     }
 

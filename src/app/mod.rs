@@ -48,12 +48,13 @@ use crate::events::AppEvent;
 pub use state::{AppState, Mode, ToastKind, ViewState};
 
 /// Full application: AppState + runtime concerns (event channels, async I/O).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct OverlayPaneState {
     ws_idx: usize,
     tab_idx: usize,
     previous_focus: crate::layout::PaneId,
     previous_zoomed: bool,
+    temp_files: Vec<std::path::PathBuf>,
 }
 
 pub struct App {

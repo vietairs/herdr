@@ -103,6 +103,7 @@ split_vertical = "d"
 split_horizontal = "D"
 close_pane = "x"
 rename_pane = ""        # optional, unset by default
+edit_scrollback = ""    # optional, opens focused pane scrollback in $EDITOR
 fullscreen = "f"
 resize_mode = "r"
 toggle_sidebar = "b"
@@ -151,9 +152,12 @@ agents = ""     # optional; follows visible agent panel order
 | `split_horizontal` | `-` | split pane horizontally (stacked) |
 | `close_pane` | `x` | close focused pane |
 | `rename_pane` | unset | rename the focused pane |
+| `edit_scrollback` | unset | open the focused pane's retained scrollback in `$EDITOR` inside a temporary zoomed pane |
 | `fullscreen` | `f` | toggle focused pane fullscreen |
 | `resize_mode` | `r` | enter or leave resize mode |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
+
+`edit_scrollback` writes the focused pane's retained plain-text scrollback to a temporary file, opens `${EDITOR:-vi}` on that file in a temporary zoomed pane, then removes the file when the editor exits.
 
 ### indexed keybindings
 

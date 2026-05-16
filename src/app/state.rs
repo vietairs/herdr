@@ -1113,6 +1113,8 @@ impl AppState {
                 close_tab_label: None,
                 rename_pane: None,
                 rename_pane_label: None,
+                edit_scrollback: None,
+                edit_scrollback_label: None,
                 focus_pane_left: None,
                 focus_pane_left_label: None,
                 focus_pane_down: None,

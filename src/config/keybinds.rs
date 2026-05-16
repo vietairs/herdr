@@ -95,6 +95,8 @@ pub struct Keybinds {
     pub close_tab_label: Option<String>,
     pub rename_pane: Option<(KeyCode, KeyModifiers)>,
     pub rename_pane_label: Option<String>,
+    pub edit_scrollback: Option<(KeyCode, KeyModifiers)>,
+    pub edit_scrollback_label: Option<String>,
     pub focus_pane_left: Option<(KeyCode, KeyModifiers)>,
     pub focus_pane_left_label: Option<String>,
     pub focus_pane_down: Option<(KeyCode, KeyModifiers)>,
@@ -463,6 +465,12 @@ impl Config {
                 &mut diagnostics,
             ),
             optional_binding(
+                navigate_scope(),
+                "keys.edit_scrollback",
+                &self.keys.edit_scrollback,
+                &mut diagnostics,
+            ),
+            optional_binding(
                 terminal_direct_scope(),
                 "keys.focus_pane_left",
                 &self.keys.focus_pane_left,
@@ -767,14 +775,16 @@ impl Config {
             close_tab_label: optional_bindings[10].label.clone(),
             rename_pane: optional_bindings[11].value,
             rename_pane_label: optional_bindings[11].label.clone(),
-            focus_pane_left: optional_bindings[12].value,
-            focus_pane_left_label: optional_bindings[12].label.clone(),
-            focus_pane_down: optional_bindings[13].value,
-            focus_pane_down_label: optional_bindings[13].label.clone(),
-            focus_pane_up: optional_bindings[14].value,
-            focus_pane_up_label: optional_bindings[14].label.clone(),
-            focus_pane_right: optional_bindings[15].value,
-            focus_pane_right_label: optional_bindings[15].label.clone(),
+            edit_scrollback: optional_bindings[12].value,
+            edit_scrollback_label: optional_bindings[12].label.clone(),
+            focus_pane_left: optional_bindings[13].value,
+            focus_pane_left_label: optional_bindings[13].label.clone(),
+            focus_pane_down: optional_bindings[14].value,
+            focus_pane_down_label: optional_bindings[14].label.clone(),
+            focus_pane_up: optional_bindings[15].value,
+            focus_pane_up_label: optional_bindings[15].label.clone(),
+            focus_pane_right: optional_bindings[16].value,
+            focus_pane_right_label: optional_bindings[16].label.clone(),
             split_vertical: bindings[4].value,
             split_vertical_label: bindings[4].label.clone(),
             split_horizontal: bindings[5].value,
@@ -1082,6 +1092,7 @@ mod tests {
         assert_eq!(kb.split_vertical.0, KeyCode::Char('v'));
         assert_eq!(kb.split_horizontal.0, KeyCode::Char('-'));
         assert_eq!(kb.close_pane.0, KeyCode::Char('x'));
+        assert_eq!(kb.edit_scrollback, None);
         assert_eq!(kb.fullscreen.0, KeyCode::Char('f'));
         assert_eq!(kb.resize_mode.0, KeyCode::Char('r'));
         assert_eq!(kb.toggle_sidebar.0, KeyCode::Char('b'));
@@ -1104,6 +1115,7 @@ resize_mode = "ctrl+r"
 toggle_sidebar = "tab"
 previous_agent = "alt+a"
 next_agent = "alt+d"
+edit_scrollback = "e"
 focus_pane_left = "alt+h"
 focus_pane_right = "alt+right"
 "#;
@@ -1139,6 +1151,10 @@ focus_pane_right = "alt+right"
             Some((KeyCode::Char('a'), KeyModifiers::ALT))
         );
         assert_eq!(kb.next_agent, Some((KeyCode::Char('d'), KeyModifiers::ALT)));
+        assert_eq!(
+            kb.edit_scrollback,
+            Some((KeyCode::Char('e'), KeyModifiers::empty()))
+        );
         assert_eq!(
             kb.focus_pane_left,
             Some((KeyCode::Char('h'), KeyModifiers::ALT))

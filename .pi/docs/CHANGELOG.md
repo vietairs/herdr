@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added optional `keys.edit_scrollback` to open the focused pane's retained scrollback in `$EDITOR` inside a temporary zoomed pane.
+
 ### Fixed
 - GitHub Copilot is now correctly detected when its process name is `copilot`.
 - Integration installs now respect `PI_CODING_AGENT_DIR`, `CLAUDE_CONFIG_DIR`, and `CODEX_HOME` when choosing Pi, Claude Code, and Codex config paths.
