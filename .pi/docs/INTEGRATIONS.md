@@ -209,6 +209,12 @@ this removes:
 ~/.config/opencode/plugins/herdr-agent-state.js
 ```
 
+## amp
+
+herdr does not currently install an Amp plugin.
+
+Amp's public plugin API exposes lifecycle and tool-call hooks, but not passive permission/request-blocked events. A Herdr Amp plugin that only reports `idle` and `working` would take hook authority for the pane and mask Herdr's existing screen heuristics for Amp `blocked` states. Until Amp exposes permission state as an observable plugin event, Amp remains heuristic-only in Herdr.
+
 ## known limitations
 
 - these integrations only activate inside herdr-managed panes.
