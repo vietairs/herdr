@@ -38,6 +38,7 @@ pub struct TerminalState {
     pub fallback_state: AgentState,
     pub hook_authority: Option<HookAuthority>,
     pub manual_label: Option<String>,
+    pub agent_name: Option<String>,
     hook_report_sequences: HashMap<String, u64>,
     pub state: AgentState,
     pub revision: u64,
@@ -53,6 +54,7 @@ impl TerminalState {
             fallback_state: AgentState::Unknown,
             hook_authority: None,
             manual_label: None,
+            agent_name: None,
             hook_report_sequences: HashMap::new(),
             state: AgentState::Unknown,
             revision: 0,
@@ -229,6 +231,21 @@ impl TerminalState {
 
     pub fn clear_manual_label(&mut self) {
         self.manual_label = None;
+    }
+
+    pub fn set_agent_name(&mut self, name: String) {
+        let name = name.trim().to_string();
+        self.agent_name = (!name.is_empty()).then_some(name);
+    }
+
+    pub fn clear_agent_name(&mut self) {
+        self.agent_name = None;
+    }
+
+    pub fn is_agent_terminal(&self) -> bool {
+        self.agent_name.is_some()
+            || self.effective_agent_label().is_some()
+            || self.launch_argv.is_some()
     }
 
     pub fn border_label(&self, show_agent_labels: bool) -> Option<&str> {

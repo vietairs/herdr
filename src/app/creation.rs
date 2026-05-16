@@ -8,7 +8,10 @@ use crate::workspace::Workspace;
 
 impl App {
     pub(super) fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<std::path::PathBuf> {
-        self.state.workspaces.get(ws_idx)?.resolved_identity_cwd()
+        self.state
+            .workspaces
+            .get(ws_idx)?
+            .resolved_identity_cwd_from(&self.state.terminals, &self.state.terminal_runtimes)
     }
 
     pub(super) fn workspace_creation_source(&self) -> Option<usize> {
@@ -294,7 +297,7 @@ impl App {
         crate::api::schema::WorkspaceInfo {
             workspace_id: self.public_workspace_id(index),
             number: index + 1,
-            label: ws.display_name(),
+            label: ws.display_name_from(&self.state.terminals, &self.state.terminal_runtimes),
             focused: self.state.active == Some(index),
             pane_count: ws.public_pane_numbers.len(),
             tab_count: ws.tabs.len(),

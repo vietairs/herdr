@@ -281,6 +281,7 @@ fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "send" => agent_send(&args[1..]),
         "rename" => agent_rename(&args[1..]),
         "focus" => agent_focus(&args[1..]),
+        "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -934,14 +935,9 @@ fn agent_attach(args: &[String]) -> std::io::Result<i32> {
             Err(code) => return Ok(code),
         };
 
-    let response = send_request(&Request {
-        id: "cli:agent:attach:resolve".into(),
-        method: Method::AgentGet(AgentTarget {
-            target: target.clone(),
-        }),
-    })?;
-    if let Some(error) = response.get("error") {
-        eprintln!("{}", serde_json::to_string(error).unwrap());
+    let response = resolve_agent_target(&target, "cli:agent:attach:resolve")?;
+    if response.get("error").is_some() {
+        eprintln!("{}", serde_json::to_string(&response).unwrap());
         return Ok(1);
     }
     let Some(terminal_id) = response["result"]["agent"]["terminal_id"].as_str() else {
@@ -950,6 +946,107 @@ fn agent_attach(args: &[String]) -> std::io::Result<i32> {
     };
     crate::client::run_terminal_attach(terminal_id.to_owned(), takeover)?;
     Ok(0)
+}
+
+fn agent_wait(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first() else {
+        eprintln!("usage: herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]");
+        return Ok(2);
+    };
+
+    let mut timeout_ms = None;
+    let mut desired_status = None;
+
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--status" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --status");
+                    return Ok(2);
+                };
+                desired_status = Some(parse_agent_wait_status(value)?);
+                index += 2;
+            }
+            "--timeout" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --timeout");
+                    return Ok(2);
+                };
+                timeout_ms = Some(parse_u64_flag("--timeout", value)?);
+                index += 2;
+            }
+            "help" | "--help" | "-h" => {
+                eprintln!("usage: herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]");
+                return Ok(0);
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+
+    let Some(agent_status) = desired_status else {
+        eprintln!("missing required --status");
+        return Ok(2);
+    };
+
+    let response = resolve_agent_target(target, "cli:agent:wait:resolve")?;
+    if response.get("error").is_some() {
+        eprintln!("{}", serde_json::to_string(&response).unwrap());
+        return Ok(1);
+    }
+    if response["result"]["agent"]["agent_status"]
+        .as_str()
+        .is_some_and(|current| agent_wait_status_satisfied(agent_status, current))
+    {
+        println!("{}", serde_json::to_string(&response).unwrap());
+        return Ok(0);
+    }
+
+    let Some(pane_id) = response["result"]["agent"]["pane_id"].as_str() else {
+        eprintln!("agent wait failed: response did not include pane_id");
+        return Ok(1);
+    };
+
+    let subscriptions = if agent_status == AgentStatus::Idle {
+        vec![
+            Subscription::PaneAgentStatusChanged {
+                pane_id: pane_id.to_owned(),
+                agent_status: Some(AgentStatus::Idle),
+            },
+            Subscription::PaneAgentStatusChanged {
+                pane_id: pane_id.to_owned(),
+                agent_status: Some(AgentStatus::Done),
+            },
+        ]
+    } else {
+        vec![Subscription::PaneAgentStatusChanged {
+            pane_id: pane_id.to_owned(),
+            agent_status: Some(agent_status),
+        }]
+    };
+
+    wait_for_agent_change(
+        Request {
+            id: "cli:agent:wait".into(),
+            method: Method::EventsSubscribe(crate::api::schema::EventsSubscribeParams {
+                subscriptions,
+            }),
+        },
+        timeout_ms,
+        "timed out waiting for agent status change",
+    )
+}
+
+fn resolve_agent_target(target: &str, request_id: &str) -> std::io::Result<serde_json::Value> {
+    send_request(&Request {
+        id: request_id.into(),
+        method: Method::AgentGet(AgentTarget {
+            target: target.to_owned(),
+        }),
+    })
 }
 
 fn terminal_attach(args: &[String]) -> std::io::Result<i32> {
@@ -1835,6 +1932,31 @@ fn parse_read_format(value: &str) -> std::io::Result<ReadFormat> {
     }
 }
 
+fn agent_wait_status_satisfied(desired: AgentStatus, current: &str) -> bool {
+    match desired {
+        AgentStatus::Idle => matches!(current, "idle" | "done"),
+        AgentStatus::Working => current == "working",
+        AgentStatus::Blocked => current == "blocked",
+        AgentStatus::Unknown => current == "unknown",
+        AgentStatus::Done => false,
+    }
+}
+
+fn parse_agent_wait_status(value: &str) -> std::io::Result<AgentStatus> {
+    match value {
+        "idle" => Ok(AgentStatus::Idle),
+        "working" => Ok(AgentStatus::Working),
+        "blocked" => Ok(AgentStatus::Blocked),
+        "unknown" => Ok(AgentStatus::Unknown),
+        "done" => Err(std::io::Error::other(
+            "done is a UI attention state; use idle for CLI agent completion waits",
+        )),
+        _ => Err(std::io::Error::other(format!(
+            "invalid agent status: {value} (expected idle, working, blocked, or unknown)"
+        ))),
+    }
+}
+
 fn parse_agent_status(value: &str) -> std::io::Result<AgentStatus> {
     match value {
         "idle" => Ok(AgentStatus::Idle),
@@ -1978,6 +2100,7 @@ fn print_agent_help() {
     eprintln!("  herdr agent send <target> <text>");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
+    eprintln!("  herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");
     eprintln!("  herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>");
     eprintln!("  targets accept terminal ids, unique agent names, and legacy pane ids");

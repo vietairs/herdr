@@ -70,6 +70,8 @@ pub struct PaneSnapshot {
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 
 /// Serializable BSP tree.
@@ -238,7 +240,7 @@ fn capture_workspace(
         id: Some(ws.id.clone()),
         custom_name: ws.custom_name.clone(),
         identity_cwd: ws
-            .resolved_identity_cwd()
+            .resolved_identity_cwd_from(terminals, terminal_runtimes)
             .unwrap_or_else(|| ws.identity_cwd.clone()),
         tabs: ws
             .tabs
@@ -270,7 +272,19 @@ fn capture_tab(
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id))
             .and_then(|terminal| terminal.manual_label.clone());
-        panes.insert(id.raw(), PaneSnapshot { cwd, label });
+        let agent_name = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.agent_name.clone());
+        panes.insert(
+            id.raw(),
+            PaneSnapshot {
+                cwd,
+                label,
+                agent_name,
+            },
+        );
     }
     TabSnapshot {
         custom_name: tab.custom_name.clone(),
@@ -427,6 +441,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
+                agent_name: None,
             },
         );
         panes.insert(
@@ -434,6 +449,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
+                agent_name: None,
             },
         );
 
@@ -747,6 +763,7 @@ mod tests {
             PaneSnapshot {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
+                agent_name: None,
             },
         );
         panes.insert(
@@ -756,6 +773,7 @@ mod tests {
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 label: None,
+                agent_name: None,
             },
         );
 

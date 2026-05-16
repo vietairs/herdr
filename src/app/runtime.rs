@@ -247,7 +247,10 @@ impl App {
             .state
             .workspaces
             .iter()
-            .filter_map(|ws| ws.resolved_identity_cwd().map(|cwd| (ws.id.clone(), cwd)))
+            .filter_map(|ws| {
+                ws.resolved_identity_cwd_from(&self.state.terminals, &self.state.terminal_runtimes)
+                    .map(|cwd| (ws.id.clone(), cwd))
+            })
             .collect();
 
         if workspaces.is_empty() {

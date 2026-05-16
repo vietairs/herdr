@@ -65,8 +65,10 @@ impl App {
                     .terminals
                     .values()
                     .find(|terminal| terminal.id.to_string() == candidate.terminal_id)
-                    .and_then(|terminal| terminal.manual_label.as_deref())
-                    .is_some_and(|label| label == target)
+                    .is_some_and(|terminal| {
+                        terminal.agent_name.as_deref() == Some(target)
+                            || terminal.effective_agent_label() == Some(target)
+                    })
             })
             .collect();
         if let Some(resolved) = self.single_terminal_match(target, name_matches)? {

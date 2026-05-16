@@ -412,8 +412,11 @@ impl App {
         state.terminals = restored_terminals;
         state.terminal_runtimes = restored_terminal_runtimes;
 
-        for ws in &mut state.workspaces {
-            ws.refresh_git_branch();
+        for ws_idx in 0..state.workspaces.len() {
+            let cwd = state.workspaces[ws_idx]
+                .resolved_identity_cwd_from(&state.terminals, &state.terminal_runtimes);
+            state.workspaces[ws_idx].cached_git_branch =
+                cwd.as_deref().and_then(crate::workspace::git_branch);
         }
 
         // Background auto-update is disabled in monolithic no-session mode
@@ -1702,7 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_target_resolves_unique_manual_name() {
+    fn terminal_target_resolves_unique_agent_name() {
         let mut app = test_app();
         let workspace = Workspace::test_new("terminal-target-name");
         let pane = workspace.tabs[0].root_pane;
@@ -1718,7 +1721,7 @@ mod tests {
             .terminals
             .get_mut(&attached_terminal_id)
             .unwrap()
-            .manual_label = Some("reviewer".into());
+            .set_agent_name("reviewer".into());
         app.state.active = Some(0);
         app.state.selected = 0;
 
@@ -1746,7 +1749,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_target_reports_ambiguous_duplicate_manual_name() {
+    fn terminal_target_reports_ambiguous_duplicate_agent_name() {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("terminal-target-ambiguous");
         let first = workspace.tabs[0].root_pane;
@@ -1762,7 +1765,7 @@ mod tests {
             .terminals
             .get_mut(&first_terminal_id)
             .unwrap()
-            .manual_label = Some("worker".into());
+            .set_agent_name("worker".into());
         let second_terminal_id = app.state.workspaces[0]
             .pane_state(second)
             .unwrap()
@@ -1772,7 +1775,7 @@ mod tests {
             .terminals
             .get_mut(&second_terminal_id)
             .unwrap()
-            .manual_label = Some("worker".into());
+            .set_agent_name("worker".into());
         app.state.active = Some(0);
         app.state.selected = 0;
 

@@ -693,18 +693,23 @@ impl AppState {
     pub fn apply_workspace_git_statuses(&mut self, results: Vec<WorkspaceGitStatus>) -> bool {
         let mut changed = false;
         for result in results {
-            let Some(ws) = self
+            let Some(ws_idx) = self
                 .workspaces
-                .iter_mut()
-                .find(|ws| ws.id == result.workspace_id)
+                .iter()
+                .position(|ws| ws.id == result.workspace_id)
             else {
                 continue;
             };
 
-            if ws.resolved_identity_cwd().as_ref() != Some(&result.resolved_identity_cwd) {
+            if self.workspaces[ws_idx]
+                .resolved_identity_cwd_from(&self.terminals, &self.terminal_runtimes)
+                .as_ref()
+                != Some(&result.resolved_identity_cwd)
+            {
                 continue;
             }
 
+            let ws = &mut self.workspaces[ws_idx];
             if ws.cached_git_branch != result.branch {
                 ws.cached_git_branch = result.branch;
                 changed = true;
@@ -1050,6 +1055,7 @@ mod tests {
     }
 
     fn mark_agent(state: &mut AppState, ws_idx: usize, tab_idx: usize, pane_id: PaneId) {
+        state.ensure_test_terminals();
         let terminal_id = state.workspaces[ws_idx].tabs[tab_idx]
             .panes
             .get(&pane_id)

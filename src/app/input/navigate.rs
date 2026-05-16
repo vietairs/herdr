@@ -331,6 +331,9 @@ impl App {
         )?;
         let new_pane_id = new_pane.pane_id;
         self.state
+            .terminal_runtimes
+            .insert(new_pane.terminal.id.clone(), new_pane.runtime);
+        self.state
             .terminals
             .insert(new_pane.terminal.id.clone(), new_pane.terminal);
         ws.active_tab_mut()
@@ -1122,6 +1125,7 @@ mod tests {
             .await;
 
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert_eq!(app.state.terminal_runtimes.len(), 2);
         assert!(app.state.workspaces[0].tabs[0].zoomed);
 
         let _ = wait_for_file(&output_path);

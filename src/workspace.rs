@@ -517,6 +517,17 @@ impl Workspace {
         Some(self.identity_cwd.clone())
     }
 
+    pub fn resolved_identity_cwd_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &HashMap<TerminalId, TerminalRuntime>,
+    ) -> Option<PathBuf> {
+        self.tabs
+            .first()
+            .and_then(|tab| tab.cwd_for_pane(tab.root_pane, terminals, terminal_runtimes))
+            .or_else(|| Some(self.identity_cwd.clone()))
+    }
+
     pub fn display_name(&self) -> String {
         if let Some(name) = &self.custom_name {
             return name.clone();
@@ -527,17 +538,26 @@ impl Workspace {
             .unwrap_or_else(|| "workspace".into())
     }
 
+    pub fn display_name_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &HashMap<TerminalId, TerminalRuntime>,
+    ) -> String {
+        if let Some(name) = &self.custom_name {
+            return name.clone();
+        }
+
+        self.resolved_identity_cwd_from(terminals, terminal_runtimes)
+            .map(|cwd| derive_label_from_cwd(&cwd))
+            .unwrap_or_else(|| "workspace".into())
+    }
+
     pub fn branch(&self) -> Option<String> {
         self.cached_git_branch.clone()
     }
 
     pub fn git_ahead_behind(&self) -> Option<(usize, usize)> {
         self.cached_git_ahead_behind
-    }
-
-    pub fn refresh_git_branch(&mut self) {
-        let cwd = self.resolved_identity_cwd();
-        self.cached_git_branch = cwd.as_deref().and_then(git_branch);
     }
 
     #[cfg(test)]
@@ -719,26 +739,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_identity_uses_identity_cwd() {
-        let root = std::env::temp_dir().join(format!(
-            "herdr-workspace-identity-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let identity_cwd = root.join("pion");
-        std::fs::create_dir_all(identity_cwd.join(".git")).unwrap();
-
+    fn workspace_identity_follows_first_tab_root_pane_cwd() {
         let mut ws = Workspace::test_new("ignored");
         ws.custom_name = None;
-        ws.identity_cwd = identity_cwd.clone();
+        let root_pane = ws.tabs[0].root_pane;
+        let terminal_id = ws.tabs[0].terminal_id(root_pane).unwrap().clone();
+        let mut terminals = HashMap::new();
+        terminals.insert(
+            terminal_id.clone(),
+            TerminalState::new(terminal_id, PathBuf::from("/herdr-test/pion")),
+        );
+        let terminal_runtimes = HashMap::new();
 
-        assert_eq!(ws.display_name(), "pion");
-        assert_eq!(ws.resolved_identity_cwd(), Some(identity_cwd));
-
-        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(ws.display_name_from(&terminals, &terminal_runtimes), "pion");
+        assert_eq!(
+            ws.resolved_identity_cwd_from(&terminals, &terminal_runtimes),
+            Some(PathBuf::from("/herdr-test/pion"))
+        );
     }
 
     #[test]

@@ -1301,7 +1301,7 @@ fn agent_commands_work() {
         .unwrap()
         .to_string();
 
-    let renamed = run_cli(&socket_path, &["pane", "rename", &root_pane_id, "worker"]);
+    let renamed = run_cli(&socket_path, &["agent", "rename", &root_pane_id, "worker"]);
     assert!(renamed.status.success());
 
     let listed = run_cli_json(&socket_path, &["agent", "list"]);
@@ -1311,6 +1311,20 @@ fn agent_commands_work() {
 
     let fetched = run_cli_json(&socket_path, &["agent", "get", "worker"]);
     assert_eq!(fetched["result"]["agent"]["pane_id"], root_pane_id);
+
+    let waited = run_cli_json(
+        &socket_path,
+        &[
+            "agent",
+            "wait",
+            "worker",
+            "--status",
+            "unknown",
+            "--timeout",
+            "100",
+        ],
+    );
+    assert_eq!(waited["result"]["agent"]["pane_id"], root_pane_id);
 
     let read = run_cli_json(
         &socket_path,

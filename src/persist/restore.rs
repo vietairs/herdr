@@ -169,6 +169,10 @@ fn restore_tab(
             .get(id)
             .and_then(|old_id| snap.panes.get(old_id))
             .and_then(|p| p.label.clone());
+        let saved_agent_name = reverse_id_map
+            .get(id)
+            .and_then(|old_id| snap.panes.get(old_id))
+            .and_then(|p| p.agent_name.clone());
 
         match TerminalRuntime::spawn(
             *id,
@@ -186,6 +190,9 @@ fn restore_tab(
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
                 if let Some(label) = saved_label {
                     terminal.set_manual_label(label);
+                }
+                if let Some(agent_name) = saved_agent_name {
+                    terminal.set_agent_name(agent_name);
                 }
                 panes.insert(*id, PaneState::new(terminal_id.clone()));
                 terminal_runtimes.insert(terminal_id, runtime);
