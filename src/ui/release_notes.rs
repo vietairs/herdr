@@ -100,7 +100,13 @@ pub(super) fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, ar
         .unwrap_or(sections.notes_body);
 
     if let Some(instructions_area) = sections.instructions {
-        render_release_notes_preview_panel(frame, instructions_area, &notes.version, &app.palette);
+        render_release_notes_preview_panel(
+            frame,
+            instructions_area,
+            &notes.version,
+            &app.update_install_command,
+            &app.palette,
+        );
     }
 
     let body = Paragraph::new(
@@ -278,7 +284,11 @@ pub(crate) fn release_notes_sections(area: Rect, preview: bool) -> ReleaseNotesS
     }
 }
 
-pub(super) fn release_notes_preview_lines<'a>(_version: &str, p: &Palette) -> Vec<Line<'a>> {
+pub(super) fn release_notes_preview_lines<'a>(
+    _version: &str,
+    install_command: &'a str,
+    p: &Palette,
+) -> Vec<Line<'a>> {
     let title_style = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
     let text_style = Style::default().fg(p.text);
     let code_style = Style::default()
@@ -296,13 +306,19 @@ pub(super) fn release_notes_preview_lines<'a>(_version: &str, p: &Palette) -> Ve
         ]),
         Line::from(vec![
             Span::styled("detach from this session, then run ", text_style),
-            Span::styled("herdr update", code_style),
+            Span::styled(install_command, code_style),
             Span::styled(" in your shell", text_style),
         ]),
     ]
 }
 
-fn render_release_notes_preview_panel(frame: &mut Frame, area: Rect, _version: &str, p: &Palette) {
+fn render_release_notes_preview_panel(
+    frame: &mut Frame,
+    area: Rect,
+    _version: &str,
+    install_command: &str,
+    p: &Palette,
+) {
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
@@ -318,7 +334,8 @@ fn render_release_notes_preview_panel(frame: &mut Frame, area: Rect, _version: &
         rows[0].height,
     );
     frame.render_widget(
-        Paragraph::new(release_notes_preview_lines(_version, p)).wrap(Wrap { trim: false }),
+        Paragraph::new(release_notes_preview_lines(_version, install_command, p))
+            .wrap(Wrap { trim: false }),
         text_area,
     );
 

@@ -652,8 +652,12 @@ impl AppState {
                 self.handle_pane_died(pane_id);
                 Vec::new()
             }
-            AppEvent::UpdateReady { version } => {
+            AppEvent::UpdateReady {
+                version,
+                install_command,
+            } => {
                 self.update_available = Some(version.clone());
+                self.update_install_command = install_command.clone();
                 self.latest_release_notes_available = true;
                 self.update_dismissed = true;
                 if matches!(
@@ -663,7 +667,7 @@ impl AppState {
                     self.toast = Some(ToastNotification {
                         kind: ToastKind::UpdateInstalled,
                         title: format!("v{version} available"),
-                        context: "detach, then run `herdr update`".to_string(),
+                        context: format!("detach, then run `{install_command}`"),
                         target: None,
                     });
                 }
@@ -953,6 +957,7 @@ mod tests {
 
         let updates = state.handle_app_event(crate::events::AppEvent::UpdateReady {
             version: "0.5.0".into(),
+            install_command: "herdr update".into(),
         });
 
         assert!(updates.is_empty());
@@ -1500,6 +1505,7 @@ mod tests {
 
         let updates = state.handle_app_event(AppEvent::UpdateReady {
             version: "0.5.0".into(),
+            install_command: "herdr update".into(),
         });
 
         assert!(updates.is_empty());
@@ -1510,6 +1516,27 @@ mod tests {
         assert_eq!(toast.kind, ToastKind::UpdateInstalled);
         assert_eq!(toast.title, "v0.5.0 available");
         assert_eq!(toast.context, "detach, then run `herdr update`");
+    }
+
+    #[test]
+    fn update_ready_uses_event_install_command_in_toast() {
+        let mut state = AppState::test_new();
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        state.handle_app_event(AppEvent::UpdateReady {
+            version: "0.5.0".into(),
+            install_command: "brew update && brew upgrade herdr".into(),
+        });
+
+        assert_eq!(
+            state.update_install_command,
+            "brew update && brew upgrade herdr"
+        );
+        let toast = state.toast.as_ref().expect("update toast");
+        assert_eq!(
+            toast.context,
+            "detach, then run `brew update && brew upgrade herdr`"
+        );
     }
 
     #[test]

@@ -955,9 +955,13 @@ impl HeadlessServer {
 
                 true
             }
-            AppEvent::UpdateReady { version } => {
+            AppEvent::UpdateReady {
+                version,
+                install_command,
+            } => {
                 let toast_before = self.app.state.toast.clone();
                 let version = version.clone();
+                let install_command = install_command.clone();
 
                 self.app.handle_internal_event(ev);
 
@@ -971,7 +975,7 @@ impl HeadlessServer {
                                 .map(|toast| format!("{}: {}", toast.title, toast.context))
                         } else {
                             Some(format!(
-                                "v{version} available: detach, then run `herdr update`"
+                                "v{version} available: detach, then run `{install_command}`"
                             ))
                         }
                     } else {
@@ -2970,6 +2974,7 @@ mod tests {
 
         let changed = server.handle_internal_event_with_forwarding(AppEvent::UpdateReady {
             version: "9.9.9".to_string(),
+            install_command: "herdr update".into(),
         });
 
         assert!(changed);
@@ -3004,6 +3009,7 @@ mod tests {
 
         let changed = server.handle_internal_event_with_forwarding(AppEvent::UpdateReady {
             version: "9.9.9".to_string(),
+            install_command: "herdr update".into(),
         });
 
         assert!(changed);

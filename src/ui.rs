@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn release_notes_preview_lines_show_update_steps() {
         let palette = Palette::catppuccin();
-        let lines = release_notes_preview_lines("0.5.0", &palette);
+        let lines = release_notes_preview_lines("0.5.0", "herdr update", &palette);
 
         assert_eq!(lines.len(), 2);
         assert_eq!(line_text(&lines[0]), "● update ready");

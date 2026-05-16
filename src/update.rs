@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 const UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
+const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
+const HERDR_UPDATE_COMMAND: &str = "herdr update";
+const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_NOTES_VERSION";
@@ -92,6 +95,16 @@ struct UpdateManifest {
     assets: BTreeMap<String, String>,
 }
 
+#[derive(Deserialize)]
+struct HomebrewFormula {
+    versions: HomebrewFormulaVersions,
+}
+
+#[derive(Deserialize)]
+struct HomebrewFormulaVersions {
+    stable: String,
+}
+
 impl UpdateManifest {
     fn download_url_for(&self, os: &str, arch: &str) -> Option<String> {
         self.assets.get(&format!("{os}-{arch}")).cloned()
@@ -163,6 +176,46 @@ fn check_latest() -> Result<Option<ReleaseInfo>, String> {
         download_url,
         notes_body,
     }))
+}
+
+fn parse_homebrew_formula_stable_version(input: &[u8]) -> Result<Version, String> {
+    let formula: HomebrewFormula = serde_json::from_slice(input)
+        .map_err(|e| format!("failed to parse Homebrew formula JSON: {e}"))?;
+    Version::parse(&formula.versions.stable).ok_or_else(|| {
+        format!(
+            "invalid stable version in Homebrew formula JSON: {}",
+            formula.versions.stable
+        )
+    })
+}
+
+fn check_homebrew_latest() -> Result<Option<Version>, String> {
+    let current = Version::current();
+
+    let output = Command::new("curl")
+        .args([
+            "-sfL",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "10",
+            HOMEBREW_FORMULA_API_URL,
+        ])
+        .output()
+        .map_err(|e| format!("curl failed: {e}"))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let latest = parse_homebrew_formula_stable_version(&output.stdout)?;
+    if latest <= current {
+        return Ok(None);
+    }
+
+    Ok(Some(latest))
 }
 
 // ---------------------------------------------------------------------------
@@ -533,11 +586,67 @@ fn wait_for_server_shutdown(timeout: Duration) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Installation manager detection
+// ---------------------------------------------------------------------------
+
+pub(crate) fn update_install_command() -> &'static str {
+    if is_homebrew_managed_install() {
+        HOMEBREW_UPDATE_COMMAND
+    } else {
+        HERDR_UPDATE_COMMAND
+    }
+}
+
+fn is_homebrew_managed_install() -> bool {
+    let Ok(current_exe) = env::current_exe() else {
+        return false;
+    };
+
+    if is_homebrew_managed_exe_path(&current_exe) {
+        return true;
+    }
+
+    current_exe
+        .canonicalize()
+        .is_ok_and(|path| is_homebrew_managed_exe_path(&path))
+}
+
+fn is_homebrew_managed_exe_path(path: &Path) -> bool {
+    homebrew_cellar_keg_root(path).is_some()
+}
+
+fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
+    if path.file_name()? != "herdr" {
+        return None;
+    }
+    let bin_dir = path.parent()?;
+    if bin_dir.file_name()? != "bin" {
+        return None;
+    }
+    let version_dir = bin_dir.parent()?;
+    let formula_dir = version_dir.parent()?;
+    if formula_dir.file_name()? != "herdr" {
+        return None;
+    }
+    let cellar_dir = formula_dir.parent()?;
+    if cellar_dir.file_name()? != "Cellar" {
+        return None;
+    }
+    Some(version_dir.to_path_buf())
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Manual self-update command (`herdr update`).
 pub fn self_update() -> Result<Version, String> {
+    if is_homebrew_managed_install() {
+        return Err(format!(
+            "self-update is disabled for Homebrew installs; run `{HOMEBREW_UPDATE_COMMAND}`"
+        ));
+    }
+
     if running_inside_herdr() {
         return Err("run `herdr update` outside herdr after detaching from the session".into());
     }
@@ -609,8 +718,14 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
             }
             let _ = events.blocking_send(crate::events::AppEvent::UpdateReady {
                 version: version.to_string(),
+                install_command: update_install_command().to_string(),
             });
         }
+        return;
+    }
+
+    if is_homebrew_managed_install() {
+        auto_update_homebrew(events);
         return;
     }
 
@@ -644,7 +759,45 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
     // Notify the TUI — blocking_send is safe from a std::thread
     let _ = events.blocking_send(crate::events::AppEvent::UpdateReady {
         version: release.version.to_string(),
+        install_command: HERDR_UPDATE_COMMAND.to_string(),
     });
+}
+
+fn auto_update_homebrew(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+    let version = match check_homebrew_latest() {
+        Ok(Some(version)) => version,
+        Ok(None) => return,
+        Err(err) => {
+            crate::logging::update_check_failed(&err);
+            return;
+        }
+    };
+
+    crate::logging::update_available(&version.to_string());
+    let notes_body = homebrew_release_notes_body(&version);
+    if let Err(e) = crate::release_notes::save_pending(&version.to_string(), &notes_body) {
+        tracing::warn!("failed to save pending release notes: {e}");
+    }
+
+    tracing::info!(
+        "auto-update check: v{} available through Homebrew, waiting for explicit install",
+        version
+    );
+
+    let _ = events.blocking_send(crate::events::AppEvent::UpdateReady {
+        version: version.to_string(),
+        install_command: HOMEBREW_UPDATE_COMMAND.to_string(),
+    });
+}
+
+fn homebrew_release_notes_body(version: &Version) -> String {
+    if let Ok(Some(release)) = check_latest() {
+        if release.version == *version {
+            return release.notes_body;
+        }
+    }
+
+    format!("### Changed\n- v{version} is available through Homebrew.")
 }
 
 // ---------------------------------------------------------------------------
@@ -744,6 +897,48 @@ mod tests {
         assert_eq!(Version::parse("1.2"), None);
         assert_eq!(Version::parse("abc"), None);
         assert_eq!(Version::parse(""), None);
+    }
+
+    #[test]
+    fn homebrew_cellar_path_is_detected() {
+        let path = Path::new("/opt/homebrew/Cellar/herdr/0.5.9/bin/herdr");
+
+        assert!(is_homebrew_managed_exe_path(path));
+        assert_eq!(
+            homebrew_cellar_keg_root(path).unwrap(),
+            PathBuf::from("/opt/homebrew/Cellar/herdr/0.5.9")
+        );
+    }
+
+    #[test]
+    fn homebrew_linux_cellar_path_is_detected() {
+        let path = Path::new("/home/linuxbrew/.linuxbrew/Cellar/herdr/0.5.9/bin/herdr");
+
+        assert!(is_homebrew_managed_exe_path(path));
+    }
+
+    #[test]
+    fn homebrew_opt_path_requires_canonicalized_cellar_target() {
+        let path = Path::new("/opt/homebrew/opt/herdr/bin/herdr");
+
+        assert!(!is_homebrew_managed_exe_path(path));
+    }
+
+    #[test]
+    fn non_homebrew_path_is_not_detected() {
+        let path = Path::new("/usr/local/bin/herdr");
+
+        assert!(!is_homebrew_managed_exe_path(path));
+    }
+
+    #[test]
+    fn parse_homebrew_formula_stable_version_reads_versions_stable() {
+        let version = parse_homebrew_formula_stable_version(
+            br#"{"versions":{"stable":"0.5.10","head":"HEAD","bottle":true}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(version, Version::parse("0.5.10").unwrap());
     }
 
     #[test]
