@@ -10,6 +10,7 @@
 - Renamed the focused pane fullscreen keybinding to `keys.zoom`; `keys.fullscreen` remains supported as a legacy alias.
 
 ### Fixed
+- Grok Build is now detected as `grok`, with basic working, blocked, and idle state detection. Conflicting known-agent hook labels are ignored once native foreground-process detection identifies a different known agent. (#133)
 - GitHub Copilot is now correctly detected when its process name is `copilot`.
 - Integration installs now respect `PI_CODING_AGENT_DIR`, `CLAUDE_CONFIG_DIR`, and `CODEX_HOME` when choosing Pi, Claude Code, and Codex config paths.
 - Split pane resize hit areas no longer overlap the first content column or row, making text selection work from the start of right and bottom panes.

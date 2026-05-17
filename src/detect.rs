@@ -30,6 +30,7 @@ pub enum Agent {
     Kimi,
     Droid,
     Amp,
+    Grok,
 }
 
 pub fn agent_label(agent: Agent) -> &'static str {
@@ -45,6 +46,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Kimi => "kimi",
         Agent::Droid => "droid",
         Agent::Amp => "amp",
+        Agent::Grok => "grok",
     }
 }
 
@@ -62,6 +64,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "kimi" => Some(Agent::Kimi),
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
+        "grok" | "grok-build" => Some(Agent::Grok),
         _ => None,
     }
 }
@@ -83,6 +86,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "kimi" => Some(Agent::Kimi),
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
+        "grok" | "grok-build" => Some(Agent::Grok),
         _ => None,
     }
 }
@@ -124,6 +128,7 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
         Agent::Kimi => detect_kimi(screen_content),
         Agent::Droid => detect_droid(screen_content),
         Agent::Amp => detect_amp(screen_content),
+        Agent::Grok => detect_grok(screen_content),
     }
 }
 
@@ -421,6 +426,41 @@ fn detect_amp(content: &str) -> AgentState {
     AgentState::Idle
 }
 
+/// Grok Build detection.
+///
+/// Blocked permission prompts display a whitelist scope selector with choices
+/// like "Yes, proceed" and "No, reject". Working turns show a braille spinner
+/// status line such as "⠋ Waiting… 1.8s" plus live controls like
+/// "Ctrl+c:cancel" and "Ctrl+Enter:interject".
+fn detect_grok(content: &str) -> AgentState {
+    let lower = content.to_lowercase();
+
+    if lower.contains("use ← → to choose permission whitelist scope")
+        || lower.contains("yes, proceed")
+        || lower.contains("no, reject")
+        || lower.contains("ctrl+o:yolo")
+        || lower.contains(":scope")
+    {
+        return AgentState::Blocked;
+    }
+
+    if has_braille_spinner(content)
+        && (lower.contains("waiting")
+            || lower.contains("run ")
+            || lower.contains("read ")
+            || lower.contains("search ")
+            || lower.contains("list "))
+    {
+        return AgentState::Working;
+    }
+
+    if lower.contains("ctrl+c:cancel") && lower.contains("ctrl+enter:interject") {
+        return AgentState::Working;
+    }
+
+    AgentState::Idle
+}
+
 /// Check for braille spinner characters at the start of a line.
 /// These are the Unicode braille pattern dots used by CLI spinners.
 fn has_braille_spinner(content: &str) -> bool {
@@ -689,6 +729,8 @@ mod tests {
         assert_eq!(identify_agent("kimi"), Some(Agent::Kimi));
         assert_eq!(identify_agent("copilot"), Some(Agent::GithubCopilot));
         assert_eq!(identify_agent("ghcs"), Some(Agent::GithubCopilot));
+        assert_eq!(identify_agent("grok"), Some(Agent::Grok));
+        assert_eq!(identify_agent("grok-build"), Some(Agent::Grok));
     }
 
     #[test]
@@ -701,6 +743,7 @@ mod tests {
             Some(Agent::GithubCopilot)
         );
         assert_eq!(parse_agent_label("amp-local"), Some(Agent::Amp));
+        assert_eq!(parse_agent_label("grok-build"), Some(Agent::Grok));
     }
 
     #[test]
@@ -708,6 +751,7 @@ mod tests {
         assert_eq!(agent_label(Agent::Pi), "pi");
         assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
         assert_eq!(agent_label(Agent::OpenCode), "opencode");
+        assert_eq!(agent_label(Agent::Grok), "grok");
     }
 
     #[test]
@@ -1321,6 +1365,44 @@ mod tests {
     fn amp_identified_by_process_name() {
         assert_eq!(identify_agent("amp"), Some(Agent::Amp));
         assert_eq!(identify_agent("amp-local"), Some(Agent::Amp));
+    }
+
+    // ---- Grok ----
+
+    #[test]
+    fn grok_blocked_on_permission_prompt() {
+        let screen = "Show recent commit history for analysis\n\
+                      git -C /home/can/Projects/herdr log --oneline --decorate -n 12\n\
+                      Use ← → to choose permission whitelist scope\n\n\
+                      1 (○) Always allow: git -C\n\
+                      2 (●) Yes, proceed\n\
+                      3 (○) No, reject (type to add feedback)\n\n\
+                      1/3:select │ ←/→:scope │ Ctrl+o:yolo │ Ctrl+c:cancel";
+        assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn grok_blocked_wins_over_spinner() {
+        let screen = "⠹ Run git 30s\nYes, proceed\nNo, reject (type to add feedback)";
+        assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn grok_working_on_waiting_spinner() {
+        let screen = "⠋ Waiting… 1.8s\nCtrl+c:cancel │ Ctrl+Enter:interject";
+        assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Working);
+    }
+
+    #[test]
+    fn grok_working_on_tool_spinner() {
+        let screen = "⠼ Run git -C /home/can/Projects/herdr log --oneline 1.0s";
+        assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Working);
+    }
+
+    #[test]
+    fn grok_idle_after_turn_completed() {
+        let screen = "yo\n\nTurn completed in 1.7s.\n\n╭────╮\n│ ❯  │\n╰─ gpt-5.4 ─╯";
+        assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Idle);
     }
 
     // ---- Helpers ----

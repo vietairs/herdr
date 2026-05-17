@@ -78,11 +78,13 @@ impl TerminalState {
         let previous_detected_agent = self.detected_agent;
         self.detected_agent = agent;
         self.fallback_state = fallback_state;
-        if previous_detected_agent.is_some()
-            && agent != previous_detected_agent
-            && self.hook_authority.as_ref().is_some_and(|authority| {
-                crate::detect::parse_agent_label(&authority.agent_label) == previous_detected_agent
-            })
+        if self.hook_authority_conflicts_with_detected_agent(agent)
+            || (previous_detected_agent.is_some()
+                && agent != previous_detected_agent
+                && self.hook_authority.as_ref().is_some_and(|authority| {
+                    crate::detect::parse_agent_label(&authority.agent_label)
+                        == previous_detected_agent
+                }))
         {
             self.hook_authority = None;
         }
@@ -117,6 +119,9 @@ impl TerminalState {
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
+        if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
+            return None;
+        }
         self.hook_authority = Some(HookAuthority {
             source,
             agent_label,
@@ -125,6 +130,24 @@ impl TerminalState {
             custom_status,
         });
         self.recompute_effective_state(previous_agent_label, previous_known_agent, previous_state)
+    }
+
+    fn hook_authority_conflicts_with_detected_agent(&self, detected_agent: Option<Agent>) -> bool {
+        let Some(detected_agent) = detected_agent else {
+            return false;
+        };
+        self.hook_authority.as_ref().is_some_and(|authority| {
+            crate::detect::parse_agent_label(&authority.agent_label)
+                .is_some_and(|hook_agent| hook_agent != detected_agent)
+        })
+    }
+
+    fn known_agent_label_conflicts_with_detected_agent(&self, agent_label: &str) -> bool {
+        let Some(detected_agent) = self.detected_agent else {
+            return false;
+        };
+        crate::detect::parse_agent_label(agent_label)
+            .is_some_and(|hook_agent| hook_agent != detected_agent)
     }
 
     fn accept_hook_report(&mut self, source: &str, seq: Option<u64>) -> bool {
@@ -414,6 +437,44 @@ mod tests {
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
         assert_eq!(terminal.effective_agent_label(), Some("hermes"));
         assert_eq!(terminal.effective_known_agent(), None);
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn known_hook_authority_does_not_override_different_detected_agent() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Grok), AgentState::Working);
+        let change = terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+        );
+
+        assert!(change.is_none());
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(terminal.detected_agent, Some(Agent::Grok));
+        assert_eq!(terminal.effective_agent_label(), Some("grok"));
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn detected_agent_clears_conflicting_known_hook_authority() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+        );
+
+        terminal.set_detected_state(Some(Agent::Grok), AgentState::Working);
+
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(terminal.detected_agent, Some(Agent::Grok));
+        assert_eq!(terminal.effective_agent_label(), Some("grok"));
         assert_eq!(terminal.state, AgentState::Working);
     }
 

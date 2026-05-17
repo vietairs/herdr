@@ -402,6 +402,7 @@ available agent keys:
 - `kimi`
 - `droid`
 - `amp`
+- `grok`
 
 ## experimental
 

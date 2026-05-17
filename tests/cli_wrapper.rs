@@ -399,11 +399,9 @@ fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> 
                     let mut line = String::new();
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     reader.read_line(&mut line).unwrap();
-                    stream
-                        .write_all(br#"{"id":"test","result":{"type":"ok"}}"#)
-                        .unwrap();
-                    stream.write_all(b"\n").unwrap();
-                    stream.flush().unwrap();
+                    let _ = stream.write_all(br#"{"id":"test","result":{"type":"ok"}}"#);
+                    let _ = stream.write_all(b"\n");
+                    let _ = stream.flush();
                     return Some(line);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {

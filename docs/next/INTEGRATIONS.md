@@ -108,6 +108,7 @@ notes:
 - claude code hooks also run inside subagents. herdr treats subagent `working` and `blocked` reports as real pane state.
 - subagent stop/release events are converted to `working` by the bundled hook script so a completed subagent does not make the parent claude pane look idle.
 - `PostToolUse` and `PostToolUseFailure` move the pane back to `working` after a permissioned tool call resolves.
+- some non-claude tools, including grok cli, may load claude settings or plugins. herdr ignores conflicting known-agent hook labels once native foreground-process detection identifies a different known agent.
 
 uninstall:
 
@@ -208,6 +209,14 @@ this removes:
 ```text
 ~/.config/opencode/plugins/herdr-agent-state.js
 ```
+
+## grok cli
+
+herdr does not currently install a grok hook or plugin.
+
+grok is heuristic-only in herdr. herdr detects `grok` and `grok-build` from the foreground process and uses screen heuristics for `working`, `blocked`, and `idle` states.
+
+grok cli may load claude settings or plugins as a compatibility feature, including hooks from `~/.claude/settings.json`. if that causes the claude herdr hook to run in a grok pane, herdr ignores the conflicting `claude` hook label once native foreground-process detection identifies the pane as `grok`.
 
 ## amp
 
