@@ -26,7 +26,7 @@ If you have a suggestion, disagreement, or contradiction with the current produc
 
 We use an approval gate for new contributors.
 
-Before opening your first PR, open an issue describing what you want to change and why. Keep it short. Write in your own voice. If you intend to implement it yourself, add the `intends-to-pr` label. A maintainer will comment `/approve` if the direction is approved. Once approved, you can open PRs.
+Before opening your first PR, open an issue describing what you want to change and why. Keep it short. Write in your own voice. If you intend to implement it yourself, check the contribution intent box in the issue form. The `intends-to-pr` label will be added automatically. A maintainer will comment `/approve` if the direction is approved. Once approved, you can open PRs.
 
 This exists because AI makes it trivial to generate plausible-looking contributions that do not fit the app.
 
@@ -44,7 +44,7 @@ If your proposal changes the visual language, interaction model, or overall prod
 
 If your issue does not make the direction clear, it will likely be closed.
 
-If you plan to implement the change yourself, say that directly in the issue and use the `intends-to-pr` label. That signals intent. It is not approval.
+If you plan to implement the change yourself, say that directly in the issue and check the contribution intent box. That adds the `intends-to-pr` label automatically, signals intent, and does not mean the change is approved.
 
 ## Documentation for unreleased changes
 

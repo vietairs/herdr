@@ -1,0 +1,59 @@
+name: Change proposal
+description: Propose a bug fix, feature, workflow change, or first-time contribution.
+title: "[proposal]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening your first PR, describe the change here and wait for maintainer approval.
+
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: Current behavior
+      description: What does herdr do today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-change
+    attributes:
+      label: Proposed change
+      description: What do you want to change?
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-herdr
+    attributes:
+      label: Why this belongs in herdr
+      description: Explain why this fits herdr's direction.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: product-impact
+    attributes:
+      label: Does this change UI, interaction, workflow, or product direction?
+      options:
+        - "No"
+        - "Yes"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: product-impact-details
+    attributes:
+      label: Impact details
+      description: If yes or not sure, explain what changes for users.
+
+  - type: checkboxes
+    id: contribution-intent
+    attributes:
+      label: Contribution intent
+      options:
+        - label: I intend to open a PR for this change.
+          required: false
+        - label: I understand this does not mean the change is approved.
+          required: false
