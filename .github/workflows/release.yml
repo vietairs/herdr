@@ -158,10 +158,10 @@ jobs:
             exit 0
           fi
 
-          echo "Scanning released commits in $PREVIOUS_TAG..$GITHUB_REF_NAME for refs #<issue> lines."
+          echo "Scanning released commits in $PREVIOUS_TAG..$GITHUB_REF_NAME for refs #<issue> mentions."
           mapfile -t ISSUES < <(
-            git log --format=%b "$PREVIOUS_TAG..$CURRENT_COMMIT" \
-              | perl -ne 'print "$1\n" if /^\s*refs\s+#([0-9]+)\s*$/i' \
+            git log --format='%s%n%b' "$PREVIOUS_TAG..$CURRENT_COMMIT" \
+              | perl -ne 'print "$1\n" if /\brefs\s+#([0-9]+)\b/i' \
               | sort -nu
           )
 
