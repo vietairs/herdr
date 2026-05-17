@@ -9,7 +9,7 @@ if you are teaching an agent that is already running inside herdr, start with [`
 there are three practical ways to integrate with herdr:
 
 - **agent skill** — [`SKILL.md`](./SKILL.md). best when an agent inside herdr just needs to learn the workflow quickly.
-- **cli wrappers** — `herdr server stop`, `herdr workspace ...`, `herdr tab ...`, `herdr agent ...`, `herdr pane ...`, `herdr wait ...`. best for shell scripts and simple orchestration.
+- **cli wrappers** — `herdr server stop`, `herdr workspace ...`, `herdr tab ...`, `herdr pane ...`, `herdr wait ...`. best for shell scripts and simple orchestration.
 - **raw socket api** — best when you want direct request/response control or long-lived event subscriptions.
 
 these layers are intentionally stacked on top of the same control surface.
@@ -141,7 +141,6 @@ for backward compatibility, requests also accept the older positional forms like
 ```json
 {
   "pane_id": "w64e95948145ed1-1",
-  "terminal_id": "term_64e95948145ed1",
   "workspace_id": "w64e95948145ed1",
   "tab_id": "w64e95948145ed1:1",
   "focused": true,
@@ -153,28 +152,7 @@ for backward compatibility, requests also accept the older positional forms like
 }
 ```
 
-`terminal_id` is an opaque terminal identity. during the pane-backed transition each pane has one terminal id, but clients should not derive it from the pane id.
-
 `label` is an optional manual pane name set through `pane.rename`.
-
-`agent_info` responses contain a terminal-facing view of the same live pane-backed terminal:
-
-```json
-{
-  "terminal_id": "term_64e95948145ed1",
-  "name": "reviewer",
-  "agent": "pi",
-  "agent_status": "working",
-  "workspace_id": "w64e95948145ed1",
-  "tab_id": "w64e95948145ed1:1",
-  "pane_id": "w64e95948145ed1-1",
-  "focused": true,
-  "cwd": "/home/can/Projects/herdr",
-  "revision": 0
-}
-```
-
-`name` is the manual pane label treated as the terminal/agent name by `agent.*` commands. `agent.rename` rejects duplicate active names; `pane.rename` remains backward-compatible and can still create duplicates.
 
 `agent` is an optional display label string.
 
@@ -225,13 +203,6 @@ for backward compatibility, requests also accept the older positional forms like
 | `tab.focus` | focus a tab | `tab_info` |
 | `tab.rename` | rename a tab | `tab_info` |
 | `tab.close` | close a tab | `ok` |
-| `agent.list` | list named or detected terminal-backed agents | `agent_list` |
-| `agent.get` | inspect one terminal-backed agent by terminal id, unique name, or pane id | `agent_info` |
-| `agent.read` | read output from one terminal-backed agent | `pane_read` |
-| `agent.send` | send literal text to one terminal-backed agent | `ok` |
-| `agent.rename` | set or clear the unique agent/terminal name | `agent_info` |
-| `agent.focus` | show the terminal-backed agent in the TUI | `agent_info` |
-| `agent.start` | start a named terminal-backed agent from argv | `agent_started` |
 | `pane.list` | list panes, optionally filtered by workspace | `pane_list` |
 | `pane.get` | inspect one pane | `pane_info` |
 | `pane.rename` | set or clear a manual pane label | `pane_info` |
@@ -989,20 +960,6 @@ herdr tab rename <tab_id> <label>
 herdr tab close <tab_id>
 ```
 
-agent commands:
-
-```text
-herdr agent list
-herdr agent get <target>
-herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]
-herdr agent send <target> <text>
-herdr agent rename <target> <name>|--clear
-herdr agent focus <target>
-herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>
-```
-
-agent targets accept terminal ids, unique agent names, and legacy pane ids. duplicate names fail clearly for `agent.*`; `pane.rename` can still create duplicate pane labels for backward compatibility. `agent start` treats everything after `--` as argv and does not require agent-specific launch logic.
-
 pane commands:
 
 ```text
@@ -1037,10 +994,6 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 - `tab create` without `--label` keeps the default numbered tab naming
 - `tab create --label` applies the custom tab name immediately
 - `tab create` returns `result.tab` and `result.root_pane`
-- `agent list` shows named panes and detected/reported agents as terminal-backed agents
-- `agent focus` switches the TUI workspace/tab/pane focus; it is not direct terminal attach
-- `agent rename` enforces unique active names; use `pane rename` only when duplicate labels are intentional
-- `agent start <name> -- <argv...>` starts a named pane-backed terminal and returns `result.agent` plus `result.argv`
 - `pane split` keeps focus where it is by default; pass `--focus` to switch to the new pane
 - `pane read` prints **text**, not json
 - `pane read --format ansi` and `pane read --ansi` print a rendered ANSI snapshot with colors/styles preserved

@@ -108,6 +108,12 @@ Host workbox
 
 same session, same agents, same state.
 
+### direct agent attach
+
+`herdr` and `herdr --remote` attach to the full Herdr session UI. `herdr agent attach <target>` attaches your current terminal directly to one server-owned terminal, like a single-pane terminal attach. `herdr terminal attach <terminal_id>` does the same by terminal id.
+
+Direct attach streams the current rendered terminal state first, then live ANSI frames. Your input goes straight to that terminal. Detach with `ctrl+b q`; send a literal `ctrl+b` with `ctrl+b ctrl+b`. One writable client owns input and resize for a terminal. A second attach fails unless you pass `--takeover`.
+
 ## agent awareness
 
 the sidebar shows which agents are blocked, working, or done. workspaces roll up to their most urgent state so you can scan the full list at a glance.
@@ -147,7 +153,7 @@ herdr tab create --label "logs"
 herdr pane split 1-1 --direction right
 herdr pane run 1-2 "npm test"
 
-# wait for an agent
+# wait for a pane-level UI attention state
 herdr wait agent-status 1-1 --status done
 
 # read output
