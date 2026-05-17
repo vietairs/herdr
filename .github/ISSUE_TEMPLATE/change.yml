@@ -1,11 +1,14 @@
-name: Change proposal
-description: Propose a bug fix, feature, workflow change, or first-time contribution.
-title: "[proposal]: "
+name: Feature or behavior change
+description: Propose a feature, behavior change, documentation change, or direction check.
 body:
   - type: markdown
     attributes:
       value: |
-        Before opening your first PR, describe the change here and wait for maintainer approval.
+        **Before you start:** Read [CONTRIBUTING.md](https://github.com/ogulcancelik/herdr/blob/master/CONTRIBUTING.md).
+
+        New PRs from unapproved contributors are auto-closed by default. Open an issue first and wait for maintainer approval. Issues that do not meet the quality bar in [CONTRIBUTING.md](https://github.com/ogulcancelik/herdr/blob/master/CONTRIBUTING.md) may be closed or left without a reply.
+
+        Keep this short. If it does not fit on one screen, it is too long. Write in your own voice.
 
   - type: textarea
     id: current-behavior
@@ -16,18 +19,18 @@ body:
       required: true
 
   - type: textarea
-    id: proposed-change
+    id: requested-change
     attributes:
-      label: Proposed change
+      label: Requested change
       description: What do you want to change?
     validations:
       required: true
 
   - type: textarea
-    id: why-herdr
+    id: reason
     attributes:
-      label: Why this belongs in herdr
-      description: Explain why this fits herdr's direction.
+      label: Reason
+      description: Why does this belong in herdr?
     validations:
       required: true
 
@@ -53,7 +56,7 @@ body:
     attributes:
       label: Contribution intent
       options:
-        - label: I intend to open a PR for this change.
+        - label: I intend to open a PR for this issue.
           required: false
-        - label: I understand this does not mean the change is approved.
+        - label: I understand this does not mean the issue is approved.
           required: false

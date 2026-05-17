@@ -24,9 +24,10 @@ jobs:
             const body = context.payload.issue.body || '';
             const issueNumber = context.payload.issue.number;
             const { owner, repo } = context.repo;
-            const checkedIntentPattern = /^\s*-\s*\[[xX]\]\s*I intend to open a PR for this change\.\s*$/m;
-            const uncheckedIntentPattern = /^\s*-\s*\[ \]\s*I intend to open a PR for this change\.\s*$/m;
-            const shouldAddLabel = checkedIntentPattern.test(body);
+            const checkedIntentPattern = /^\s*-\s*\[[xX]\]\s*I intend to open a PR for this (?:change|issue)\.\s*$/m;
+            const uncheckedIntentPattern = /^\s*-\s*\[ \]\s*I intend to open a PR for this (?:change|issue)\.\s*$/m;
+            const cliIntentPattern = /^\s*\/i-intend-to-pr\s*$/m;
+            const shouldAddLabel = checkedIntentPattern.test(body) || cliIntentPattern.test(body);
             const shouldRemoveLabel = uncheckedIntentPattern.test(body);
             const labels = context.payload.issue.labels.map((item) =>
               typeof item === 'string' ? item : item.name,
@@ -44,7 +45,7 @@ jobs:
             }
 
             if (!shouldAddLabel && !shouldRemoveLabel) {
-              console.log(`No contribution intent checkbox found for #${issueNumber}.`);
+              console.log(`No contribution intent signal found for #${issueNumber}.`);
               return;
             }
 
