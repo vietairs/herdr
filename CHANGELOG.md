@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.10] - 2026-05-17
+
 ### Added
 - Added indexed keybind families under `[keys.indexed]` for jumping directly to workspace, tab, or visible agent positions 1-9.
 - Added hook-owned custom agent status labels, so integrations can show short visual states like `indexing` without changing semantic agent status.
