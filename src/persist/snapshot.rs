@@ -642,7 +642,7 @@ mod tests {
         let root = state.workspaces[0].tabs[0].root_pane;
         let second = state.workspaces[0].test_split(Direction::Horizontal);
         state.workspaces[0].tabs[0].layout.focus_pane(second);
-        state.toggle_fullscreen();
+        state.toggle_zoom();
 
         let snapshot = capture_from_state(&state);
         let tab = &snapshot.workspaces[0].tabs[0];

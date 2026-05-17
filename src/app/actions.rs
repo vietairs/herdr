@@ -576,7 +576,7 @@ impl AppState {
         }
     }
 
-    pub fn toggle_fullscreen(&mut self) {
+    pub fn toggle_zoom(&mut self) {
         if let Some(tab) = self
             .active
             .and_then(|i| self.workspaces.get_mut(i))
@@ -1652,21 +1652,21 @@ mod tests {
     }
 
     #[test]
-    fn toggle_fullscreen_works() {
+    fn toggle_zoom_works() {
         let mut state = app_with_workspaces(&["test"]);
         state.workspaces[0].test_split(Direction::Horizontal);
 
         assert!(!state.workspaces[0].zoomed);
-        state.toggle_fullscreen();
+        state.toggle_zoom();
         assert!(state.workspaces[0].zoomed);
-        state.toggle_fullscreen();
+        state.toggle_zoom();
         assert!(!state.workspaces[0].zoomed);
     }
 
     #[test]
-    fn toggle_fullscreen_single_pane_noop() {
+    fn toggle_zoom_single_pane_noop() {
         let mut state = app_with_workspaces(&["test"]);
-        state.toggle_fullscreen();
+        state.toggle_zoom();
         assert!(!state.workspaces[0].zoomed);
     }
 

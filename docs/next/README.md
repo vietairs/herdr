@@ -208,7 +208,7 @@ press `ctrl+b` to enter navigate mode.
 | `v` / `-` | split pane |
 | `x` | close pane |
 | `b` | toggle sidebar |
-| `f` | fullscreen pane |
+| `f` | zoom pane |
 | `r` | resize mode |
 | `q` | detach (quit client) |
 

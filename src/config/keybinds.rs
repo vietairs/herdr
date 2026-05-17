@@ -111,8 +111,8 @@ pub struct Keybinds {
     pub split_horizontal_label: String,
     pub close_pane: (KeyCode, KeyModifiers),
     pub close_pane_label: String,
-    pub fullscreen: (KeyCode, KeyModifiers),
-    pub fullscreen_label: String,
+    pub zoom: (KeyCode, KeyModifiers),
+    pub zoom_label: String,
     pub resize_mode: (KeyCode, KeyModifiers),
     pub resize_mode_label: String,
     pub toggle_sidebar: (KeyCode, KeyModifiers),
@@ -362,8 +362,8 @@ impl Config {
             ),
             required_binding(
                 BindingScope::Navigate,
-                "keys.fullscreen",
-                &self.keys.fullscreen,
+                "keys.zoom",
+                &self.keys.zoom,
                 "f",
                 (KeyCode::Char('f'), KeyModifiers::empty()),
                 &mut diagnostics,
@@ -791,8 +791,8 @@ impl Config {
             split_horizontal_label: bindings[5].label.clone(),
             close_pane: bindings[6].value,
             close_pane_label: bindings[6].label.clone(),
-            fullscreen: bindings[7].value,
-            fullscreen_label: bindings[7].label.clone(),
+            zoom: bindings[7].value,
+            zoom_label: bindings[7].label.clone(),
             resize_mode: bindings[8].value,
             resize_mode_label: bindings[8].label.clone(),
             toggle_sidebar: bindings[9].value,
@@ -1093,7 +1093,7 @@ mod tests {
         assert_eq!(kb.split_horizontal.0, KeyCode::Char('-'));
         assert_eq!(kb.close_pane.0, KeyCode::Char('x'));
         assert_eq!(kb.edit_scrollback, None);
-        assert_eq!(kb.fullscreen.0, KeyCode::Char('f'));
+        assert_eq!(kb.zoom.0, KeyCode::Char('f'));
         assert_eq!(kb.resize_mode.0, KeyCode::Char('r'));
         assert_eq!(kb.toggle_sidebar.0, KeyCode::Char('b'));
         assert!(kb.custom_commands.is_empty());
@@ -1110,7 +1110,7 @@ close_workspace = "ctrl+d"
 split_vertical = "s"
 split_horizontal = "shift+s"
 close_pane = "ctrl+w"
-fullscreen = "z"
+zoom = "z"
 resize_mode = "ctrl+r"
 toggle_sidebar = "tab"
 previous_agent = "alt+a"
@@ -1143,7 +1143,7 @@ focus_pane_right = "alt+right"
             (KeyCode::Char('s'), KeyModifiers::SHIFT)
         );
         assert_eq!(kb.close_pane, (KeyCode::Char('w'), KeyModifiers::CONTROL));
-        assert_eq!(kb.fullscreen.0, KeyCode::Char('z'));
+        assert_eq!(kb.zoom.0, KeyCode::Char('z'));
         assert_eq!(kb.resize_mode, (KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert_eq!(kb.toggle_sidebar, (KeyCode::Tab, KeyModifiers::empty()));
         assert_eq!(
@@ -1165,6 +1165,17 @@ focus_pane_right = "alt+right"
         );
         assert_eq!(kb.focus_pane_down, None);
         assert_eq!(kb.focus_pane_up, None);
+    }
+
+    #[test]
+    fn legacy_fullscreen_keybind_alias_maps_to_zoom() {
+        let toml = r#"
+[keys]
+fullscreen = "z"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.zoom.0, KeyCode::Char('z'));
     }
 
     #[test]

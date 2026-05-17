@@ -759,7 +759,7 @@ impl ContextMenuState {
                 "Clear pane name",
                 "Split vertical",
                 "Split horizontal",
-                "Fullscreen",
+                "Zoom",
                 "Close pane",
             ],
             ContextMenuKind::Pane {
@@ -769,7 +769,7 @@ impl ContextMenuState {
                 "Rename pane",
                 "Split vertical",
                 "Split horizontal",
-                "Fullscreen",
+                "Zoom",
                 "Close pane",
             ],
         }
@@ -1192,8 +1192,8 @@ impl AppState {
                 split_horizontal_label: "-".into(),
                 close_pane: (KeyCode::Char('x'), KeyModifiers::empty()),
                 close_pane_label: "x".into(),
-                fullscreen: (KeyCode::Char('f'), KeyModifiers::empty()),
-                fullscreen_label: "f".into(),
+                zoom: (KeyCode::Char('f'), KeyModifiers::empty()),
+                zoom_label: "f".into(),
                 resize_mode: (KeyCode::Char('r'), KeyModifiers::empty()),
                 resize_mode_label: "r".into(),
                 toggle_sidebar: (KeyCode::Char('b'), KeyModifiers::empty()),

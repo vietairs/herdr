@@ -108,7 +108,7 @@ pub(super) fn keybind_help_groups(
             optional_keybind_label(&kb.edit_scrollback_label),
             "edit scrollback",
         ),
-        (kb.fullscreen_label.clone(), "fullscreen"),
+        (kb.zoom_label.clone(), "zoom pane"),
         (kb.resize_mode_label.clone(), "resize mode"),
         (kb.toggle_sidebar_label.clone(), "toggle sidebar"),
         (

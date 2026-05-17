@@ -494,8 +494,8 @@ pub(super) fn apply_context_menu_action(state: &mut AppState, menu: ContextMenuS
             state.split_pane(Direction::Vertical);
             state.mode = Mode::Terminal;
         }
-        (ContextMenuKind::Pane { .. }, Some("Fullscreen")) => {
-            state.toggle_fullscreen();
+        (ContextMenuKind::Pane { .. }, Some("Zoom")) => {
+            state.toggle_zoom();
             state.mode = Mode::Terminal;
         }
         (ContextMenuKind::Pane { .. }, Some("Close pane")) => {

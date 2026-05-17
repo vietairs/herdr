@@ -106,7 +106,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # split_vertical = "v"
 # split_horizontal = "-"
 # close_pane = "x"
-# fullscreen = "f"
+# zoom = "f"             # legacy alias: fullscreen
 # resize_mode = "r"
 # toggle_sidebar = "b"
 

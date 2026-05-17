@@ -104,7 +104,7 @@ split_horizontal = "D"
 close_pane = "x"
 rename_pane = ""        # optional, unset by default
 edit_scrollback = ""    # optional, opens focused pane scrollback in $EDITOR
-fullscreen = "f"
+zoom = "f"               # legacy alias: fullscreen
 resize_mode = "r"
 toggle_sidebar = "b"
 previous_workspace = "ctrl+alt+["
@@ -153,7 +153,7 @@ agents = ""     # optional; follows visible agent panel order
 | `close_pane` | `x` | close focused pane |
 | `rename_pane` | unset | rename the focused pane |
 | `edit_scrollback` | unset | open the focused pane's retained scrollback in `$EDITOR` inside a temporary zoomed pane |
-| `fullscreen` | `f` | toggle focused pane fullscreen |
+| `zoom` | `f` | zoom focused pane; legacy alias: `fullscreen` |
 | `resize_mode` | `r` | enter or leave resize mode |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
 

@@ -119,8 +119,9 @@ pub struct KeysConfig {
     pub split_horizontal: String,
     /// Close the focused pane. Default: "x"
     pub close_pane: String,
-    /// Toggle fullscreen for the focused pane. Default: "f"
-    pub fullscreen: String,
+    /// Toggle zoom for the focused pane. Default: "f"
+    #[serde(alias = "fullscreen")]
+    pub zoom: String,
     /// Enter resize mode. Default: "r"
     pub resize_mode: String,
     /// Toggle sidebar collapse. Default: "b"
@@ -210,7 +211,7 @@ impl Default for KeysConfig {
             split_vertical: "v".into(),
             split_horizontal: "-".into(),
             close_pane: "x".into(),
-            fullscreen: "f".into(),
+            zoom: "f".into(),
             resize_mode: "r".into(),
             toggle_sidebar: "b".into(),
             indexed: IndexedKeysConfig::default(),

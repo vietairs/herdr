@@ -485,7 +485,7 @@ pub(crate) enum NavigateAction {
     SplitHorizontal,
     ClosePane,
     EditScrollback,
-    Fullscreen,
+    Zoom,
     EnterResizeMode,
     ToggleSidebar,
     ReloadConfig,
@@ -609,8 +609,8 @@ fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateA
     if key_matches(key, kb.close_pane.0, kb.close_pane.1) {
         return Some(NavigateAction::ClosePane);
     }
-    if key_matches(key, kb.fullscreen.0, kb.fullscreen.1) {
-        return Some(NavigateAction::Fullscreen);
+    if key_matches(key, kb.zoom.0, kb.zoom.1) {
+        return Some(NavigateAction::Zoom);
     }
     if key_matches(key, kb.resize_mode.0, kb.resize_mode.1) {
         return Some(NavigateAction::EnterResizeMode);
@@ -744,8 +744,8 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
             leave_navigate_mode(state);
         }
         NavigateAction::EditScrollback => {}
-        NavigateAction::Fullscreen => {
-            state.toggle_fullscreen();
+        NavigateAction::Zoom => {
+            state.toggle_zoom();
             leave_navigate_mode(state);
         }
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
@@ -1192,11 +1192,11 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_action_exits_navigate_mode() {
+    fn zoom_action_exits_navigate_mode() {
         let mut state = state_with_workspaces(&["test"]);
         state.workspaces[0].test_split(Direction::Horizontal);
-        state.keybinds.fullscreen = (KeyCode::Char('g'), KeyModifiers::empty());
-        state.keybinds.fullscreen_label = "g".into();
+        state.keybinds.zoom = (KeyCode::Char('g'), KeyModifiers::empty());
+        state.keybinds.zoom_label = "g".into();
 
         handle_navigate_key(
             &mut state,
