@@ -49,9 +49,11 @@ Process:
    - Treat `docs/next/CHANGELOG.md` as the next-release changelog.
    - Compare meaningful user-facing changes in the commit range against `docs/next/CHANGELOG.md`.
    - Flag missing entries for new features, bug fixes, removals, breaking changes, defaults, compatibility changes, user-visible command/config/API behavior, and security-relevant changes.
+   - Do not require changelog entries solely for internal client/server protocol version bumps. Mention protocol only when the release intentionally changes user-facing compatibility guidance beyond the normal restart requirement.
    - Inspect commit bodies for issue reference lines in the form `refs #<issue-number>`.
    - Flag normal commits that use GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue-number>`, or `resolves #<issue-number>`, because they close issues before release when they land on `master`.
    - For each shipped issue reference, check whether the changelog has a matching user-facing entry that mentions `#<issue-number>` when appropriate.
+   - For each merged external PR, check whether the changelog entry mentions the PR number and thanks the contributor in the existing style, e.g. `(#129, thanks @username)`. If the PR primarily ships an issue fix, include both the issue and PR numbers when useful, e.g. `(#128, #129, thanks @username)`.
    - Do not require or add GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue-number>`, or `resolves #<issue-number>` to changelog entries or release notes.
    - List shipped issue references under `Issue references to close after release:` so the release operator can verify what release CI will close after the GitHub Release is published.
    - Flag stale entries that do not appear to correspond to shipped changes in the range.
@@ -82,16 +84,38 @@ Process:
 
 Output format:
 
-- `Base ref:`
-- `PRs included:`
-- `Direct commits included:`
-- `Excluded as housekeeping:`
-- `Next-release changelog audit:`
-- `Issue references to close after release:`
-- `Next-release docs audit:`
-- `Root finalization status:`
-- `Required changes before release:`
-- `Proposed changelog edits:`
-- `Proposed docs edits:`
+```md
+Release readiness: READY | NOT READY
+
+Base: <base ref>
+Range: <base ref>..HEAD
+Meaningful shipped changes: yes | no
+
+Changelog: OK | MISSING ENTRIES | NEEDS ATTENTION
+Missing:
+- <only user-facing shipped changes missing from docs/next/CHANGELOG.md>
+
+Docs: OK | MISSING | INACCURATE | NEEDS DECISION
+Missing:
+- <only required next-release public docs gaps>
+
+Wrong or questionable:
+- <docs that disagree with implementation, if any>
+
+Issue refs: OK | NEEDS ATTENTION
+Will close after release:
+- #<issue>
+
+Accepted/no action:
+- <items the user explicitly accepted, such as known closing-keyword commits>
+
+Root docs finalized: YES | NO
+<result of just release-docs-check or why it was not run>
+
+Required before release:
+1. <short action>
+```
+
+Keep the main output glanceable. Put commit inventories, excluded housekeeping, and commands run in an appendix only when they materially help the operator.
 
 If the range has no meaningful user-facing changes, say that plainly instead of forcing entries.

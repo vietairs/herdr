@@ -9,7 +9,7 @@ if you are teaching an agent that is already running inside herdr, start with [`
 there are three practical ways to integrate with herdr:
 
 - **agent skill** — [`SKILL.md`](./SKILL.md). best when an agent inside herdr just needs to learn the workflow quickly.
-- **cli wrappers** — `herdr server stop`, `herdr workspace ...`, `herdr tab ...`, `herdr pane ...`, `herdr wait ...`. best for shell scripts and simple orchestration.
+- **cli wrappers** — `herdr server stop`, `herdr workspace ...`, `herdr tab ...`, `herdr agent ...`, `herdr pane ...`, `herdr wait ...`. best for shell scripts and simple orchestration.
 - **raw socket api** — best when you want direct request/response control or long-lived event subscriptions.
 
 these layers are intentionally stacked on top of the same control surface.
@@ -141,6 +141,7 @@ for backward compatibility, requests also accept the older positional forms like
 ```json
 {
   "pane_id": "w64e95948145ed1-1",
+  "terminal_id": "term_64e95948145ed1",
   "workspace_id": "w64e95948145ed1",
   "tab_id": "w64e95948145ed1:1",
   "focused": true,
@@ -148,17 +149,41 @@ for backward compatibility, requests also accept the older positional forms like
   "label": "reviewer",
   "agent": "pi",
   "agent_status": "working",
+  "custom_status": "indexing",
   "revision": 0
 }
 ```
 
+`terminal_id` is an opaque terminal identity. during the pane-backed transition each pane has one terminal id, but clients should not derive it from the pane id.
+
 `label` is an optional manual pane name set through `pane.rename`.
+
+`agent_info` responses contain a terminal-facing view of a live agent terminal:
+
+```json
+{
+  "terminal_id": "term_64e95948145ed1",
+  "name": "reviewer",
+  "agent": "pi",
+  "agent_status": "working",
+  "workspace_id": "w64e95948145ed1",
+  "tab_id": "w64e95948145ed1:1",
+  "pane_id": "w64e95948145ed1-1",
+  "focused": true,
+  "cwd": "/home/can/Projects/herdr",
+  "revision": 0
+}
+```
+
+`name` is an optional unique agent alias set by `agent.start` or `agent.rename`. it is separate from the pane `label`: `pane.rename` names a terminal/pane for UI purposes, while `agent.rename` declares or changes the agent-facing name and rejects duplicate active agent names.
 
 `agent` is an optional display label string.
 
 - when herdr detects a built-in agent, this is that built-in name like `pi` or `claude`
 - when a hook or plugin reports a custom agent through `pane.report_agent`, this can be any non-empty label like `hermes`
 - when no agent identity is known, it is omitted
+
+`custom_status` on `pane_info` and agent-status events is an optional hook-owned display label. It is present only while hook authority is active. It does not change `agent_status`, `done` semantics, waits, notifications, or workspace/tab rollup priority.
 
 `pane_read` responses contain objects like:
 
@@ -203,6 +228,13 @@ for backward compatibility, requests also accept the older positional forms like
 | `tab.focus` | focus a tab | `tab_info` |
 | `tab.rename` | rename a tab | `tab_info` |
 | `tab.close` | close a tab | `ok` |
+| `agent.list` | list terminal-backed agents | `agent_list` |
+| `agent.get` | inspect one agent by terminal id, unique agent name, detected agent label, or pane id | `agent_info` |
+| `agent.read` | read output from one agent terminal | `pane_read` |
+| `agent.send` | send literal text to one agent terminal | `ok` |
+| `agent.rename` | set or clear the unique agent name | `agent_info` |
+| `agent.focus` | show the agent terminal in the TUI | `agent_info` |
+| `agent.start` | start a named agent terminal from argv | `agent_started` |
 | `pane.list` | list panes, optionally filtered by workspace | `pane_list` |
 | `pane.get` | inspect one pane | `pane_info` |
 | `pane.rename` | set or clear a manual pane label | `pane_info` |
@@ -624,7 +656,8 @@ params:
   "source": "custom:hermes",
   "agent": "hermes",
   "state": "working",
-  "message": "running tools"
+  "message": "running tools",
+  "custom_status": "indexing"
 }
 ```
 
@@ -637,6 +670,9 @@ notes:
 - while this authority is active, the reported `agent` and `state` override heuristic display for that pane
 - process detection still owns pane liveness and fallback when hook authority is cleared or released
 - `message` is optional metadata for the reporting integration
+- `custom_status` is an optional short display label such as `scheduled`, `indexing`, or `stuck`
+- `custom_status` is visual-only; use `state` for semantic behavior like working or blocked
+- omitting `custom_status` clears any previous custom status from this reporting source
 
 returns `ok`.
 
@@ -916,12 +952,13 @@ example pushed `pane.agent_status_changed` event:
     "pane_id": "1-1",
     "workspace_id": "1",
     "agent_status": "done",
-    "agent": "pi"
+    "agent": "pi",
+    "custom_status": "scheduled"
   }
 }
 ```
 
-`agent` in pushed events follows the same rules as `pane_info.agent`: it may be a built-in detected name, a custom hook-reported label, or omitted.
+`agent` in pushed events follows the same rules as `pane_info.agent`: it may be a built-in detected name, a custom hook-reported label, or omitted. `custom_status` may be included when the pane has hook-owned custom status metadata at the time of the semantic status transition.
 ## cli wrappers
 
 these commands provide the shell-facing control surface. most command groups talk to the local socket; `status client` only inspects the local executable.
@@ -960,6 +997,30 @@ herdr tab rename <tab_id> <label>
 herdr tab close <tab_id>
 ```
 
+agent commands:
+
+```text
+herdr agent list
+herdr agent get <target>
+herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]
+herdr agent send <target> <text>
+herdr agent rename <target> <name>|--clear
+herdr agent focus <target>
+herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
+herdr agent attach <target> [--takeover]
+herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>
+```
+
+agent targets accept terminal ids, unique agent names, detected/reported agent labels, and legacy pane ids. `agent list` shows terminals with explicit agent identity, detected/reported agent identity, or `agent.start` launch metadata. `pane.rename` does not make a plain terminal appear in `agent list`; use `agent.rename` for agent identity.
+
+terminal commands:
+
+```text
+herdr terminal attach <terminal_id> [--takeover]
+```
+
+`terminal attach` is the low-level direct attach primitive. it streams the current rendered terminal state first, then live ANSI frames. direct attach has one writable input/resize owner; a second direct attach fails unless you pass `--takeover`. detach with `ctrl+b q`; send a literal `ctrl+b` with `ctrl+b ctrl+b`.
+
 pane commands:
 
 ```text
@@ -971,6 +1032,7 @@ herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-f
 herdr pane close <pane_id>
 herdr pane send-text <pane_id> <text>
 herdr pane send-keys <pane_id> <key> [key ...]
+herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N]
 herdr pane run <pane_id> <command>
 ```
 
@@ -994,11 +1056,16 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 - `tab create` without `--label` keeps the default numbered tab naming
 - `tab create --label` applies the custom tab name immediately
 - `tab create` returns `result.tab` and `result.root_pane`
+- `agent list` shows agent terminals, not arbitrary named panes
+- `agent wait --status idle` is the CLI completion wait; it treats the UI-only `done` attention state as satisfying idle
+- `agent focus` switches the TUI workspace/tab/pane focus; it is not direct terminal attach
+- `agent attach` attaches the current terminal directly to the agent terminal stream
+- `agent start <name> -- <argv...>` starts a named agent terminal and returns `result.agent` plus `result.argv`
 - `pane split` keeps focus where it is by default; pass `--focus` to switch to the new pane
 - `pane read` prints **text**, not json
 - `pane read --format ansi` and `pane read --ansi` print a rendered ANSI snapshot with colors/styles preserved
 - `pane read --source recent-unwrapped` returns recent terminal text with soft wraps joined back together
-- `pane send-text`, `pane send-keys`, and `pane run` print nothing on success
+- `pane send-text`, `pane send-keys`, `pane report-agent`, and `pane run` print nothing on success
 - list/get/create/split/wait commands print json on success
 - `pane run` is a convenience wrapper for `pane.send_input` with the command text followed by a real `Enter` keypress
 - `wait agent-status` is a cli convenience built on top of event subscriptions
@@ -1017,7 +1084,13 @@ herdr pane run 1-2 "npm run dev"
 herdr wait output 1-2 --match "ready" --timeout 30000
 ```
 
-wait for another agent to finish in the same user-facing sense the UI shows:
+wait for an agent by name to become idle for CLI automation:
+
+```bash
+herdr agent wait reviewer --status idle --timeout 60000
+```
+
+wait for a pane-level UI attention state:
 
 ```bash
 herdr wait agent-status 1-1 --status done --timeout 60000

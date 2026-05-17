@@ -77,14 +77,14 @@ keybindings live under `[keys]`.
 
 supported syntax:
 - plain keys: `n`, `x`, `-`, `` ` ``
-- modifiers: `ctrl+b`, `shift+n`, `alt+x`
+- modifiers: `ctrl+b`, `shift+n`, `alt+x`, `cmd+x`, `super+x`
 - special keys: `enter`, `esc`, `tab`, `backspace`, `left`, `right`, `up`, `down`
 - function keys: `f1`, `f12`
 - uppercase letters also imply shift: `D` works like `shift+d`
 
 notes:
 - most reliable bindings are plain keys, `ctrl+letter`, `esc`/`tab`/`enter`, and function keys
-- `alt+...` and punctuation-with-modifiers may vary depending on terminal/tmux setup
+- `alt+...`, `cmd`/`super`, and punctuation-with-modifiers may vary depending on terminal/tmux setup
 - bindings marked `unset` in the key reference are supported actions with no default key assigned
 - for navigate-mode actions, duplicate keybindings are treated as config errors; later conflicting bindings fall back to defaults
 
@@ -103,7 +103,8 @@ split_vertical = "d"
 split_horizontal = "D"
 close_pane = "x"
 rename_pane = ""        # optional, unset by default
-fullscreen = "f"
+edit_scrollback = ""    # optional, opens focused pane scrollback in $EDITOR
+zoom = "f"               # legacy alias: fullscreen
 resize_mode = "r"
 toggle_sidebar = "b"
 previous_workspace = "ctrl+alt+["
@@ -116,6 +117,11 @@ focus_pane_left = "alt+h"
 focus_pane_down = "alt+j"
 focus_pane_up = "alt+k"
 focus_pane_right = "alt+l"
+
+[keys.indexed]
+tabs = ""       # optional; e.g. "ctrl" makes ctrl+1..9 switch tabs
+workspaces = "" # optional; e.g. "ctrl+shift" makes ctrl+shift+1..9 switch workspaces
+agents = ""     # optional; follows visible agent panel order
 ```
 
 ### key reference
@@ -146,9 +152,29 @@ focus_pane_right = "alt+l"
 | `split_horizontal` | `-` | split pane horizontally (stacked) |
 | `close_pane` | `x` | close focused pane |
 | `rename_pane` | unset | rename the focused pane |
-| `fullscreen` | `f` | toggle focused pane fullscreen |
+| `edit_scrollback` | unset | open the focused pane's retained scrollback in `$EDITOR` inside a temporary zoomed pane |
+| `zoom` | `f` | zoom focused pane; legacy alias: `fullscreen` |
 | `resize_mode` | `r` | enter or leave resize mode |
 | `toggle_sidebar` | `b` | collapse or expand the sidebar |
+
+`edit_scrollback` writes the focused pane's retained plain-text scrollback to a temporary file, opens `${EDITOR:-vi}` on that file in a temporary zoomed pane, then removes the file when the editor exits.
+
+### indexed keybindings
+
+Use `[keys.indexed]` to bind number keys `1` through `9` as positional shortcuts. Each value is a modifier combo only. Empty values disable that shortcut family.
+
+```toml
+[keys.indexed]
+tabs = ""
+workspaces = ""
+agents = ""
+```
+
+| key | default | action |
+|-----|---------|--------|
+| `tabs` | unset | switch to tab 1-9 in the active workspace, left to right |
+| `workspaces` | unset | switch to workspace 1-9 in sidebar order, top to bottom |
+| `agents` | unset | focus agent row 1-9 in the visible agent panel order |
 
 ### custom command keybindings
 
@@ -270,6 +296,7 @@ for `panel_bg`, you can also use `reset`, `default`, `none`, or `transparent` to
 sidebar_width = 26
 mouse_capture = true
 confirm_close = true
+prompt_new_tab_name = true
 show_agent_labels_on_pane_borders = false
 agent_panel_scope = "all"
 accent = "cyan"
@@ -282,6 +309,7 @@ accent = "cyan"
 | `sidebar_width` | `26` | base sidebar width before auto-scaling |
 | `mouse_capture` | `true` | capture mouse input for Herdr's mouse UI; set false to let the terminal handle normal clicks while still forwarding mouse to pane apps that request it |
 | `confirm_close` | `true` | ask before closing a workspace |
+| `prompt_new_tab_name` | `true` | ask for a tab name before creating a new tab; set false to create tabs immediately with generated names |
 | `show_agent_labels_on_pane_borders` | `false` | show detected/reported agent labels in split pane borders when no manual pane name is set |
 | `agent_panel_scope` | `all` | sidebar agent list scope: `current` or `all` |
 | `accent` | `cyan` | highlight and border color |
@@ -374,6 +402,7 @@ available agent keys:
 - `kimi`
 - `droid`
 - `amp`
+- `grok`
 
 ## experimental
 

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Added
+- Added indexed keybind families under `[keys.indexed]` for jumping directly to workspace, tab, or visible agent positions 1-9.
+- Added hook-owned custom agent status labels, so integrations can show short visual states like `indexing` without changing semantic agent status.
+- Added terminal-backed agent commands and socket API methods for listing, reading, sending to, renaming, focusing, waiting on, attaching to, and starting agent terminals.
+- Added direct terminal attach with `herdr agent attach <target>` and `herdr terminal attach <terminal_id>`.
+- Added `ui.prompt_new_tab_name = false` for creating new tabs immediately with generated names instead of opening the rename dialog. (#123)
+- Added optional `keys.edit_scrollback` to open the focused pane's retained scrollback in `$EDITOR` inside a temporary zoomed pane. (#122)
+
+### Changed
+- Renamed the focused pane fullscreen keybinding to `keys.zoom`; `keys.fullscreen` remains supported as a legacy alias.
+
+### Fixed
+- Grok Build is now detected as `grok`, with basic working, blocked, and idle state detection. Conflicting known-agent hook labels are ignored once native foreground-process detection identifies a different known agent. (#133)
+- Terminal cursor shapes now forward through attached clients. (#116)
+- Herdr now redraws immediately when the outer terminal regains focus.
+- GitHub Copilot is now correctly detected when its process name is `copilot`. (#118)
+- Integration installs now respect `PI_CODING_AGENT_DIR`, `CLAUDE_CONFIG_DIR`, and `CODEX_HOME` when choosing Pi, Claude Code, and Codex config paths. (#121)
+- Split pane resize hit areas no longer overlap the first content column or row, making text selection work from the start of right and bottom panes. (#120)
+- Dragging text selections near pane edges now autoscrolls into scrollback, and selection state now clears correctly when switching workspaces, tabs, or panes. (#128, #129, thanks @leeeanh)
+- Zoomed panes now keep their border visible in tabs that contain multiple panes. (#115)
+
 ## [0.5.9] - 2026-05-15
 
 ### Added

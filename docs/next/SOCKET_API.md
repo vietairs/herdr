@@ -166,7 +166,6 @@ for backward compatibility, requests also accept the older positional forms like
   "name": "reviewer",
   "agent": "pi",
   "agent_status": "working",
-  "custom_status": "indexing",
   "workspace_id": "w64e95948145ed1",
   "tab_id": "w64e95948145ed1:1",
   "pane_id": "w64e95948145ed1-1",
@@ -184,7 +183,7 @@ for backward compatibility, requests also accept the older positional forms like
 - when a hook or plugin reports a custom agent through `pane.report_agent`, this can be any non-empty label like `hermes`
 - when no agent identity is known, it is omitted
 
-`custom_status` is an optional hook-owned display label. It is present only while hook authority is active. It does not change `agent_status`, `done` semantics, waits, notifications, or workspace/tab rollup priority.
+`custom_status` on `pane_info` and agent-status events is an optional hook-owned display label. It is present only while hook authority is active. It does not change `agent_status`, `done` semantics, waits, notifications, or workspace/tab rollup priority.
 
 `pane_read` responses contain objects like:
 
