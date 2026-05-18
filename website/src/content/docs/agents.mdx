@@ -18,8 +18,9 @@ Automatic detection works out of the box for common coding agents.
 | Amp | yes | yes | yes |
 | OpenCode | yes | yes | yes |
 | Grok CLI | yes | yes | yes |
+| GitHub Copilot CLI | yes | yes | yes |
 
-Detected but less thoroughly tested: Gemini CLI, Cursor Agent, Cline, Kimi, and GitHub Copilot CLI.
+Detected but less thoroughly tested: Gemini CLI, Cursor Agent, Cline, and Kimi.
 
 Unsupported agents still run normally as terminal processes. They just may not get rich state unless you add an integration or report state over the socket API.
 
@@ -73,7 +74,7 @@ herdr agent rename 1-1 reviewer
 herdr agent rename reviewer --clear
 ```
 
-Targets accept terminal IDs, unique agent names, and legacy pane IDs.
+Targets accept terminal IDs, unique agent names, detected or reported agent labels, and legacy pane IDs.
 
 ## Custom status labels
 
@@ -91,17 +92,21 @@ herdr pane report-agent 1-1 \
 
 ## Start agents from the CLI
 
+Use `herdr agent ...` commands when you want a terminal to be treated as an agent target. Agent targets show up in `agent list`, can be read or sent input by agent name, can be waited on by agent state, and can be directly attached.
+
 Spawn an agent into Herdr from a script:
 
 ```bash
 herdr agent start reviewer --cwd ~/project --split right -- pi
 ```
 
-You can target a workspace or tab:
+You can place that agent in a specific workspace or tab:
 
 ```bash
-herdr agent start tests --workspace 1 --tab 1-1 -- cargo test
+herdr agent start docs --workspace 1 --tab 1-1 -- claude
 ```
+
+Use `herdr pane ...` commands for ordinary terminals, servers, tests, shells, and low-level terminal input. For example, use `pane split` and `pane run` for `cargo test`, not `agent start`, unless that terminal is intentionally being treated as an agent target.
 
 ## Attach directly to an agent
 
@@ -118,3 +123,5 @@ Use `--takeover` if another direct attach client already owns input:
 ```bash
 herdr agent attach reviewer --takeover
 ```
+
+Use `herdr terminal attach <terminal_id>` when you want the same direct attach behavior for a non-agent terminal.
