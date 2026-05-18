@@ -938,6 +938,34 @@ mod tests {
     }
 
     #[test]
+    fn all_workspaces_agent_panel_entries_prefer_agent_names_for_agent_identity() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("bridge");
+        let first_pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let first_terminal_id = app.workspaces[0].tabs[0].panes[&first_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        app.terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .set_agent_name("planner".into());
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let entries = agent_panel_entries(&app);
+        assert_eq!(entries[0].primary_label, "bridge");
+        assert_eq!(entries[0].agent_label.as_deref(), Some("planner"));
+    }
+
+    #[test]
     fn all_workspaces_primary_label_truncates_workspace_and_tab() {
         let entry = AgentPanelEntry {
             ws_idx: 0,

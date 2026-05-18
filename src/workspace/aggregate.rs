@@ -36,7 +36,11 @@ impl Tab {
             .filter_map(|id| {
                 let pane = self.panes.get(id)?;
                 let terminal = terminals.get(&pane.attached_terminal_id)?;
-                let agent_label = terminal.effective_agent_label()?.to_string();
+                let agent_label = terminal
+                    .agent_name
+                    .as_deref()
+                    .or_else(|| terminal.effective_agent_label())?
+                    .to_string();
                 Some(PaneDetail {
                     pane_id: *id,
                     tab_idx: self.number.saturating_sub(1),
@@ -170,6 +174,28 @@ mod tests {
 
         assert_eq!(state, AgentState::Idle);
         assert!(!seen);
+    }
+
+    #[test]
+    fn pane_details_prefers_agent_name_over_detected_agent_label() {
+        let ws = Workspace::test_new("test");
+        let root_pane = ws.tabs[0].root_pane;
+        let mut terminals = HashMap::new();
+        let mut terminal = terminal_for_pane(&ws, root_pane);
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        terminal.set_agent_name("planner".into());
+        terminals.insert(terminal.id.clone(), terminal);
+
+        let labels: Vec<_> = ws
+            .pane_details(&terminals)
+            .into_iter()
+            .map(|detail| (detail.label, detail.agent_label, detail.agent))
+            .collect();
+
+        assert_eq!(
+            labels,
+            vec![("planner".into(), "planner".into(), Some(Agent::Pi))]
+        );
     }
 
     #[test]
