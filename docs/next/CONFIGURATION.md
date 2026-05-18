@@ -409,6 +409,7 @@ available agent keys:
 - `droid`
 - `amp`
 - `grok`
+- `hermes`
 
 ## experimental
 

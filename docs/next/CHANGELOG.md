@@ -3,7 +3,12 @@
 ## Unreleased
 
 ### Added
+- Added Hermes Agent foreground-process detection with basic idle, working, and blocked heuristics.
+- Added a Hermes Agent plugin integration for direct state reporting.
 - Added `ui.sidebar_min_width` and `ui.sidebar_max_width` to configure the sidebar's expanded resize bounds. Defaults remain 18 and 36 columns; existing configs are unchanged.
+
+### Breaking Changes
+- The client/server protocol is now version 7. Stop and restart any running v0.5.10 server before attaching with this release.
 
 ## [0.5.10] - 2026-05-17
 

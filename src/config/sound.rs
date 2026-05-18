@@ -37,6 +37,7 @@ pub struct AgentSoundOverrides {
     pub droid: AgentSoundSetting,
     pub amp: AgentSoundSetting,
     pub grok: AgentSoundSetting,
+    pub hermes: AgentSoundSetting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -124,6 +125,7 @@ impl AgentSoundOverrides {
             Some(Agent::Droid) => self.droid,
             Some(Agent::Amp) => self.amp,
             Some(Agent::Grok) => self.grok,
+            Some(Agent::Hermes) => self.hermes,
             None => AgentSoundSetting::Default,
         }
     }
@@ -156,6 +158,7 @@ impl Default for AgentSoundOverrides {
             droid: AgentSoundSetting::Off,
             amp: AgentSoundSetting::Default,
             grok: AgentSoundSetting::Default,
+            hermes: AgentSoundSetting::Default,
         }
     }
 }

@@ -397,6 +397,7 @@ pub enum IntegrationTarget {
     Claude,
     Codex,
     Opencode,
+    Hermes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

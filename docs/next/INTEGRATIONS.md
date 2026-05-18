@@ -12,6 +12,7 @@ if you want to inspect the exact files herdr installs, they are versioned in thi
 - [claude code hook](./src/integration/assets/claude/herdr-agent-state.sh)
 - [codex hook](./src/integration/assets/codex/herdr-agent-state.sh)
 - [opencode plugin](./src/integration/assets/opencode/herdr-agent-state.js)
+- [hermes plugin](./src/integration/assets/hermes/__init__.py)
 
 ## how herdr uses integrations
 
@@ -30,6 +31,7 @@ herdr integration install pi
 herdr integration install claude
 herdr integration install codex
 herdr integration install opencode
+herdr integration install hermes
 ```
 
 ## uninstall commands
@@ -39,6 +41,7 @@ herdr integration uninstall pi
 herdr integration uninstall claude
 herdr integration uninstall codex
 herdr integration uninstall opencode
+herdr integration uninstall hermes
 ```
 
 ## pi
@@ -209,6 +212,47 @@ this removes:
 ```text
 ~/.config/opencode/plugins/herdr-agent-state.js
 ```
+
+## hermes agent
+
+install:
+
+```bash
+herdr integration install hermes
+```
+
+this:
+
+- writes the bundled plugin to `~/.hermes/plugins/herdr-agent-state/`
+- updates `~/.hermes/config.yaml` so `plugins.enabled` contains `herdr-agent-state`
+
+bundled source: [`src/integration/assets/hermes/__init__.py`](./src/integration/assets/hermes/__init__.py)
+
+current plugin mapping:
+
+- `on_session_start` → `idle`
+- `pre_llm_call` → `working`
+- `pre_api_request` → `working`
+- `pre_tool_call` → `working`
+- `post_tool_call` → `working`
+- `pre_approval_request` → `blocked`
+- `post_approval_response` → `working`
+- `post_llm_call` → `idle`
+- `on_session_end` → `idle`
+- `on_session_finalize` → `release`
+
+notes:
+
+- hermes plugins are opt-in, so install also enables the plugin in `config.yaml`.
+- herdr still keeps native process detection and screen heuristics for hermes. the plugin improves state accuracy when the hook surface fires.
+
+uninstall:
+
+```bash
+herdr integration uninstall hermes
+```
+
+this removes `~/.hermes/plugins/herdr-agent-state/` and removes the matching `plugins.enabled` entry from `~/.hermes/config.yaml`.
 
 ## grok cli
 

@@ -31,6 +31,7 @@ pub enum Agent {
     Droid,
     Amp,
     Grok,
+    Hermes,
 }
 
 pub fn agent_label(agent: Agent) -> &'static str {
@@ -47,6 +48,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Droid => "droid",
         Agent::Amp => "amp",
         Agent::Grok => "grok",
+        Agent::Hermes => "hermes",
     }
 }
 
@@ -65,6 +67,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
+        "hermes" | "hermes-agent" => Some(Agent::Hermes),
         _ => None,
     }
 }
@@ -87,6 +90,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
+        "hermes" | "hermes-agent" => Some(Agent::Hermes),
         _ => None,
     }
 }
@@ -129,6 +133,7 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
         Agent::Droid => detect_droid(screen_content),
         Agent::Amp => detect_amp(screen_content),
         Agent::Grok => detect_grok(screen_content),
+        Agent::Hermes => detect_hermes(screen_content),
     }
 }
 
@@ -461,6 +466,31 @@ fn detect_grok(content: &str) -> AgentState {
     AgentState::Idle
 }
 
+/// Hermes Agent detection.
+///
+/// Hermes shows a bottom status bar while turns are active and modal approval
+/// dialogs for dangerous terminal commands. Prefer the modal controls for
+/// blocked detection, then the live interrupt/status controls for working.
+fn detect_hermes(content: &str) -> AgentState {
+    let lower = content.to_lowercase();
+
+    let has_approval_options = lower.contains("allow once")
+        && lower.contains("allow for this session")
+        && lower.contains("deny");
+    let has_approval_controls = lower.contains("enter to confirm")
+        || lower.contains("↑/↓ to select")
+        || lower.contains("show full command");
+    if (lower.contains("dangerous command") || has_approval_options) && has_approval_controls {
+        return AgentState::Blocked;
+    }
+
+    if lower.contains("msg=interrupt") || lower.contains("ctrl+c cancel") {
+        return AgentState::Working;
+    }
+
+    AgentState::Idle
+}
+
 /// Check for braille spinner characters at the start of a line.
 /// These are the Unicode braille pattern dots used by CLI spinners.
 fn has_braille_spinner(content: &str) -> bool {
@@ -731,6 +761,8 @@ mod tests {
         assert_eq!(identify_agent("ghcs"), Some(Agent::GithubCopilot));
         assert_eq!(identify_agent("grok"), Some(Agent::Grok));
         assert_eq!(identify_agent("grok-build"), Some(Agent::Grok));
+        assert_eq!(identify_agent("hermes"), Some(Agent::Hermes));
+        assert_eq!(identify_agent("hermes-agent"), Some(Agent::Hermes));
     }
 
     #[test]
@@ -744,6 +776,7 @@ mod tests {
         );
         assert_eq!(parse_agent_label("amp-local"), Some(Agent::Amp));
         assert_eq!(parse_agent_label("grok-build"), Some(Agent::Grok));
+        assert_eq!(parse_agent_label("hermes-agent"), Some(Agent::Hermes));
     }
 
     #[test]
@@ -752,6 +785,7 @@ mod tests {
         assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
         assert_eq!(agent_label(Agent::OpenCode), "opencode");
         assert_eq!(agent_label(Agent::Grok), "grok");
+        assert_eq!(agent_label(Agent::Hermes), "hermes");
     }
 
     #[test]
@@ -1403,6 +1437,50 @@ mod tests {
     fn grok_idle_after_turn_completed() {
         let screen = "yo\n\nTurn completed in 1.7s.\n\n╭────╮\n│ ❯  │\n╰─ gpt-5.4 ─╯";
         assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Idle);
+    }
+
+    // ---- Hermes ----
+
+    #[test]
+    fn hermes_identified_by_process_name() {
+        assert_eq!(identify_agent("hermes"), Some(Agent::Hermes));
+        assert_eq!(identify_agent("hermes-agent"), Some(Agent::Hermes));
+    }
+
+    #[test]
+    fn hermes_working_on_interrupt_footer() {
+        let screen = "  (⌐■_■) computing...\n\n ⚕ gpt-5.5 │ 15.5K/272K │ [█░░░░░░░░░] 6% │ 2m │ ⏱ 3s\n─────────────────────────────────────────────────────────────────────────────────────────\n⚕ ❯ msg=interrupt · /queue · /bg · /steer · Ctrl+C cancel";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_idle_ignores_stale_initializing_agent_text() {
+        let screen = "● say exactly READY and stop\nInitializing agent...\n\n╭─ ⚕ Hermes ────────────────────────────────────────────────────────────────────────────╮\n    READY\n╰───────────────────────────────────────────────────────────────────────────────────────╯\n ⚕ gpt-5.5 │ 15.5K/272K │ [█░░░░░░░░░] 6% │ 15s │ ⏲ 2s\n─────────────────────────────────────────────────────────────────────────────────────────\n❯";
+        assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn hermes_blocked_on_dangerous_command_prompt() {
+        let screen = "╭────────────────────────────────────────────────────────────╮\n│ ⚠️  Dangerous Command                                      │\n│ mkdir -p /tmp/herdr-hermes-block-test/subdir && touch      │\n│ ❯ 1. Allow once                                            │\n│   2. Allow for this session                                │\n│   3. Add to permanent allowlist                            │\n│   4. Deny                                                  │\n│   5. Show full command                                     │\n╰────────────────────────────────────────────────────────────╯\n  ↑/↓ to select, Enter to confirm\n⚠ ❯";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn hermes_idle_at_prompt_after_response() {
+        let screen = "╭─ ⚕ Hermes ────────────────────────────────────────────────────────────────────────────╮\n    READY\n╰───────────────────────────────────────────────────────────────────────────────────────╯\n ⚕ gpt-5.5 │ 15.5K/272K │ [█░░░░░░░░░] 6% │ 15s │ ⏲ 2s\n─────────────────────────────────────────────────────────────────────────────────────────\n❯\n─────────────────────────────────────────────────────────────────────────────────────────";
+        assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn hermes_denied_message_is_idle() {
+        let screen = "╭─ ⚕ Hermes ────────────────────────────────────────────────────────────────────────────╮\n    Command was blocked/denied by the safety layer. I did not retry.\n╰───────────────────────────────────────────────────────────────────────────────────────╯\n ⚕ gpt-5.5 │ 15.4K/272K │ [█░░░░░░░░░] 6% │ 2m │ ⏲ 11s\n─────────────────────────────────────────────────────────────────────────────────────────\n❯";
+        assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
     }
 
     // ---- Helpers ----

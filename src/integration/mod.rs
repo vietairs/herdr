@@ -25,6 +25,12 @@ const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
 const OPENCODE_INTEGRATION_VERSION: u32 = 1;
+const HERMES_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state";
+const HERMES_PLUGIN_MANIFEST_INSTALL_NAME: &str = "plugin.yaml";
+const HERMES_PLUGIN_INIT_INSTALL_NAME: &str = "__init__.py";
+const HERMES_PLUGIN_MANIFEST_ASSET: &str = include_str!("assets/hermes/plugin.yaml");
+const HERMES_PLUGIN_INIT_ASSET: &str = include_str!("assets/hermes/__init__.py");
+const HERMES_INTEGRATION_VERSION: u32 = 1;
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 #[derive(Debug)]
@@ -43,6 +49,12 @@ pub(crate) struct CodexInstallPaths {
 #[derive(Debug)]
 pub(crate) struct OpenCodeInstallPaths {
     pub plugin_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct HermesInstallPaths {
+    pub plugin_dir: PathBuf,
+    pub config_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +100,14 @@ pub(crate) struct CodexUninstallResult {
 pub(crate) struct OpenCodeUninstallResult {
     pub plugin_path: PathBuf,
     pub removed_plugin: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct HermesUninstallResult {
+    pub plugin_dir: PathBuf,
+    pub config_path: PathBuf,
+    pub removed_plugin_dir: bool,
+    pub updated_config: bool,
 }
 
 pub(crate) fn apply_pane_env(cmd: &mut CommandBuilder, pane_id: PaneId) {
@@ -136,6 +156,19 @@ pub(crate) fn install_target(
                 "installed opencode integration plugin to {}",
                 installed.plugin_path.display()
             )]
+        }
+        crate::api::schema::IntegrationTarget::Hermes => {
+            let installed = install_hermes()?;
+            vec![
+                format!(
+                    "installed hermes integration plugin to {}",
+                    installed.plugin_dir.display()
+                ),
+                format!(
+                    "enabled hermes plugin in {}",
+                    installed.config_path.display()
+                ),
+            ]
         }
     };
 
@@ -233,6 +266,33 @@ pub(crate) fn uninstall_target(
                 )]
             }
         }
+        crate::api::schema::IntegrationTarget::Hermes => {
+            let result = uninstall_hermes()?;
+            let mut messages = Vec::new();
+            if result.removed_plugin_dir {
+                messages.push(format!(
+                    "removed hermes integration plugin at {}",
+                    result.plugin_dir.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no hermes integration plugin found at {}",
+                    result.plugin_dir.display()
+                ));
+            }
+            if result.updated_config {
+                messages.push(format!(
+                    "disabled hermes plugin in {}",
+                    result.config_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no hermes plugin entry found in {}",
+                    result.config_path.display()
+                ));
+            }
+            messages
+        }
     };
 
     crate::logging::integration_action("uninstall", integration_target_label(target), "ok");
@@ -247,6 +307,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
+        crate::api::schema::IntegrationTarget::Hermes => "hermes",
     }
 }
 
@@ -270,7 +331,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 4] {
+); 5] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -291,6 +352,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Opencode,
             opencode_dir().map(|dir| dir.join("plugins").join(OPENCODE_PLUGIN_INSTALL_NAME)),
             OPENCODE_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Hermes,
+            hermes_plugin_dir().map(|dir| dir.join(HERMES_PLUGIN_INIT_INSTALL_NAME)),
+            HERMES_INTEGRATION_VERSION,
         ),
     ]
 }
@@ -590,6 +656,43 @@ pub(crate) fn install_opencode() -> io::Result<OpenCodeInstallPaths> {
     Ok(OpenCodeInstallPaths { plugin_path })
 }
 
+pub(crate) fn install_hermes() -> io::Result<HermesInstallPaths> {
+    let dir = hermes_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "hermes config directory not found at {}. install hermes agent first",
+            dir.display()
+        )));
+    }
+
+    let plugin_dir = hermes_plugin_dir()?;
+    fs::create_dir_all(&plugin_dir)?;
+    fs::write(
+        plugin_dir.join(HERMES_PLUGIN_MANIFEST_INSTALL_NAME),
+        HERMES_PLUGIN_MANIFEST_ASSET,
+    )?;
+    fs::write(
+        plugin_dir.join(HERMES_PLUGIN_INIT_INSTALL_NAME),
+        HERMES_PLUGIN_INIT_ASSET,
+    )?;
+
+    let config_path = dir.join("config.yaml");
+    let existing_config = if config_path.is_file() {
+        fs::read_to_string(&config_path)?
+    } else {
+        String::new()
+    };
+    let new_config = ensure_hermes_plugin_enabled(&existing_config);
+    if new_config != existing_config {
+        fs::write(&config_path, new_config)?;
+    }
+
+    Ok(HermesInstallPaths {
+        plugin_dir,
+        config_path,
+    })
+}
+
 pub(crate) fn uninstall_pi() -> io::Result<PiUninstallResult> {
     let extension_path = pi_extension_dir()?.join(PI_EXTENSION_INSTALL_NAME);
     let removed_extension = remove_file_if_exists(&extension_path)?;
@@ -742,6 +845,30 @@ pub(crate) fn uninstall_opencode() -> io::Result<OpenCodeUninstallResult> {
     })
 }
 
+pub(crate) fn uninstall_hermes() -> io::Result<HermesUninstallResult> {
+    let dir = hermes_dir()?;
+    let plugin_dir = hermes_plugin_dir()?;
+    let config_path = dir.join("config.yaml");
+
+    let removed_plugin_dir = remove_dir_all_if_exists(&plugin_dir)?;
+    let mut updated_config = false;
+    if config_path.is_file() {
+        let existing_config = fs::read_to_string(&config_path)?;
+        let new_config = remove_hermes_plugin_enabled(&existing_config);
+        if new_config != existing_config {
+            fs::write(&config_path, new_config)?;
+            updated_config = true;
+        }
+    }
+
+    Ok(HermesUninstallResult {
+        plugin_dir,
+        config_path,
+        removed_plugin_dir,
+        updated_config,
+    })
+}
+
 fn ensure_hooks_object<'a>(
     settings: &'a mut Value,
     settings_path: &Path,
@@ -889,6 +1016,136 @@ fn remove_file_if_exists(path: &Path) -> io::Result<bool> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(err),
     }
+}
+
+fn remove_dir_all_if_exists(path: &Path) -> io::Result<bool> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn ensure_hermes_plugin_enabled(content: &str) -> String {
+    update_hermes_enabled_plugin(content, true)
+}
+
+fn remove_hermes_plugin_enabled(content: &str) -> String {
+    update_hermes_enabled_plugin(content, false)
+}
+
+fn update_hermes_enabled_plugin(content: &str, enabled: bool) -> String {
+    let trailing_newline = content.ends_with('\n');
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let Some(plugins_index) = top_level_yaml_key_index(&lines, "plugins") else {
+        if !enabled {
+            return content.to_string();
+        }
+        let mut result = content.trim_end_matches('\n').to_string();
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str("plugins:\n  enabled:\n    - herdr-agent-state\n");
+        return result;
+    };
+
+    let plugins_end =
+        next_top_level_yaml_key_index(&lines, plugins_index + 1).unwrap_or(lines.len());
+    let enabled_index = lines[plugins_index + 1..plugins_end]
+        .iter()
+        .position(|line| yaml_key_at_indent(line, 2) == Some("enabled"))
+        .map(|offset| plugins_index + 1 + offset);
+
+    if let Some(enabled_index) = enabled_index {
+        let line = lines[enabled_index].trim();
+        if line == "enabled: []" || line == "enabled: [] # herdr" {
+            if enabled {
+                lines[enabled_index] = "  enabled:".to_string();
+                lines.insert(enabled_index + 1, "    - herdr-agent-state".to_string());
+            }
+            return join_yaml_lines(lines, trailing_newline);
+        }
+
+        let list_start = enabled_index + 1;
+        let list_end = lines[list_start..plugins_end]
+            .iter()
+            .position(|line| {
+                yaml_indent(line).is_some_and(|indent| indent <= 2) && yaml_key_name(line).is_some()
+            })
+            .map(|offset| list_start + offset)
+            .unwrap_or(plugins_end);
+        let existing_item_index = lines[list_start..list_end]
+            .iter()
+            .position(|line| yaml_list_item_value(line) == Some(HERMES_PLUGIN_INSTALL_NAME))
+            .map(|offset| list_start + offset);
+
+        match (enabled, existing_item_index) {
+            (true, Some(_)) | (false, None) => return content.to_string(),
+            (true, None) => lines.insert(list_start, "    - herdr-agent-state".to_string()),
+            (false, Some(index)) => {
+                lines.remove(index);
+            }
+        }
+        return join_yaml_lines(lines, trailing_newline);
+    }
+
+    if enabled {
+        lines.insert(plugins_index + 1, "  enabled:".to_string());
+        lines.insert(plugins_index + 2, "    - herdr-agent-state".to_string());
+        return join_yaml_lines(lines, trailing_newline);
+    }
+
+    content.to_string()
+}
+
+fn top_level_yaml_key_index(lines: &[String], key: &str) -> Option<usize> {
+    lines
+        .iter()
+        .position(|line| yaml_key_at_indent(line, 0) == Some(key))
+}
+
+fn next_top_level_yaml_key_index(lines: &[String], start: usize) -> Option<usize> {
+    lines[start..]
+        .iter()
+        .position(|line| yaml_indent(line) == Some(0) && yaml_key_name(line).is_some())
+        .map(|offset| start + offset)
+}
+
+fn yaml_key_at_indent(line: &str, indent: usize) -> Option<&str> {
+    if yaml_indent(line)? != indent {
+        return None;
+    }
+    yaml_key_name(line)
+}
+
+fn yaml_key_name(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
+        return None;
+    }
+    let (key, _) = trimmed.split_once(':')?;
+    let key = key.trim();
+    (!key.is_empty()).then_some(key)
+}
+
+fn yaml_indent(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    Some(line.len() - trimmed.len())
+}
+
+fn yaml_list_item_value(line: &str) -> Option<&str> {
+    line.trim().strip_prefix("- ").map(str::trim)
+}
+
+fn join_yaml_lines(lines: Vec<String>, trailing_newline: bool) -> String {
+    let mut result = lines.join("\n");
+    if trailing_newline || result.is_empty() {
+        result.push('\n');
+    }
+    result
 }
 
 fn build_codex_config_with_hooks(content: &str) -> String {
@@ -1051,6 +1308,16 @@ fn expand_tilde_path(path: PathBuf) -> io::Result<PathBuf> {
 
 fn opencode_dir() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".config/opencode"))
+}
+
+fn hermes_dir() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".hermes"))
+}
+
+fn hermes_plugin_dir() -> io::Result<PathBuf> {
+    Ok(hermes_dir()?
+        .join("plugins")
+        .join(HERMES_PLUGIN_INSTALL_NAME))
 }
 
 fn home_dir() -> io::Result<PathBuf> {
@@ -1691,6 +1958,112 @@ mod tests {
         let err = install_opencode().unwrap_err().to_string();
 
         assert!(err.contains("opencode config directory not found"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_hermes_writes_plugin_and_enables_it() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let hermes_dir = home.join(".hermes");
+        fs::create_dir_all(&hermes_dir).unwrap();
+        fs::write(hermes_dir.join("config.yaml"), "model:\n  provider: auto\n").unwrap();
+        std::env::set_var("HOME", &home);
+
+        let installed = install_hermes().unwrap();
+        let manifest = fs::read_to_string(
+            installed
+                .plugin_dir
+                .join(HERMES_PLUGIN_MANIFEST_INSTALL_NAME),
+        )
+        .unwrap();
+        let init =
+            fs::read_to_string(installed.plugin_dir.join(HERMES_PLUGIN_INIT_INSTALL_NAME)).unwrap();
+        let config = fs::read_to_string(&installed.config_path).unwrap();
+
+        assert_eq!(
+            installed.plugin_dir,
+            hermes_dir.join("plugins").join(HERMES_PLUGIN_INSTALL_NAME)
+        );
+        assert_eq!(manifest, HERMES_PLUGIN_MANIFEST_ASSET);
+        assert_eq!(init, HERMES_PLUGIN_INIT_ASSET);
+        assert!(config.contains("plugins:\n  enabled:\n    - herdr-agent-state"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_hermes_is_idempotent_for_enabled_entry() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let hermes_dir = home.join(".hermes");
+        fs::create_dir_all(&hermes_dir).unwrap();
+        fs::write(
+            hermes_dir.join("config.yaml"),
+            "plugins:\n  enabled:\n    - herdr-agent-state\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_hermes().unwrap();
+        install_hermes().unwrap();
+
+        let config = fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+        assert_eq!(config.matches("herdr-agent-state").count(), 1);
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_hermes_removes_plugin_and_enabled_entry() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let hermes_dir = home.join(".hermes");
+        let plugin_dir = hermes_dir.join("plugins").join(HERMES_PLUGIN_INSTALL_NAME);
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(
+            plugin_dir.join(HERMES_PLUGIN_INIT_INSTALL_NAME),
+            HERMES_PLUGIN_INIT_ASSET,
+        )
+        .unwrap();
+        fs::write(
+            hermes_dir.join("config.yaml"),
+            "plugins:\n  enabled:\n    - other-plugin\n    - herdr-agent-state\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let result = uninstall_hermes().unwrap();
+        let config = fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+
+        assert!(result.removed_plugin_dir);
+        assert!(result.updated_config);
+        assert!(!plugin_dir.exists());
+        assert!(config.contains("    - other-plugin"));
+        assert!(!config.contains("herdr-agent-state"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_hermes_errors_when_config_dir_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let err = install_hermes().unwrap_err().to_string();
+
+        assert!(err.contains("hermes config directory not found"));
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);

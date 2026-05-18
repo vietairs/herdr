@@ -428,14 +428,14 @@ mod tests {
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority(
             "herdr:custom".into(),
-            "hermes".into(),
+            "custom-agent".into(),
             AgentState::Working,
             None,
             None,
         );
 
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
-        assert_eq!(terminal.effective_agent_label(), Some("hermes"));
+        assert_eq!(terminal.effective_agent_label(), Some("custom-agent"));
         assert_eq!(terminal.effective_known_agent(), None);
         assert_eq!(terminal.state, AgentState::Working);
     }
@@ -504,7 +504,7 @@ mod tests {
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority(
             "herdr:custom".into(),
-            "hermes".into(),
+            "custom-agent".into(),
             AgentState::Working,
             None,
             None,
@@ -514,7 +514,7 @@ mod tests {
 
         assert!(terminal.hook_authority.is_some());
         assert_eq!(terminal.detected_agent, None);
-        assert_eq!(terminal.effective_agent_label(), Some("hermes"));
+        assert_eq!(terminal.effective_agent_label(), Some("custom-agent"));
         assert_eq!(terminal.state, AgentState::Working);
     }
 
