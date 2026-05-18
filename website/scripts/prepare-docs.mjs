@@ -1,4 +1,4 @@
-import { cp, mkdir } from 'node:fs/promises';
+import { cp, mkdir, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,6 +9,7 @@ const publicDir = resolve(repoRoot, 'website/public');
 await preparePublicAssets();
 
 async function preparePublicAssets() {
+  await rm(publicDir, { recursive: true, force: true });
   await mkdir(publicDir, { recursive: true });
 
   for (const file of [
@@ -16,7 +17,6 @@ async function preparePublicAssets() {
     'latest.json',
     'robots.txt',
     'sitemap.xml',
-    'favicon.ico',
     '_headers',
     '_redirects',
   ]) {

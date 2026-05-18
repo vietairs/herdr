@@ -1256,6 +1256,216 @@ td:last-child {
     font-size: 0.9rem;
 }
 
+.compare-hero {
+    grid-template-columns: minmax(360px, 0.95fr) minmax(360px, 0.75fr);
+    align-items: center;
+}
+
+.compare-claim-card {
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-lg);
+    background:
+        radial-gradient(circle at 22% 0%, rgb(103 215 202 / 0.2), transparent 18rem),
+        rgb(255 253 248 / 0.82);
+    box-shadow: var(--shadow);
+    padding: clamp(1.35rem, 3vw, 2rem);
+}
+
+.compare-claim-card h2 {
+    margin: 0;
+    color: var(--ink);
+    font-size: clamp(1.85rem, 3vw, 2.85rem);
+    letter-spacing: -0.055em;
+    line-height: 1.04;
+}
+
+.compare-checks {
+    list-style: none;
+    margin: 1.25rem 0 0;
+    padding: 0;
+    display: grid;
+    gap: 0.65rem;
+}
+
+.compare-checks li {
+    position: relative;
+    padding-left: 1.65rem;
+    color: var(--ink-soft);
+    line-height: 1.5;
+}
+
+.compare-checks li::before {
+    content: "✓";
+    position: absolute;
+    left: 0;
+    top: 0.05rem;
+    display: inline-grid;
+    place-items: center;
+    width: 1.05rem;
+    height: 1.05rem;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-dark);
+    font-size: 0.72rem;
+    font-weight: 900;
+}
+
+.compare-section .section-heading-wide a,
+.compare-stack-section .section-heading-wide a {
+    color: var(--accent-dark);
+    font-weight: 800;
+    text-decoration: underline;
+    text-decoration-thickness: 0.08em;
+    text-underline-offset: 0.18em;
+}
+
+.comparison-matrix table {
+    min-width: 980px;
+}
+
+.comparison-matrix th:last-child,
+.comparison-matrix td:last-child {
+    color: var(--ink-soft);
+    font-weight: inherit;
+    background: transparent;
+}
+
+.comparison-matrix th:nth-child(2),
+.comparison-matrix td:nth-child(2) {
+    color: var(--accent-dark);
+    font-weight: 850;
+    background: rgb(217 238 233 / 0.54);
+}
+
+.comparison-matrix td:first-child {
+    color: var(--ink);
+    font-weight: 760;
+}
+
+.differ-grid {
+    display: grid;
+    grid-template-columns: minmax(320px, 0.88fr) minmax(0, 1.12fr);
+    gap: 1rem;
+    align-items: stretch;
+}
+
+.intersection-card,
+.differ-list article {
+    border: 1px solid var(--line);
+    background: rgb(255 253 248 / 0.74);
+    box-shadow: 0 16px 50px rgb(35 29 21 / 0.06);
+}
+
+.intersection-card {
+    border-color: var(--line-strong);
+    border-radius: var(--radius-lg);
+    padding: clamp(1.4rem, 3vw, 2rem);
+    background:
+        radial-gradient(circle at 18% 0%, rgb(103 215 202 / 0.2), transparent 18rem),
+        radial-gradient(circle at 100% 100%, rgb(37 99 235 / 0.1), transparent 16rem),
+        rgb(255 253 248 / 0.84);
+}
+
+.intersection-card h3 {
+    margin: 1.2rem 0 0;
+    color: var(--ink);
+    font-size: clamp(2rem, 4vw, 3.35rem);
+    letter-spacing: -0.06em;
+    line-height: 1;
+}
+
+.intersection-card p {
+    margin: 1.15rem 0 0;
+    color: var(--ink-soft);
+    font-size: 1.05rem;
+    line-height: 1.75;
+}
+
+.intersection-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    margin-top: 1.45rem;
+}
+
+.intersection-pills span {
+    border: 1px solid rgb(31 111 104 / 0.18);
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-dark);
+    padding: 0.45rem 0.65rem;
+    font-size: 0.78rem;
+    font-weight: 800;
+}
+
+.differ-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+}
+
+.differ-list article {
+    min-height: 210px;
+    border-radius: var(--radius-md);
+    padding: 1.2rem;
+}
+
+.differ-list article span {
+    display: block;
+    color: var(--accent-dark);
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 750;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.differ-list article h3 {
+    margin: 1rem 0 0;
+    color: var(--ink);
+    font-size: 1.32rem;
+    letter-spacing: -0.04em;
+    line-height: 1.1;
+}
+
+.differ-list article p {
+    margin: 0.85rem 0 0;
+    color: var(--muted);
+    line-height: 1.65;
+}
+
+.one-liner-list {
+    display: grid;
+    gap: 0.75rem;
+}
+
+.one-liner-list article {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.34fr) minmax(0, 1fr);
+    gap: 1rem;
+    align-items: start;
+    padding: 1rem 1.1rem;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: rgb(255 253 248 / 0.72);
+    box-shadow: 0 12px 34px rgb(35 29 21 / 0.04);
+}
+
+.one-liner-list strong {
+    color: var(--accent-dark);
+    font-family: var(--mono);
+    font-size: 0.86rem;
+}
+
+.one-liner-list span {
+    color: var(--ink-soft);
+    line-height: 1.65;
+}
+
+.compare-final-cta {
+    margin-top: 0;
+}
+
 @media (max-width: 980px) {
     .hero,
     .feature-split,
@@ -1283,12 +1493,17 @@ td:last-child {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .mobile-proof {
+    .mobile-proof,
+    .differ-grid {
         grid-template-columns: 1fr;
     }
 
     .mobile-shots {
         justify-content: center;
+    }
+
+    .intersection-card {
+        min-height: auto;
     }
 }
 
@@ -1358,7 +1573,8 @@ td:last-child {
     .contrast-grid,
     .access-grid,
     .awareness-grid,
-    .integration-grid {
+    .integration-grid,
+    .differ-list {
         grid-template-columns: 1fr;
     }
 
@@ -1416,6 +1632,10 @@ td:last-child {
 
     .compare-cards .herdr b {
         color: var(--accent-dark);
+    }
+
+    .one-liner-list article {
+        grid-template-columns: 1fr;
     }
 
     .pillar-card {

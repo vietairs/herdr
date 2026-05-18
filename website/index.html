@@ -39,8 +39,7 @@
         />
         <meta name="twitter:image:alt" content="Herdr — One terminal. The whole herd." />
 
-        <link rel="icon" href="/favicon.ico" sizes="any" />
-        <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon.png" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon.png?v=14" />
         <link rel="apple-touch-icon" href="/assets/logo.png" />
         <link
             rel="preload"
@@ -49,7 +48,7 @@
             type="font/woff2"
             crossorigin
         />
-        <link rel="stylesheet" href="/css/style.css?v=3f0e9b12" />
+        <link rel="stylesheet" href="/css/style.css?v=compare1" />
     </head>
     <body>
         <header class="site-header">
@@ -59,6 +58,7 @@
                     <span>herdr</span>
                 </a>
                 <div class="nav-links">
+                    <a href="/compare/">Compare</a>
                     <a href="/docs/">Docs</a>
                     <a href="/docs/quick-start/">Quick start</a>
                     <a href="/docs/socket-api/">API</a>
@@ -222,55 +222,68 @@
             </section>
 
             <section class="section compare-section">
-                <div class="section-heading">
-                    <p class="section-kicker">Positioning</p>
-                    <h2>The terminal-native control layer.</h2>
+                <div class="section-heading-wide">
+                    <div>
+                        <p class="section-kicker">Positioning</p>
+                        <h2>tmux persistence, agent awareness, no terminal replacement.</h2>
+                    </div>
+                    <p>
+                        tmux and Zellij own persistent terminal sessions. Desktop agent apps own dashboards, editors, or worktree flows. Herdr keeps the multiplexer inside your terminal and makes it agent-aware.
+                        <a href="/compare/">See the full comparison →</a>
+                    </p>
                 </div>
                 <div class="table-wrap">
                     <table>
                         <thead>
                             <tr>
                                 <th>Capability</th>
-                                <th>tmux</th>
-                                <th>GUI agent managers</th>
+                                <th>tmux / Zellij</th>
+                                <th>agent apps</th>
+                                <th>worktree orchestrators</th>
                                 <th>Herdr</th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr>
-                                <td>Persistent sessions</td>
+                                <td>Runs inside your terminal</td>
                                 <td>✓</td>
                                 <td>—</td>
+                                <td>—</td>
+                                <td>✓</td>
+                            </tr>
+                            <tr>
+                                <td>Persistent PTY sessions</td>
+                                <td>✓</td>
+                                <td>limited</td>
+                                <td>embedded</td>
                                 <td>✓</td>
                             </tr>
                             <tr>
                                 <td>Remote SSH attach</td>
                                 <td>✓</td>
                                 <td>limited</td>
+                                <td>remote projects</td>
                                 <td>✓</td>
                             </tr>
                             <tr>
-                                <td>Real terminal panes</td>
-                                <td>✓</td>
+                                <td>Semantic agent state</td>
                                 <td>—</td>
+                                <td>partial</td>
+                                <td>workspace status</td>
                                 <td>✓</td>
                             </tr>
                             <tr>
-                                <td>Mouse-native TUI</td>
+                                <td>Direct agent attach</td>
                                 <td>—</td>
-                                <td>✓</td>
-                                <td>✓</td>
-                            </tr>
-                            <tr>
-                                <td>Agent state awareness</td>
                                 <td>—</td>
-                                <td>✓</td>
+                                <td>—</td>
                                 <td>✓</td>
                             </tr>
                             <tr>
                                 <td>Agents can orchestrate it</td>
-                                <td>—</td>
-                                <td>limited</td>
+                                <td>scriptable</td>
+                                <td>partial</td>
+                                <td>workflow-owned</td>
                                 <td>✓</td>
                             </tr>
                         </tbody>
@@ -278,39 +291,45 @@
                 </div>
                 <div class="compare-cards" aria-label="Mobile comparison">
                     <article>
-                        <h3>Persistent sessions</h3>
-                        <span>tmux <b>✓</b></span>
-                        <span>apps <b>—</b></span>
+                        <h3>Runs inside your terminal</h3>
+                        <span>tmux/Zellij <b>✓</b></span>
+                        <span>agent apps <b>—</b></span>
+                        <span>worktree apps <b>—</b></span>
+                        <span class="herdr">Herdr <b>✓</b></span>
+                    </article>
+                    <article>
+                        <h3>Persistent PTY sessions</h3>
+                        <span>tmux/Zellij <b>✓</b></span>
+                        <span>agent apps <b>limited</b></span>
+                        <span>worktree apps <b>embedded</b></span>
                         <span class="herdr">Herdr <b>✓</b></span>
                     </article>
                     <article>
                         <h3>Remote SSH attach</h3>
-                        <span>tmux <b>✓</b></span>
-                        <span>apps <b>limited</b></span>
+                        <span>tmux/Zellij <b>✓</b></span>
+                        <span>agent apps <b>limited</b></span>
+                        <span>worktree apps <b>remote projects</b></span>
                         <span class="herdr">Herdr <b>✓</b></span>
                     </article>
                     <article>
-                        <h3>Real terminal panes</h3>
-                        <span>tmux <b>✓</b></span>
-                        <span>apps <b>—</b></span>
+                        <h3>Semantic agent state</h3>
+                        <span>tmux/Zellij <b>—</b></span>
+                        <span>agent apps <b>partial</b></span>
+                        <span>worktree apps <b>workspace status</b></span>
                         <span class="herdr">Herdr <b>✓</b></span>
                     </article>
                     <article>
-                        <h3>Mouse-native TUI</h3>
-                        <span>tmux <b>—</b></span>
-                        <span>apps <b>✓</b></span>
-                        <span class="herdr">Herdr <b>✓</b></span>
-                    </article>
-                    <article>
-                        <h3>Agent state awareness</h3>
-                        <span>tmux <b>—</b></span>
-                        <span>apps <b>✓</b></span>
+                        <h3>Direct agent attach</h3>
+                        <span>tmux/Zellij <b>—</b></span>
+                        <span>agent apps <b>—</b></span>
+                        <span>worktree apps <b>—</b></span>
                         <span class="herdr">Herdr <b>✓</b></span>
                     </article>
                     <article>
                         <h3>Agents can orchestrate it</h3>
-                        <span>tmux <b>—</b></span>
-                        <span>apps <b>limited</b></span>
+                        <span>tmux/Zellij <b>scriptable</b></span>
+                        <span>agent apps <b>partial</b></span>
+                        <span>worktree apps <b>workflow-owned</b></span>
                         <span class="herdr">Herdr <b>✓</b></span>
                     </article>
                 </div>
@@ -492,7 +511,7 @@ $ herdr</code></pre>
                 <div class="awareness-grid">
                     <article class="awareness-card">
                         <img
-                            src="/assets/sidebar-workspaces.png"
+                            src="/assets/sidebar-workspaces-v2.png"
                             alt="Herdr workspace sidebar state"
                             loading="lazy"
                         />
@@ -504,7 +523,7 @@ $ herdr</code></pre>
                     </article>
                     <article class="awareness-card">
                         <img
-                            src="/assets/sidebar-agents.png"
+                            src="/assets/sidebar-agents-v2.png"
                             alt="Herdr agent sidebar state"
                             loading="lazy"
                         />
@@ -571,6 +590,7 @@ $ herdr</code></pre>
                 <span>herdr</span>
             </a>
             <div>
+                <a href="/compare/">Compare</a>
                 <a href="/docs/">Docs</a>
                 <a href="/docs/configuration/">Configuration</a>
                 <a href="/docs/socket-api/">API</a>
