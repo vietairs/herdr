@@ -144,10 +144,13 @@ jobs:
       - name: Close issues referenced by released commits
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          NEXT_RELEASE_LABEL: included-in-next-release
+          GH_TOKEN: ${{ secrets.KANGAL_GITHUB_TOKEN }}
+          NEXT_RELEASE_LABEL: pending-release
+          LEGACY_NEXT_RELEASE_LABEL: included-in-next-release
         run: |
           set -euo pipefail
+
+          echo "Using GitHub token for $(gh api user --jq .login)."
 
           VERSION="${GITHUB_REF_NAME#v}"
           CURRENT_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
@@ -171,6 +174,19 @@ jobs:
           fi
 
           RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/v${VERSION}"
+          RELEASE_COMMENT_MARKER="<!-- herdr:released:v${VERSION} -->"
+          RELEASE_COMMENT="${RELEASE_COMMENT_MARKER}"$'\n'"Released in [v${VERSION}](${RELEASE_URL})."
+
+          issue_has_comment_marker() {
+            local issue="$1"
+            local marker="$2"
+            local comments
+            if ! comments="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${issue}/comments?per_page=100" --jq '.[].body')"; then
+              echo "::warning::Could not read comments for issue #$issue."
+              return 2
+            fi
+            grep -F -- "$marker" >/dev/null <<<"$comments"
+          }
 
           for issue in "${ISSUES[@]}"; do
             echo "Checking #$issue"
@@ -185,19 +201,54 @@ jobs:
             fi
 
             HAS_NEXT_RELEASE_LABEL="$(jq -r --arg label "$NEXT_RELEASE_LABEL" 'any(.labels[].name; . == $label)' <<<"$data")"
+            HAS_LEGACY_NEXT_RELEASE_LABEL="$(jq -r --arg label "$LEGACY_NEXT_RELEASE_LABEL" 'any(.labels[].name; . == $label)' <<<"$data")"
+            HAS_PENDING_RELEASE_LABEL="false"
+            if [ "$HAS_NEXT_RELEASE_LABEL" = "true" ] || [ "$HAS_LEGACY_NEXT_RELEASE_LABEL" = "true" ]; then
+              HAS_PENDING_RELEASE_LABEL="true"
+            fi
+            MARKER_STATUS=0
+            issue_has_comment_marker "$issue" "$RELEASE_COMMENT_MARKER" || MARKER_STATUS="$?"
+            if [ "$MARKER_STATUS" -eq 2 ]; then
+              continue
+            fi
+            HAS_RELEASE_COMMENT="false"
+            if [ "$MARKER_STATUS" -eq 0 ]; then
+              HAS_RELEASE_COMMENT="true"
+            fi
 
             if [ "$(jq -r '.state' <<<"$data")" = "open" ]; then
-              if ! gh issue close "$issue" --repo "$GITHUB_REPOSITORY" --reason completed --comment "Released in [v${VERSION}](${RELEASE_URL})."; then
+              if [ "$HAS_RELEASE_COMMENT" = "true" ]; then
+                if ! gh issue close "$issue" --repo "$GITHUB_REPOSITORY" --reason completed; then
+                  echo "::warning::Could not close issue #$issue."
+                  continue
+                fi
+              elif ! gh issue close "$issue" --repo "$GITHUB_REPOSITORY" --reason completed --comment "$RELEASE_COMMENT"; then
                 echo "::warning::Could not close issue #$issue."
                 continue
               fi
+            elif [ "$HAS_PENDING_RELEASE_LABEL" = "true" ]; then
+              if [ "$HAS_RELEASE_COMMENT" != "true" ]; then
+                if ! gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" --body "$RELEASE_COMMENT"; then
+                  echo "::warning::Could not comment on issue #$issue."
+                  continue
+                fi
+              else
+                echo "Skipping release comment for #$issue because it already exists."
+              fi
             else
-              echo "Skipping close for #$issue because it is not open."
+              echo "Skipping release comment for #$issue because it is closed and has no $NEXT_RELEASE_LABEL label."
             fi
 
             if [ "$HAS_NEXT_RELEASE_LABEL" = "true" ]; then
               if ! gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --remove-label "$NEXT_RELEASE_LABEL"; then
                 echo "::warning::Could not remove $NEXT_RELEASE_LABEL from issue #$issue."
+                continue
+              fi
+            fi
+
+            if [ "$HAS_LEGACY_NEXT_RELEASE_LABEL" = "true" ]; then
+              if ! gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --remove-label "$LEGACY_NEXT_RELEASE_LABEL"; then
+                echo "::warning::Could not remove $LEGACY_NEXT_RELEASE_LABEL from issue #$issue."
                 continue
               fi
             fi
