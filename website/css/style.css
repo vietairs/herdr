@@ -723,6 +723,81 @@ samp {
     box-shadow: var(--shadow), 0 0 0 1px rgb(21 26 33 / 0.08);
 }
 
+.logo-cloud {
+    max-width: var(--max);
+    margin: 0 auto;
+    padding: 0 1.25rem 4rem;
+    overflow: hidden;
+}
+
+.logo-cloud-heading {
+    margin-bottom: 0.9rem;
+    text-align: center;
+}
+
+.logo-cloud-heading .section-kicker {
+    margin-bottom: 0.45rem;
+}
+
+.logo-cloud-heading h2 {
+    margin: 0;
+    color: var(--ink-soft);
+    font-size: clamp(1.05rem, 2vw, 1.35rem);
+    line-height: 1.25;
+    letter-spacing: -0.035em;
+}
+
+.logo-marquee {
+    position: relative;
+    overflow: hidden;
+    background: radial-gradient(ellipse at center, rgb(201 189 173 / 0.28) 0%, rgb(201 189 173 / 0.16) 36%, transparent 72%);
+    -webkit-mask-image: linear-gradient(90deg, transparent, black 7%, black 93%, transparent);
+    mask-image: linear-gradient(90deg, transparent, black 7%, black 93%, transparent);
+}
+
+.logo-track {
+    display: flex;
+    width: max-content;
+    animation: logo-marquee 36s linear infinite;
+}
+
+.logo-marquee:hover .logo-track {
+    animation-play-state: paused;
+}
+
+.logo-row {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 0.65rem;
+    padding: 0.45rem 0.325rem;
+}
+
+.logo-card {
+    width: 150px;
+    height: 58px;
+    display: grid;
+    place-items: center;
+    padding: 0.5rem 0.85rem;
+    color: var(--ink-soft);
+}
+
+.logo-card img {
+    width: auto;
+    height: 32px;
+    max-width: 116px;
+    object-fit: contain;
+}
+
+.logo-card span {
+    display: none;
+}
+
+@keyframes logo-marquee {
+    to {
+        transform: translateX(-50%);
+    }
+}
+
 .section {
     padding-top: 6rem;
     padding-bottom: 6rem;
@@ -1519,6 +1594,7 @@ td:last-child {
     .hero,
     .section,
     .demo-section,
+    .logo-cloud,
     .footer,
     .final-cta {
         padding-inline: 1rem;
@@ -1554,6 +1630,20 @@ td:last-child {
 
     .demo-video {
         border-radius: 18px;
+    }
+
+    .logo-cloud {
+        padding-bottom: 3rem;
+    }
+
+    .logo-card {
+        width: 132px;
+        height: 54px;
+    }
+
+    .logo-card img {
+        height: 28px;
+        max-width: 100px;
     }
 
     .section {
@@ -1692,6 +1782,15 @@ td:last-child {
 
     .hero-product-shot figcaption {
         font-size: 0.78rem;
+    }
+
+    .logo-card {
+        width: 118px;
+    }
+
+    .logo-card img {
+        height: 26px;
+        max-width: 92px;
     }
 
     .mobile-proof,
