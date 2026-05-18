@@ -200,6 +200,11 @@ impl RemoteHerdr {
             platform,
         }
     }
+
+    fn with_shell_path(mut self, shell_path: String) -> Self {
+        self.shell_path = shell_path;
+        self
+    }
 }
 
 #[derive(Deserialize)]
@@ -240,8 +245,13 @@ fn prepare_remote_herdr(target: &str) -> io::Result<RemoteHerdr> {
     let remote_herdr = RemoteHerdr::for_platform(platform);
     let override_binary = remote_binary_override_path()?;
 
-    if override_binary.is_none() && remote_binary_matches(target, &remote_herdr)? {
-        return Ok(remote_herdr);
+    if override_binary.is_none() {
+        if let Some(path_remote_herdr) = remote_binary_on_path(target, &remote_herdr)? {
+            return Ok(path_remote_herdr);
+        }
+        if remote_binary_matches(target, &remote_herdr)? {
+            return Ok(remote_herdr);
+        }
     }
 
     confirm_remote_install(
@@ -282,6 +292,38 @@ fn detect_remote_platform(target: &str) -> io::Result<RemotePlatform> {
             arch.trim()
         ))
     })
+}
+
+fn remote_binary_on_path(
+    target: &str,
+    remote_herdr: &RemoteHerdr,
+) -> io::Result<Option<RemoteHerdr>> {
+    let output = ssh_output(target, remote_path_probe_command())?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(remote_herdr_from_path_probe(remote_herdr, &stdout))
+}
+
+fn remote_path_probe_command() -> &'static str {
+    r#"path=$(command -v herdr) || exit 1
+test -n "$path" || exit 1
+version=$("$path" --version) || exit 1
+printf '%s\n%s\n' "$path" "$version"
+"#
+}
+
+fn remote_herdr_from_path_probe(remote_herdr: &RemoteHerdr, stdout: &str) -> Option<RemoteHerdr> {
+    let mut lines = stdout.lines();
+    let path = lines.next()?;
+    let version = lines.next()?.trim();
+    if !path.starts_with('/') || version != format!("herdr {CURRENT_VERSION}") {
+        return None;
+    }
+
+    Some(remote_herdr.clone().with_shell_path(shell_quote(path)))
 }
 
 fn remote_binary_matches(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
@@ -936,6 +978,95 @@ mod tests {
             remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
             "exec \"$HOME/.local/bin/herdr\" remote-client-bridge"
         );
+    }
+
+    #[test]
+    fn remote_path_probe_uses_path_binary_when_version_matches() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        let stdout = format!("/usr/bin/herdr\nherdr {CURRENT_VERSION}\n");
+        let remote_herdr =
+            remote_herdr_from_path_probe(&remote_herdr, &stdout).expect("matching path binary");
+
+        assert_eq!(
+            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
+            "exec /usr/bin/herdr remote-client-bridge"
+        );
+    }
+
+    #[test]
+    fn remote_path_probe_quotes_discovered_binary() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        let stdout = format!("/opt/herdr bin/herdr\nherdr {CURRENT_VERSION}\n");
+        let remote_herdr =
+            remote_herdr_from_path_probe(&remote_herdr, &stdout).expect("matching path binary");
+
+        assert_eq!(
+            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
+            "exec '/opt/herdr bin/herdr' remote-client-bridge"
+        );
+    }
+
+    #[test]
+    fn remote_path_probe_uses_macos_path_binary_when_version_matches() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "macos",
+            arch: "aarch64",
+        });
+        let stdout = format!("/opt/homebrew/bin/herdr\nherdr {CURRENT_VERSION}\n");
+        let remote_herdr =
+            remote_herdr_from_path_probe(&remote_herdr, &stdout).expect("matching path binary");
+
+        assert_eq!(
+            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
+            "exec /opt/homebrew/bin/herdr remote-client-bridge"
+        );
+        assert_eq!(remote_herdr.platform.asset_key(), "macos-aarch64");
+    }
+
+    #[test]
+    fn remote_path_probe_quotes_single_quotes_in_discovered_binary() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        let stdout = format!("/opt/herdr's/bin/herdr\nherdr {CURRENT_VERSION}\n");
+        let remote_herdr =
+            remote_herdr_from_path_probe(&remote_herdr, &stdout).expect("matching path binary");
+
+        assert_eq!(
+            remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
+            "exec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
+        );
+    }
+
+    #[test]
+    fn remote_path_probe_ignores_version_mismatch() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        let remote_herdr =
+            remote_herdr_from_path_probe(&remote_herdr, "/usr/bin/herdr\nherdr 0.0.0\n");
+
+        assert!(remote_herdr.is_none());
+    }
+
+    #[test]
+    fn remote_path_probe_ignores_relative_paths() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        let stdout = format!("bin/herdr\nherdr {CURRENT_VERSION}\n");
+        let remote_herdr = remote_herdr_from_path_probe(&remote_herdr, &stdout);
+
+        assert!(remote_herdr.is_none());
     }
 
     #[test]
