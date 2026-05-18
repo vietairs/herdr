@@ -16,6 +16,7 @@ async function preparePublicAssets() {
     'latest.json',
     'robots.txt',
     'sitemap.xml',
+    'favicon.ico',
     '_headers',
     '_redirects',
   ]) {

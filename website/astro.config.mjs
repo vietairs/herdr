@@ -52,10 +52,10 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'herdr',
-      description: 'Terminal multiplexer for AI coding agents.',
-      favicon: '/assets/logo.png',
+      description: 'Terminal-native agent runtime and multiplexer.',
+      favicon: '/assets/favicon.png',
       logo: {
-        src: './public/assets/logo.png',
+        src: './public/assets/logo.svg',
         alt: 'herdr',
       },
       social: [

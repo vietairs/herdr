@@ -1,11 +1,11 @@
 ---
 title: Herdr documentation
-description: Terminal multiplexer for AI coding agents.
+description: Terminal-native agent runtime and multiplexer.
 template: splash
 hero:
-  tagline: Run agents in real terminal panes, keep sessions alive, attach over SSH, and orchestrate everything from the CLI or socket API.
+  tagline: "One terminal for the whole herd: real panes, persistent sessions, SSH attach, state awareness, and CLI/socket orchestration."
   image:
-    file: ../../../public/assets/logo.png
+    file: ../../../public/assets/logo.svg
   actions:
     - text: Install Herdr
       link: /docs/install/
@@ -16,14 +16,14 @@ hero:
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-Herdr is a terminal-native agent multiplexer. It gives AI coding agents persistent terminal workspaces with panes, tabs, mouse control, state awareness, and an API that agents can use themselves.
+Herdr is a terminal-native agent runtime and multiplexer. It gives the whole herd persistent terminal workspaces with panes, tabs, mouse control, state awareness, and an API that agents can use themselves.
 
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh
 herdr
 ```
 
-## Core model
+## Core runtime
 
 <CardGrid>
   <Card title="Detach and reattach">
@@ -41,7 +41,7 @@ herdr
 
     [Learn concepts →](/docs/concepts/)
   </Card>
-  <Card title="State and orchestration">
+  <Card title="Runtime API">
     See agent status in the sidebar and drive workspaces, tabs, panes, waits, and output reads through the CLI or socket API.
 
     [Read the API guide →](/docs/socket-api/)
