@@ -5,6 +5,8 @@ description: Detach from Herdr, reattach later, use named sessions, and connect 
 
 Herdr keeps panes running in a background server. Your terminal client can detach and reconnect later.
 
+For the local, SSH, and `herdr --remote` workflows, see [How to work with Herdr](/docs/how-to-work/).
+
 ## Detach and reattach
 
 Start Herdr:
@@ -21,7 +23,7 @@ Your panes and agents keep running. Reattach by running Herdr again:
 herdr
 ```
 
-Stop the default server when you want to end the session:
+If you want to end the session and stop its panes, stop the default server:
 
 ```bash
 herdr server stop
@@ -58,12 +60,16 @@ ssh you@server
 herdr
 ```
 
+In this mode your shell is remote, Herdr runs on the remote host, and panes keep running there after you detach.
+
 You can also attach through SSH from your local machine:
 
 ```bash
 herdr --remote workbox
 herdr --remote ssh://you@server:2222
 ```
+
+In this mode your local Herdr is a thin client. It connects over SSH, starts or attaches to the remote Herdr server, and streams the UI back to your local terminal.
 
 For repeat targets, use your SSH config:
 

@@ -9,7 +9,9 @@ Start Herdr from any project directory:
 herdr
 ```
 
-Herdr launches or attaches to your default background session. If you detach, agents keep running.
+Herdr launches or attaches to your default background session. You do not manage sockets. If you detach, agents keep running.
+
+For the local, SSH, and `herdr --remote` workflows, see [How to work with Herdr](/docs/how-to-work/).
 
 ## Create a workspace
 
@@ -63,18 +65,18 @@ Workspaces are usually enough. Use named sessions when you need isolation betwee
 
 ## Attach from another machine
 
-Start Herdr on a server, detach, and come back over SSH later.
+Run Herdr where the work lives. If the code and credentials are on a server, either SSH there and run Herdr like a terminal multiplexer:
 
 ```bash
 ssh you@server
 herdr
 ```
 
-You can also attach through SSH from your local terminal:
+Or attach from your local terminal through SSH:
 
 ```bash
 herdr --remote workbox
 herdr --remote ssh://you@server:2222
 ```
 
-For repeat targets, put the host in your SSH config.
+For repeat targets, put the host in your SSH config. See [How to work with Herdr](/docs/how-to-work/) for the full model.

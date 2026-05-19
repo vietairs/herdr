@@ -65,6 +65,9 @@ export default defineConfig({
           href: 'https://github.com/ogulcancelik/herdr',
         },
       ],
+      components: {
+        SiteTitle: './src/components/SiteTitle.astro',
+      },
       customCss: ['./src/styles/starlight.css'],
       editLink: {
         baseUrl: 'https://github.com/ogulcancelik/herdr/edit/master/',
@@ -78,16 +81,17 @@ export default defineConfig({
             { label: 'Overview', slug: 'docs' },
             { label: 'Install', slug: 'docs/install' },
             { label: 'Quick start', slug: 'docs/quick-start' },
+            { label: 'How to work with Herdr', slug: 'docs/how-to-work' },
             { label: 'Concepts', slug: 'docs/concepts' },
           ],
         },
         {
           label: 'Core guides',
           items: [
-            { label: 'Persistence and remote access', slug: 'docs/persistence-remote' },
             { label: 'Agents', slug: 'docs/agents' },
-            { label: 'Configuration', slug: 'docs/configuration' },
             { label: 'Integrations', slug: 'docs/integrations' },
+            { label: 'Configuration', slug: 'docs/configuration' },
+            { label: 'Persistence and remote access', slug: 'docs/persistence-remote' },
           ],
         },
         {
@@ -95,7 +99,7 @@ export default defineConfig({
           items: [
             { label: 'CLI reference', slug: 'docs/cli-reference' },
             { label: 'Socket API', slug: 'docs/socket-api' },
-            { label: 'Agent skill', slug: 'docs/agent-skill' },
+            { label: 'Agent skill file', slug: 'docs/agent-skill' },
           ],
         },
       ],

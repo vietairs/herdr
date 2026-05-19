@@ -86,14 +86,6 @@
   color: var(--sl-color-gray-1);
 }
 
-.header a[href="/"]::after {
-  content: "home";
-  margin-left: 0.75rem;
-  color: var(--sl-color-gray-3);
-  font-size: 0.8rem;
-  font-weight: 500;
-}
-
 #starlight__sidebar a[aria-current="page"] {
   background: color-mix(in srgb, var(--sl-color-accent) 13%, transparent);
   color: var(--sl-color-accent-high);
@@ -102,6 +94,31 @@
 
 :root[data-theme="light"] #starlight__sidebar a[aria-current="page"] {
   color: var(--sl-color-accent-high);
+}
+
+.mobile-doc-shots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 1rem;
+  margin: 1.25rem 0;
+}
+
+.mobile-doc-shots figure {
+  margin: 0;
+}
+
+.mobile-doc-shots img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 1rem;
+}
+
+.mobile-doc-shots figcaption {
+  margin-top: 0.45rem;
+  color: var(--sl-color-gray-3);
+  font-size: var(--sl-text-sm);
+  text-align: center;
 }
 
 .sl-markdown-content a:not(:where(.not-content *)) {

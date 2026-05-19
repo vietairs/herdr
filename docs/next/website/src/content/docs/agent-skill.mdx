@@ -1,103 +1,55 @@
 ---
-title: Agent skill
-description: A concise guide for coding agents running inside Herdr.
+title: Agent skill file
+description: Install Herdr instructions for Claude Code or another coding agent.
 ---
 
-This page teaches coding agents how to use Herdr while they are running inside a Herdr pane.
+Herdr ships a reusable agent skill file at [`SKILL.md`](https://github.com/ogulcancelik/herdr/blob/master/SKILL.md).
 
-Use Herdr to organize parallel work instead of stacking everything in one terminal.
+Install that file into any coding agent that supports reusable skills or custom instructions. The skill teaches the agent how to control Herdr from inside a Herdr pane.
 
-## Core model
+## What the skill does
 
-Herdr has four levels:
+The skill tells an agent to use the `herdr` CLI when `HERDR_ENV=1` is set. That means the agent is running inside a Herdr-managed pane and can safely talk to the local Herdr socket.
 
-| Level | Meaning |
-| --- | --- |
-| Workspace | A project or task context. |
-| Tab | A view inside a workspace. |
-| Pane | A terminal area inside a tab. |
-| Agent | A detected coding agent running in a pane. |
+With the skill installed, an agent can:
 
-Use workspace and tab actions for layout. Use pane actions for commands and output.
+- inspect workspaces, tabs, panes, and neighboring agents
+- split panes and run commands without stealing focus
+- read pane output and recent logs
+- wait for servers, tests, or another agent to finish
+- start helper agents in sibling panes
 
-## Read the current layout
+The skill is not a separate app or service. It is a markdown instruction file for agents.
 
-```bash
-herdr pane list
+## Install it
+
+Use the repository copy as the source of truth:
+
+```text
+https://github.com/ogulcancelik/herdr/blob/master/SKILL.md
 ```
 
-Use the pane IDs returned by Herdr for later commands.
+For agents with a skill system, install that file as a skill named `herdr`. For agents without a skill system, paste the file into the agent's project or user instructions.
 
-## Create a helper pane
-
-Split a pane and run a command:
+After installation, start the agent inside Herdr:
 
 ```bash
-herdr pane split 1-1 --direction right
-herdr pane run 1-2 "just test"
+herdr
+claude
 ```
 
-Prefer `pane run` over sending raw keys when you want to submit a full command line.
+Or use any other coding agent in a Herdr pane. The important part is that the agent process runs inside Herdr, so `HERDR_ENV=1` is available.
 
-## Read output
+## Safety rule
 
-```bash
-herdr pane read 1-2 --source recent --lines 80
-```
+The skill starts with one guardrail: if `HERDR_ENV=1` is not set, the agent should stop and say it is not running inside a Herdr-managed pane.
 
-Use `recent-unwrapped` when reading logs or matching long lines.
+This prevents an agent outside Herdr from trying to control a session it does not own.
 
-```bash
-herdr pane read 1-2 --source recent-unwrapped --lines 120
-```
+## Agent-facing reference
 
-## Wait for agents
+The full command guide lives in the skill file itself. It covers pane IDs, `pane split`, `pane run`, `pane read`, `wait output`, `wait agent-status`, workspace and tab commands, and coordination recipes.
 
-Wait for another agent to finish or become blocked:
+Read the source file here:
 
-```bash
-herdr wait agent-status 1-3 --status done
-herdr wait agent-status 1-3 --status blocked
-```
-
-Use agent waits for recognized coding agents. Use normal output matching for ordinary commands, servers, and tests.
-
-## Preserve focus
-
-Do not steal visible focus unless the user asked for it. Create panes, submit commands, and read output without changing the user’s active view when possible.
-
-## Use clear pane aliases
-
-When your tool supports aliases, use names like `server`, `tests`, `reviewer`, or `docs`. This makes later pane operations easier to audit.
-
-## Good patterns
-
-Run long work in a separate pane:
-
-```bash
-herdr pane split 1-1 --direction right
-herdr pane run 1-2 "just check"
-```
-
-Watch a server until it is ready:
-
-```bash
-herdr pane read 1-2 --source recent-unwrapped --lines 80
-```
-
-Ask a reviewer agent to inspect a change:
-
-```bash
-herdr pane split 1-1 --direction right
-herdr pane run 1-2 "pi --model <review-model>"
-```
-
-## Avoid these patterns
-
-Do not pile every command into the current pane.
-
-Do not use raw key injection for command submission when `pane run` is available.
-
-Do not wait for `agent-status` on a normal process that is not a coding agent.
-
-Do not change implementation direction without telling the user.
+[Open `SKILL.md` on GitHub →](https://github.com/ogulcancelik/herdr/blob/master/SKILL.md)
