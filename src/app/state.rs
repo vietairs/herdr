@@ -588,6 +588,7 @@ pub struct ViewState {
 pub enum Mode {
     Onboarding,
     ReleaseNotes,
+    ProductAnnouncement,
     Navigate,
     Terminal,
     RenameWorkspace,
@@ -747,6 +748,9 @@ pub(crate) enum DragTarget {
     ReleaseNotesScrollbar {
         grab_row_offset: u16,
     },
+    ProductAnnouncementScrollbar {
+        grab_row_offset: u16,
+    },
     KeybindHelpScrollbar {
         grab_row_offset: u16,
     },
@@ -853,6 +857,15 @@ pub struct ReleaseNotesState {
     pub preview: bool,
 }
 
+pub struct ProductAnnouncementState {
+    pub version: String,
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    pub scroll: u16,
+    pub preview: bool,
+}
+
 pub struct KeybindHelpState {
     pub scroll: u16,
 }
@@ -899,6 +912,7 @@ pub struct AppState {
     pub name_input: String,
     pub name_input_replace_on_type: bool,
     pub release_notes: Option<ReleaseNotesState>,
+    pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
@@ -1133,6 +1147,7 @@ impl AppState {
             name_input: String::new(),
             name_input_replace_on_type: false,
             release_notes: None,
+            product_announcement: None,
             keybind_help: KeybindHelpState { scroll: 0 },
             workspace_scroll: 0,
             agent_panel_scroll: 0,

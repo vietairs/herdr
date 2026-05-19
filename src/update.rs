@@ -98,6 +98,7 @@ struct UpdateManifest {
     protocol: Option<u32>,
     notes: String,
     assets: BTreeMap<String, String>,
+    announcement: Option<crate::product_announcements::ManifestAnnouncement>,
 }
 
 #[derive(Deserialize)]
@@ -133,10 +134,7 @@ struct ReleaseInfo {
     notes_body: String,
 }
 
-/// Check the hosted update manifest for the latest release. Returns release info if newer.
-fn check_latest() -> Result<Option<ReleaseInfo>, String> {
-    let current = Version::current();
-
+fn fetch_update_manifest() -> Result<UpdateManifest, String> {
     let output = Command::new("curl")
         .args([
             "-sfL",
@@ -155,9 +153,21 @@ fn check_latest() -> Result<Option<ReleaseInfo>, String> {
         return Err("failed to fetch update manifest".into());
     }
 
-    let manifest: UpdateManifest = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("failed to parse update manifest JSON: {e}"))?;
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("failed to parse update manifest JSON: {e}"))
+}
 
+fn handle_manifest_announcement(manifest: &UpdateManifest) {
+    if let Err(err) = crate::product_announcements::save_manifest_announcement(
+        &manifest.version,
+        manifest.announcement.as_ref(),
+    ) {
+        tracing::warn!("failed to save product announcement: {err}");
+    }
+}
+
+fn release_info_from_manifest(manifest: UpdateManifest) -> Result<Option<ReleaseInfo>, String> {
+    let current = Version::current();
     let latest = Version::parse(&manifest.version)
         .ok_or_else(|| format!("invalid version in update manifest: {}", manifest.version))?;
 
@@ -181,6 +191,13 @@ fn check_latest() -> Result<Option<ReleaseInfo>, String> {
         download_url,
         notes_body,
     }))
+}
+
+/// Check the hosted update manifest for the latest release. Returns release info if newer.
+fn check_latest() -> Result<Option<ReleaseInfo>, String> {
+    let manifest = fetch_update_manifest()?;
+    handle_manifest_announcement(&manifest);
+    release_info_from_manifest(manifest)
 }
 
 fn parse_homebrew_formula_stable_version(input: &[u8]) -> Result<Version, String> {
@@ -1029,6 +1046,10 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
 }
 
 fn auto_update_homebrew(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+    if let Ok(manifest) = fetch_update_manifest() {
+        handle_manifest_announcement(&manifest);
+    }
+
     let version = match check_homebrew_latest() {
         Ok(Some(version)) => version,
         Ok(None) => return,
@@ -1488,6 +1509,11 @@ mod tests {
             \"version\": \"0.2.0\",\n\
             \"protocol\": 4,\n\
             \"notes\": \"### Changed\\n- One\",\n\
+            \"announcement\": {\n\
+                \"id\": \"keymap-v2\",\n\
+                \"title\": \"Keymap changes\",\n\
+                \"body\": \"### Heads up\\n- Defaults changed\"\n\
+            },\n\
             \"assets\": {\n\
                 \"linux-x86_64\": \"https://example.com/herdr-linux-x86_64\",\n\
                 \"macos-aarch64\": \"https://example.com/herdr-macos-aarch64\"\n\
@@ -1498,6 +1524,13 @@ mod tests {
         assert_eq!(manifest.protocol, Some(4));
         assert_eq!(manifest.assets.len(), 2);
         assert_eq!(manifest.notes_body(), "### Changed\n- One");
+        assert_eq!(
+            manifest
+                .announcement
+                .as_ref()
+                .map(|announcement| announcement.id.as_str()),
+            Some("keymap-v2")
+        );
         assert_eq!(
             manifest.download_url_for("linux", "x86_64").as_deref(),
             Some("https://example.com/herdr-linux-x86_64")

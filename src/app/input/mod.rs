@@ -62,6 +62,7 @@ impl App {
                 match self.state.mode {
                     Mode::Onboarding => self.handle_onboarding_key(key),
                     Mode::ReleaseNotes => self.handle_release_notes_key(key),
+                    Mode::ProductAnnouncement => self.handle_product_announcement_key(key),
                     Mode::Navigate => unreachable!(),
                     Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                         handle_rename_key(&mut self.state, key)
@@ -123,6 +124,32 @@ impl App {
                 if let Some(ModalAction::Close) = modal_action_from_key(&key, RELEASE_NOTES_ACTIONS)
                 {
                     self.dismiss_release_notes();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn handle_product_announcement_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.scroll_product_announcement(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll_product_announcement(1),
+            KeyCode::PageUp => self.scroll_product_announcement(-8),
+            KeyCode::PageDown => self.scroll_product_announcement(8),
+            KeyCode::Home => {
+                if let Some(announcement) = &mut self.state.product_announcement {
+                    announcement.scroll = 0;
+                }
+            }
+            KeyCode::End => {
+                let max_scroll = self.state.product_announcement_max_scroll();
+                if let Some(announcement) = &mut self.state.product_announcement {
+                    announcement.scroll = max_scroll;
+                }
+            }
+            _ => {
+                if let Some(ModalAction::Close) = modal_action_from_key(&key, RELEASE_NOTES_ACTIONS)
+                {
+                    self.dismiss_product_announcement();
                 }
             }
         }

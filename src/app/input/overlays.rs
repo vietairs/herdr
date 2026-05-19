@@ -67,6 +67,58 @@ impl App {
             return true;
         }
 
+        if self.state.mode == Mode::ProductAnnouncement {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left)
+                    if self
+                        .state
+                        .product_announcement_close_button_at(mouse.column, mouse.row) =>
+                {
+                    self.dismiss_product_announcement();
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(target) = self
+                        .state
+                        .product_announcement_scrollbar_target_at(mouse.column, mouse.row)
+                    {
+                        match target {
+                            ScrollbarClickTarget::Thumb { grab_row_offset } => {
+                                self.state.drag = Some(DragState {
+                                    target: DragTarget::ProductAnnouncementScrollbar {
+                                        grab_row_offset,
+                                    },
+                                });
+                            }
+                            ScrollbarClickTarget::Track { offset_from_bottom } => self
+                                .state
+                                .set_product_announcement_offset_from_bottom(offset_from_bottom),
+                        }
+                    }
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if let Some(DragState {
+                        target: DragTarget::ProductAnnouncementScrollbar { grab_row_offset },
+                    }) = &self.state.drag
+                    {
+                        if let Some(offset_from_bottom) = self
+                            .state
+                            .product_announcement_offset_for_drag_row(mouse.row, *grab_row_offset)
+                        {
+                            self.state
+                                .set_product_announcement_offset_from_bottom(offset_from_bottom);
+                        }
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.state.drag = None;
+                }
+                MouseEventKind::ScrollUp => self.scroll_product_announcement(-3),
+                MouseEventKind::ScrollDown => self.scroll_product_announcement(3),
+                _ => {}
+            }
+            return true;
+        }
+
         if self.state.mode == Mode::KeybindHelp {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left)
@@ -153,6 +205,13 @@ impl AppState {
         self.onboarding_modal_inner(
             crate::ui::RELEASE_NOTES_MODAL_SIZE.0,
             crate::ui::RELEASE_NOTES_MODAL_SIZE.1,
+        )
+    }
+
+    fn product_announcement_modal_inner(&self) -> Option<Rect> {
+        self.onboarding_modal_inner(
+            crate::ui::PRODUCT_ANNOUNCEMENT_MODAL_SIZE.0,
+            crate::ui::PRODUCT_ANNOUNCEMENT_MODAL_SIZE.1,
         )
     }
 
@@ -264,6 +323,112 @@ impl AppState {
         let max_scroll = self.release_notes_max_scroll() as usize;
         if let Some(notes) = &mut self.release_notes {
             notes.scroll = max_scroll.saturating_sub(offset_from_bottom) as u16;
+        }
+    }
+
+    fn product_announcement_close_button_at(&self, col: u16, row: u16) -> bool {
+        let Some(inner) = self.product_announcement_modal_inner() else {
+            return false;
+        };
+        if inner.height < 4 || inner.width < 12 {
+            return false;
+        }
+        let button =
+            crate::ui::release_notes_close_button_rect(Rect::new(inner.x, inner.y, inner.width, 1));
+        col >= button.x
+            && col < button.x + button.width
+            && row >= button.y
+            && row < button.y + button.height
+    }
+
+    fn product_announcement_body_rect(&self) -> Option<Rect> {
+        let inner = self.product_announcement_modal_inner()?;
+        if inner.height < 8 || inner.width < 4 {
+            return None;
+        }
+        Some(crate::ui::modal_stack_areas(inner, 2, 1, 0, 1).content)
+    }
+
+    fn product_announcement_scroll_metrics(&self) -> Option<crate::pane::ScrollMetrics> {
+        let announcement = self.product_announcement.as_ref()?;
+        let body = self.product_announcement_body_rect()?;
+        let viewport_rows = body.height.max(1) as usize;
+        let lines = crate::ui::product_announcement_display_lines(announcement, &self.palette);
+
+        let rows_for_width = |wrap_width: usize| {
+            lines
+                .iter()
+                .map(|(width, _)| width.max(&1).div_ceil(wrap_width.max(1)))
+                .sum::<usize>()
+        };
+
+        let full_width = body.width.max(1) as usize;
+        let mut total_rows = rows_for_width(full_width);
+        let wrap_width = if total_rows > viewport_rows && full_width > 1 {
+            body.width.saturating_sub(1).max(1) as usize
+        } else {
+            full_width
+        };
+        total_rows = rows_for_width(wrap_width);
+
+        let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
+        Some(crate::pane::ScrollMetrics {
+            offset_from_bottom: max_offset_from_bottom.saturating_sub(announcement.scroll as usize),
+            max_offset_from_bottom,
+            viewport_rows,
+        })
+    }
+
+    pub(crate) fn product_announcement_max_scroll(&self) -> u16 {
+        self.product_announcement_scroll_metrics()
+            .map(|metrics| metrics.max_offset_from_bottom as u16)
+            .unwrap_or(0)
+    }
+
+    fn product_announcement_scrollbar_target_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<ScrollbarClickTarget> {
+        let body = self.product_announcement_body_rect()?;
+        let metrics = self.product_announcement_scroll_metrics()?;
+        let track = crate::ui::release_notes_scrollbar_rect(body, metrics)?;
+        if !(col >= track.x
+            && col < track.x + track.width
+            && row >= track.y
+            && row < track.y + track.height)
+        {
+            return None;
+        }
+        if let Some(grab_row_offset) = crate::ui::scrollbar_thumb_grab_offset(metrics, track, row) {
+            Some(ScrollbarClickTarget::Thumb { grab_row_offset })
+        } else {
+            Some(ScrollbarClickTarget::Track {
+                offset_from_bottom: crate::ui::scrollbar_offset_from_row(metrics, track, row),
+            })
+        }
+    }
+
+    fn product_announcement_offset_for_drag_row(
+        &self,
+        row: u16,
+        grab_row_offset: u16,
+    ) -> Option<usize> {
+        let body = self.product_announcement_body_rect()?;
+        let metrics = self.product_announcement_scroll_metrics()?;
+        let track = crate::ui::release_notes_scrollbar_rect(body, metrics)?;
+        Some(crate::ui::scrollbar_offset_from_drag_row(
+            metrics,
+            track,
+            row,
+            grab_row_offset,
+        ))
+    }
+
+    fn set_product_announcement_offset_from_bottom(&mut self, offset_from_bottom: usize) {
+        let max_scroll = self.product_announcement_max_scroll() as usize;
+        if let Some(announcement) = &mut self.product_announcement {
+            announcement.scroll = max_scroll.saturating_sub(offset_from_bottom) as u16;
         }
     }
 

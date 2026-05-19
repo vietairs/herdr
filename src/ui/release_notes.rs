@@ -12,11 +12,12 @@ use super::widgets::{
     render_modal_header, render_modal_shell,
 };
 use crate::app::{
-    state::{Palette, ReleaseNotesState},
+    state::{Palette, ProductAnnouncementState, ReleaseNotesState},
     AppState,
 };
 
 pub(crate) const RELEASE_NOTES_MODAL_SIZE: (u16, u16) = (80, 24);
+pub(crate) const PRODUCT_ANNOUNCEMENT_MODAL_SIZE: (u16, u16) = (88, 24);
 
 pub(super) fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(notes) = &app.release_notes else {
@@ -118,6 +119,117 @@ pub(super) fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, ar
     .wrap(Wrap { trim: false })
     .scroll((notes.scroll, 0));
     frame.render_widget(body, notes_text_area);
+    if let Some(track) = track {
+        render_scrollbar(
+            frame,
+            metrics,
+            track,
+            app.palette.overlay0,
+            app.palette.overlay1,
+            "▐",
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" scroll ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("wheel ↑↓", Style::default().fg(app.palette.text)),
+            Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("close", Style::default().fg(app.palette.overlay0)),
+            Span::styled(" esc / enter ", Style::default().fg(app.palette.text)),
+        ])),
+        stack.footer.unwrap_or_default(),
+    );
+}
+
+pub(super) fn render_product_announcement_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    let Some(announcement) = &app.product_announcement else {
+        return;
+    };
+
+    super::dim_background(frame, area);
+
+    let Some(inner) = render_modal_shell(
+        frame,
+        area,
+        PRODUCT_ANNOUNCEMENT_MODAL_SIZE.0,
+        PRODUCT_ANNOUNCEMENT_MODAL_SIZE.1,
+        &app.palette,
+    ) else {
+        return;
+    };
+    if inner.height < 8 || inner.width < 20 {
+        return;
+    }
+
+    let stack = modal_stack_areas(inner, 2, 1, 0, 1);
+    let header_rows =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas::<2>(stack.header);
+
+    let header_title_area = Rect::new(
+        header_rows[0].x + 1,
+        header_rows[0].y,
+        header_rows[0].width.saturating_sub(2),
+        header_rows[0].height,
+    );
+    let header_subtitle_area = Rect::new(
+        header_rows[1].x + 1,
+        header_rows[1].y,
+        header_rows[1].width.saturating_sub(2),
+        header_rows[1].height,
+    );
+
+    render_modal_header(frame, header_title_area, &announcement.title, &app.palette);
+    let subtitle = if announcement.preview {
+        "product announcement preview"
+    } else {
+        "product announcement"
+    };
+    frame.render_widget(
+        Paragraph::new(format!("{subtitle} · v{}", announcement.version))
+            .style(Style::default().fg(app.palette.overlay1)),
+        header_subtitle_area,
+    );
+    render_action_button(
+        frame,
+        release_notes_close_button_rect(header_rows[0]),
+        Some("esc"),
+        "close",
+        Style::default()
+            .fg(panel_contrast_fg(&app.palette))
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let body_rect = stack.content;
+    let metrics = crate::pane::ScrollMetrics {
+        offset_from_bottom: app
+            .product_announcement_max_scroll()
+            .saturating_sub(announcement.scroll) as usize,
+        max_offset_from_bottom: app.product_announcement_max_scroll() as usize,
+        viewport_rows: body_rect.height.max(1) as usize,
+    };
+    let track = release_notes_scrollbar_rect(body_rect, metrics);
+    let text_area = track
+        .map(|_| {
+            Rect::new(
+                body_rect.x,
+                body_rect.y,
+                body_rect.width.saturating_sub(1),
+                body_rect.height,
+            )
+        })
+        .unwrap_or(body_rect);
+
+    let body = Paragraph::new(
+        product_announcement_display_lines(announcement, &app.palette)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>(),
+    )
+    .wrap(Wrap { trim: false })
+    .scroll((announcement.scroll, 0));
+    frame.render_widget(body, text_area);
     if let Some(track) = track {
         render_scrollbar(
             frame,
@@ -354,6 +466,13 @@ pub(crate) fn release_notes_display_lines<'a>(
     p: &Palette,
 ) -> Vec<(usize, Line<'a>)> {
     release_notes_lines(notes.body.as_str(), p)
+}
+
+pub(crate) fn product_announcement_display_lines<'a>(
+    announcement: &'a ProductAnnouncementState,
+    p: &Palette,
+) -> Vec<(usize, Line<'a>)> {
+    release_notes_lines(announcement.body.as_str(), p)
 }
 
 pub(crate) fn release_notes_close_button_rect(area: Rect) -> Rect {

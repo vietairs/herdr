@@ -316,11 +316,15 @@ impl App {
             .map(|notes| notes.version.clone());
         let latest_release_notes_available = latest_release_notes.is_some();
         let update_install_command = crate::update::update_install_command().to_string();
+        let startup_product_announcement =
+            crate::product_announcements::load_unseen_for_current_version();
 
         let mode = if config.should_show_onboarding() {
             state::Mode::Onboarding
         } else if startup_release_notes.is_some() {
             state::Mode::ReleaseNotes
+        } else if startup_product_announcement.is_some() {
+            state::Mode::ProductAnnouncement
         } else if active.is_some() {
             state::Mode::Terminal
         } else {
@@ -354,6 +358,16 @@ impl App {
                 body: notes.body,
                 scroll: 0,
                 preview: notes.preview,
+            }),
+            product_announcement: startup_product_announcement.map(|announcement| {
+                state::ProductAnnouncementState {
+                    version: announcement.version,
+                    id: announcement.id,
+                    title: announcement.title,
+                    body: announcement.body,
+                    scroll: 0,
+                    preview: announcement.preview,
+                }
             }),
             keybind_help: state::KeybindHelpState { scroll: 0 },
             workspace_scroll: 0,
@@ -664,6 +678,30 @@ impl App {
             }
         }
 
+        if self.state.product_announcement.is_some() {
+            self.state.mode = Mode::ProductAnnouncement;
+        } else {
+            self.state.mode = if self.state.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
+        }
+    }
+
+    pub(crate) fn dismiss_product_announcement(&mut self) {
+        if let Some(announcement) = self.state.product_announcement.take() {
+            if !announcement.preview {
+                if let Err(err) =
+                    crate::product_announcements::mark_seen(&announcement.version, &announcement.id)
+                {
+                    self.state.config_diagnostic =
+                        Some(format!("failed to update announcement status: {err}"));
+                    self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(5));
+                }
+            }
+        }
+
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
         } else {
@@ -678,6 +716,18 @@ impl App {
                 notes.scroll.saturating_sub(delta.unsigned_abs())
             } else {
                 notes.scroll.saturating_add(delta as u16)
+            }
+            .min(max_scroll);
+        }
+    }
+
+    pub(crate) fn scroll_product_announcement(&mut self, delta: i16) {
+        let max_scroll = self.state.product_announcement_max_scroll();
+        if let Some(announcement) = &mut self.state.product_announcement {
+            announcement.scroll = if delta.is_negative() {
+                announcement.scroll.saturating_sub(delta.unsigned_abs())
+            } else {
+                announcement.scroll.saturating_add(delta as u16)
             }
             .min(max_scroll);
         }
@@ -981,6 +1031,9 @@ impl App {
             }
             Mode::ReleaseNotes => {
                 self.handle_release_notes_key(key_event);
+            }
+            Mode::ProductAnnouncement => {
+                self.handle_product_announcement_key(key_event);
             }
             Mode::Settings => {
                 self.handle_settings_key(key_event);

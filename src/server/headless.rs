@@ -2188,7 +2188,7 @@ pub fn run_server() -> io::Result<()> {
             &loaded_config.config,
             no_session,
             config::config_diagnostic_summary(&loaded_config.diagnostics),
-            None, // startup_release_notes
+            crate::release_notes::load_pending_for_current_version(),
             api_rx,
             event_hub,
         );
