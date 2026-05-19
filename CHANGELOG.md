@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.11] - 2026-05-19
+
 ### Added
 - Added the `terminal` built-in theme, which uses the host terminal's ANSI palette for Herdr UI colors. (#140, #146, thanks @babymastodon)
 - Added Hermes Agent foreground-process detection with basic idle, working, and blocked heuristics. (#144)
