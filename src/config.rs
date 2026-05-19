@@ -9,7 +9,7 @@ mod theme;
 pub use self::{
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config, remove_section_key,
-        upsert_section_bool, upsert_section_value,
+        state_dir, upsert_section_bool, upsert_section_value,
     },
     keybinds::{
         format_key_combo, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,

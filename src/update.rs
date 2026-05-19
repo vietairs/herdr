@@ -12,10 +12,10 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
@@ -28,6 +28,11 @@ const DEFAULT_FAKE_UPDATE_NOTES_VERSION: &str = "0.3.0";
 const SERVER_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVER_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const STAR_PROMPT_REPO: &str = "ogulcancelik/herdr";
+const STAR_PROMPT_STATE_FILE: &str = "github-star-prompt.json";
+const STAR_PROMPT_MAX_PROMPTS: u32 = 5;
+const STAR_PROMPT_INTERVAL_UPDATES: [u32; 4] = [2, 3, 5, 7];
+const GH_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn fake_release_notes_body(version: &str) -> String {
     let notes_version = env::var(FAKE_UPDATE_NOTES_VERSION_ENV)
@@ -636,6 +641,262 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// GitHub star prompt
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct StarPromptState {
+    #[serde(default)]
+    prompts_shown: u32,
+    #[serde(default)]
+    successful_updates_since_prompt: u32,
+    #[serde(default)]
+    known_starred: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GithubStarStatus {
+    Starred,
+    NotStarred,
+    Unknown,
+}
+
+fn star_prompt_state_path() -> PathBuf {
+    crate::config::state_dir().join(STAR_PROMPT_STATE_FILE)
+}
+
+fn load_star_prompt_state_from_path(path: &Path) -> StarPromptState {
+    let Ok(content) = fs::read_to_string(path) else {
+        return StarPromptState::default();
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_star_prompt_state_to_path(path: &Path, state: &StarPromptState) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let json = serde_json::to_string_pretty(state).map_err(io::Error::other)?;
+    let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    fs::write(&tmp_path, json)?;
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn star_prompt_due(state: &StarPromptState) -> bool {
+    if state.known_starred {
+        return false;
+    }
+    if state.prompts_shown == 0 {
+        return true;
+    }
+    if state.prompts_shown >= STAR_PROMPT_MAX_PROMPTS {
+        return false;
+    }
+
+    let interval_index = state.prompts_shown.saturating_sub(1) as usize;
+    let Some(interval) = STAR_PROMPT_INTERVAL_UPDATES.get(interval_index) else {
+        return false;
+    };
+    state.successful_updates_since_prompt.saturating_add(1) >= *interval
+}
+
+fn record_successful_update_without_star_prompt(state: &mut StarPromptState) {
+    state.successful_updates_since_prompt = state.successful_updates_since_prompt.saturating_add(1);
+}
+
+fn record_star_prompt_shown(state: &mut StarPromptState) {
+    state.prompts_shown = state.prompts_shown.saturating_add(1);
+    state.successful_updates_since_prompt = 0;
+}
+
+fn command_status_succeeds_with_timeout(command: &mut Command, timeout: Duration) -> bool {
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> io::Result<Option<std::process::Output>> {
+    let mut child = command.spawn()?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match child.try_wait()? {
+            Some(_) => return child.wait_with_output().map(Some),
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+        }
+    }
+}
+
+fn command_succeeds(command: &str, args: &[&str]) -> bool {
+    let mut command = Command::new(command);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command_status_succeeds_with_timeout(&mut command, GH_COMMAND_TIMEOUT)
+}
+
+fn gh_cli_available() -> bool {
+    command_succeeds("gh", &["--version"])
+}
+
+fn gh_auth_succeeds() -> bool {
+    command_succeeds("gh", &["auth", "status", "--hostname", "github.com"])
+}
+
+fn gh_viewer_star_status() -> GithubStarStatus {
+    let mut command = Command::new("gh");
+    command
+        .args([
+            "repo",
+            "view",
+            STAR_PROMPT_REPO,
+            "--json",
+            "viewerHasStarred",
+            "--jq",
+            ".viewerHasStarred",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let Ok(Some(output)) = command_output_with_timeout(&mut command, GH_COMMAND_TIMEOUT) else {
+        return GithubStarStatus::Unknown;
+    };
+    if !output.status.success() {
+        return GithubStarStatus::Unknown;
+    }
+
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "true" => GithubStarStatus::Starred,
+        "false" => GithubStarStatus::NotStarred,
+        _ => GithubStarStatus::Unknown,
+    }
+}
+
+fn parse_star_prompt_response(input: &str) -> Option<bool> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn prompt_to_star_repository() -> io::Result<bool> {
+    loop {
+        eprint!("If herdr has been useful, would you like to star it? [Y/n] ");
+        io::stderr().flush()?;
+
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input)? == 0 {
+            return Ok(false);
+        }
+        if let Some(answer) = parse_star_prompt_response(&input) {
+            return Ok(answer);
+        }
+        eprintln!("please answer y or n.");
+    }
+}
+
+fn star_repository_with_gh() -> bool {
+    let mut command = Command::new("gh");
+    command.args(["repo", "star", STAR_PROMPT_REPO]);
+
+    if command_status_succeeds_with_timeout(&mut command, GH_COMMAND_TIMEOUT) {
+        eprintln!("starred {STAR_PROMPT_REPO}. thank you.");
+        true
+    } else {
+        eprintln!(
+            "could not star {STAR_PROMPT_REPO}; you can run `gh repo star {STAR_PROMPT_REPO}` manually."
+        );
+        false
+    }
+}
+
+fn maybe_offer_star_after_successful_update() {
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return;
+    }
+
+    let path = star_prompt_state_path();
+    let mut state = load_star_prompt_state_from_path(&path);
+    if state.known_starred {
+        return;
+    }
+    if !star_prompt_due(&state) {
+        record_successful_update_without_star_prompt(&mut state);
+        if let Err(err) = save_star_prompt_state_to_path(&path, &state) {
+            tracing::warn!(err = %err, "failed to save GitHub star prompt state");
+        }
+        return;
+    }
+
+    if !gh_cli_available() || !gh_auth_succeeds() {
+        return;
+    }
+    match gh_viewer_star_status() {
+        GithubStarStatus::NotStarred => {}
+        GithubStarStatus::Starred => {
+            state.known_starred = true;
+            if let Err(err) = save_star_prompt_state_to_path(&path, &state) {
+                tracing::warn!(err = %err, "failed to save GitHub star prompt state");
+            }
+            return;
+        }
+        GithubStarStatus::Unknown => return,
+    }
+
+    record_star_prompt_shown(&mut state);
+    if let Err(err) = save_star_prompt_state_to_path(&path, &state) {
+        tracing::warn!(err = %err, "failed to save GitHub star prompt state");
+        return;
+    }
+
+    match prompt_to_star_repository() {
+        Ok(true) => {
+            if star_repository_with_gh() {
+                state.known_starred = true;
+                if let Err(err) = save_star_prompt_state_to_path(&path, &state) {
+                    tracing::warn!(err = %err, "failed to save GitHub star prompt state");
+                }
+            }
+        }
+        Ok(false) => {}
+        Err(err) => tracing::warn!(err = %err, "failed to read GitHub star prompt response"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -685,6 +946,8 @@ pub fn self_update() -> Result<Version, String> {
     } else {
         eprintln!("run herdr again.");
     }
+
+    maybe_offer_star_after_successful_update();
 
     Ok(release.version)
 }
@@ -1132,6 +1395,82 @@ mod tests {
     fn current_version_parses() {
         let v = Version::current();
         assert!(v.major < 100);
+    }
+
+    #[test]
+    fn star_prompt_response_defaults_yes() {
+        assert_eq!(parse_star_prompt_response(""), Some(true));
+        assert_eq!(parse_star_prompt_response("\n"), Some(true));
+        assert_eq!(parse_star_prompt_response("y"), Some(true));
+        assert_eq!(parse_star_prompt_response("yes"), Some(true));
+        assert_eq!(parse_star_prompt_response("n"), Some(false));
+        assert_eq!(parse_star_prompt_response("no"), Some(false));
+        assert_eq!(parse_star_prompt_response("later"), None);
+    }
+
+    #[test]
+    fn star_prompt_is_due_five_times_with_increasing_intervals() {
+        let mut state = StarPromptState::default();
+
+        assert!(star_prompt_due(&state));
+        record_star_prompt_shown(&mut state);
+        assert_eq!(state.prompts_shown, 1);
+        assert_eq!(state.successful_updates_since_prompt, 0);
+
+        for interval in STAR_PROMPT_INTERVAL_UPDATES {
+            for update in 1..interval {
+                assert!(
+                    !star_prompt_due(&state),
+                    "prompt was early at update {update}/{interval}"
+                );
+                record_successful_update_without_star_prompt(&mut state);
+            }
+
+            assert!(
+                star_prompt_due(&state),
+                "prompt was not due after {interval} updates"
+            );
+            record_star_prompt_shown(&mut state);
+            assert_eq!(state.successful_updates_since_prompt, 0);
+        }
+
+        assert_eq!(state.prompts_shown, STAR_PROMPT_MAX_PROMPTS);
+        for _ in 0..20 {
+            assert!(!star_prompt_due(&state));
+            record_successful_update_without_star_prompt(&mut state);
+        }
+    }
+
+    #[test]
+    fn star_prompt_is_never_due_after_known_starred() {
+        let mut state = StarPromptState {
+            prompts_shown: 1,
+            successful_updates_since_prompt: 99,
+            known_starred: true,
+        };
+
+        assert!(!star_prompt_due(&state));
+        record_successful_update_without_star_prompt(&mut state);
+        assert!(!star_prompt_due(&state));
+    }
+
+    #[test]
+    fn star_prompt_state_round_trips() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-star-prompt-{}-{}.json",
+            std::process::id(),
+            "round-trip"
+        ));
+        let state = StarPromptState {
+            prompts_shown: 2,
+            successful_updates_since_prompt: 1,
+            known_starred: false,
+        };
+
+        save_star_prompt_state_to_path(&path, &state).unwrap();
+
+        assert_eq!(load_star_prompt_state_from_path(&path), state);
+        let _ = fs::remove_file(path);
     }
 
     #[test]

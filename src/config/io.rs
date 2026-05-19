@@ -22,6 +22,16 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
+pub fn state_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_STATE_HOME") {
+        PathBuf::from(dir).join(app_dir_name())
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(format!(".local/state/{}", app_dir_name()))
+    } else {
+        PathBuf::from(format!("/tmp/{}-state", app_dir_name()))
+    }
+}
+
 impl Config {
     pub fn load() -> LoadedConfig {
         let path = config_path();

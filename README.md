@@ -267,6 +267,10 @@ full logging and environment variable details: [`CONFIGURATION.md`](./CONFIGURAT
 - [`SKILL.md`](./SKILL.md) — reusable agent skill
 - [`SOCKET_API.md`](./SOCKET_API.md) — socket protocol and cli reference
 
+## agent instructions
+
+If you are an AI agent helping with this repository, read [`AGENTS.md`](./AGENTS.md) before making changes and read [`CONTRIBUTING.md`](./CONTRIBUTING.md) before opening issues or PRs.
+
 ## building from source
 
 ```bash
