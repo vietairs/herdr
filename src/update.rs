@@ -829,16 +829,18 @@ fn prompt_to_star_repository() -> io::Result<bool> {
 }
 
 fn star_repository_with_gh() -> bool {
+    let endpoint = format!("/user/starred/{STAR_PROMPT_REPO}");
     let mut command = Command::new("gh");
-    command.args(["repo", "star", STAR_PROMPT_REPO]);
+    command
+        .args(["api", "--method", "PUT", endpoint.as_str(), "--silent"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
 
     if command_status_succeeds_with_timeout(&mut command, GH_COMMAND_TIMEOUT) {
         eprintln!("starred {STAR_PROMPT_REPO}. thank you.");
         true
     } else {
-        eprintln!(
-            "could not star {STAR_PROMPT_REPO}; you can run `gh repo star {STAR_PROMPT_REPO}` manually."
-        );
         false
     }
 }
