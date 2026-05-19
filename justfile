@@ -51,9 +51,25 @@ release-docs-check:
             exit 1; \
         fi; \
     done
-    @test -f website/src/content/docs/configuration.mdx
-    @test -f website/src/content/docs/integrations.mdx
-    @test -f website/src/content/docs/socket-api.mdx
+    @test -d docs/next/website/src/content/docs
+    @for file in website/src/content/docs/*.mdx; do \
+        staged="docs/next/website/src/content/docs/$$(basename "$$file")"; \
+        if [ ! -f "$$staged" ]; then \
+            echo "error: $$staged is missing; docs/next/website/src/content/docs must mirror website/src/content/docs"; \
+            exit 1; \
+        fi; \
+        if ! diff -u "$$file" "$$staged"; then \
+            echo "error: $$file differs from $$staged; finalize website docs before releasing"; \
+            exit 1; \
+        fi; \
+    done
+    @for file in docs/next/website/src/content/docs/*.mdx; do \
+        released="website/src/content/docs/$$(basename "$$file")"; \
+        if [ ! -f "$$released" ]; then \
+            echo "error: $$file has no matching released website doc"; \
+            exit 1; \
+        fi; \
+    done
 
 # Finalize changelog, bump version, commit, tag, push, and trigger the GitHub Release workflow (usage: just release 0.1.1)
 release version:
