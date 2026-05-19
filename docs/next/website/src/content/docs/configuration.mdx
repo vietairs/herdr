@@ -120,7 +120,9 @@ name = "catppuccin"
 
 Built-in themes:
 
-`catppuccin`, `catppuccin-latte`, `tokyo-night`, `tokyo-night-day`, `dracula`, `nord`, `gruvbox`, `gruvbox-light`, `one-dark`, `one-light`, `solarized`, `solarized-light`, `kanagawa`, `kanagawa-lotus`, `rose-pine`, `rose-pine-dawn`, `vesper`.
+`catppuccin`, `catppuccin-latte`, `terminal`, `tokyo-night`, `tokyo-night-day`, `dracula`, `nord`, `gruvbox`, `gruvbox-light`, `one-dark`, `one-light`, `solarized`, `solarized-light`, `kanagawa`, `kanagawa-lotus`, `rose-pine`, `rose-pine-dawn`, `vesper`.
+
+Use `terminal` when you want Herdr UI colors to follow your host terminal's ANSI palette.
 
 You can override individual colors:
 
@@ -145,6 +147,8 @@ Common options:
 ```toml
 [ui]
 sidebar_width = 32
+sidebar_min_width = 18
+sidebar_max_width = 36
 mouse_capture = true
 confirm_close = true
 prompt_new_tab_name = true
@@ -152,6 +156,8 @@ show_agent_labels_on_pane_borders = false
 agent_panel_scope = "all"
 accent = "cyan"
 ```
+
+`sidebar_min_width` and `sidebar_max_width` control the expanded sidebar's resize bounds in columns. The defaults are 18 and 36.
 
 `agent_panel_scope` can be `all` or `current`. Use `current` if you only want the agent panel to show agents in the active workspace.
 

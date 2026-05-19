@@ -286,7 +286,7 @@ cargo build --release
 
 ```bash
 just test        # unit tests
-just test-all   # full local test suite
+just check       # formatting, tests, and maintenance checks
 ```
 
 ## license

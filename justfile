@@ -53,20 +53,20 @@ release-docs-check:
     done
     @test -d docs/next/website/src/content/docs
     @for file in website/src/content/docs/*.mdx; do \
-        staged="docs/next/website/src/content/docs/$$(basename "$$file")"; \
-        if [ ! -f "$$staged" ]; then \
-            echo "error: $$staged is missing; docs/next/website/src/content/docs must mirror website/src/content/docs"; \
+        staged="docs/next/website/src/content/docs/$(basename "$file")"; \
+        if [ ! -f "$staged" ]; then \
+            echo "error: $staged is missing; docs/next/website/src/content/docs must mirror website/src/content/docs"; \
             exit 1; \
         fi; \
-        if ! diff -u "$$file" "$$staged"; then \
-            echo "error: $$file differs from $$staged; finalize website docs before releasing"; \
+        if ! diff -u "$file" "$staged"; then \
+            echo "error: $file differs from $staged; finalize website docs before releasing"; \
             exit 1; \
         fi; \
     done
     @for file in docs/next/website/src/content/docs/*.mdx; do \
-        released="website/src/content/docs/$$(basename "$$file")"; \
-        if [ ! -f "$$released" ]; then \
-            echo "error: $$file has no matching released website doc"; \
+        released="website/src/content/docs/$(basename "$file")"; \
+        if [ ! -f "$released" ]; then \
+            echo "error: $file has no matching released website doc"; \
             exit 1; \
         fi; \
     done

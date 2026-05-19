@@ -53,7 +53,7 @@ Process:
    - Inspect commit bodies for issue reference lines in the form `refs #<issue-number>`.
    - Flag normal commits that use GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue-number>`, or `resolves #<issue-number>`, because they close issues before release when they land on `master`.
    - For each shipped issue reference, check whether the changelog has a matching user-facing entry that mentions `#<issue-number>` when appropriate.
-   - For each merged external PR, check whether the changelog entry mentions the PR number and thanks the contributor in the existing style, e.g. `(#129, thanks @username)`. If the PR primarily ships an issue fix, include both the issue and PR numbers when useful, e.g. `(#128, #129, thanks @username)`.
+   - For each merged external human PR, check whether the changelog entry mentions the PR number and thanks the contributor in the existing style, e.g. `(#129, thanks @username)`. If the PR primarily ships an issue fix, include both the issue and PR numbers when useful, e.g. `(#128, #129, thanks @username)`. Do not add thanks text for maintainer-owned bots or automation accounts such as `kangal-bot` or `dependabot`.
    - Do not require or add GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue-number>`, or `resolves #<issue-number>` to changelog entries or release notes.
    - List shipped issue references under `Issue references to close after release:` so the release operator can verify what release CI will close after the GitHub Release is published.
    - Flag stale entries that do not appear to correspond to shipped changes in the range.

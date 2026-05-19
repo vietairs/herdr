@@ -1,6 +1,6 @@
 ---
 title: Integrations
-description: Install Herdr integrations for Pi, Claude Code, Codex, and OpenCode.
+description: Install Herdr integrations for Pi, Claude Code, Codex, OpenCode, and Hermes Agent.
 ---
 
 Herdr detects supported agents automatically. Integrations make that detection more precise by reporting semantic state directly to Herdr.
@@ -14,6 +14,7 @@ herdr integration install pi
 herdr integration install claude
 herdr integration install codex
 herdr integration install opencode
+herdr integration install hermes
 ```
 
 ## Uninstall integrations
@@ -23,6 +24,7 @@ herdr integration uninstall pi
 herdr integration uninstall claude
 herdr integration uninstall codex
 herdr integration uninstall opencode
+herdr integration uninstall hermes
 ```
 
 ## How Herdr uses integrations
@@ -83,6 +85,17 @@ herdr integration install opencode
 
 The plugin reports semantic state while OpenCode runs inside a Herdr pane.
 
+## Hermes Agent
+
+Install the Hermes Agent plugin:
+
+```bash
+herdr integration install hermes
+```
+
+Herdr writes `~/.hermes/plugins/herdr-agent-state/` and enables `herdr-agent-state` in `~/.hermes/config.yaml`. Restart Hermes after installing so the plugin loads.
+
+The plugin reports lifecycle, tool, and approval state while Hermes runs inside a Herdr pane. Native screen heuristics remain available when the plugin is not installed.
 
 ## Custom status labels
 

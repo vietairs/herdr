@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added
+- Added the `terminal` built-in theme, which uses the host terminal's ANSI palette for Herdr UI colors. (#140, #146, thanks @babymastodon)
+- Added Hermes Agent foreground-process detection with basic idle, working, and blocked heuristics. (#144)
+- Added a Hermes Agent plugin integration for direct state reporting. (#144)
+- Added `ui.sidebar_min_width` and `ui.sidebar_max_width` to configure the sidebar's expanded resize bounds. Defaults remain 18 and 36 columns; existing configs are unchanged. (#132, #135, thanks @ChihGodlee)
+
+### Fixed
+- Running the internal `herdr client` command from inside Herdr now respects the nested-launch guard, and the command is no longer advertised in root help. (#187)
+- The Herdr agent skill now refuses to claim pane ownership unless it is running inside Herdr. (#152)
+- Terminal-style docs code blocks now keep their copy button in the top-right corner. (#190)
+- The sidebar `new` workspace button now aligns with the sidebar's left padding. (#189)
+- Herdr now preserves `session.json` symlinks when saving persistent session state. (#139, #147, thanks @cloudmanic)
+- Alt+Backspace is now preserved when forwarded into panes. (#155, #165)
+- Directional pane focus now works while a tab is zoomed. (#151, #167)
+- Agent detection now prefers the foreground process group leader, reducing false matches from child helper processes. (#161, #172)
+- Remote attach now uses a matching `herdr` already available on the remote `PATH` before installing a new copy. (#170)
+- Modified Enter input such as Shift+Enter is now preserved in supported terminals. (#168)
+- Sidebar agent entries now show user-assigned agent names when available. (#145)
+
+### Breaking Changes
+- The client/server protocol is now version 7. Stop and restart any running v0.5.10 server before attaching with this release.
+
 ## [0.5.10] - 2026-05-17
 
 ### Added
