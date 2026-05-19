@@ -385,8 +385,8 @@ fn update_requires_server_stop(server: &crate::api::RuntimeStatus, release: &Rel
 fn parse_stop_server_before_update_response(input: &str) -> Option<bool> {
     let trimmed = input.trim().to_ascii_lowercase();
     match trimmed.as_str() {
-        "" | "n" | "no" => Some(false),
-        "y" | "yes" => Some(true),
+        "" | "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
         _ => None,
     }
 }
@@ -434,9 +434,9 @@ fn prompt_to_stop_server_before_update(
 
     loop {
         let prompt = if requires_stop {
-            "stop the server and continue updating? [y/N] "
+            "stop the server and continue updating? [Y/n] "
         } else {
-            "stop the server before updating? [y/N] "
+            "stop the server before updating? [Y/n] "
         };
         eprint!("{prompt}");
         io::stderr()
@@ -1256,13 +1256,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_stop_server_before_update_response_defaults_no_for_blank() {
-        assert_eq!(parse_stop_server_before_update_response(""), Some(false));
-        assert_eq!(parse_stop_server_before_update_response("\n"), Some(false));
-        assert_eq!(parse_stop_server_before_update_response("n"), Some(false));
-        assert_eq!(parse_stop_server_before_update_response("no"), Some(false));
+    fn parse_stop_server_before_update_response_defaults_yes_for_blank() {
+        assert_eq!(parse_stop_server_before_update_response(""), Some(true));
+        assert_eq!(parse_stop_server_before_update_response("\n"), Some(true));
         assert_eq!(parse_stop_server_before_update_response("y"), Some(true));
         assert_eq!(parse_stop_server_before_update_response("yes"), Some(true));
+        assert_eq!(parse_stop_server_before_update_response("n"), Some(false));
+        assert_eq!(parse_stop_server_before_update_response("no"), Some(false));
         assert_eq!(parse_stop_server_before_update_response("later"), None);
     }
 
