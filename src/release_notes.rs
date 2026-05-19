@@ -70,20 +70,8 @@ fn load_stored_from_path(path: &Path) -> Option<StoredReleaseNotes> {
     serde_json::from_str(&content).ok()
 }
 
-pub fn load_pending_for_current_version() -> Option<ReleaseNotes> {
-    load_pending_from_path(&pending_path(), env!("CARGO_PKG_VERSION"))
-}
-
 pub fn load_latest() -> Option<ReleaseNotes> {
     load_latest_from_path(&pending_path(), env!("CARGO_PKG_VERSION"))
-}
-
-fn load_pending_from_path(path: &Path, current_version: &str) -> Option<ReleaseNotes> {
-    let stored = load_stored_from_path(path)?;
-    if stored.version != current_version || !stored.show_on_startup {
-        return None;
-    }
-    release_notes_from_stored(stored, current_version)
 }
 
 fn load_latest_from_path(path: &Path, current_version: &str) -> Option<ReleaseNotes> {
@@ -240,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn marking_current_version_seen_preserves_latest_notes_without_startup_modal() {
+    fn marking_current_version_seen_preserves_latest_notes() {
         let path = std::env::temp_dir().join(format!(
             "herdr-release-notes-{}-{}.json",
             std::process::id(),
@@ -249,12 +237,10 @@ mod tests {
         let _ = clear_pending_at(&path);
         save_pending_to_path(&path, "0.3.1", "### Changed\n- One").unwrap();
 
-        let startup = load_pending_from_path(&path, "0.3.1").expect("startup notes");
-        assert!(!startup.preview);
-
         mark_current_version_seen_at(&path, "0.3.1").unwrap();
 
-        assert!(load_pending_from_path(&path, "0.3.1").is_none());
+        let stored = load_stored_from_path(&path).expect("stored notes");
+        assert!(!stored.show_on_startup);
         let latest = load_latest_from_path(&path, "0.3.1").expect("latest notes");
         assert_eq!(latest.version, "0.3.1");
         assert!(!latest.preview);
@@ -263,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_notes_without_show_on_startup_default_to_unseen() {
+    fn legacy_notes_without_show_on_startup_remain_available_as_latest() {
         let path = std::env::temp_dir().join(format!(
             "herdr-release-notes-{}-{}.json",
             std::process::id(),
@@ -276,7 +262,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(load_pending_from_path(&path, "0.3.1").is_some());
+        assert!(load_latest_from_path(&path, "0.3.1").is_some());
 
         clear_pending_at(&path).unwrap();
     }

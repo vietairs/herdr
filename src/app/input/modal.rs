@@ -627,6 +627,23 @@ mod tests {
     use super::super::{capture_snapshot, state_with_workspaces};
     use super::*;
 
+    fn config_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn temp_config_path(name: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "herdr-modal-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique).join("config.toml")
+    }
+
     #[test]
     fn custom_resize_key_exits_resize_mode() {
         let mut state = state_with_workspaces(&["test"]);
@@ -640,6 +657,34 @@ mod tests {
         );
 
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn global_menu_whats_new_opens_saved_release_notes() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("whats-new-saved-release-notes");
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        crate::release_notes::save_pending(env!("CARGO_PKG_VERSION"), "### Changed\n- Menu")
+            .unwrap();
+
+        let mut state = state_with_workspaces(&["test"]);
+        state.latest_release_notes_available = true;
+
+        assert!(global_menu_actions(&state).contains(&GlobalMenuAction::WhatsNew));
+
+        apply_global_menu_action(&mut state, GlobalMenuAction::WhatsNew);
+
+        assert_eq!(state.mode, Mode::ReleaseNotes);
+        assert_eq!(
+            state
+                .release_notes
+                .as_ref()
+                .map(|notes| notes.body.as_str()),
+            Some("### Changed\n- Menu")
+        );
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

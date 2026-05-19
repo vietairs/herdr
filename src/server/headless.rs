@@ -2188,7 +2188,6 @@ pub fn run_server() -> io::Result<()> {
             &loaded_config.config,
             no_session,
             config::config_diagnostic_summary(&loaded_config.diagnostics),
-            crate::release_notes::load_pending_for_current_version(),
             api_rx,
             event_hub,
         );
@@ -2242,8 +2241,7 @@ mod tests {
     fn test_headless_server() -> HeadlessServer {
         let config = crate::config::Config::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app =
-            crate::app::App::new(&config, true, None, None, api_rx, api::EventHub::default());
+        let mut app = crate::app::App::new(&config, true, None, api_rx, api::EventHub::default());
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
 

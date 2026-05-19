@@ -1035,7 +1035,6 @@ mod tests {
             &Config::default(),
             true,
             None,
-            None,
             api_rx,
             crate::api::EventHub::default(),
         );
@@ -1083,7 +1082,6 @@ mod tests {
         let mut app = App::new(
             &Config::default(),
             true,
-            None,
             None,
             api_rx,
             crate::api::EventHub::default(),
@@ -1152,7 +1150,6 @@ mod tests {
         let mut app = App::new(
             &Config::default(),
             true,
-            None,
             None,
             api_rx,
             crate::api::EventHub::default(),

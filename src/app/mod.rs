@@ -198,7 +198,6 @@ impl App {
         config: &Config,
         no_session: bool,
         config_diagnostic: Option<String>,
-        startup_release_notes: Option<crate::release_notes::ReleaseNotes>,
         api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
     ) -> Self {
@@ -321,8 +320,6 @@ impl App {
 
         let mode = if config.should_show_onboarding() {
             state::Mode::Onboarding
-        } else if startup_release_notes.is_some() {
-            state::Mode::ReleaseNotes
         } else if startup_product_announcement.is_some() {
             state::Mode::ProductAnnouncement
         } else if active.is_some() {
@@ -353,12 +350,7 @@ impl App {
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
-            release_notes: startup_release_notes.map(|notes| state::ReleaseNotesState {
-                version: notes.version,
-                body: notes.body,
-                scroll: 0,
-                preview: notes.preview,
-            }),
+            release_notes: None,
             product_announcement: startup_product_announcement.map(|announcement| {
                 state::ProductAnnouncementState {
                     version: announcement.version,
@@ -1131,7 +1123,6 @@ mod tests {
             &Config::default(),
             true,
             None,
-            None,
             api_rx,
             crate::api::EventHub::default(),
         )
@@ -1152,6 +1143,14 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique).join("config.toml")
+    }
+
+    fn restore_xdg_state_home(original: Option<std::ffi::OsString>) {
+        if let Some(value) = original {
+            std::env::set_var("XDG_STATE_HOME", value);
+        } else {
+            std::env::remove_var("XDG_STATE_HOME");
+        }
     }
 
     #[test]
@@ -1204,14 +1203,7 @@ mod tests {
         config.ui.agent_panel_scope = crate::config::AgentPanelScopeConfig::Current;
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let app = App::new(
-            &config,
-            true,
-            None,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
         assert_eq!(
             app.state.agent_panel_scope,
@@ -1251,6 +1243,74 @@ mod tests {
         assert!(app.state.latest_release_notes_available);
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn startup_keeps_pending_release_notes_available_without_auto_opening() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("startup-pending-release-notes-no-auto-open");
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        crate::release_notes::save_pending(env!("CARGO_PKG_VERSION"), "### Changed\n- One")
+            .unwrap();
+        let config = Config {
+            onboarding: Some(false),
+            ..Default::default()
+        };
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(app.state.mode, Mode::Navigate);
+        assert!(app.state.release_notes.is_none());
+        assert!(app.state.latest_release_notes_available);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn startup_still_auto_opens_unseen_product_announcement() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("startup-product-announcement-auto-open");
+        let state_home = path.parent().unwrap().join("state");
+        let original_xdg_state_home = std::env::var_os("XDG_STATE_HOME");
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        std::env::set_var("XDG_STATE_HOME", &state_home);
+
+        crate::release_notes::save_pending(env!("CARGO_PKG_VERSION"), "### Changed\n- One")
+            .unwrap();
+        crate::product_announcements::save_manifest_announcement(
+            env!("CARGO_PKG_VERSION"),
+            Some(&crate::product_announcements::ManifestAnnouncement {
+                id: "startup-announcement".into(),
+                title: Some("Startup announcement".into()),
+                body: "### Announcement\n- One".into(),
+            }),
+        )
+        .unwrap();
+
+        let config = Config {
+            onboarding: Some(false),
+            ..Default::default()
+        };
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(app.state.mode, Mode::ProductAnnouncement);
+        assert_eq!(
+            app.state
+                .product_announcement
+                .as_ref()
+                .map(|announcement| announcement.id.as_str()),
+            Some("startup-announcement")
+        );
+        assert!(app.state.release_notes.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        restore_xdg_state_home(original_xdg_state_home);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1382,14 +1442,7 @@ mod tests {
         config.ui.sidebar_max_width = 30;
 
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let app = App::new(
-            &config,
-            true,
-            None,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
         assert_eq!(
             app.state.sidebar_min_width, 18,

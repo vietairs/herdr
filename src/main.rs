@@ -517,13 +517,10 @@ fn main() -> io::Result<()> {
             std::io::stdout().flush()?;
         }
 
-        let startup_release_notes = crate::release_notes::load_pending_for_current_version();
-
         let mut app = app::App::new(
             config,
             true, // no_session — monolithic mode never saves/restores sessions
             config_diagnostic,
-            startup_release_notes,
             api_rx,
             event_hub,
         );

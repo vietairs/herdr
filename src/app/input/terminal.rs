@@ -461,7 +461,6 @@ mod tests {
             &Config::default(),
             true,
             None,
-            None,
             api_rx,
             crate::api::EventHub::default(),
         );

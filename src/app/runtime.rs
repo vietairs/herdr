@@ -419,7 +419,6 @@ mod tests {
             &crate::config::Config::default(),
             true,
             None,
-            None,
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         );
@@ -527,7 +526,6 @@ mod tests {
         let mut app = super::super::App::new(
             &crate::config::Config::default(),
             true,
-            None,
             None,
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),

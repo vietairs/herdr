@@ -295,7 +295,6 @@ fn app_for_mouse_test() -> App {
         &crate::config::Config::default(),
         true,
         None,
-        None,
         api_rx,
         crate::api::EventHub::default(),
     );
