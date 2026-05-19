@@ -591,6 +591,44 @@ fn help_commands_exit_successfully() {
 }
 
 #[test]
+fn root_help_hides_explicit_client_command() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("herdr client"),
+        "root help should not advertise the internal client command: {stdout}"
+    );
+}
+
+#[test]
+fn explicit_client_command_respects_nested_guard() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .arg("client")
+        .env("HERDR_ENV", "1")
+        .env("XDG_CONFIG_HOME", &base)
+        .env_remove("HERDR_CONFIG_PATH")
+        .output()
+        .unwrap();
+
+    cleanup_test_base(&base);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nested herdr is disabled by default"),
+        "client should fail at the nested guard before connecting: {stderr}"
+    );
+}
+
+#[test]
 fn removed_show_changelog_flag_fails_before_nested_guard() {
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .arg("--show-changelog")

@@ -7,6 +7,9 @@
 - Added a Hermes Agent plugin integration for direct state reporting.
 - Added `ui.sidebar_min_width` and `ui.sidebar_max_width` to configure the sidebar's expanded resize bounds. Defaults remain 18 and 36 columns; existing configs are unchanged.
 
+### Fixed
+- Running the internal `herdr client` command from inside Herdr now respects the nested-launch guard, and the command is no longer advertised in root help. (#187)
+
 ### Breaking Changes
 - The client/server protocol is now version 7. Stop and restart any running v0.5.10 server before attaching with this release.
 

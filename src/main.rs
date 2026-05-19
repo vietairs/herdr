@@ -211,6 +211,16 @@ fn random_nested_message() -> &'static str {
     NESTED_HERDR_MESSAGES[index]
 }
 
+fn exit_if_nested_disabled(config: &config::Config) {
+    if should_block_nested(config) {
+        eprintln!("\x1b[1merror:\x1b[0m nested herdr is disabled by default.");
+        eprintln!("see configuration if you want to enable it.");
+        eprintln!();
+        eprintln!("\x1b[2m\"{}\"\x1b[0m", random_nested_message());
+        std::process::exit(1);
+    }
+}
+
 fn main() -> io::Result<()> {
     let raw_args: Vec<String> = std::env::args().collect();
     let args = match session::configure_from_args(&raw_args) {
@@ -257,8 +267,10 @@ fn main() -> io::Result<()> {
         return server::headless::run_server();
     }
 
-    // Client mode: connect to an existing server's client socket.
+    // Hidden client mode: connect to an existing server's client socket.
     if args.get(1).map(|s| s.as_str()) == Some("client") {
+        let loaded_config = config::Config::load();
+        exit_if_nested_disabled(&loaded_config.config);
         return client::run_client();
     }
 
@@ -340,15 +352,7 @@ fn main() -> io::Result<()> {
         }
         println!();
         println!("Advanced commands:");
-        for (command, description) in [
-            ("herdr server", "Run as headless server"),
-            (
-                "herdr client",
-                "Connect to a running server as a thin client",
-            ),
-        ] {
-            println!("  {command:<32} {description}");
-        }
+        println!("  {:<32} Run as headless server", "herdr server");
         println!();
         println!("Options:");
         println!("  --no-session        Run monolithically (no server/client, escape hatch)");
@@ -418,13 +422,7 @@ fn main() -> io::Result<()> {
     }
 
     let loaded_config = config::Config::load();
-    if should_block_nested(&loaded_config.config) {
-        eprintln!("\x1b[1merror:\x1b[0m nested herdr is disabled by default.");
-        eprintln!("see configuration if you want to enable it.");
-        eprintln!();
-        eprintln!("\x1b[2m\"{}\"\x1b[0m", random_nested_message());
-        std::process::exit(1);
-    }
+    exit_if_nested_disabled(&loaded_config.config);
 
     let no_session = args.iter().any(|a| a == "--no-session");
 
