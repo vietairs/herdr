@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 
 use crate::{
@@ -354,6 +354,67 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
     }
 }
 
+fn clear_rename_input(state: &mut AppState) {
+    state.name_input.clear();
+    state.name_input_replace_on_type = false;
+}
+
+fn delete_rename_input_char(state: &mut AppState) {
+    if state.name_input_replace_on_type {
+        clear_rename_input(state);
+    } else {
+        state.name_input.pop();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameWordDeleteClass {
+    Word,
+    Separator,
+}
+
+fn rename_word_delete_class(ch: char) -> RenameWordDeleteClass {
+    if ch.is_alphanumeric() || ch == '_' {
+        RenameWordDeleteClass::Word
+    } else {
+        RenameWordDeleteClass::Separator
+    }
+}
+
+fn delete_rename_input_word(state: &mut AppState) {
+    if state.name_input_replace_on_type {
+        clear_rename_input(state);
+        return;
+    }
+
+    while state
+        .name_input
+        .chars()
+        .last()
+        .is_some_and(char::is_whitespace)
+    {
+        state.name_input.pop();
+    }
+
+    let Some(class) = state
+        .name_input
+        .chars()
+        .last()
+        .map(rename_word_delete_class)
+    else {
+        return;
+    };
+
+    while state
+        .name_input
+        .chars()
+        .last()
+        .is_some_and(|ch| !ch.is_whitespace() && rename_word_delete_class(ch) == class)
+    {
+        state.name_input.pop();
+    }
+}
+
 pub(crate) fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
     if let Some(action) = modal_action_from_key(&key, RENAME_ACTIONS) {
         apply_rename_action(state, action);
@@ -361,18 +422,25 @@ pub(crate) fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
     }
 
     match key.code {
-        KeyCode::Backspace => {
-            if state.name_input_replace_on_type {
-                state.name_input.clear();
-                state.name_input_replace_on_type = false;
-            } else {
-                state.name_input.pop();
-            }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            clear_rename_input(state);
         }
-        KeyCode::Char(c) => {
+        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::SUPER) => {
+            clear_rename_input(state);
+        }
+        KeyCode::Backspace
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            delete_rename_input_word(state);
+        }
+        KeyCode::Char('h' | 'w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            delete_rename_input_word(state);
+        }
+        KeyCode::Backspace => delete_rename_input_char(state),
+        KeyCode::Char(c) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
             if state.name_input_replace_on_type {
-                state.name_input.clear();
-                state.name_input_replace_on_type = false;
+                clear_rename_input(state);
             }
             state.name_input.push(c);
         }
@@ -661,6 +729,78 @@ mod tests {
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()),
         );
         assert_eq!(state.name_input, "ne");
+    }
+
+    #[test]
+    fn rename_modal_handles_line_editing_shortcuts() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        state.name_input = "website zero".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()),
+        );
+        assert_eq!(state.name_input, "website zer");
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.name_input, "website ");
+
+        state.name_input = "website-zero".into();
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT),
+        );
+        assert_eq!(state.name_input, "website-");
+
+        state.name_input = "website-zero".into();
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.name_input, "website-");
+
+        state.name_input = "website-zero".into();
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.name_input, "website-");
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER),
+        );
+        assert!(state.name_input.is_empty());
+
+        state.name_input = "website zero".into();
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert!(state.name_input.is_empty());
+    }
+
+    #[test]
+    fn rename_modal_does_not_insert_modified_shortcut_chars() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::RenameWorkspace;
+        state.name_input = "website".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(state.name_input, "website");
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(state.name_input, "websiteZ");
     }
 
     #[test]
