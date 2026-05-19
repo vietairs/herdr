@@ -143,7 +143,7 @@
 ## [0.5.1] - 2026-04-25
 
 ### Added
-- Toast notifications can now be delivered through the outer terminal as desktop notifications. Configure this with `ui.toast.delivery = "terminal"`; see `CONFIGURATION.md` for details.
+- Toast notifications can now be delivered through the outer terminal as desktop notifications. Configure this with `ui.toast.delivery = "terminal"`; see the [configuration docs](https://herdr.dev/docs/configuration/) for details.
 - Herdr now writes separate capped support logs for app, client, and server modes, making persistent-session issue reports easier to diagnose without unbounded log growth.
 - The bundled opencode plugin now reports question prompts as blocked while waiting for user input, then returns to working or idle when answered or dismissed. Question prompts are also detected by the default terminal-screen heuristics. (#51, thanks @mspiegel31)
 
@@ -420,7 +420,7 @@
 ### Added
 - Added first-run onboarding flow that lets you choose notification preferences (sound and toast) on startup.
 - Added optional visual toast notifications in the top-right corner for background workspace events (completion and attention-needed alerts).
-- Added configurable keybindings for all navigate mode actions: new workspace, rename workspace, close workspace, resize mode, and toggle sidebar. See `CONFIGURATION.md` for the full key reference.
+- Added configurable keybindings for all navigate mode actions: new workspace, rename workspace, close workspace, resize mode, and toggle sidebar. See the [configuration docs](https://herdr.dev/docs/configuration/) for the full key reference.
 - Added configuration validation with startup diagnostics. Invalid key combinations or duplicate bindings now fall back to safe defaults with a visible warning.
 
 ### Changed
@@ -431,7 +431,7 @@
 - Keybinding parser now accepts special keys (`enter`, `esc`, `tab`, `backspace`, `space`) and function keys (`f1`–`f12`).
 
 ### Documentation
-- Split configuration reference into a dedicated `CONFIGURATION.md` file with full keybinding documentation and config diagnostics explanation.
+- Split configuration reference into dedicated configuration docs with full keybinding documentation and config diagnostics explanation.
 
 ## [0.1.1] - 2026-03-28
 

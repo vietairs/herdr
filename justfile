@@ -17,6 +17,7 @@ ci: lint
 # Check formatting + run unit tests + maintenance script tests
 check: ci
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
+    @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
 # Install repo-local git hooks
 install-hooks:
@@ -36,14 +37,23 @@ website-build:
 build-libghostty-vt:
     scripts/build_vendored_libghostty_vt.sh
 
-# Check that public docs and changelog have been finalized from docs/next before release
+# Check that release docs and changelog have been finalized from docs/next before release
 release-docs-check:
-    @for file in README.md CONFIGURATION.md INTEGRATIONS.md SOCKET_API.md CHANGELOG.md; do \
+    @for file in README.md CHANGELOG.md; do \
         if ! diff -u "$file" "docs/next/$file"; then \
             echo "error: $file differs from docs/next/$file; finalize release docs before releasing"; \
             exit 1; \
         fi; \
     done
+    @for file in CONFIGURATION.md INTEGRATIONS.md SOCKET_API.md; do \
+        if [ -e "$file" ]; then \
+            echo "error: $file was replaced by website docs; remove the root copy"; \
+            exit 1; \
+        fi; \
+    done
+    @test -f website/src/content/docs/configuration.mdx
+    @test -f website/src/content/docs/integrations.mdx
+    @test -f website/src/content/docs/socket-api.mdx
 
 # Finalize changelog, bump version, commit, tag, push, and trigger the GitHub Release workflow (usage: just release 0.1.1)
 release version:

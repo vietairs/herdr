@@ -50,16 +50,9 @@ If you plan to implement the change yourself, say that directly in the issue and
 
 ## Documentation for unreleased changes
 
-The root docs describe the latest released version of herdr. Do not update root `README.md`, `CONFIGURATION.md`, `INTEGRATIONS.md`, `SOCKET_API.md`, or `CHANGELOG.md` for normal PRs.
+The root `README.md`, root `CHANGELOG.md`, and website docs describe the latest released version of herdr. Do not update root `README.md`, root `CHANGELOG.md`, or `website/src/content/docs/` for normal PRs.
 
-If your PR changes user-facing behavior, update the matching next-release docs under `docs/next/` instead.
-
-Examples:
-
-- config changes: update `docs/next/CONFIGURATION.md`
-- integration changes: update `docs/next/INTEGRATIONS.md`
-- socket/API changes: update `docs/next/SOCKET_API.md`
-- workflow or usage changes: update `docs/next/README.md`
+If your PR changes user-facing behavior, mention the needed public-doc update in the PR. Update `docs/next/README.md` only when the root README needs to change for the next release.
 
 You do not need to edit the changelog for normal PRs. Maintainers prepare `docs/next/CHANGELOG.md` during release review.
 

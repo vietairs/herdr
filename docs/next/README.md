@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#quick-start">quick start</a> · <a href="#supported-agents">supported agents</a> · <a href="./INTEGRATIONS.md">integrations</a> · <a href="./CONFIGURATION.md">configuration</a> · <a href="./SOCKET_API.md">socket api</a>
+  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="#quick-start">quick start</a> · <a href="#supported-agents">supported agents</a> · <a href="https://herdr.dev/docs/integrations/">integrations</a> · <a href="https://herdr.dev/docs/configuration/">configuration</a> · <a href="https://herdr.dev/docs/socket-api/">socket api</a>
 </p>
 
 ---
@@ -163,7 +163,7 @@ herdr pane read 1-2 --source recent --lines 50
 herdr pane read 1-2 --source visible --ansi
 ```
 
-full reference: [`SOCKET_API.md`](./SOCKET_API.md) and [`SKILL.md`](./SKILL.md).
+full reference: [socket api](https://herdr.dev/docs/socket-api/) and [`SKILL.md`](./SKILL.md).
 
 ## supported agents
 
@@ -182,7 +182,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 
 detected but not fully tested: gemini cli, cursor agent, cline, kimi, github copilot cli.
 
-for agents outside the built-in list, herdr still works as a terminal multiplexer with workspaces, panes, and tiling. custom integrations can report agent labels over the socket api. see [`SOCKET_API.md`](./SOCKET_API.md).
+for agents outside the built-in list, herdr still works as a terminal multiplexer with workspaces, panes, and tiling. custom integrations can report agent labels over the socket api. see the [socket api docs](https://herdr.dev/docs/socket-api/).
 
 ### direct integrations
 
@@ -196,7 +196,7 @@ herdr integration install opencode
 herdr integration install hermes
 ```
 
-see [`INTEGRATIONS.md`](./INTEGRATIONS.md) for setup details.
+see the [integrations docs](https://herdr.dev/docs/integrations/) for setup details.
 
 ## keybindings
 
@@ -226,7 +226,7 @@ type = "pane" # "shell" or "pane"
 command = "lazygit"
 ```
 
-mouse is supported throughout. full reference: [`CONFIGURATION.md`](./CONFIGURATION.md).
+mouse is supported throughout. full reference: [configuration docs](https://herdr.dev/docs/configuration/).
 
 ## configuration
 
@@ -236,7 +236,7 @@ config file: `~/.config/herdr/config.toml`
 herdr --default-config   # print full default config
 ```
 
-in-app settings screen for theme, sound, and toast preferences. full reference: [`CONFIGURATION.md`](./CONFIGURATION.md).
+in-app settings screen for theme, sound, and toast preferences. full reference: [configuration docs](https://herdr.dev/docs/configuration/).
 
 ## logs
 
@@ -260,14 +260,14 @@ use a higher log level only when needed:
 HERDR_LOG=herdr=debug herdr
 ```
 
-full logging and environment variable details: [`CONFIGURATION.md`](./CONFIGURATION.md).
+full logging and environment variable details: [configuration docs](https://herdr.dev/docs/configuration/).
 
 ## docs
 
-- [`CONFIGURATION.md`](./CONFIGURATION.md) — keybindings, themes, notifications, environment variables
-- [`INTEGRATIONS.md`](./INTEGRATIONS.md) — pi, claude code, codex, opencode, hermes integrations
+- [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
+- [integrations](https://herdr.dev/docs/integrations/) — pi, claude code, codex, opencode, hermes integrations
 - [`SKILL.md`](./SKILL.md) — reusable agent skill
-- [`SOCKET_API.md`](./SOCKET_API.md) — socket protocol and cli reference
+- [socket api](https://herdr.dev/docs/socket-api/) — socket protocol and cli reference
 
 ## agent instructions
 

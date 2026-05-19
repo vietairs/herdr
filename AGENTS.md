@@ -51,11 +51,10 @@ Unit tests live next to the code (`#[cfg(test)] mod tests`). If you add behavior
 ## Conventions
 
 - Conventional commits, lowercase, no emojis.
-- Do not edit root `CHANGELOG.md` during normal feature or fix work. Maintainers prepare `docs/next/CHANGELOG.md` during release review unless explicitly asked to update it earlier.
-- Treat the root public docs as the latest released docs. Do not document unreleased behavior in root `README.md`, `CONFIGURATION.md`, `INTEGRATIONS.md`, `SOCKET_API.md`, or `CHANGELOG.md` during normal feature or fix work.
-- Treat `docs/next/README.md`, `docs/next/CONFIGURATION.md`, `docs/next/INTEGRATIONS.md`, `docs/next/SOCKET_API.md`, and `docs/next/CHANGELOG.md` as the next-release versions of those public docs. When unreleased work needs public documentation, update the matching file under `docs/next/` instead of the root file.
-- Before release, copy the approved `docs/next/` versions into the root public docs. `just release` blocks until each root public doc and `CHANGELOG.md` are identical to their `docs/next/` counterparts.
-- Keep website copy and config examples aligned with the latest published release unless the user explicitly asks for prerelease docs.
+- Do not edit root `README.md` or `CHANGELOG.md` during normal feature or fix work unless explicitly asked. Maintainers prepare `docs/next/README.md` and `docs/next/CHANGELOG.md` during release review.
+- Treat website docs under `website/src/content/docs/` as the latest released public docs. Do not document unreleased behavior there during normal feature or fix work.
+- Treat `docs/next/README.md` and `docs/next/CHANGELOG.md` as next-release staging for the root README and changelog.
+- Before release, copy approved next-release docs into their released locations: `docs/next/README.md` to `README.md`, `docs/next/CHANGELOG.md` to `CHANGELOG.md`, and approved website doc changes to `website/src/content/docs/`. `just release-docs-check` verifies README/changelog sync, the website docs are present, and the removed root docs stay removed.
 - Put local PRDs, planning notes, and exploratory specs under `.prd/`; that directory is ignored and locally controlled.
 - When a normal feature or fix commit relates to a GitHub issue, add a commit body line `refs #<issue-number>` after the subject. Use this shape:
   ```text
@@ -70,7 +69,7 @@ Unit tests live next to the code (`#[cfg(test)] mod tests`). If you add behavior
 
 ## Releases
 
-Before cutting a release, run `/pre-release-audit` to compare commits since the last tag against `docs/next/CHANGELOG.md` and `docs/next/`, then copy the approved next-release docs and changelog into the root public docs. The release script promotes the root changelog's `## Unreleased` section into the versioned entry and copies the prepared changelog back to `docs/next/CHANGELOG.md` so the next cycle starts clean.
+Before cutting a release, run `/pre-release-audit` to compare commits since the last tag against `docs/next/CHANGELOG.md` and `docs/next/`, then copy approved next-release docs into `README.md`, `CHANGELOG.md`, and the matching website docs. The release script promotes the root changelog's `## Unreleased` section into the versioned entry and copies the prepared changelog back to `docs/next/CHANGELOG.md` so the next cycle starts clean.
 
 Default release flow:
 
