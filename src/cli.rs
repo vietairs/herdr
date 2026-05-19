@@ -2151,6 +2151,7 @@ fn print_integration_help() {
     eprintln!("  herdr integration uninstall claude");
     eprintln!("  herdr integration uninstall codex");
     eprintln!("  herdr integration uninstall opencode");
+    eprintln!("  herdr integration uninstall hermes");
     eprintln!("  herdr integration status [--outdated-only]");
 }
 

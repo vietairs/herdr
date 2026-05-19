@@ -20,7 +20,7 @@ const CLAUDE_INTEGRATION_VERSION: u32 = 2;
 const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
 const CODEX_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/herdr-agent-state.sh");
-const CODEX_INTEGRATION_VERSION: u32 = 2;
+const CODEX_INTEGRATION_VERSION: u32 = 3;
 const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
@@ -608,6 +608,13 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     )?;
     ensure_command_hook(
         hooks,
+        "PermissionRequest",
+        format!("bash {quoted_hook_path} blocked"),
+        10,
+        None,
+    )?;
+    ensure_command_hook(
+        hooks,
         "Stop",
         format!("bash {quoted_hook_path} idle"),
         10,
@@ -808,6 +815,11 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
                 hooks,
                 "PreToolUse",
                 &format!("bash {quoted_hook_path} working"),
+            )?;
+            updated_hooks |= remove_command_hook(
+                hooks,
+                "PermissionRequest",
+                &format!("bash {quoted_hook_path} blocked"),
             )?;
             updated_hooks |=
                 remove_command_hook(hooks, "Stop", &format!("bash {quoted_hook_path} idle"))?;
@@ -1760,6 +1772,36 @@ mod tests {
     }
 
     #[test]
+    fn codex_v2_integration_status_is_outdated() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let codex_dir = home.join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+        fs::write(
+            &hook_path,
+            "#!/bin/sh\n# HERDR_INTEGRATION_ID=codex\n# HERDR_INTEGRATION_VERSION=2\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let statuses = installed_integration_statuses();
+        let codex = statuses
+            .iter()
+            .find(|status| status.target == crate::api::schema::IntegrationTarget::Codex)
+            .unwrap();
+
+        assert_eq!(codex.path, hook_path);
+        assert_eq!(codex.installed_version, Some(2));
+        assert_eq!(codex.expected_version, 3);
+        assert_eq!(codex.state, IntegrationStatusKind::Outdated);
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn install_codex_writes_hook_and_updates_hooks_and_config() {
         let _lock = integration_env_lock();
         let base = unique_base();
@@ -1791,6 +1833,12 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(" working"));
+        assert!(
+            hooks["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains(" blocked")
+        );
         assert!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
@@ -1851,6 +1899,13 @@ mod tests {
             1
         );
         assert_eq!(hooks["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            hooks["hooks"]["PermissionRequest"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert_eq!(config.matches("hooks = true").count(), 1);
         assert!(!config.contains("codex_hooks"));
@@ -1897,7 +1952,9 @@ mod tests {
         fs::write(
             codex_dir.join("hooks.json"),
             format!(
-                r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"Stop":[{{"hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}]}}}}"#,
+                r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"PreToolUse":[{{"hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"PermissionRequest":[{{"hooks":[{{"type":"command","command":"bash '{}' blocked","timeout":10}}]}}],"Stop":[{{"hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}]}}}}"#,
+                hook_path.display(),
+                hook_path.display(),
                 hook_path.display(),
                 hook_path.display(),
                 hook_path.display(),
@@ -1921,6 +1978,8 @@ mod tests {
         assert!(result.updated_hooks);
         assert!(!result.hook_path.exists());
         assert!(hooks["hooks"].get("SessionStart").is_none());
+        assert!(hooks["hooks"].get("PreToolUse").is_none());
+        assert!(hooks["hooks"].get("PermissionRequest").is_none());
         assert!(hooks["hooks"].get("Stop").is_none());
         assert_eq!(
             hooks["hooks"]["UserPromptSubmit"][0]["hooks"]
