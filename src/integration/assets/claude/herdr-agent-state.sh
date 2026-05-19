@@ -2,7 +2,7 @@
 # installed by herdr
 # safe to edit. this hook only activates inside herdr-managed panes.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 
 set -eu
 

@@ -16,7 +16,7 @@ const PI_INTEGRATION_VERSION: u32 = 1;
 const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
 const CLAUDE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/herdr-agent-state.sh");
-const CLAUDE_INTEGRATION_VERSION: u32 = 1;
+const CLAUDE_INTEGRATION_VERSION: u32 = 2;
 const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
 const CODEX_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/herdr-agent-state.sh");
@@ -495,6 +495,16 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         "claude settings hooks",
     )?;
     let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+    remove_command_hook(
+        hooks,
+        "PostToolUse",
+        &format!("bash {quoted_hook_path} working"),
+    )?;
+    remove_command_hook(
+        hooks,
+        "PostToolUseFailure",
+        &format!("bash {quoted_hook_path} working"),
+    )?;
     ensure_command_hook(
         hooks,
         "UserPromptSubmit",
@@ -513,20 +523,6 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         hooks,
         "PermissionRequest",
         format!("bash {quoted_hook_path} blocked"),
-        10,
-        Some("*"),
-    )?;
-    ensure_command_hook(
-        hooks,
-        "PostToolUse",
-        format!("bash {quoted_hook_path} working"),
-        10,
-        Some("*"),
-    )?;
-    ensure_command_hook(
-        hooks,
-        "PostToolUseFailure",
-        format!("bash {quoted_hook_path} working"),
         10,
         Some("*"),
     )?;
@@ -1532,16 +1528,8 @@ mod tests {
                 .unwrap()
                 .contains(" blocked")
         );
-        assert!(settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains(" working"));
-        assert!(
-            settings["hooks"]["PostToolUseFailure"][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap()
-                .contains(" working")
-        );
+        assert!(settings["hooks"].get("PostToolUse").is_none());
+        assert!(settings["hooks"].get("PostToolUseFailure").is_none());
         assert!(settings["hooks"]["SubagentStop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
@@ -1609,23 +1597,91 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(
-            settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
-            1
-        );
-        assert_eq!(
-            settings["hooks"]["PostToolUseFailure"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(settings["hooks"].get("PostToolUse").is_none());
+        assert!(settings["hooks"].get("PostToolUseFailure").is_none());
         assert_eq!(
             settings["hooks"]["SubagentStop"].as_array().unwrap().len(),
             1
         );
         assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert_eq!(settings["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_claude_removes_deprecated_post_tool_hooks_and_preserves_user_hooks() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_dir = home.join(".claude");
+        let hooks_dir = claude_dir.join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join(CLAUDE_HOOK_INSTALL_NAME);
+        fs::write(
+            claude_dir.join("settings.json"),
+            format!(
+                r#"{{"hooks":{{"PostToolUse":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-post","timeout":10}}]}}],"PostToolUseFailure":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep-failure","timeout":10}}]}}]}}}}"#,
+                hook_path.display(),
+                hook_path.display(),
+            ),
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_claude().unwrap();
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
+            "echo keep-post"
+        );
+        assert_eq!(
+            settings["hooks"]["PostToolUseFailure"][0]["hooks"][0]["command"],
+            "echo keep-failure"
+        );
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn claude_v1_integration_status_is_outdated() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let claude_hooks_dir = home.join(".claude").join("hooks");
+        fs::create_dir_all(&claude_hooks_dir).unwrap();
+        let hook_path = claude_hooks_dir.join(CLAUDE_HOOK_INSTALL_NAME);
+        fs::write(
+            &hook_path,
+            "#!/bin/sh\n# HERDR_INTEGRATION_ID=claude\n# HERDR_INTEGRATION_VERSION=1\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let statuses = installed_integration_statuses();
+        let claude = statuses
+            .iter()
+            .find(|status| status.target == crate::api::schema::IntegrationTarget::Claude)
+            .unwrap();
+
+        assert_eq!(claude.path, hook_path);
+        assert_eq!(claude.installed_version, Some(1));
+        assert_eq!(claude.expected_version, 2);
+        assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
