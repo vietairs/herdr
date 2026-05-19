@@ -637,6 +637,9 @@ impl App {
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| std::path::PathBuf::from("/"));
                 let (rows, cols) = self.state.estimate_pane_size();
+                let default_shell = self.state.default_shell.clone();
+                let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+                let host_terminal_theme = self.state.host_terminal_theme;
                 let result = self
                     .state
                     .workspaces
@@ -647,8 +650,9 @@ impl App {
                             rows,
                             cols,
                             cwd,
-                            self.state.pane_scrollback_limit_bytes,
-                            self.state.host_terminal_theme,
+                            scrollback_limit_bytes,
+                            host_terminal_theme,
+                            &default_shell,
                         )
                     });
                 match result {
@@ -1019,6 +1023,9 @@ impl App {
                         )
                     })
                 });
+                let default_shell = self.state.default_shell.clone();
+                let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+                let host_terminal_theme = self.state.host_terminal_theme;
                 let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
@@ -1043,8 +1050,9 @@ impl App {
                     rows,
                     cols,
                     split_cwd,
-                    self.state.pane_scrollback_limit_bytes,
-                    self.state.host_terminal_theme,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                    &default_shell,
                     params.focus,
                 ) {
                     Some(Ok(result)) => result,

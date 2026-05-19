@@ -250,6 +250,22 @@ fn shutdown_pane_processes(pane_id: PaneId, child_pid: u32) {
     );
 }
 
+fn pane_shell(configured_shell: &str) -> String {
+    pane_shell_from(configured_shell, std::env::var("SHELL").ok())
+}
+
+fn pane_shell_from(configured_shell: &str, env_shell: Option<String>) -> String {
+    let configured_shell = configured_shell.trim();
+    if !configured_shell.is_empty() {
+        return configured_shell.to_string();
+    }
+
+    env_shell
+        .map(|shell| shell.trim().to_string())
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into())
+}
+
 impl PaneRuntime {
     pub fn shutdown(self) {
         self.detect_handle.abort();
@@ -267,11 +283,12 @@ impl PaneRuntime {
         cwd: std::path::PathBuf,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        default_shell: &str,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let shell = pane_shell(default_shell);
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
@@ -1097,6 +1114,28 @@ mod tests {
         let output = std::fs::read_to_string(&output_path).unwrap();
         let _ = std::fs::remove_file(output_path);
         output
+    }
+
+    #[test]
+    fn pane_shell_prefers_configured_shell() {
+        assert_eq!(
+            pane_shell_from("/usr/bin/nu", Some("/bin/bash".to_string())),
+            "/usr/bin/nu"
+        );
+    }
+
+    #[test]
+    fn pane_shell_falls_back_to_shell_env() {
+        assert_eq!(
+            pane_shell_from("", Some("/bin/bash".to_string())),
+            "/bin/bash"
+        );
+    }
+
+    #[test]
+    fn pane_shell_ignores_empty_values() {
+        assert_eq!(pane_shell_from("   ", Some("  ".to_string())), "/bin/sh");
+        assert_eq!(pane_shell_from("", None), "/bin/sh");
     }
 
     #[test]

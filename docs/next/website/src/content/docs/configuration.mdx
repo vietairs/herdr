@@ -45,6 +45,17 @@ You can also open the global menu in Herdr and choose `reload config`.
 
 Reload applies most UI settings without restarting panes. Startup-only settings still need a restart.
 
+## Default shell
+
+Set the executable Herdr uses for newly created interactive panes:
+
+```toml
+[terminal]
+default_shell = "nu"
+```
+
+When unset or empty, Herdr uses `$SHELL`, then `/bin/sh`. This is an executable name or path, not a shell command line. Existing panes keep their current shell until they are recreated. Command panes still run through `/bin/sh -c`; detached custom command keybindings use Herdr's existing `/bin/sh -lc` path.
+
 ## Keybindings
 
 Herdr has a prefix mode similar to tmux. The default prefix is `ctrl+b`.

@@ -162,6 +162,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     );
     load_live_section(
         table,
+        "terminal",
+        "terminal config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.terminal = section,
+    );
+    load_live_section(
+        table,
         "ui",
         "ui config",
         &mut diagnostics,

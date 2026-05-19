@@ -259,6 +259,7 @@ impl AppState {
                 cwd,
                 self.pane_scrollback_limit_bytes,
                 self.host_terminal_theme,
+                &self.default_shell,
             ) {
                 let new_id = new_pane.pane_id;
                 self.terminal_runtimes

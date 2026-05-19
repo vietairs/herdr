@@ -1092,6 +1092,7 @@ mod tests {
             80,
             app.state.pane_scrollback_limit_bytes,
             app.state.host_terminal_theme,
+            &app.state.default_shell,
             app.event_tx.clone(),
             app.render_notify.clone(),
             app.render_dirty.clone(),

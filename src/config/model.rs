@@ -34,6 +34,13 @@ pub struct ToastConfig {
     pub delivery: ToastDelivery,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Executable used for new interactive panes. Empty means SHELL, then /bin/sh.
+    pub default_shell: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigReloadStatus {
@@ -66,6 +73,7 @@ pub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> {
 pub struct Config {
     pub onboarding: Option<bool>,
     pub theme: ThemeConfig,
+    pub terminal: TerminalConfig,
     pub keys: KeysConfig,
     pub ui: UiConfig,
     pub advanced: AdvancedConfig,
@@ -296,6 +304,19 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_default_shell_defaults_empty_and_parses() {
+        let default_config = Config::default();
+        assert!(default_config.terminal.default_shell.is_empty());
+
+        let toml = r#"
+[terminal]
+default_shell = "nu"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.terminal.default_shell, "nu");
+    }
 
     #[test]
     fn agent_panel_scope_config_parses() {

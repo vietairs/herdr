@@ -4,6 +4,7 @@
 
 ### Added
 - Added an integrations tab in settings and first-run onboarding so users can install recommended agent integrations from inside Herdr.
+- Added `terminal.default_shell` to choose the executable used for new interactive panes. When unset, Herdr still falls back to `$SHELL`, then `/bin/sh`. (#196)
 
 ## [0.5.12] - 2026-05-19
 

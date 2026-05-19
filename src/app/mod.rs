@@ -234,6 +234,7 @@ impl App {
                 24,
                 80,
                 config.advanced.scrollback_limit_bytes,
+                &config.terminal.default_shell,
                 event_tx.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
@@ -412,6 +413,7 @@ impl App {
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             kitty_graphics_enabled: config.experimental.kitty_graphics,
+            default_shell: config.terminal.default_shell.clone(),
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
             accent: crate::config::parse_color(&config.ui.accent),
             sound: config.ui.sound.clone(),
@@ -891,6 +893,10 @@ impl App {
             self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
         }
 
+        if !invalid_section("terminal") {
+            self.state.default_shell = config.terminal.default_shell.clone();
+        }
+
         if !invalid_section("theme") {
             self.state.palette = resolve_palette_with_legacy_accent(config, !invalid_section("ui"));
             self.state.theme_name = config
@@ -1321,7 +1327,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[keys]\nnew_workspace = \"g\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\n[ui.toast]\ndelivery = \"herdr\"\n",
+            "[terminal]\ndefault_shell = \"nu\"\n[keys]\nnew_workspace = \"g\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\n[ui.toast]\ndelivery = \"herdr\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -1344,6 +1350,7 @@ mod tests {
             app.state.agent_panel_scope,
             state::AgentPanelScope::CurrentWorkspace
         );
+        assert_eq!(app.state.default_shell, "nu");
         assert!(app.state.config_diagnostic.is_none());
         let toast = app.state.toast.as_ref().unwrap();
         assert_eq!(toast.kind, crate::app::state::ToastKind::UpdateInstalled);

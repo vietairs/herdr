@@ -75,6 +75,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # red = "#ff6188"
 # green = "#a6e3a1"
 
+[terminal]
+# Executable used for new interactive panes.
+# Empty means $SHELL, then /bin/sh.
+# default_shell = ""
+
 [keys]
 # Prefix key to enter navigate mode (default: "ctrl+b")
 # Examples: "ctrl+b", "f12", "esc", "-"
