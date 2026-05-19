@@ -9,6 +9,9 @@
 
 ### Fixed
 - Running the internal `herdr client` command from inside Herdr now respects the nested-launch guard, and the command is no longer advertised in root help. (#187)
+- The Herdr agent skill now refuses to claim pane ownership unless it is running inside Herdr. (#152)
+- Terminal-style docs code blocks now keep their copy button in the top-right corner. (#190)
+- The sidebar `new` workspace button now aligns with the sidebar's left padding. (#189)
 
 ### Breaking Changes
 - The client/server protocol is now version 7. Stop and restart any running v0.5.10 server before attaching with this release.

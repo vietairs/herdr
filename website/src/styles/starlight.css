@@ -131,6 +131,10 @@
   overflow: hidden;
 }
 
+.expressive-code .frame.is-terminal {
+  --button-spacing: 0.4rem;
+}
+
 .expressive-code .frame.is-terminal .header {
   display: none;
 }
