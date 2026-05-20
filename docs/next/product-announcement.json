@@ -1,5 +1,1 @@
-{
-  "id": "keybinding-v2",
-  "title": "Keybind Refactor",
-  "body": "### Breaking change: keybinding syntax changed\n\nHerdr now uses explicit tmux-style keybindings. If you want the new defaults, run `herdr config reset-keys`. Herdr backs up your config first, removes only keybinding settings, and preserves non-key settings.\n\nBefore, many keybinding values implicitly meant \"after pressing the prefix\". Now the binding must say that directly:\n\n- Before: `new_tab = \"c\"`\n- After: `new_tab = \"prefix+c\"`\n\nBindings without `prefix+` are direct terminal-mode shortcuts. Direct shortcuts can intercept keys before shells, editors, tmux, SSH, and terminal apps receive them. If your current config has old bare keybindings, Herdr may warn about them or disable unsafe bindings.\n\nThe new defaults are prefix-first:\n\n- `prefix+c` creates a tab\n- `prefix+n` / `prefix+p` switch tabs\n- `prefix+1..9` switches tabs\n- `prefix+h/j/k/l` focuses panes\n- `prefix+w` opens workspace navigation\n\nPlease read the updated keybinding docs before customizing again:\n\nhttps://herdr.dev/docs/configuration/"
-}
+null
