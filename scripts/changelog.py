@@ -17,6 +17,7 @@ SECTION_RE = re.compile(r"^##\s+(?:\[(?P<bracketed>[^\]]+)\]|(?P<plain>.+?))\s*$
 VERSION_WITH_DATE_RE = re.compile(r"^(?P<version>.+?)\s+-\s+\d{4}-\d{2}-\d{2}$")
 DEFAULT_RELEASE_REPO = "ogulcancelik/herdr"
 DEFAULT_LATEST_JSON_PATH = Path("website/latest.json")
+DEFAULT_PRODUCT_ANNOUNCEMENT_PATH = Path("docs/next/product-announcement.json")
 PROTOCOL_SOURCE_PATH = Path("src/server/protocol.rs")
 ASSET_TARGETS = (
     "linux-x86_64",
@@ -134,7 +135,11 @@ def read_protocol_version(source_path: Path = PROTOCOL_SOURCE_PATH) -> int:
 
 
 def build_latest_json(
-    version: str, notes: str, assets: dict[str, str], protocol: int | None = None
+    version: str,
+    notes: str,
+    assets: dict[str, str],
+    protocol: int | None = None,
+    announcement: dict[str, str] | None = None,
 ) -> str:
     normalized_version = normalize_version(version)
     normalized_notes = notes.strip()
@@ -150,15 +155,16 @@ def build_latest_json(
 
     ordered_assets = {target: assets[target] for target in ASSET_TARGETS}
 
-    return json.dumps(
-        {
-            "version": normalized_version,
-            "protocol": protocol,
-            "notes": normalized_notes,
-            "assets": ordered_assets,
-        },
-        indent=2,
-    ) + "\n"
+    manifest: dict[str, Any] = {
+        "version": normalized_version,
+        "protocol": protocol,
+        "notes": normalized_notes,
+        "assets": ordered_assets,
+    }
+    if announcement is not None:
+        manifest["announcement"] = announcement
+
+    return json.dumps(manifest, indent=2) + "\n"
 
 
 def default_release_assets(version: str, repo: str = DEFAULT_RELEASE_REPO) -> dict[str, str]:
@@ -282,6 +288,44 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ChangelogError(f"expected JSON object in {path}")
     return data
+
+
+def load_product_announcement(path: Path) -> dict[str, str] | None:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ChangelogError(f"product announcement file not found: {path}") from exc
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ChangelogError(f"invalid JSON in {path}: {exc}") from exc
+
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise ChangelogError(f"expected announcement object or null in {path}")
+
+    allowed_keys = {"id", "title", "body"}
+    extra_keys = sorted(set(data) - allowed_keys)
+    if extra_keys:
+        raise ChangelogError(
+            f"announcement in {path} has unsupported field(s): {', '.join(extra_keys)}"
+        )
+
+    announcement: dict[str, str] = {}
+    for key in ("id", "title", "body"):
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ChangelogError(f"announcement in {path} is missing non-empty string field: {key}")
+        announcement[key] = value.strip()
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", announcement["id"]):
+        raise ChangelogError(
+            f"announcement in {path} has invalid id; use lowercase letters, numbers, dots, underscores, or dashes"
+        )
+
+    return announcement
 
 
 def write_text(path: Path, text: str) -> None:
@@ -412,10 +456,22 @@ def cmd_sync_latest_json(args: argparse.Namespace) -> int:
 
     release_payload = fetch_release_payload(version, args.repo)
     new_manifest = manifest_from_release_payload(release_payload, version)
-    output = build_latest_json(version, str(new_manifest["notes"]), dict(new_manifest["assets"]))
+    announcement_path = Path(args.announcement)
+    announcement = load_product_announcement(announcement_path)
+    output = build_latest_json(
+        version,
+        str(new_manifest["notes"]),
+        dict(new_manifest["assets"]),
+        announcement=announcement,
+    )
     write_text(manifest_path, output)
+    if announcement is not None:
+        write_text(announcement_path, "null\n")
 
     print(f"updated {manifest_path} from GitHub release v{version}")
+    if announcement is not None:
+        print(f"included product announcement from {announcement_path}")
+        print(f"cleared {announcement_path}")
     status_lines = git_status_lines(manifest_path)
     print("files changed:")
     if status_lines:
@@ -429,6 +485,17 @@ def cmd_sync_latest_json(args: argparse.Namespace) -> int:
     print(f"  git add {manifest_path}")
     print(f"  git commit -m \"docs: update website manifest for v{version}\"")
     print("  git push")
+    return 0
+
+
+def cmd_validate_product_announcement(args: argparse.Namespace) -> int:
+    announcement = load_product_announcement(Path(args.path))
+    if announcement is None:
+        print(f"product announcement ({args.path}): none")
+    else:
+        print(
+            f"product announcement ({args.path}): {announcement['id']} - {announcement['title']}"
+        )
     return 0
 
 
@@ -484,7 +551,17 @@ def build_parser() -> argparse.ArgumentParser:
     sync_latest_json.add_argument("--version", required=True)
     sync_latest_json.add_argument("--repo", default=DEFAULT_RELEASE_REPO)
     sync_latest_json.add_argument("--output", default=str(DEFAULT_LATEST_JSON_PATH))
+    sync_latest_json.add_argument("--announcement", default=str(DEFAULT_PRODUCT_ANNOUNCEMENT_PATH))
     sync_latest_json.set_defaults(func=cmd_sync_latest_json)
+
+    validate_product_announcement = subparsers.add_parser(
+        "validate-product-announcement",
+        help="Validate docs/next product announcement JSON",
+    )
+    validate_product_announcement.add_argument(
+        "--path", default=str(DEFAULT_PRODUCT_ANNOUNCEMENT_PATH)
+    )
+    validate_product_announcement.set_defaults(func=cmd_validate_product_announcement)
 
     verify_release_state = subparsers.add_parser(
         "verify-release-state",

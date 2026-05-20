@@ -81,56 +81,68 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # default_shell = ""
 
 [keys]
-# Prefix key to enter navigate mode (default: "ctrl+b")
+# Prefix key to enter prefix mode (default: "ctrl+b")
 # Examples: "ctrl+b", "f12", "esc", "-"
-# Accepted syntax: plain keys, ctrl/shift/alt/cmd/super modifiers, and special keys like enter/tab/esc/left/right/up/down
-# Most reliable bindings are plain keys, ctrl+letter, esc/tab/enter, and function keys.
+# Action bindings use explicit syntax: "prefix+n" requires the prefix;
+# "ctrl+alt+n" is a direct terminal-mode shortcut.
+# Accepted key syntax: plain keys, ctrl/shift/alt/cmd/super modifiers, and special keys like enter/tab/esc/left/right/up/down.
+# Named punctuation such as minus, comma, ampersand, plus, and backtick is also accepted.
+# Most reliable direct bindings are ctrl+letter, function keys, and explicit modified chords.
 # alt+..., cmd/super, and punctuation-with-modifiers may depend on your terminal/tmux setup.
 # prefix = "ctrl+b"
 
-# Navigate-mode actions
-# new_workspace = "n"
-# rename_workspace = "shift+n"
-# close_workspace = "shift+d"
+# Prefix-mode actions
+# help = "prefix+?"
+# settings = "prefix+s"
+# quit = "prefix+q"
+# detach = "prefix+d"
+# reload_config = "prefix+shift+r"
+# open_notification_target = "prefix+o"
+# workspace_picker = "prefix+w"
+# new_workspace = "prefix+shift+n"
+# rename_workspace = "prefix+shift+w"
+# close_workspace = "prefix+shift+d"
 # previous_workspace = "" # optional, unset by default
 # next_workspace = ""     # optional, unset by default
 # previous_agent = ""     # optional, unset by default
 # next_agent = ""         # optional, unset by default
-# detach = ""             # optional explicit detach shortcut in server/client mode
-# reload_config = ""      # optional shortcut to reload config.toml without restarting
-# open_notification_target = "" # optional shortcut to jump to the visible notification target
-# new_tab = "c"
-# rename_tab = ""         # optional, unset by default
-# previous_tab = ""       # optional, unset by default
-# next_tab = ""           # optional, unset by default
-# close_tab = ""          # optional, unset by default
-# rename_pane = ""        # optional, unset by default
-# edit_scrollback = ""    # optional, opens focused pane scrollback in $EDITOR
-# focus_pane_left = ""    # optional, unset by default
-# focus_pane_down = ""    # optional, unset by default
-# focus_pane_up = ""      # optional, unset by default
-# focus_pane_right = ""   # optional, unset by default
-# split_vertical = "v"
-# split_horizontal = "-"
-# close_pane = "x"
-# zoom = "f"             # legacy alias: fullscreen
-# resize_mode = "r"
-# toggle_sidebar = "b"
+# focus_agent = ""        # optional indexed binding, e.g. "prefix+alt+1..9"
+# new_tab = "prefix+c"
+# rename_tab = "prefix+shift+t"
+# previous_tab = "prefix+p"
+# next_tab = "prefix+n"
+# switch_tab = "prefix+1..9"
+# switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
+# close_tab = "prefix+shift+x"
+# rename_pane = "prefix+shift+p"
+# edit_scrollback = "prefix+e"
+# focus_pane_left = "prefix+h"
+# focus_pane_down = "prefix+j"
+# focus_pane_up = "prefix+k"
+# focus_pane_right = "prefix+l"
+# cycle_pane_next = "prefix+tab"
+# cycle_pane_previous = "prefix+shift+tab"
+# split_vertical = "prefix+v"
+# split_horizontal = "prefix+minus"
+# close_pane = "prefix+x"
+# zoom = "prefix+z"       # legacy alias: fullscreen
+# resize_mode = "prefix+r"
+# toggle_sidebar = "prefix+b"
 
-# Custom prefix-mode commands. Press prefix, then the configured key.
+# Custom commands use the same binding syntax.
 # type = "shell" runs detached in the background.
 # type = "pane" opens a temporary pane and closes it when the command exits.
 # [[keys.command]]
-# key = "g"
+# key = "prefix+g"
 # type = "pane"
 # command = "lazygit"
 
-# Optional modifier-only shortcuts expanded over number keys 1-9.
-# Empty means disabled. Examples: "ctrl", "ctrl+shift", "alt".
+# Legacy indexed shortcut config is still parsed for compatibility.
+# Prefer switch_tab, switch_workspace, and focus_agent for new configs.
 # [keys.indexed]
-# tabs = ""       # e.g. "ctrl" makes ctrl+1..9 switch tabs
-# workspaces = "" # e.g. "ctrl+shift" makes ctrl+shift+1..9 switch workspaces
-# agents = ""     # e.g. "alt" makes alt+1..9 focus agent rows
+# tabs = ""       # e.g. "ctrl" makes ctrl+1..9 switch tabs directly
+# workspaces = "" # e.g. "ctrl+shift" makes ctrl+shift+1..9 switch workspaces directly
+# agents = ""     # e.g. "alt" makes alt+1..9 focus agent rows directly
 
 [ui]
 # Sidebar width (auto-scaled based on workspace names, this sets the default)
@@ -304,6 +316,7 @@ fn main() -> io::Result<()> {
         println!("       herdr update");
         println!("       herdr server stop");
         println!("       herdr server reload-config");
+        println!("       herdr config <subcommand> ...");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
         println!("       herdr agent <subcommand> ...");
@@ -327,6 +340,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr server reload-config",
                 "Reload config.toml in the running server",
+            ),
+            (
+                "herdr config reset-keys",
+                "Back up config.toml and remove custom keybindings",
             ),
             (
                 "herdr workspace <subcommand>",
@@ -409,6 +426,7 @@ fn main() -> io::Result<()> {
                 "remote-client-bridge",
                 "update",
                 "status",
+                "config",
                 "workspace",
                 "pane",
                 "wait",

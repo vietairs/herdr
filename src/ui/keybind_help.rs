@@ -14,8 +14,31 @@ use super::widgets::{
 };
 use crate::app::AppState;
 
-fn optional_keybind_label(label: &Option<String>) -> String {
-    label.clone().unwrap_or_else(|| "unset".to_string())
+fn keybind_label(bindings: &crate::config::ActionKeybinds) -> String {
+    bindings.label().unwrap_or_else(|| "unset".to_string())
+}
+
+fn indexed_label(bindings: &[crate::config::IndexedKeybind]) -> String {
+    if bindings.is_empty() {
+        "unset".to_string()
+    } else if bindings.len() == 9 {
+        let first = &bindings[0].label;
+        if first.ends_with('1') {
+            format!("{}1..9", first.trim_end_matches('1'))
+        } else {
+            bindings
+                .iter()
+                .map(|binding| binding.label.clone())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        }
+    } else {
+        bindings
+            .iter()
+            .map(|binding| binding.label.clone())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
 }
 
 pub(super) fn keybind_help_groups(
@@ -29,12 +52,16 @@ pub(super) fn keybind_help_groups(
         vec![
             (
                 crate::config::format_key_combo((app.prefix_code, app.prefix_mods)),
-                "navigate mode",
+                "prefix mode",
             ),
-            ("prefix + ?".to_string(), "keybinds"),
+            (keybind_label(&kb.help), "keybinds"),
+            (keybind_label(&kb.settings), "settings"),
+            (keybind_label(&kb.quit), "quit"),
+            (keybind_label(&kb.detach), "detach from server"),
+            (keybind_label(&kb.reload_config), "reload config"),
             (
-                optional_keybind_label(&kb.reload_config_label),
-                "reload config",
+                keybind_label(&kb.open_notification_target),
+                "open notification target",
             ),
         ],
     ));
@@ -47,85 +74,47 @@ pub(super) fn keybind_help_groups(
             ("h j k l / arrows".to_string(), "move focus"),
             ("tab / shift+tab".to_string(), "cycle pane"),
             ("enter".to_string(), "open workspace"),
-            ("s".to_string(), "settings"),
-            ("q".to_string(), "quit"),
+            ("1..9".to_string(), "switch workspace"),
         ],
     ));
 
-    let mut workspace_tab = vec![
-        (kb.new_workspace_label.clone(), "new workspace"),
-        (kb.rename_workspace_label.clone(), "rename workspace"),
-        (kb.close_workspace_label.clone(), "close workspace"),
-        (
-            optional_keybind_label(&kb.open_notification_target_label),
-            "open notification target",
-        ),
-        (
-            optional_keybind_label(&kb.previous_workspace_label),
-            "previous workspace",
-        ),
-        (
-            optional_keybind_label(&kb.next_workspace_label),
-            "next workspace",
-        ),
-        (
-            optional_keybind_label(&kb.indexed_workspaces_label),
-            "switch workspace 1-9",
-        ),
-        (
-            optional_keybind_label(&kb.previous_agent_label),
-            "previous agent",
-        ),
-        (optional_keybind_label(&kb.next_agent_label), "next agent"),
-        (
-            optional_keybind_label(&kb.indexed_agents_label),
-            "focus agent 1-9",
-        ),
-        (kb.new_tab_label.clone(), "new tab"),
-        (optional_keybind_label(&kb.rename_tab_label), "rename tab"),
-        (
-            optional_keybind_label(&kb.previous_tab_label),
-            "previous tab",
-        ),
-        (optional_keybind_label(&kb.next_tab_label), "next tab"),
-        (
-            optional_keybind_label(&kb.indexed_tabs_label),
-            "switch tab 1-9",
-        ),
-        (optional_keybind_label(&kb.close_tab_label), "close tab"),
+    let workspace_tab = vec![
+        (keybind_label(&kb.workspace_picker), "workspace navigation"),
+        (keybind_label(&kb.new_workspace), "new workspace"),
+        (keybind_label(&kb.rename_workspace), "rename workspace"),
+        (keybind_label(&kb.close_workspace), "close workspace"),
+        (keybind_label(&kb.previous_workspace), "previous workspace"),
+        (keybind_label(&kb.next_workspace), "next workspace"),
+        (indexed_label(&kb.switch_workspace), "switch workspace 1-9"),
+        (keybind_label(&kb.previous_agent), "previous agent"),
+        (keybind_label(&kb.next_agent), "next agent"),
+        (indexed_label(&kb.focus_agent), "focus agent 1-9"),
+        (keybind_label(&kb.new_tab), "new tab"),
+        (keybind_label(&kb.rename_tab), "rename tab"),
+        (keybind_label(&kb.previous_tab), "previous tab"),
+        (keybind_label(&kb.next_tab), "next tab"),
+        (indexed_label(&kb.switch_tab), "switch tab 1-9"),
+        (keybind_label(&kb.close_tab), "close tab"),
     ];
-    if let Some(label) = &kb.detach_label {
-        workspace_tab.insert(3, (label.clone(), "detach from server"));
-    }
     groups.push(("workspaces / tabs", workspace_tab));
 
     let panes = vec![
-        (kb.split_vertical_label.clone(), "split vertical"),
-        (kb.split_horizontal_label.clone(), "split horizontal"),
-        (kb.close_pane_label.clone(), "close pane"),
-        (optional_keybind_label(&kb.rename_pane_label), "rename pane"),
+        (keybind_label(&kb.split_vertical), "split vertical"),
+        (keybind_label(&kb.split_horizontal), "split horizontal"),
+        (keybind_label(&kb.close_pane), "close pane"),
+        (keybind_label(&kb.rename_pane), "rename pane"),
+        (keybind_label(&kb.edit_scrollback), "edit scrollback"),
+        (keybind_label(&kb.zoom), "zoom pane"),
+        (keybind_label(&kb.resize_mode), "resize mode"),
+        (keybind_label(&kb.toggle_sidebar), "toggle sidebar"),
+        (keybind_label(&kb.focus_pane_left), "focus pane left"),
+        (keybind_label(&kb.focus_pane_down), "focus pane down"),
+        (keybind_label(&kb.focus_pane_up), "focus pane up"),
+        (keybind_label(&kb.focus_pane_right), "focus pane right"),
+        (keybind_label(&kb.cycle_pane_next), "cycle pane next"),
         (
-            optional_keybind_label(&kb.edit_scrollback_label),
-            "edit scrollback",
-        ),
-        (kb.zoom_label.clone(), "zoom pane"),
-        (kb.resize_mode_label.clone(), "resize mode"),
-        (kb.toggle_sidebar_label.clone(), "toggle sidebar"),
-        (
-            optional_keybind_label(&kb.focus_pane_left_label),
-            "focus pane left",
-        ),
-        (
-            optional_keybind_label(&kb.focus_pane_down_label),
-            "focus pane down",
-        ),
-        (
-            optional_keybind_label(&kb.focus_pane_up_label),
-            "focus pane up",
-        ),
-        (
-            optional_keybind_label(&kb.focus_pane_right_label),
-            "focus pane right",
+            keybind_label(&kb.cycle_pane_previous),
+            "cycle pane previous",
         ),
     ];
     groups.push(("panes", panes));

@@ -8,12 +8,14 @@ mod theme;
 
 pub use self::{
     io::{
-        config_diagnostic_summary, config_dir, config_path, load_live_config, remove_section_key,
-        state_dir, upsert_section_bool, upsert_section_value,
+        config_diagnostic_summary, config_dir, config_path, load_live_config,
+        remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_bool,
+        upsert_section_value,
     },
     keybinds::{
-        format_key_combo, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
-        Keybinds, LiveKeybindConfig,
+        format_key_combo, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
+        BindingConfig, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
+        IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
     model::{
         validated_sidebar_bounds, AgentPanelScopeConfig, Config, ConfigReloadReport,
@@ -42,7 +44,7 @@ impl Config {
         self.validated_keybinds().1
     }
 
-    /// Parsed keybinds for navigate mode actions.
+    /// Parsed keybinds for Herdr actions.
     pub fn keybinds(&self) -> Keybinds {
         self.validated_keybinds().3
     }

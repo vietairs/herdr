@@ -2,7 +2,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 
 use crate::{
-    app::state::{key_matches, AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode},
+    app::state::{AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode},
+    input::TerminalKey,
     layout::NavDirection,
 };
 
@@ -448,14 +449,12 @@ pub(crate) fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
-pub(crate) fn handle_resize_key(state: &mut AppState, key: KeyEvent) {
+pub(crate) fn handle_resize_key(state: &mut AppState, raw_key: TerminalKey) {
+    let key = raw_key.as_key_event();
     if key.code == KeyCode::Esc
         || key.code == KeyCode::Enter
-        || key_matches(
-            &key,
-            state.keybinds.resize_mode.0,
-            state.keybinds.resize_mode.1,
-        )
+        || state.keybinds.resize_mode.matches_prefix_key(raw_key)
+        || state.keybinds.resize_mode.matches_direct_key(raw_key)
     {
         if state.active.is_some() {
             state.mode = Mode::Terminal;
@@ -648,12 +647,43 @@ mod tests {
     fn custom_resize_key_exits_resize_mode() {
         let mut state = state_with_workspaces(&["test"]);
         state.mode = Mode::Resize;
-        state.keybinds.resize_mode = (KeyCode::Char('g'), KeyModifiers::empty());
-        state.keybinds.resize_mode_label = "g".into();
+        state.keybinds.resize_mode = crate::config::ActionKeybinds::prefix("g");
 
         handle_resize_key(
             &mut state,
-            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+            TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn direct_resize_key_exits_resize_mode() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::Resize;
+        state.keybinds.resize_mode = crate::config::ActionKeybinds::direct("ctrl+alt+r");
+
+        handle_resize_key(
+            &mut state,
+            TerminalKey::new(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn resize_key_exit_matches_enhanced_shifted_punctuation() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::Resize;
+        state.keybinds.resize_mode = crate::config::ActionKeybinds::prefix("?");
+
+        handle_resize_key(
+            &mut state,
+            TerminalKey::new(KeyCode::Char('/'), KeyModifiers::SHIFT)
+                .with_shifted_codepoint('?' as u32),
         );
 
         assert_eq!(state.mode, Mode::Terminal);

@@ -78,7 +78,7 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " enters navigate mode · ",
+            " enters prefix mode · ",
             Style::default().fg(app.palette.overlay1),
         ),
         Span::styled(

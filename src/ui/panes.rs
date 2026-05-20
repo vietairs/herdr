@@ -355,7 +355,10 @@ fn render_empty(app: &AppState, frame: &mut Frame, area: Rect) {
         Line::from(vec![
             Span::styled("  Press ", Style::default().fg(p.overlay0)),
             Span::styled(
-                app.keybinds.new_workspace_label.to_string(),
+                app.keybinds
+                    .new_workspace
+                    .label()
+                    .unwrap_or_else(|| "unset".to_string()),
                 Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" to create one", Style::default().fg(p.overlay0)),

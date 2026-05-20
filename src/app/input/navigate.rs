@@ -11,7 +11,7 @@ use ratatui::layout::Direction;
 
 use crate::{
     app::{
-        state::{key_matches, AppState, Mode},
+        state::{AppState, Mode},
         App,
     },
     input::TerminalKey,
@@ -20,100 +20,61 @@ use crate::{
 
 pub(crate) fn terminal_direct_navigation_action(
     state: &AppState,
-    key: &KeyEvent,
+    key: TerminalKey,
 ) -> Option<NavigateAction> {
-    if let Some(action) = indexed_navigation_action(state, key) {
-        return Some(action);
-    }
+    action_for_key(state, key, BindingDispatch::Direct)
+}
 
-    let kb = &state.keybinds;
-    if kb
-        .previous_workspace
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::PreviousWorkspace);
-    }
-    if kb
-        .next_workspace
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::NextWorkspace);
-    }
-    if kb
-        .previous_agent
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::PreviousAgent);
-    }
-    if kb
-        .next_agent
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::NextAgent);
-    }
-    if kb
-        .previous_tab
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::PreviousTab);
-    }
-    if kb
-        .next_tab
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::NextTab);
-    }
-    if kb
-        .focus_pane_left
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::FocusPaneLeft);
-    }
-    if kb
-        .focus_pane_down
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::FocusPaneDown);
-    }
-    if kb
-        .focus_pane_up
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::FocusPaneUp);
-    }
-    if kb
-        .focus_pane_right
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::FocusPaneRight);
-    }
-    None
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActionContext {
+    Direct,
+    Prefix,
+    Navigate,
 }
 
 impl App {
-    pub(crate) fn handle_navigate_key(&mut self, raw_key: TerminalKey) {
+    pub(crate) fn handle_prefix_key(&mut self, raw_key: TerminalKey) {
         let key = raw_key.as_key_event();
         self.state.update_dismissed = true;
 
-        if self.state.is_prefix(&key) {
+        if self.state.is_prefix_key(raw_key) {
             if !self.pass_through_key_to_focused_pane(raw_key) {
-                leave_navigate_mode(&mut self.state);
+                leave_command_mode(&mut self.state);
             }
             return;
         }
 
         if key.code == KeyCode::Esc {
-            leave_navigate_mode(&mut self.state);
+            leave_command_mode(&mut self.state);
             return;
         }
 
-        if let Some(action) = navigate_action_for_key(&self.state, &key) {
+        if let Some(action) = action_for_key(&self.state, raw_key, BindingDispatch::Prefix) {
             if action == NavigateAction::EditScrollback {
+                let previous_mode = self.state.mode;
                 self.launch_focused_scrollback_editor();
+                finish_action_context(&mut self.state, ActionContext::Prefix, previous_mode);
             } else {
-                execute_navigate_action(&mut self.state, action);
+                execute_navigate_action_in_context(&mut self.state, action, ActionContext::Prefix);
             }
             self.selection_autoscroll_deadline = None;
+            return;
+        }
+
+        if let Some(binding) = command_for_key(&self.state, raw_key, BindingDispatch::Prefix) {
+            self.launch_custom_command(binding, ActionContext::Prefix);
+            return;
+        }
+
+        leave_command_mode(&mut self.state);
+    }
+
+    pub(crate) fn handle_navigate_key(&mut self, raw_key: TerminalKey) {
+        let key = raw_key.as_key_event();
+        self.state.update_dismissed = true;
+
+        if key.code == KeyCode::Esc || self.state.is_prefix_key(raw_key) {
+            leave_navigate_mode(&mut self.state);
             return;
         }
 
@@ -121,8 +82,22 @@ impl App {
             return;
         }
 
-        if let Some(binding) = navigate_custom_command_for_key(&self.state, &key) {
-            self.launch_custom_command(binding);
+        if let Some(action) = action_for_key(&self.state, raw_key, BindingDispatch::Prefix) {
+            if action == NavigateAction::EditScrollback {
+                self.launch_focused_scrollback_editor();
+            } else {
+                execute_navigate_action_in_context(
+                    &mut self.state,
+                    action,
+                    ActionContext::Navigate,
+                );
+            }
+            self.selection_autoscroll_deadline = None;
+            return;
+        }
+
+        if let Some(binding) = command_for_key(&self.state, raw_key, BindingDispatch::Prefix) {
+            self.launch_custom_command(binding, ActionContext::Navigate);
         }
     }
 
@@ -143,7 +118,12 @@ impl App {
         true
     }
 
-    fn launch_custom_command(&mut self, binding: crate::config::CustomCommandKeybind) {
+    pub(super) fn launch_custom_command(
+        &mut self,
+        binding: crate::config::CustomCommandKeybind,
+        context: ActionContext,
+    ) {
+        let previous_mode = self.state.mode;
         let previous_toast = self.state.toast.clone();
         let result = match binding.action {
             crate::config::CustomCommandAction::Shell => self.spawn_custom_command(&binding),
@@ -152,7 +132,7 @@ impl App {
             }
         };
         match result {
-            Ok(()) => leave_navigate_mode(&mut self.state),
+            Ok(()) => finish_custom_command_context(&mut self.state, context, previous_mode),
             Err(err) => {
                 self.state.toast = Some(crate::app::state::ToastNotification {
                     kind: crate::app::state::ToastKind::NeedsAttention,
@@ -161,6 +141,7 @@ impl App {
                     target: None,
                 });
                 self.sync_toast_deadline(previous_toast);
+                finish_custom_command_context(&mut self.state, context, previous_mode);
             }
         }
     }
@@ -233,7 +214,7 @@ impl App {
         Ok(())
     }
 
-    fn launch_focused_scrollback_editor(&mut self) {
+    pub(super) fn launch_focused_scrollback_editor(&mut self) {
         let previous_toast = self.state.toast.clone();
         match self.open_focused_scrollback_in_editor() {
             Ok(()) => self.sync_toast_deadline(previous_toast),
@@ -359,25 +340,35 @@ impl App {
     }
 }
 
-fn navigate_custom_command_for_key(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindingDispatch {
+    Direct,
+    Prefix,
+}
+
+pub(crate) fn command_for_key(
     state: &AppState,
-    key: &KeyEvent,
+    key: TerminalKey,
+    dispatch: BindingDispatch,
 ) -> Option<crate::config::CustomCommandKeybind> {
     state
         .keybinds
         .custom_commands
         .iter()
-        .find(|binding| key_matches(key, binding.key.0, binding.key.1))
+        .find(|binding| match dispatch {
+            BindingDispatch::Direct => binding.bindings.matches_direct_key(key),
+            BindingDispatch::Prefix => binding.bindings.matches_prefix_key(key),
+        })
         .cloned()
 }
 
 pub(super) fn handle_navigate_reserved_key(state: &mut AppState, key: KeyEvent) -> bool {
-    match key.code {
-        KeyCode::Char('q') => {
-            super::modal::request_quit_or_detach(state);
-            leave_navigate_mode(state);
-            true
-        }
+    let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+    if !modifiers.is_empty() {
+        return false;
+    }
+
+    match code {
         KeyCode::Enter => {
             if !state.workspaces.is_empty() {
                 state.switch_workspace(state.selected);
@@ -391,14 +382,6 @@ pub(super) fn handle_navigate_reserved_key(state: &mut AppState, key: KeyEvent) 
                 state.switch_workspace(idx);
                 leave_navigate_mode(state);
             }
-            true
-        }
-        KeyCode::Char('s') => {
-            super::settings::open_settings(state);
-            true
-        }
-        KeyCode::Char('?') => {
-            super::modal::open_keybind_help(state);
             true
         }
         KeyCode::Up => {
@@ -446,18 +429,20 @@ pub(super) fn handle_navigate_reserved_key(state: &mut AppState, key: KeyEvent) 
 #[allow(dead_code)] // exercised in input unit tests; production uses App::handle_navigate_key
 pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     state.update_dismissed = true;
+    let terminal_key = TerminalKey::from(key);
 
-    if state.is_prefix(&key) || key.code == KeyCode::Esc {
+    if state.is_prefix_key(terminal_key) || key.code == KeyCode::Esc {
         leave_navigate_mode(state);
         return;
     }
 
-    if let Some(action) = navigate_action_for_key(state, &key) {
-        execute_navigate_action(state, action);
+    if handle_navigate_reserved_key(state, key) {
         return;
     }
 
-    let _ = handle_navigate_reserved_key(state, key);
+    if let Some(action) = action_for_key(state, terminal_key, BindingDispatch::Prefix) {
+        execute_navigate_action_in_context(state, action, ActionContext::Navigate);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -468,6 +453,7 @@ pub(crate) enum NavigateAction {
     SwitchWorkspace(usize),
     SwitchTab(usize),
     FocusAgent(usize),
+    WorkspacePicker,
     PreviousWorkspace,
     NextWorkspace,
     PreviousAgent,
@@ -489,158 +475,129 @@ pub(crate) enum NavigateAction {
     Zoom,
     EnterResizeMode,
     ToggleSidebar,
+    CyclePaneNext,
+    CyclePanePrevious,
+    Help,
+    Settings,
+    Quit,
     ReloadConfig,
     OpenNotificationTarget,
     Detach,
 }
 
-fn indexed_navigation_action(state: &AppState, key: &KeyEvent) -> Option<NavigateAction> {
-    let KeyCode::Char(c @ '1'..='9') = key.code else {
-        return None;
-    };
-    let idx = (c as usize) - ('1' as usize);
+fn indexed_navigation_action(
+    state: &AppState,
+    key: TerminalKey,
+    dispatch: BindingDispatch,
+) -> Option<NavigateAction> {
     let kb = &state.keybinds;
+    let trigger_matches = |binding: &crate::config::IndexedKeybind| match dispatch {
+        BindingDispatch::Direct => binding.trigger.is_direct(),
+        BindingDispatch::Prefix => binding.trigger.is_prefix(),
+    };
 
-    if kb
-        .indexed_tabs
-        .is_some_and(|mods| key_matches(key, KeyCode::Char(c), mods))
-    {
-        return Some(NavigateAction::SwitchTab(idx));
+    for binding in &kb.switch_tab {
+        if trigger_matches(binding) {
+            if let Some(idx) = binding.matched_index(key) {
+                return Some(NavigateAction::SwitchTab(idx));
+            }
+        }
     }
-    if kb
-        .indexed_workspaces
-        .is_some_and(|mods| key_matches(key, KeyCode::Char(c), mods))
-    {
-        return Some(NavigateAction::SwitchWorkspace(idx));
+    for binding in &kb.switch_workspace {
+        if trigger_matches(binding) {
+            if let Some(idx) = binding.matched_index(key) {
+                return Some(NavigateAction::SwitchWorkspace(idx));
+            }
+        }
     }
-    if kb
-        .indexed_agents
-        .is_some_and(|mods| key_matches(key, KeyCode::Char(c), mods))
-    {
-        return Some(NavigateAction::FocusAgent(idx));
+    for binding in &kb.focus_agent {
+        if trigger_matches(binding) {
+            if let Some(idx) = binding.matched_index(key) {
+                return Some(NavigateAction::FocusAgent(idx));
+            }
+        }
     }
 
     None
 }
 
-fn navigate_action_for_key(state: &AppState, key: &KeyEvent) -> Option<NavigateAction> {
-    if let Some(action) = indexed_navigation_action(state, key) {
+fn action_matches(
+    bindings: &crate::config::ActionKeybinds,
+    key: TerminalKey,
+    dispatch: BindingDispatch,
+) -> bool {
+    match dispatch {
+        BindingDispatch::Direct => bindings.matches_direct_key(key),
+        BindingDispatch::Prefix => bindings.matches_prefix_key(key),
+    }
+}
+
+fn action_for_key(
+    state: &AppState,
+    key: TerminalKey,
+    dispatch: BindingDispatch,
+) -> Option<NavigateAction> {
+    if let Some(action) = indexed_navigation_action(state, key, dispatch) {
         return Some(action);
     }
 
     let kb = &state.keybinds;
-    if key_matches(key, kb.new_workspace.0, kb.new_workspace.1) {
-        return Some(NavigateAction::NewWorkspace);
-    }
-    if key_matches(key, kb.rename_workspace.0, kb.rename_workspace.1) {
-        return Some(NavigateAction::RenameWorkspace);
-    }
-    if key_matches(key, kb.close_workspace.0, kb.close_workspace.1) {
-        return Some(NavigateAction::CloseWorkspace);
-    }
-    if kb
-        .previous_workspace
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::PreviousWorkspace);
-    }
-    if kb
-        .next_workspace
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::NextWorkspace);
-    }
-    if kb
-        .previous_agent
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::PreviousAgent);
-    }
-    if kb
-        .next_agent
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::NextAgent);
-    }
-    if key_matches(key, kb.new_tab.0, kb.new_tab.1) {
-        return Some(NavigateAction::NewTab);
-    }
-    if kb
-        .rename_tab
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::RenameTab);
-    }
-    if kb
-        .previous_tab
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::PreviousTab);
-    }
-    if kb
-        .next_tab
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::NextTab);
-    }
-    if kb
-        .close_tab
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::CloseTab);
-    }
-    if kb
-        .rename_pane
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::RenamePane);
-    }
-    if kb
-        .edit_scrollback
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::EditScrollback);
-    }
-    if key_matches(key, kb.split_vertical.0, kb.split_vertical.1) {
-        return Some(NavigateAction::SplitVertical);
-    }
-    if key_matches(key, kb.split_horizontal.0, kb.split_horizontal.1) {
-        return Some(NavigateAction::SplitHorizontal);
-    }
-    if key_matches(key, kb.close_pane.0, kb.close_pane.1) {
-        return Some(NavigateAction::ClosePane);
-    }
-    if key_matches(key, kb.zoom.0, kb.zoom.1) {
-        return Some(NavigateAction::Zoom);
-    }
-    if key_matches(key, kb.resize_mode.0, kb.resize_mode.1) {
-        return Some(NavigateAction::EnterResizeMode);
-    }
-    if key_matches(key, kb.toggle_sidebar.0, kb.toggle_sidebar.1) {
-        return Some(NavigateAction::ToggleSidebar);
-    }
-    if kb
-        .reload_config
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::ReloadConfig);
-    }
-    if kb
-        .open_notification_target
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::OpenNotificationTarget);
-    }
-    if kb
-        .detach
-        .is_some_and(|(code, mods)| key_matches(key, code, mods))
-    {
-        return Some(NavigateAction::Detach);
+    for (bindings, action) in [
+        (&kb.help, NavigateAction::Help),
+        (&kb.settings, NavigateAction::Settings),
+        (&kb.quit, NavigateAction::Quit),
+        (&kb.workspace_picker, NavigateAction::WorkspacePicker),
+        (&kb.new_workspace, NavigateAction::NewWorkspace),
+        (&kb.rename_workspace, NavigateAction::RenameWorkspace),
+        (&kb.close_workspace, NavigateAction::CloseWorkspace),
+        (&kb.previous_workspace, NavigateAction::PreviousWorkspace),
+        (&kb.next_workspace, NavigateAction::NextWorkspace),
+        (&kb.previous_agent, NavigateAction::PreviousAgent),
+        (&kb.next_agent, NavigateAction::NextAgent),
+        (&kb.new_tab, NavigateAction::NewTab),
+        (&kb.rename_tab, NavigateAction::RenameTab),
+        (&kb.previous_tab, NavigateAction::PreviousTab),
+        (&kb.next_tab, NavigateAction::NextTab),
+        (&kb.close_tab, NavigateAction::CloseTab),
+        (&kb.rename_pane, NavigateAction::RenamePane),
+        (&kb.edit_scrollback, NavigateAction::EditScrollback),
+        (&kb.focus_pane_left, NavigateAction::FocusPaneLeft),
+        (&kb.focus_pane_down, NavigateAction::FocusPaneDown),
+        (&kb.focus_pane_up, NavigateAction::FocusPaneUp),
+        (&kb.focus_pane_right, NavigateAction::FocusPaneRight),
+        (&kb.cycle_pane_next, NavigateAction::CyclePaneNext),
+        (&kb.cycle_pane_previous, NavigateAction::CyclePanePrevious),
+        (&kb.split_vertical, NavigateAction::SplitVertical),
+        (&kb.split_horizontal, NavigateAction::SplitHorizontal),
+        (&kb.close_pane, NavigateAction::ClosePane),
+        (&kb.zoom, NavigateAction::Zoom),
+        (&kb.resize_mode, NavigateAction::EnterResizeMode),
+        (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+        (&kb.reload_config, NavigateAction::ReloadConfig),
+        (
+            &kb.open_notification_target,
+            NavigateAction::OpenNotificationTarget,
+        ),
+        (&kb.detach, NavigateAction::Detach),
+    ] {
+        if action_matches(bindings, key, dispatch) {
+            return Some(action);
+        }
     }
     None
 }
 
+#[cfg(test)]
 pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateAction) {
+    execute_navigate_action_in_context(state, action, ActionContext::Navigate);
+}
+
+pub(super) fn execute_navigate_action_in_context(
+    state: &mut AppState,
+    action: NavigateAction,
+    context: ActionContext,
+) {
+    let previous_mode = state.mode;
     match action {
         NavigateAction::NewWorkspace => {
             state.request_new_workspace = true;
@@ -682,6 +639,10 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
                 leave_navigate_mode(state);
             }
         }
+        NavigateAction::WorkspacePicker => {
+            state.mobile_switcher_scroll = 0;
+            state.mode = Mode::Navigate;
+        }
         NavigateAction::PreviousWorkspace => {
             state.previous_workspace();
             leave_navigate_mode(state);
@@ -699,11 +660,13 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
             leave_navigate_mode(state);
         }
         NavigateAction::NewTab => {
-            if state.prompt_new_tab_name {
-                super::modal::open_new_tab_dialog(state);
-            } else {
-                state.request_new_tab = true;
-                leave_navigate_mode(state);
+            if state.active.is_some() {
+                if state.prompt_new_tab_name {
+                    super::modal::open_new_tab_dialog(state);
+                } else {
+                    state.request_new_tab = true;
+                    leave_navigate_mode(state);
+                }
             }
         }
         NavigateAction::RenameTab => super::modal::open_rename_active_tab(state, false),
@@ -754,6 +717,20 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
             state.sidebar_collapsed = !state.sidebar_collapsed;
             leave_navigate_mode(state);
         }
+        NavigateAction::CyclePaneNext => {
+            state.cycle_pane(false);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::CyclePanePrevious => {
+            state.cycle_pane(true);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::Help => super::modal::open_keybind_help(state),
+        NavigateAction::Settings => super::settings::open_settings(state),
+        NavigateAction::Quit => {
+            super::modal::request_quit_or_detach(state);
+            leave_navigate_mode(state);
+        }
         NavigateAction::ReloadConfig => {
             state.request_reload_config = true;
             leave_navigate_mode(state);
@@ -769,12 +746,42 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
             leave_navigate_mode(state);
         }
     }
+
+    finish_action_context(state, context, previous_mode);
 }
 
 fn leave_navigate_mode(state: &mut AppState) {
     if state.active.is_some() {
         state.mode = Mode::Terminal;
     }
+}
+
+fn finish_action_context(state: &mut AppState, context: ActionContext, previous_mode: Mode) {
+    if matches!(context, ActionContext::Direct | ActionContext::Prefix)
+        && state.mode == previous_mode
+    {
+        leave_command_mode(state);
+    }
+}
+
+fn finish_custom_command_context(
+    state: &mut AppState,
+    context: ActionContext,
+    previous_mode: Mode,
+) {
+    if context == ActionContext::Navigate {
+        leave_navigate_mode(state);
+    } else {
+        finish_action_context(state, context, previous_mode);
+    }
+}
+
+fn leave_command_mode(state: &mut AppState) {
+    state.mode = if state.active.is_some() {
+        Mode::Terminal
+    } else {
+        Mode::Navigate
+    };
 }
 
 fn write_scrollback_temp_file(content: &str) -> io::Result<std::path::PathBuf> {
@@ -850,8 +857,7 @@ mod tests {
     #[test]
     fn custom_rename_key_enters_rename_mode() {
         let mut state = state_with_workspaces(&["test"]);
-        state.keybinds.rename_workspace = (KeyCode::Char('g'), KeyModifiers::empty());
-        state.keybinds.rename_workspace_label = "g".into();
+        state.keybinds.rename_workspace = crate::config::ActionKeybinds::prefix("g");
 
         handle_navigate_key(
             &mut state,
@@ -865,8 +871,7 @@ mod tests {
     #[test]
     fn custom_new_workspace_key_requests_and_exits_navigate() {
         let mut state = state_with_workspaces(&["test"]);
-        state.keybinds.new_workspace = (KeyCode::Char('g'), KeyModifiers::empty());
-        state.keybinds.new_workspace_label = "g".into();
+        state.keybinds.new_workspace = crate::config::ActionKeybinds::prefix("g");
 
         handle_navigate_key(
             &mut state,
@@ -880,8 +885,7 @@ mod tests {
     #[test]
     fn custom_sidebar_toggle_key_toggles_and_exits_navigate() {
         let mut state = state_with_workspaces(&["test"]);
-        state.keybinds.toggle_sidebar = (KeyCode::Char('g'), KeyModifiers::empty());
-        state.keybinds.toggle_sidebar_label = "g".into();
+        state.keybinds.toggle_sidebar = crate::config::ActionKeybinds::prefix("g");
         assert!(!state.sidebar_collapsed);
 
         handle_navigate_key(
@@ -896,8 +900,7 @@ mod tests {
     #[test]
     fn custom_resize_key_enters_resize_mode() {
         let mut state = state_with_workspaces(&["test"]);
-        state.keybinds.resize_mode = (KeyCode::Char('g'), KeyModifiers::empty());
-        state.keybinds.resize_mode_label = "g".into();
+        state.keybinds.resize_mode = crate::config::ActionKeybinds::prefix("g");
 
         handle_navigate_key(
             &mut state,
@@ -910,8 +913,7 @@ mod tests {
     #[test]
     fn custom_reload_config_key_requests_reload_and_exits_navigate() {
         let mut state = state_with_workspaces(&["test"]);
-        state.keybinds.reload_config = Some((KeyCode::Char('g'), KeyModifiers::empty()));
-        state.keybinds.reload_config_label = Some("g".into());
+        state.keybinds.reload_config = crate::config::ActionKeybinds::prefix("g");
 
         handle_navigate_key(
             &mut state,
@@ -928,8 +930,7 @@ mod tests {
         state.active = Some(0);
         state.selected = 0;
         state.mode = Mode::Navigate;
-        state.keybinds.open_notification_target = Some((KeyCode::Char('g'), KeyModifiers::empty()));
-        state.keybinds.open_notification_target_label = Some("g".into());
+        state.keybinds.open_notification_target = crate::config::ActionKeybinds::prefix("g");
         let target_workspace_id = state.workspaces[1].id.clone();
         let target_pane = state.workspaces[1].tabs[0].root_pane;
         state.toast = Some(crate::app::state::ToastNotification {
@@ -989,12 +990,11 @@ mod tests {
     #[test]
     fn terminal_direct_agent_shortcut_maps_to_navigation_action() {
         let mut state = state_with_workspaces(&["test"]);
-        state.keybinds.next_agent = Some((KeyCode::Char('a'), KeyModifiers::ALT));
-        state.keybinds.next_agent_label = Some("alt+a".into());
+        state.keybinds.next_agent = crate::config::ActionKeybinds::direct("alt+a");
 
         let action = terminal_direct_navigation_action(
             &state,
-            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT),
+            TerminalKey::new(KeyCode::Char('a'), KeyModifiers::ALT),
         );
 
         assert_eq!(action, Some(NavigateAction::NextAgent));
@@ -1003,12 +1003,11 @@ mod tests {
     #[test]
     fn terminal_direct_focus_pane_shortcut_maps_to_navigation_action() {
         let mut state = state_with_workspaces(&["test"]);
-        state.keybinds.focus_pane_left = Some((KeyCode::Left, KeyModifiers::ALT));
-        state.keybinds.focus_pane_left_label = Some("alt+left".into());
+        state.keybinds.focus_pane_left = crate::config::ActionKeybinds::direct("alt+left");
 
         let action = terminal_direct_navigation_action(
             &state,
-            &KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+            TerminalKey::new(KeyCode::Left, KeyModifiers::ALT),
         );
 
         assert_eq!(action, Some(NavigateAction::FocusPaneLeft));
@@ -1017,15 +1016,200 @@ mod tests {
     #[test]
     fn terminal_direct_indexed_tab_shortcut_maps_to_navigation_action() {
         let mut state = state_with_workspaces(&["test"]);
-        state.keybinds.indexed_tabs = Some(KeyModifiers::CONTROL);
-        state.keybinds.indexed_tabs_label = Some("ctrl+1..9".into());
+        let config: Config = toml::from_str("[keys]\nswitch_tab = \"ctrl+3\"\n").unwrap();
+        state.keybinds.switch_tab = config.keybinds().switch_tab;
 
         let action = terminal_direct_navigation_action(
             &state,
-            &KeyEvent::new(KeyCode::Char('3'), KeyModifiers::CONTROL),
+            TerminalKey::new(KeyCode::Char('3'), KeyModifiers::CONTROL),
         );
 
         assert_eq!(action, Some(NavigateAction::SwitchTab(2)));
+    }
+
+    #[tokio::test]
+    async fn navigate_mode_runs_prefix_action_rhs_without_pressing_prefix_again() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Navigate;
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('n'), KeyModifiers::SHIFT));
+
+        assert!(app.state.request_new_workspace);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn prefix_focus_pane_is_one_shot_and_returns_to_terminal() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let right = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].layout.focus_pane(right);
+        app.state.view.pane_infos = app.state.workspaces[0]
+            .active_tab()
+            .unwrap()
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 80, 24));
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn no_op_prefix_action_exits_prefix_mode() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('o'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn unmatched_prefix_rhs_exits_prefix_mode() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::F(12), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn prefix_help_matches_enhanced_shifted_question_mark() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(
+            TerminalKey::new(KeyCode::Char('/'), KeyModifiers::SHIFT)
+                .with_shifted_codepoint('?' as u32),
+        )
+        .await;
+
+        assert_eq!(app.state.mode, Mode::KeybindHelp);
+    }
+
+    #[test]
+    fn navigate_mode_help_is_binding_driven() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.help = crate::config::ActionKeybinds::prefix("f");
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(state.mode, Mode::Navigate);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::empty()),
+        );
+        assert_eq!(state.mode, Mode::KeybindHelp);
+    }
+
+    #[test]
+    fn modified_navigate_local_key_can_be_bound_as_prefix_rhs() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.toggle_sidebar = crate::config::ActionKeybinds::prefix("shift+h");
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT),
+        );
+
+        assert!(state.sidebar_collapsed);
+    }
+
+    #[test]
+    fn empty_state_new_tab_is_no_op() {
+        let mut state = crate::app::state::AppState::test_new();
+        state.mode = Mode::Prefix;
+
+        execute_navigate_action_in_context(
+            &mut state,
+            NavigateAction::NewTab,
+            ActionContext::Prefix,
+        );
+
+        assert_eq!(state.mode, Mode::Navigate);
+        assert!(!state.creating_new_tab);
+        assert!(!state.request_new_tab);
+        assert!(state.workspaces.is_empty());
     }
 
     #[tokio::test]
@@ -1049,8 +1233,8 @@ mod tests {
             output_path.display()
         );
         app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
-            key: (KeyCode::Char('g'), KeyModifiers::empty()),
-            label: "g".into(),
+            bindings: crate::config::ActionKeybinds::prefix("g"),
+            label: "prefix+g".into(),
             command,
             action: crate::config::CustomCommandAction::Shell,
         }];
@@ -1060,7 +1244,7 @@ mod tests {
             app.state.prefix_mods,
         ))
         .await;
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.mode, Mode::Prefix);
 
         app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
             .await;
@@ -1110,8 +1294,8 @@ mod tests {
         let output_path = unique_temp_path("custom-pane-command");
         let command = format!("printf done > '{}'", output_path.display());
         app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
-            key: (KeyCode::Char('g'), KeyModifiers::empty()),
-            label: "g".into(),
+            bindings: crate::config::ActionKeybinds::prefix("g"),
+            label: "prefix+g".into(),
             command,
             action: crate::config::CustomCommandAction::Pane,
         }];
@@ -1164,7 +1348,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Navigate;
+        app.state.mode = Mode::Terminal;
 
         let output_path = unique_temp_path("edit-scrollback");
         let previous_editor = std::env::var_os("EDITOR");
@@ -1172,10 +1356,15 @@ mod tests {
             "EDITOR",
             format!("sh -c 'cp \"$1\" {}' sh", output_path.display()),
         );
-        app.state.keybinds.edit_scrollback = Some((KeyCode::Char('g'), KeyModifiers::empty()));
-        app.state.keybinds.edit_scrollback_label = Some("g".into());
+        app.state.keybinds.edit_scrollback = crate::config::ActionKeybinds::prefix("g");
 
-        app.handle_navigate_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()));
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
+            .await;
 
         match previous_editor {
             Some(value) => std::env::set_var("EDITOR", value),
@@ -1194,8 +1383,7 @@ mod tests {
     fn zoom_action_exits_navigate_mode() {
         let mut state = state_with_workspaces(&["test"]);
         state.workspaces[0].test_split(Direction::Horizontal);
-        state.keybinds.zoom = (KeyCode::Char('g'), KeyModifiers::empty());
-        state.keybinds.zoom_label = "g".into();
+        state.keybinds.zoom = crate::config::ActionKeybinds::prefix("g");
 
         handle_navigate_key(
             &mut state,
@@ -1265,10 +1453,11 @@ mod tests {
         let mut state = crate::app::state::AppState::test_new();
         state.quit_detaches = true;
 
-        assert!(handle_navigate_reserved_key(
+        handle_navigate_key(
             &mut state,
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())
-        ));
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()),
+        );
+
         assert!(state.detach_requested);
         assert!(!state.should_quit);
     }

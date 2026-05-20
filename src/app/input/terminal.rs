@@ -34,21 +34,44 @@ impl App {
 
         let key_event = key.as_key_event();
 
-        if let Some(action) = super::terminal_direct_navigation_action(&self.state, &key_event) {
+        if let Some(action) = super::terminal_direct_navigation_action(&self.state, key) {
             debug!(
                 code = ?key_event.code,
                 modifiers = ?key_event.modifiers,
                 kind = ?key_event.kind,
                 action = ?action,
-                "intercepted terminal direct navigation key before forwarding to pane"
+                "intercepted terminal direct keybinding before forwarding to pane"
             );
-            super::navigate::execute_navigate_action(&mut self.state, action);
+            if action == super::navigate::NavigateAction::EditScrollback {
+                self.launch_focused_scrollback_editor();
+            } else {
+                super::navigate::execute_navigate_action_in_context(
+                    &mut self.state,
+                    action,
+                    super::navigate::ActionContext::Direct,
+                );
+            }
             return None;
         }
 
-        if self.state.is_prefix(&key_event) {
-            self.state.mobile_switcher_scroll = 0;
-            self.state.mode = Mode::Navigate;
+        if let Some(binding) = super::navigate::command_for_key(
+            &self.state,
+            key,
+            super::navigate::BindingDispatch::Direct,
+        ) {
+            debug!(
+                code = ?key_event.code,
+                modifiers = ?key_event.modifiers,
+                kind = ?key_event.kind,
+                command = %binding.label,
+                "intercepted terminal direct custom command before forwarding to pane"
+            );
+            self.launch_custom_command(binding, super::navigate::ActionContext::Direct);
+            return None;
+        }
+
+        if self.state.is_prefix_key(key) {
+            self.state.mode = Mode::Prefix;
             return None;
         }
 
@@ -169,7 +192,9 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
 
-    use super::super::{app_for_mouse_test, mouse, numbered_lines_bytes};
+    use super::super::{
+        app_for_mouse_test, mouse, numbered_lines_bytes, unique_temp_path, wait_for_file,
+    };
     use super::*;
     use crate::{config::Config, workspace::Workspace};
 
@@ -475,13 +500,144 @@ mod tests {
             .layout
             .panes(Rect::new(0, 0, 80, 24));
         let focused_before = app.state.workspaces[0].layout.focused();
-        app.state.keybinds.focus_pane_left = Some((KeyCode::Char('h'), KeyModifiers::ALT));
-        app.state.keybinds.focus_pane_left_label = Some("alt+h".into());
+        app.state.keybinds.focus_pane_left = crate::config::ActionKeybinds::direct("alt+h");
 
         app.handle_terminal_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::ALT))
             .await;
 
         assert_ne!(app.state.workspaces[0].layout.focused(), focused_before);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn terminal_direct_edit_scrollback_opens_editor_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = Workspace::test_new("test");
+        let root_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].runtimes.insert(
+            root_pane,
+            crate::pane::PaneRuntime::test_with_scrollback_bytes(20, 5, 4096, b"alpha\nbeta\n"),
+        );
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let output_path = unique_temp_path("direct-edit-scrollback");
+        let previous_editor = std::env::var_os("EDITOR");
+        std::env::set_var(
+            "EDITOR",
+            format!("sh -c 'cp \"$1\" {}' sh", output_path.display()),
+        );
+        app.state.keybinds.edit_scrollback = crate::config::ActionKeybinds::direct("ctrl+alt+e");
+
+        app.handle_terminal_key(TerminalKey::new(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ))
+        .await;
+
+        match previous_editor {
+            Some(value) => std::env::set_var("EDITOR", value),
+            None => std::env::remove_var("EDITOR"),
+        }
+
+        let content = wait_for_file(&output_path);
+        assert!(content.contains("alpha"));
+        assert!(content.contains("beta"));
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[tokio::test]
+    async fn direct_custom_command_runs_before_forwarding_to_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        let output_path = unique_temp_path("direct-custom-command");
+        let command = format!("printf direct > '{}'", output_path.display());
+        app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
+            bindings: crate::config::ActionKeybinds::direct("ctrl+alt+g"),
+            label: "ctrl+alt+g".into(),
+            command,
+            action: crate::config::CustomCommandAction::Shell,
+        }];
+
+        app.handle_terminal_key(TerminalKey::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ))
+        .await;
+
+        assert_eq!(wait_for_file(&output_path), "direct");
+        assert_eq!(app.state.mode, Mode::Terminal);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[tokio::test]
+    async fn direct_custom_pane_command_opens_overlay_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let (workspace, terminal, runtime) = Workspace::new(
+            std::env::current_dir().unwrap_or_else(|_| "/".into()),
+            24,
+            80,
+            app.state.pane_scrollback_limit_bytes,
+            app.state.host_terminal_theme,
+            &app.state.default_shell,
+            app.event_tx.clone(),
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )
+        .expect("workspace should spawn");
+        app.state.workspaces = vec![workspace];
+        app.state
+            .terminal_runtimes
+            .insert(terminal.id.clone(), runtime);
+        app.state.terminals.insert(terminal.id.clone(), terminal);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
+            bindings: crate::config::ActionKeybinds::direct("ctrl+alt+g"),
+            label: "ctrl+alt+g".into(),
+            command: "printf direct-pane".into(),
+            action: crate::config::CustomCommandAction::Pane,
+        }];
+
+        app.handle_terminal_key(TerminalKey::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ))
+        .await;
+
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert!(app.state.workspaces[0].tabs[0].zoomed);
         assert_eq!(app.state.mode, Mode::Terminal);
     }
 

@@ -56,23 +56,24 @@ impl App {
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
+            Mode::Prefix => self.handle_prefix_key(key),
             Mode::Navigate => self.handle_navigate_key(key),
             _ => {
-                let key = key.as_key_event();
+                let key_event = key.as_key_event();
                 match self.state.mode {
-                    Mode::Onboarding => self.handle_onboarding_key(key),
-                    Mode::ReleaseNotes => self.handle_release_notes_key(key),
-                    Mode::ProductAnnouncement => self.handle_product_announcement_key(key),
-                    Mode::Navigate => unreachable!(),
+                    Mode::Onboarding => self.handle_onboarding_key(key_event),
+                    Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
+                    Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
+                    Mode::Prefix | Mode::Navigate => unreachable!(),
                     Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                        handle_rename_key(&mut self.state, key)
+                        handle_rename_key(&mut self.state, key_event)
                     }
                     Mode::Resize => handle_resize_key(&mut self.state, key),
-                    Mode::ConfirmClose => handle_confirm_close_key(&mut self.state, key),
-                    Mode::ContextMenu => handle_context_menu_key(&mut self.state, key),
-                    Mode::Settings => self.handle_settings_key(key),
-                    Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key),
-                    Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
+                    Mode::ConfirmClose => handle_confirm_close_key(&mut self.state, key_event),
+                    Mode::ContextMenu => handle_context_menu_key(&mut self.state, key_event),
+                    Mode::Settings => self.handle_settings_key(key_event),
+                    Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
+                    Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key_event),
                     Mode::Terminal => unreachable!(),
                 }
             }

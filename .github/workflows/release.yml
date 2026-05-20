@@ -109,8 +109,21 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
 
+  validate-release-inputs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Validate product announcement
+        run: python3 scripts/changelog.py validate-product-announcement
+
   release:
-    needs: build
+    needs: [build, validate-release-inputs]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -280,18 +293,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          ANNOUNCEMENT_PATH="$RUNNER_TEMP/product-announcement.json"
+          ANNOUNCEMENT_ORIGINAL_PATH="$RUNNER_TEMP/product-announcement-original.json"
+          git show "${GITHUB_REF_NAME}:docs/next/product-announcement.json" > "$ANNOUNCEMENT_PATH"
+          cp "$ANNOUNCEMENT_PATH" "$ANNOUNCEMENT_ORIGINAL_PATH"
+          python3 scripts/changelog.py validate-product-announcement --path "$ANNOUNCEMENT_PATH"
+
           CURRENT_VERSION=$(python3 -c 'import json; print(json.load(open("website/latest.json")).get("version", ""))')
           if [ "$CURRENT_VERSION" = "$VERSION" ]; then
             echo "website/latest.json is already at v$VERSION"
             exit 0
           fi
-          python3 scripts/changelog.py sync-latest-json --version "$VERSION" --output website/latest.json
+          python3 scripts/changelog.py sync-latest-json --version "$VERSION" --output website/latest.json --announcement "$ANNOUNCEMENT_PATH"
+          if cmp -s "$ANNOUNCEMENT_ORIGINAL_PATH" docs/next/product-announcement.json; then
+            printf 'null\n' > docs/next/product-announcement.json
+          else
+            echo "::warning::docs/next/product-announcement.json changed after $GITHUB_REF_NAME; leaving it unchanged."
+          fi
 
       - name: Commit website latest manifest
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add website/latest.json
+          git add website/latest.json docs/next/product-announcement.json
           git diff --cached --quiet || git commit -m "docs: update website manifest for v$VERSION"
           git push origin master

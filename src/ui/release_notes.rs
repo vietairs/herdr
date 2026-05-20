@@ -281,7 +281,15 @@ fn release_notes_inline_spans<'a>(
         let (code, after_end) = after_start.split_at(end);
         width += code.chars().count();
         if !code.is_empty() {
-            spans.push(Span::styled(code.to_string(), code_style));
+            // Keep short config examples together when Paragraph wraps.
+            // Snippets like `new_tab = "prefix+c"` read poorly when they
+            // split at the spaces around `=` in narrow announcement modals.
+            let display_code = if code.contains('=') {
+                code.replace(' ', "\u{00a0}")
+            } else {
+                code.to_string()
+            };
+            spans.push(Span::styled(display_code, code_style));
         }
         remaining = &after_end[1..];
     }

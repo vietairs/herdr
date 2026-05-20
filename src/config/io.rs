@@ -293,6 +293,58 @@ pub fn remove_section_key(content: &str, section: &str, key: &str) -> String {
     result.join("\n") + "\n"
 }
 
+pub fn remove_keybinding_config_sections(content: &str) -> (String, bool) {
+    let mut result = Vec::new();
+    let mut removed = false;
+    let mut skipping_key_section = false;
+    let mut in_table = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if let Some(table_name) = toml_table_header_name(trimmed) {
+            in_table = true;
+            skipping_key_section = is_keys_table_name(table_name);
+            if skipping_key_section {
+                removed = true;
+                continue;
+            }
+        } else if skipping_key_section || (!in_table && is_top_level_keys_assignment(trimmed)) {
+            removed = true;
+            continue;
+        }
+
+        result.push(line.to_string());
+    }
+
+    let mut updated = result.join("\n");
+    if content.ends_with('\n') || !updated.is_empty() {
+        updated.push('\n');
+    }
+    (updated, removed)
+}
+
+fn toml_table_header_name(trimmed: &str) -> Option<&str> {
+    if let Some(name) = trimmed
+        .strip_prefix("[[")
+        .and_then(|value| value.strip_suffix("]]"))
+    {
+        return Some(name.trim());
+    }
+    trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .map(str::trim)
+}
+
+fn is_keys_table_name(name: &str) -> bool {
+    name == "keys" || name.starts_with("keys.")
+}
+
+fn is_top_level_keys_assignment(trimmed: &str) -> bool {
+    trimmed.starts_with("keys ") || trimmed.starts_with("keys=") || trimmed.starts_with("keys.")
+}
+
 fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> String {
     let header = format!("[{section}]");
     let assignment = format!("{key} = {value}");
@@ -380,5 +432,47 @@ mod tests {
         assert!(!updated.contains("[ui.toast]\nenabled = true"));
         assert!(updated.contains("delivery = \"herdr\""));
         assert!(updated.contains("[ui.sound]\nenabled = true"));
+    }
+
+    #[test]
+    fn remove_keybinding_config_sections_removes_keys_tables_only() {
+        let content = r#"onboarding = false
+
+[theme]
+name = "catppuccin"
+
+[keys]
+prefix = "ctrl+a"
+new_tab = "c"
+
+[[keys.command]]
+key = "g"
+command = "lazygit"
+
+[keys.indexed]
+tabs = "ctrl"
+
+[ui]
+mouse_capture = false
+"#;
+
+        let (updated, removed) = remove_keybinding_config_sections(content);
+
+        assert!(removed);
+        assert!(updated.contains("onboarding = false"));
+        assert!(updated.contains("[theme]\nname = \"catppuccin\""));
+        assert!(updated.contains("[ui]\nmouse_capture = false"));
+        assert!(!updated.contains("[keys]"));
+        assert!(!updated.contains("[[keys.command]]"));
+        assert!(!updated.contains("[keys.indexed]"));
+        assert!(toml::from_str::<toml::Value>(&updated).is_ok());
+    }
+
+    #[test]
+    fn remove_keybinding_config_sections_reports_noop_without_keys() {
+        let content = "[ui]\nmouse_capture = true\n";
+        let (updated, removed) = remove_keybinding_config_sections(content);
+        assert!(!removed);
+        assert_eq!(updated, content);
     }
 }

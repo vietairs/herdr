@@ -590,6 +590,7 @@ pub enum Mode {
     ReleaseNotes,
     ProductAnnouncement,
     Navigate,
+    Prefix,
     Terminal,
     RenameWorkspace,
     RenameTab,
@@ -1023,8 +1024,8 @@ impl AppState {
         self.mouse_capture || self.focused_pane_requests_mouse_capture()
     }
 
-    pub fn is_prefix(&self, key: &crossterm::event::KeyEvent) -> bool {
-        key_matches(key, self.prefix_code, self.prefix_mods)
+    pub fn is_prefix_key(&self, key: crate::input::TerminalKey) -> bool {
+        crate::config::terminal_key_matches_combo(key, (self.prefix_code, self.prefix_mods))
     }
 
     pub fn estimate_pane_size(&self) -> (u16, u16) {
@@ -1110,23 +1111,16 @@ impl AppState {
     }
 }
 
+#[cfg(test)]
 pub fn key_matches(
     key: &crossterm::event::KeyEvent,
     expected_code: KeyCode,
     expected_mods: KeyModifiers,
 ) -> bool {
-    if key.modifiers != expected_mods {
-        return false;
-    }
-
-    match (key.code, expected_code) {
-        (KeyCode::Char(actual), KeyCode::Char(expected))
-            if actual.is_ascii_alphabetic() && expected.is_ascii_alphabetic() =>
-        {
-            actual.eq_ignore_ascii_case(&expected)
-        }
-        (actual, expected) => actual == expected,
-    }
+    crate::config::terminal_key_matches_combo(
+        crate::input::TerminalKey::from(*key),
+        (expected_code, expected_mods),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,69 +1215,7 @@ impl AppState {
             },
             local_sound_playback: false,
             toast_config: ToastConfig::default(),
-            keybinds: Keybinds {
-                new_workspace: (KeyCode::Char('n'), KeyModifiers::empty()),
-                new_workspace_label: "n".into(),
-                rename_workspace: (KeyCode::Char('n'), KeyModifiers::SHIFT),
-                rename_workspace_label: "shift+n".into(),
-                close_workspace: (KeyCode::Char('d'), KeyModifiers::SHIFT),
-                close_workspace_label: "shift+d".into(),
-                detach: None,
-                detach_label: None,
-                reload_config: None,
-                reload_config_label: None,
-                open_notification_target: None,
-                open_notification_target_label: None,
-                previous_workspace: None,
-                previous_workspace_label: None,
-                next_workspace: None,
-                next_workspace_label: None,
-                previous_agent: None,
-                previous_agent_label: None,
-                next_agent: None,
-                next_agent_label: None,
-                indexed_tabs: None,
-                indexed_tabs_label: None,
-                indexed_workspaces: None,
-                indexed_workspaces_label: None,
-                indexed_agents: None,
-                indexed_agents_label: None,
-                new_tab: (KeyCode::Char('c'), KeyModifiers::empty()),
-                new_tab_label: "c".into(),
-                rename_tab: None,
-                rename_tab_label: None,
-                previous_tab: None,
-                previous_tab_label: None,
-                next_tab: None,
-                next_tab_label: None,
-                close_tab: None,
-                close_tab_label: None,
-                rename_pane: None,
-                rename_pane_label: None,
-                edit_scrollback: None,
-                edit_scrollback_label: None,
-                focus_pane_left: None,
-                focus_pane_left_label: None,
-                focus_pane_down: None,
-                focus_pane_down_label: None,
-                focus_pane_up: None,
-                focus_pane_up_label: None,
-                focus_pane_right: None,
-                focus_pane_right_label: None,
-                split_vertical: (KeyCode::Char('v'), KeyModifiers::empty()),
-                split_vertical_label: "v".into(),
-                split_horizontal: (KeyCode::Char('-'), KeyModifiers::empty()),
-                split_horizontal_label: "-".into(),
-                close_pane: (KeyCode::Char('x'), KeyModifiers::empty()),
-                close_pane_label: "x".into(),
-                zoom: (KeyCode::Char('f'), KeyModifiers::empty()),
-                zoom_label: "f".into(),
-                resize_mode: (KeyCode::Char('r'), KeyModifiers::empty()),
-                resize_mode_label: "r".into(),
-                toggle_sidebar: (KeyCode::Char('b'), KeyModifiers::empty()),
-                toggle_sidebar_label: "b".into(),
-                custom_commands: Vec::new(),
-            },
+            keybinds: Keybinds::default(),
             spinner_tick: 0,
             palette: Palette::catppuccin(),
             theme_name: "catppuccin".to_string(),

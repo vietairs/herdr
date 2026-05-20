@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- Added keybinding v2 with explicit `prefix+...` syntax, array bindings per action, configurable prefix-mode pane focus, tab switching, and direct modified chords for users who opt in. (#154)
+- Added `herdr config reset-keys` to back up `config.toml` and remove custom keybindings so built-in v2 defaults apply on restart or config reload. (#154)
 - Added an integrations tab in settings and first-run onboarding so users can install recommended agent integrations from inside Herdr.
 - Added `terminal.default_shell` to choose the executable used for new interactive panes. When unset, Herdr still falls back to `$SHELL`, then `/bin/sh`. (#196)
 - Added native Kiro CLI detection with idle and working state heuristics. (#185)
@@ -11,6 +13,7 @@
 - Remote clients now bridge local clipboard images into the remote pane by staging them as temporary image files and pasting the remote path, so Claude Code image paste works over `herdr --remote`. (#205)
 
 ### Breaking Changes
+- Keybindings now use explicit trigger syntax: `prefix+c` means prefix mode, while `ctrl+alt+c` is direct. Bare printable direct bindings such as `new_tab = "c"` are rejected with diagnostics because they intercept normal typing. The default keymap now gives tmux-style tab actions to `prefix+c`, `prefix+n`/`prefix+p`, and `prefix+1..9`, uses `prefix+w` for workspace navigation, and moves pane focus to `prefix+h/j/k/l`. (#154)
 - The client/server protocol is now version 8. Stop and restart any running v0.5.12 server before attaching with this release.
 
 ## [0.5.12] - 2026-05-19

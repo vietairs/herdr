@@ -1048,6 +1048,9 @@ impl App {
     fn handle_non_terminal_key(&mut self, key: crate::input::TerminalKey) {
         let key_event = key.as_key_event();
         match self.state.mode {
+            Mode::Prefix => {
+                self.handle_prefix_key(key);
+            }
             Mode::Navigate => {
                 self.handle_navigate_key(key);
             }
@@ -1055,7 +1058,7 @@ impl App {
                 input::handle_rename_key(&mut self.state, key_event);
             }
             Mode::Resize => {
-                input::handle_resize_key(&mut self.state, key_event);
+                input::handle_resize_key(&mut self.state, key);
             }
             Mode::ConfirmClose => {
                 input::handle_confirm_close_key(&mut self.state, key_event);
@@ -1104,7 +1107,7 @@ mod tests {
     use crate::detect::{Agent, AgentState};
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
-    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use std::sync::{Mutex, OnceLock};
 
     fn raw_key(
@@ -1330,7 +1333,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\n[keys]\nnew_workspace = \"g\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\n[ui.toast]\ndelivery = \"herdr\"\n",
+            "[terminal]\ndefault_shell = \"nu\"\n[keys]\nnew_workspace = \"prefix+g\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\n[ui.toast]\ndelivery = \"herdr\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -1341,10 +1344,11 @@ mod tests {
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.state.prefix_code, KeyCode::Char('a'));
         assert_eq!(app.state.prefix_mods, KeyModifiers::CONTROL);
-        assert_eq!(
-            app.state.keybinds.new_workspace,
-            (KeyCode::Char('g'), KeyModifiers::empty())
-        );
+        assert!(app
+            .state
+            .keybinds
+            .new_workspace
+            .matches_prefix(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())));
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Herdr
@@ -1523,7 +1527,7 @@ mod tests {
 
         let mut app = test_app();
         let original_prefix = (app.state.prefix_code, app.state.prefix_mods);
-        let original_keybinds = app.state.keybinds.new_workspace;
+        let original_keybinds = app.state.keybinds.new_workspace.clone();
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
@@ -1556,7 +1560,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[keys]\nnew_workspace = \"g\"\n[ui.toast]\ndelivery = \"desktop\"\n",
+            "[keys]\nnew_workspace = \"prefix+g\"\n[ui.toast]\ndelivery = \"desktop\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -1566,10 +1570,11 @@ mod tests {
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
-        assert_eq!(
-            app.state.keybinds.new_workspace,
-            (KeyCode::Char('g'), KeyModifiers::empty())
-        );
+        assert!(app
+            .state
+            .keybinds
+            .new_workspace
+            .matches_prefix(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())));
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Herdr
@@ -1650,7 +1655,7 @@ mod tests {
 
         let mut app = test_app();
         let original_prefix = (app.state.prefix_code, app.state.prefix_mods);
-        let original_keybinds = app.state.keybinds.new_workspace;
+        let original_keybinds = app.state.keybinds.new_workspace.clone();
         let original_toast_delivery = app.state.toast_config.delivery;
         let report = app.reload_config();
 
@@ -2547,8 +2552,8 @@ mod tests {
 
         assert_eq!(
             app.state.mode,
-            Mode::Navigate,
-            "prefix key should enter navigate mode"
+            Mode::Prefix,
+            "prefix key should enter prefix mode"
         );
         assert!(
             !app.state.detach_requested,
@@ -2584,7 +2589,7 @@ mod tests {
         app.state.prefix_mods = KeyModifiers::CONTROL;
 
         app.route_client_input(vec![0x0c]);
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.mode, Mode::Prefix);
 
         app.route_client_input(vec![0x0c]);
         assert_eq!(app.state.mode, Mode::Terminal);
