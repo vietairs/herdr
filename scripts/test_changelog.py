@@ -186,6 +186,26 @@ class ChangelogScriptTests(unittest.TestCase):
             },
         )
 
+    def test_manifest_from_release_payload_uses_explicit_protocol(self) -> None:
+        manifest = manifest_from_release_payload(
+            {
+                "tagName": "v0.1.1",
+                "isDraft": False,
+                "isPrerelease": False,
+                "body": "### Fixed\n- One\n",
+                "assets": [
+                    {"name": "herdr-linux-x86_64", "url": "https://example.com/linux-x86_64"},
+                    {"name": "herdr-linux-aarch64", "url": "https://example.com/linux-aarch64"},
+                    {"name": "herdr-macos-x86_64", "url": "https://example.com/macos-x86_64"},
+                    {"name": "herdr-macos-aarch64", "url": "https://example.com/macos-aarch64"},
+                ],
+            },
+            "0.1.1",
+            protocol=42,
+        )
+
+        self.assertEqual(manifest["protocol"], 42)
+
     def test_manifest_from_release_payload_rejects_missing_asset(self) -> None:
         with self.assertRaisesRegex(ChangelogError, "missing asset herdr-macos-aarch64"):
             manifest_from_release_payload(

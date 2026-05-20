@@ -98,7 +98,7 @@ struct UpdateManifest {
     protocol: Option<u32>,
     notes: String,
     assets: BTreeMap<String, String>,
-    announcement: Option<crate::product_announcements::ManifestAnnouncement>,
+    announcement: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -158,9 +158,23 @@ fn fetch_update_manifest() -> Result<UpdateManifest, String> {
 }
 
 fn handle_manifest_announcement(manifest: &UpdateManifest) {
+    let announcement = match manifest.announcement.as_ref() {
+        Some(value) => match serde_json::from_value::<
+            crate::product_announcements::ManifestAnnouncement,
+        >(value.clone())
+        {
+            Ok(announcement) => Some(announcement),
+            Err(err) => {
+                tracing::warn!("skipping invalid product announcement in update manifest: {err}");
+                None
+            }
+        },
+        None => None,
+    };
+
     if let Err(err) = crate::product_announcements::save_manifest_announcement(
         &manifest.version,
-        manifest.announcement.as_ref(),
+        announcement.as_ref(),
     ) {
         tracing::warn!("failed to save product announcement: {err}");
     }
@@ -1528,7 +1542,8 @@ mod tests {
             manifest
                 .announcement
                 .as_ref()
-                .map(|announcement| announcement.id.as_str()),
+                .and_then(|announcement| announcement.get("id"))
+                .and_then(serde_json::Value::as_str),
             Some("keymap-v2")
         );
         assert_eq!(
@@ -1547,6 +1562,36 @@ mod tests {
         }"#;
 
         assert!(serde_json::from_str::<UpdateManifest>(json).is_err());
+    }
+
+    #[test]
+    fn invalid_manifest_announcement_does_not_block_release_info() {
+        let (os, arch) = platform_target();
+        let asset_key = format!("{os}-{arch}");
+        let json = format!(
+            r####"{{
+                "version": "99.99.99",
+                "protocol": 4,
+                "notes": "### Changed\n- One",
+                "announcement": {{
+                    "id": 123,
+                    "title": "Keymap changes",
+                    "body": "### Heads up\n- Defaults changed"
+                }},
+                "assets": {{
+                    "{asset_key}": "https://example.com/herdr"
+                }}
+            }}"####
+        );
+
+        let manifest: UpdateManifest = serde_json::from_str(&json).unwrap();
+        handle_manifest_announcement(&manifest);
+        let release = release_info_from_manifest(manifest)
+            .unwrap()
+            .expect("release info");
+
+        assert_eq!(release.version, Version::parse("99.99.99").unwrap());
+        assert_eq!(release.download_url, "https://example.com/herdr");
     }
 
     #[test]

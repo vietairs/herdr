@@ -176,7 +176,9 @@ def default_release_assets(version: str, repo: str = DEFAULT_RELEASE_REPO) -> di
     }
 
 
-def manifest_from_release_payload(payload: dict[str, Any], version: str) -> dict[str, Any]:
+def manifest_from_release_payload(
+    payload: dict[str, Any], version: str, protocol: int | None = None
+) -> dict[str, Any]:
     normalized_version = normalize_version(version)
     tag_name = str(payload.get("tagName") or "")
     if normalize_version(tag_name) != normalized_version:
@@ -215,7 +217,7 @@ def manifest_from_release_payload(payload: dict[str, Any], version: str) -> dict
 
     return {
         "version": normalized_version,
-        "protocol": read_protocol_version(),
+        "protocol": protocol if protocol is not None else read_protocol_version(),
         "notes": notes,
         "assets": manifest_assets,
     }
@@ -455,13 +457,14 @@ def cmd_sync_latest_json(args: argparse.Namespace) -> int:
     ensure_manifest_is_outdated(current_manifest, version)
 
     release_payload = fetch_release_payload(version, args.repo)
-    new_manifest = manifest_from_release_payload(release_payload, version)
+    new_manifest = manifest_from_release_payload(release_payload, version, args.protocol)
     announcement_path = Path(args.announcement)
     announcement = load_product_announcement(announcement_path)
     output = build_latest_json(
         version,
         str(new_manifest["notes"]),
         dict(new_manifest["assets"]),
+        protocol=int(new_manifest["protocol"]),
         announcement=announcement,
     )
     write_text(manifest_path, output)
@@ -502,7 +505,7 @@ def cmd_validate_product_announcement(args: argparse.Namespace) -> int:
 def cmd_verify_release_state(args: argparse.Namespace) -> int:
     version = normalize_version(args.version)
     release_payload = fetch_release_payload(version, args.repo)
-    expected_manifest = manifest_from_release_payload(release_payload, version)
+    expected_manifest = manifest_from_release_payload(release_payload, version, args.protocol)
 
     local_manifest = ensure_manifest_matches_expected(
         load_json(Path(args.output)),
@@ -552,6 +555,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_latest_json.add_argument("--repo", default=DEFAULT_RELEASE_REPO)
     sync_latest_json.add_argument("--output", default=str(DEFAULT_LATEST_JSON_PATH))
     sync_latest_json.add_argument("--announcement", default=str(DEFAULT_PRODUCT_ANNOUNCEMENT_PATH))
+    sync_latest_json.add_argument("--protocol", type=int)
     sync_latest_json.set_defaults(func=cmd_sync_latest_json)
 
     validate_product_announcement = subparsers.add_parser(
@@ -571,6 +575,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_release_state.add_argument("--repo", default=DEFAULT_RELEASE_REPO)
     verify_release_state.add_argument("--output", default=str(DEFAULT_LATEST_JSON_PATH))
     verify_release_state.add_argument("--live-url", default=DEFAULT_LIVE_MANIFEST_URL)
+    verify_release_state.add_argument("--protocol", type=int)
     verify_release_state.set_defaults(func=cmd_verify_release_state)
 
     return parser
