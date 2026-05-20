@@ -731,13 +731,13 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
         );
 
         let menu_rect = app.global_launcher_rect();
-        let menu_line = if app.update_available.is_some() {
+        let menu_line = if app.global_menu_attention_badge_visible() {
             Line::from(vec![
-                Span::styled("menu", Style::default().fg(p.overlay0)),
                 Span::styled(
-                    " ●",
+                    "● ",
                     Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
                 ),
+                Span::styled("menu", Style::default().fg(p.overlay0)),
             ])
         } else {
             Line::from(vec![Span::styled("menu", Style::default().fg(p.overlay0))])
@@ -887,7 +887,7 @@ fn render_sidebar_toggle(
     if toggle_area == Rect::default() {
         return;
     }
-    let icon_style = if app.update_available.is_some() {
+    let icon_style = if app.global_menu_attention_badge_visible() {
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(p.overlay0)

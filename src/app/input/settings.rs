@@ -283,7 +283,12 @@ impl AppState {
         }
         let mut x = inner.x;
         for section in SettingsSection::ALL {
-            let width = section.label().len() as u16 + 2;
+            let badge_width = if self.settings_section_has_badge(*section) {
+                2
+            } else {
+                0
+            };
+            let width = section.label().len() as u16 + 2 + badge_width;
             if col >= x && col < x + width {
                 return Some(*section);
             }
@@ -492,5 +497,71 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 2, area.y + 2));
 
         assert_eq!(app.state.settings.list.selected, 0);
+    }
+
+    #[test]
+    fn integration_update_badge_only_tracks_outdated_recommendations() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.integration_recommendations = vec![integration_recommendation(
+            crate::integration::IntegrationStatusKind::NotInstalled,
+            true,
+        )];
+        assert!(!state.integration_updates_available());
+
+        state.integration_recommendations = vec![integration_recommendation(
+            crate::integration::IntegrationStatusKind::NotInstalled,
+            false,
+        )];
+        assert!(!state.integration_updates_available());
+
+        state.integration_recommendations = vec![integration_recommendation(
+            crate::integration::IntegrationStatusKind::Current,
+            true,
+        )];
+        assert!(!state.integration_updates_available());
+
+        state.integration_recommendations = vec![integration_recommendation(
+            crate::integration::IntegrationStatusKind::Outdated,
+            true,
+        )];
+        assert!(state.integration_updates_available());
+    }
+
+    #[test]
+    fn settings_tab_hit_area_includes_integration_update_badge() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.integration_recommendations = vec![integration_recommendation(
+            crate::integration::IntegrationStatusKind::Outdated,
+            true,
+        )];
+        open_settings(&mut state);
+
+        let inner = state.settings_inner_rect();
+        let tab_y = inner.y + 1;
+        let integrations_x = inner.x
+            + SettingsSection::ALL[..SettingsSection::ALL.len() - 1]
+                .iter()
+                .map(|section| section.label().len() as u16 + 3)
+                .sum::<u16>();
+        let dotted_width = SettingsSection::Integrations.label().len() as u16 + 4;
+
+        assert_eq!(
+            state.settings_tab_at(integrations_x + dotted_width - 1, tab_y),
+            Some(SettingsSection::Integrations)
+        );
+    }
+
+    fn integration_recommendation(
+        state: crate::integration::IntegrationStatusKind,
+        available: bool,
+    ) -> crate::integration::IntegrationRecommendation {
+        crate::integration::IntegrationRecommendation {
+            target: crate::api::schema::IntegrationTarget::Claude,
+            label: "claude",
+            command: "claude",
+            available,
+            path: std::path::PathBuf::from("/tmp/herdr-test-integration"),
+            state,
+        }
     }
 }

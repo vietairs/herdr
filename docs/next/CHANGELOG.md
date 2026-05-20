@@ -6,6 +6,7 @@
 - Added keybinding v2 with explicit `prefix+...` syntax, array bindings per action, configurable prefix-mode pane focus, tab switching, and direct modified chords for users who opt in. (#154)
 - Added `herdr config reset-keys` to back up `config.toml` and remove custom keybindings so built-in v2 defaults apply on restart or config reload. (#154)
 - Added an integrations tab in settings and first-run onboarding so users can install recommended agent integrations from inside Herdr.
+- Added update badges on the sidebar menu, settings menu item, and integrations settings tab when installed integrations are outdated.
 - Added `terminal.default_shell` to choose the executable used for new interactive panes. When unset, Herdr still falls back to `$SHELL`, then `/bin/sh`. (#196)
 - Added native Kiro CLI detection with idle and working state heuristics. (#185)
 

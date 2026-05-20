@@ -48,7 +48,20 @@ pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: R
         header_rows[0],
     );
 
-    let tabs = Tabs::new(SettingsSection::ALL.iter().map(|s| s.label()))
+    let tab_labels = SettingsSection::ALL.iter().map(|section| {
+        if app.settings_section_has_badge(*section) {
+            Line::from(vec![
+                Span::styled(
+                    "● ",
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(section.label()),
+            ])
+        } else {
+            Line::from(section.label())
+        }
+    });
+    let tabs = Tabs::new(tab_labels)
         .select(
             SettingsSection::ALL
                 .iter()

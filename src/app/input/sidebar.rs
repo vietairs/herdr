@@ -175,7 +175,7 @@ impl AppState {
         }
 
         let footer = self.sidebar_footer_rect();
-        let width = if self.update_available.is_some() {
+        let width = if self.global_menu_attention_badge_visible() {
             8
         } else {
             6
@@ -203,8 +203,12 @@ impl AppState {
         let content_width = labels
             .iter()
             .map(|label| {
-                let extra = if *label == "update ready" { 2 } else { 0 };
-                label.chars().count() as u16 + extra
+                let badge_width = if self.global_menu_item_has_badge(label) {
+                    2
+                } else {
+                    0
+                };
+                label.chars().count() as u16 + badge_width
             })
             .max()
             .unwrap_or(8)

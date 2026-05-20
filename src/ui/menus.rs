@@ -148,53 +148,32 @@ pub(super) fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {
         let selected = idx == app.global_menu.highlighted;
         let rect = Rect::new(inner.x, y, inner.width, 1);
 
-        if *item == "update ready" {
-            let line = if selected {
-                Line::from(vec![
-                    Span::styled(
-                        " update ready ",
-                        Style::default()
-                            .fg(panel_contrast_fg(&app.palette))
-                            .bg(app.palette.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "● ",
-                        Style::default()
-                            .fg(panel_contrast_fg(&app.palette))
-                            .bg(app.palette.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::styled(" update ready ", Style::default().fg(app.palette.text)),
-                    Span::styled(
-                        "● ",
-                        Style::default()
-                            .fg(app.palette.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ])
-            };
-            frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), rect);
-            continue;
-        }
-
-        let style = if selected {
-            Style::default()
-                .fg(panel_contrast_fg(&app.palette))
-                .bg(app.palette.accent)
-                .add_modifier(Modifier::BOLD)
+        let selected_style = Style::default()
+            .fg(panel_contrast_fg(&app.palette))
+            .bg(app.palette.accent)
+            .add_modifier(Modifier::BOLD);
+        let item_style = if selected {
+            selected_style
         } else {
             Style::default().fg(app.palette.text)
         };
-        frame.render_widget(
-            Paragraph::new(format!(" {item} "))
-                .style(style)
-                .alignment(Alignment::Left),
-            rect,
-        );
+        let badge_style = if selected {
+            selected_style
+        } else {
+            Style::default()
+                .fg(app.palette.accent)
+                .add_modifier(Modifier::BOLD)
+        };
+
+        let line = if app.global_menu_item_has_badge(item) {
+            Line::from(vec![
+                Span::styled(" ●", badge_style),
+                Span::styled(format!(" {item} "), item_style),
+            ])
+        } else {
+            Line::from(Span::styled(format!(" {item} "), item_style))
+        };
+        frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), rect);
     }
 }
 
