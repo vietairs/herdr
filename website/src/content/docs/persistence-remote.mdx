@@ -69,7 +69,7 @@ herdr --remote workbox
 herdr --remote ssh://you@server:2222
 ```
 
-In this mode your local Herdr is a thin client. It connects over SSH, starts or attaches to the remote Herdr server, and streams the UI back to your local terminal.
+In this mode your local Herdr is a thin client. It connects over SSH, starts or attaches to the remote Herdr server, and streams the UI back to your local terminal. Because the client runs locally, Herdr can bridge local desktop features such as image clipboard paste into the remote session by copying the image to a remote temp file and pasting that path.
 
 For repeat targets, use your SSH config:
 
@@ -87,6 +87,8 @@ herdr --remote workbox
 ```
 
 Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks `~/.local/bin/herdr`. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
+
+If you SSH into the server first and run `herdr` there, Herdr runs entirely on the server. That mode is useful and simple, but it cannot access your local desktop clipboard beyond normal terminal text paste.
 
 When your local and remote platforms match, Herdr can copy the current local binary. Otherwise it downloads the matching release asset from `https://herdr.dev/latest.json`.
 
