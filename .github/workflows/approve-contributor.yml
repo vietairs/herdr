@@ -42,8 +42,8 @@ jobs:
                 username: commenter,
               });
 
-              if (!['admin', 'write'].includes(permissionLevel.permission)) {
-                console.log(`${commenter} does not have write access`);
+              if (permissionLevel.permission !== 'admin') {
+                console.log(`${commenter} does not have admin access`);
                 core.setOutput('status', 'skipped');
                 return;
               }
