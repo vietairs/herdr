@@ -564,11 +564,14 @@ impl App {
             if needs_render && self.can_render_now(now) {
                 self.render_dirty.swap(false, Ordering::AcqRel);
                 let _sync_output = SyncOutputGuard::begin()?;
+                let kitty_graphics_enabled = self.state.kitty_graphics_enabled;
                 if self.full_redraw_pending {
+                    if kitty_graphics_enabled {
+                        crate::kitty_graphics::clear_all_host_graphics()?;
+                    }
                     terminal.clear()?;
                     self.full_redraw_pending = false;
                 }
-                let kitty_graphics_enabled = self.state.kitty_graphics_enabled;
                 let mut cell_size = crate::kitty_graphics::HostCellSize::default();
                 terminal.draw(|frame| {
                     let area = frame.area();

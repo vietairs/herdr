@@ -859,6 +859,40 @@ mod tests {
     }
 
     #[test]
+    fn surface_reset_deletes_then_reuploads_and_redisplays_placement() {
+        let mut cache = HostGraphicsCache::default();
+        let mut bytes = Vec::new();
+        let placement = test_placement(0, 0);
+
+        encode_graphics_update(
+            &mut bytes,
+            &[placement],
+            false,
+            &mut cache.images,
+            &mut cache.placements,
+        );
+        assert_eq!(cache.images.len(), 1);
+        assert_eq!(cache.placements.len(), 1);
+
+        bytes = cache.clear_bytes();
+        let same = test_placement(0, 0);
+        encode_graphics_update(
+            &mut bytes,
+            &[same],
+            false,
+            &mut cache.images,
+            &mut cache.placements,
+        );
+
+        let redisplay = String::from_utf8_lossy(&bytes);
+        assert!(redisplay.contains("a=d,d=I"));
+        assert!(redisplay.contains("a=t"));
+        assert!(redisplay.contains("a=p"));
+        assert_eq!(cache.images.len(), 1);
+        assert_eq!(cache.placements.len(), 1);
+    }
+
+    #[test]
     fn scrollback_offset_change_redisplays_placement() {
         let mut images = HashMap::new();
         let mut placements = HashMap::new();

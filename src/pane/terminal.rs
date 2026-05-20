@@ -6,7 +6,7 @@ use bytes::Bytes;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::{layout::Rect, Frame};
 use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 use unicode_width::UnicodeWidthStr;
 
 use crate::layout::PaneId;
@@ -390,21 +390,7 @@ impl GhosttyPaneTerminal {
         let has_kitty_graphics_sequence = crate::kitty_graphics::is_enabled()
             && contains_kitty_graphics_sequence(filtered_bytes.as_ref());
         if has_kitty_graphics_sequence {
-            match core
-                .terminal
-                .kitty_image_placements_with_data_filter(|_| false)
-            {
-                Ok(placements) => debug!(
-                    pane = pane_id.raw(),
-                    placements = placements.len(),
-                    "processed kitty graphics sequence"
-                ),
-                Err(err) => warn!(
-                    pane = pane_id.raw(),
-                    err = %err,
-                    "failed to query kitty graphics after sequence"
-                ),
-            }
+            debug!(pane = pane_id.raw(), "processed kitty graphics sequence");
         }
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             key_encoder.set_from_terminal(&core.terminal);
@@ -725,6 +711,7 @@ impl GhosttyPaneTerminal {
             .and_then(|c| ghostty_default_fg(c.foreground, host_theme, initial_default_foreground));
         let resolved_fg = colors.map(|c| ghostty_color(c.foreground));
         let resolved_bg = colors.map(|c| ghostty_color(c.background));
+        let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
 
         let mut row_iterator = match crate::ghostty::RowIterator::new() {
             Ok(iterator) => iterator,
@@ -761,6 +748,7 @@ impl GhosttyPaneTerminal {
                     let symbol = match ghostty_buffer_symbol_into(
                         &cells,
                         wide,
+                        hide_kitty_placeholders,
                         &mut grapheme_scratch,
                         &mut symbol_scratch,
                     ) {
@@ -1016,6 +1004,7 @@ pub(super) fn ghostty_normalize_buffer_symbol(
 fn ghostty_buffer_symbol_into<'a>(
     cells: &crate::ghostty::RowCellIter<'_>,
     wide: crate::ghostty::CellWide,
+    hide_kitty_placeholders: bool,
     grapheme_scratch: &mut Vec<u32>,
     symbol_scratch: &'a mut String,
 ) -> Result<&'a str, crate::ghostty::Error> {
@@ -1025,7 +1014,10 @@ fn ghostty_buffer_symbol_into<'a>(
         crate::ghostty::CellWide::SpacerHead => symbol_scratch.push(' '),
         crate::ghostty::CellWide::Narrow | crate::ghostty::CellWide::Wide => {
             cells.graphemes_into(grapheme_scratch)?;
-            if grapheme_scratch.is_empty() {
+            let hidden_kitty_placeholder = hide_kitty_placeholders
+                && grapheme_scratch.first().copied()
+                    == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER);
+            if hidden_kitty_placeholder || grapheme_scratch.is_empty() {
                 symbol_scratch.push(' ');
             } else {
                 for &codepoint in grapheme_scratch.iter() {
@@ -1819,6 +1811,31 @@ mod tests {
         assert_eq!(buffer[(2, 0)].symbol(), " ");
         assert_eq!(buffer[(2, 0)].style().fg, Some(Color::Reset));
         assert_eq!(buffer[(2, 0)].style().bg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn render_blanks_kitty_unicode_placeholders_when_graphics_enabled() {
+        crate::kitty_graphics::set_enabled(true);
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        {
+            let mut core = pane.core.lock().unwrap();
+            core.terminal
+                .write("before\u{10eeee}\u{0305}\u{0305}after".as_bytes());
+        }
+
+        let backend = ratatui::backend::TestBackend::new(20, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| pane.render(frame, Rect::new(0, 0, 20, 5), false))
+            .unwrap();
+        crate::kitty_graphics::set_enabled(false);
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "b");
+        assert_eq!(buffer[(6, 0)].symbol(), " ");
+        assert_eq!(buffer[(7, 0)].symbol(), "a");
     }
 
     #[test]

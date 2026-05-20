@@ -245,6 +245,8 @@ struct ClientConnection {
     render_state: ClientRenderState,
     /// Client-local host Kitty graphics cache.
     graphics_cache: crate::kitty_graphics::HostGraphicsCache,
+    /// Whether the next graphics frame must clear and rebuild host-side Kitty state.
+    graphics_surface_reset_pending: bool,
     /// Whether a render was skipped because the render channel was full.
     render_pending: bool,
     /// Last host mouse capture mode sent to this client.
@@ -297,6 +299,7 @@ impl ClientConnection {
             last_activity,
             render_state: ClientRenderState::new(render_encoding),
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
+            graphics_surface_reset_pending: false,
             render_pending: false,
             host_mouse_capture_active: None,
             staged_clipboard_files: Vec::new(),
@@ -306,6 +309,7 @@ impl ClientConnection {
 
     fn request_full_redraw(&mut self) {
         self.render_state.reset_baseline();
+        self.graphics_surface_reset_pending = true;
     }
 
     fn request_semantic_redraw_after_input(&mut self) {
@@ -1934,12 +1938,18 @@ impl HeadlessServer {
                 continue;
             };
             let mut next_graphics_cache = client.graphics_cache.clone();
+            let graphics_surface_reset_pending = client.graphics_surface_reset_pending;
             if is_app_client && self.app.state.kitty_graphics_enabled && cell_size.is_known() {
-                frame.graphics = crate::kitty_graphics::encode_local_pane_graphics(
-                    &self.app.state,
-                    cell_size,
-                    &mut next_graphics_cache,
-                );
+                if graphics_surface_reset_pending {
+                    frame.graphics = next_graphics_cache.clear_bytes();
+                }
+                frame
+                    .graphics
+                    .extend(crate::kitty_graphics::encode_local_pane_graphics(
+                        &self.app.state,
+                        cell_size,
+                        &mut next_graphics_cache,
+                    ));
             } else {
                 frame.graphics = next_graphics_cache.clear_bytes();
             }
@@ -2023,6 +2033,7 @@ impl HeadlessServer {
                     client.render_pending = false;
                     if commit_graphics_cache {
                         client.graphics_cache = next_graphics_cache;
+                        client.graphics_surface_reset_pending = false;
                     }
                     client
                         .render_state
