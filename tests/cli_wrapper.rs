@@ -461,19 +461,13 @@ fn claude_hook_reports_subagent_working_and_blocked() {
 }
 
 #[test]
-fn claude_hook_converts_subagent_idle_and_release_to_working() {
+fn claude_hook_ignores_subagent_completion_reports() {
     let subagent_input =
         r#"{"hook_event_name":"SubagentStop","agent_id":"agent-abc123","agent_type":"Explore"}"#;
 
-    let idle = run_claude_hook("idle", subagent_input)
-        .expect("subagent idle should keep parent pane working");
-    assert_eq!(idle["method"], "pane.report_agent");
-    assert_eq!(idle["params"]["state"], "working");
-
-    let release = run_claude_hook("release", subagent_input)
-        .expect("subagent release should keep parent pane working");
-    assert_eq!(release["method"], "pane.report_agent");
-    assert_eq!(release["params"]["state"], "working");
+    assert!(run_claude_hook("working", subagent_input).is_none());
+    assert!(run_claude_hook("idle", subagent_input).is_none());
+    assert!(run_claude_hook("release", subagent_input).is_none());
 }
 
 #[test]

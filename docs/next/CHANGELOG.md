@@ -10,6 +10,7 @@
 - Added native Kiro CLI detection with idle and working state heuristics. (#185)
 
 ### Fixed
+- The Claude Code integration no longer lets subagent completion hooks report durable `working`, preventing delayed recap or subagent completion events from reviving an idle pane. (#198)
 - Remote clients now bridge local clipboard images into the remote pane by staging them as temporary image files and pasting the remote path, so Claude Code image paste works over `herdr --remote`. (#205)
 
 ### Breaking Changes
