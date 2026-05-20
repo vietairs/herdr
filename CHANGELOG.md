@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.6.0] - 2026-05-20
+
 ### Added
 - Added keybinding v2 with explicit `prefix+...` syntax, array bindings per action, configurable prefix-mode pane focus, tab switching, and direct modified chords for users who opt in. (#154, #201, #202, #219)
 - Added `herdr config reset-keys` to back up `config.toml` and remove custom keybindings so built-in v2 defaults apply on restart or config reload. (#154)
