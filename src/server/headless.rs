@@ -2301,6 +2301,7 @@ pub fn run_server() -> io::Result<()> {
             client_socket = %client_socket_path().display(),
             "herdr server started"
         );
+        print_ready_message(&api::socket_path(), &client_socket_path());
 
         server.run().await
     });
@@ -2308,6 +2309,19 @@ pub fn run_server() -> io::Result<()> {
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("server");
     result
+}
+
+fn print_ready_message(api_socket: &Path, client_socket: &Path) {
+    eprintln!("herdr server running; you can use any herdr CLI command in another terminal.");
+    eprintln!("api socket: {}", api_socket.display());
+    eprintln!("client socket: {}", client_socket.display());
+    eprintln!(
+        "logs: {}",
+        crate::session::data_dir()
+            .join("herdr-server.log")
+            .display()
+    );
+    eprintln!("did you mean to open the Herdr TUI? run `herdr`; you do not need `herdr server`.");
 }
 
 /// Initialize logging for the server process.
