@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- `herdr --remote` now offers to restart the remote server after installing or replacing a remote binary, or when the running server version differs, even if the client/server protocol is still compatible.
+
 ## [0.6.0] - 2026-05-20
 
 ### Added
