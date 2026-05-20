@@ -56,8 +56,7 @@ pub(super) fn keybind_help_groups(
             ),
             (keybind_label(&kb.help), "keybinds"),
             (keybind_label(&kb.settings), "settings"),
-            (keybind_label(&kb.quit), "quit"),
-            (keybind_label(&kb.detach), "detach from server"),
+            (keybind_label(&kb.detach), "detach"),
             (keybind_label(&kb.reload_config), "reload config"),
             (
                 keybind_label(&kb.open_notification_target),

@@ -94,8 +94,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Prefix-mode actions
 # help = "prefix+?"
 # settings = "prefix+s"
-# quit = "prefix+q"
-# detach = "prefix+d"
+# detach = "prefix+q"
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
 # workspace_picker = "prefix+w"

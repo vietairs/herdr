@@ -76,7 +76,7 @@ pub(super) fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: R
     let resize = prefix_rhs_label(&kb.resize_mode);
     let help = prefix_rhs_label(&kb.help);
     let settings = prefix_rhs_label(&kb.settings);
-    let quit = prefix_rhs_label(&kb.quit);
+    let detach = prefix_rhs_label(&kb.detach);
     let line = Line::from(vec![
         Span::styled(" NAVIGATE ", mode_style),
         Span::raw(" "),
@@ -102,8 +102,8 @@ pub(super) fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: R
         Span::styled(" keybinds  ", dim),
         Span::styled(settings, key),
         Span::styled(" settings  ", dim),
-        Span::styled(quit, key),
-        Span::styled(" quit", dim),
+        Span::styled(detach, key),
+        Span::styled(" detach", dim),
     ]);
 
     let overlay_y = area.y + area.height.saturating_sub(1);

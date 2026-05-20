@@ -75,26 +75,29 @@ pub(super) fn render_toast_notification(
 }
 
 pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &str, p: &Palette) {
-    let text = format!(" config warning: {message} ");
-    let width = text.len() as u16 + 2;
-    let notif_area = Rect::new(
-        area.x + area.width.saturating_sub(width.min(area.width)),
-        area.y,
-        width.min(area.width),
-        1,
-    );
+    let style = Style::default()
+        .fg(panel_contrast_fg(p))
+        .bg(p.yellow)
+        .add_modifier(Modifier::BOLD);
 
-    frame.render_widget(Clear, notif_area);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            text,
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        notif_area,
-    );
+    for (row, line) in message
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(area.height as usize)
+        .enumerate()
+    {
+        let text = format!(" config warning: {line} ");
+        let width = (text.len() as u16).min(area.width);
+        let notif_area = Rect::new(
+            area.x + area.width.saturating_sub(width),
+            area.y + row as u16,
+            width,
+            1,
+        );
+
+        frame.render_widget(Clear, notif_area);
+        frame.render_widget(Paragraph::new(Span::styled(text, style)), notif_area);
+    }
 }
 
 pub(super) fn state_dot(state: AgentState, seen: bool, p: &Palette) -> (&'static str, Style) {

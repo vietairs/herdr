@@ -67,7 +67,7 @@ pub(super) fn modal_action_from_buttons<A: Copy>(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GlobalMenuAction {
-    Quit,
+    Detach,
     WhatsNew,
     Keybinds,
     ReloadConfig,
@@ -83,7 +83,7 @@ pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
     if state.update_available.is_some() || state.latest_release_notes_available {
         actions.push(GlobalMenuAction::WhatsNew);
     }
-    actions.push(GlobalMenuAction::Quit);
+    actions.push(GlobalMenuAction::Detach);
     actions
 }
 
@@ -111,19 +111,19 @@ fn open_update_release_notes(state: &mut AppState) {
     state.mode = Mode::ReleaseNotes;
 }
 
-pub(super) fn request_quit_or_detach(state: &mut AppState) {
-    if state.quit_detaches {
-        state.detach_requested = true;
-    } else {
+pub(super) fn request_detach(state: &mut AppState) {
+    if state.detach_exits {
         state.should_quit = true;
+    } else {
+        state.detach_requested = true;
     }
 }
 
 pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuAction) {
     match action {
-        GlobalMenuAction::Quit => {
+        GlobalMenuAction::Detach => {
             leave_modal(state);
-            request_quit_or_detach(state);
+            request_detach(state);
         }
         GlobalMenuAction::WhatsNew => open_update_release_notes(state),
         GlobalMenuAction::Keybinds => open_keybind_help(state),
@@ -687,6 +687,28 @@ mod tests {
         );
 
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn detach_requests_client_detach_in_persistence_mode() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.detach_exits = false;
+
+        request_detach(&mut state);
+
+        assert!(state.detach_requested);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn detach_exits_in_no_session_mode() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.detach_exits = true;
+
+        request_detach(&mut state);
+
+        assert!(state.should_quit);
+        assert!(!state.detach_requested);
     }
 
     #[test]

@@ -900,8 +900,8 @@ pub struct AppState {
     pub selected: usize,
     pub mode: Mode,
     pub should_quit: bool,
-    /// In persistence mode, client quit actions detach instead of stopping the server.
-    pub quit_detaches: bool,
+    /// In monolithic --no-session mode, detach exits the app because there is no server to detach from.
+    pub detach_exits: bool,
     /// Set when the current client should detach from the persistent session.
     /// The server's event loop checks this and handles client detach.
     pub detach_requested: bool,
@@ -1159,7 +1159,7 @@ impl AppState {
             selected: 0,
             mode: Mode::Navigate,
             should_quit: false,
-            quit_detaches: false,
+            detach_exits: false,
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,

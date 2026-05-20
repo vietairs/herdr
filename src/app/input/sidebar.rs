@@ -192,7 +192,7 @@ impl AppState {
         } else if self.latest_release_notes_available {
             labels.push("what's new");
         }
-        labels.push(if self.quit_detaches { "detach" } else { "quit" });
+        labels.push("detach");
         labels
     }
 
@@ -578,7 +578,7 @@ mod tests {
                 "keybinds",
                 "reload config",
                 "update ready",
-                "quit"
+                "detach"
             ]
         );
         assert!(!app.state.should_quit);
@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn persistence_mode_menu_surfaces_detach_action() {
         let mut app = app_for_mouse_test();
-        app.state.quit_detaches = true;
+        app.state.detach_exits = false;
 
         let launcher = app.state.global_launcher_rect();
         app.handle_mouse(mouse(
@@ -625,7 +625,7 @@ mod tests {
                 "keybinds",
                 "reload config",
                 "what's new",
-                "quit"
+                "detach"
             ]
         );
     }

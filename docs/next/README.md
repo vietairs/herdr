@@ -218,7 +218,7 @@ press `ctrl+b` to enter prefix mode. default actions are prefix-first and tmux-l
 | `prefix+b` | toggle sidebar |
 | `prefix+z` | zoom pane |
 | `prefix+r` | resize mode |
-| `prefix+d` | detach (quit client) |
+| `prefix+q` | detach |
 
 resize mode: `h`/`l` resize width, `j`/`k` resize height, `esc` exit.
 

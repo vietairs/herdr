@@ -245,7 +245,6 @@ pub struct CustomCommandKeybind {
 pub struct Keybinds {
     pub help: ActionKeybinds,
     pub settings: ActionKeybinds,
-    pub quit: ActionKeybinds,
     pub new_workspace: ActionKeybinds,
     pub rename_workspace: ActionKeybinds,
     pub close_workspace: ActionKeybinds,
@@ -375,7 +374,6 @@ impl Config {
         let mut keybinds = Keybinds {
             help: action!("keys.help", &self.keys.help),
             settings: action!("keys.settings", &self.keys.settings),
-            quit: action!("keys.quit", &self.keys.quit),
             new_workspace: action!("keys.new_workspace", &self.keys.new_workspace),
             rename_workspace: action!("keys.rename_workspace", &self.keys.rename_workspace),
             close_workspace: action!("keys.close_workspace", &self.keys.close_workspace),
@@ -619,10 +617,7 @@ fn reject_binding(
     }
 
     if let Some(first_field) = registry.conflict(binding) {
-        let diag = format!(
-            "duplicate keybinding: {field} = {:?} conflicts with {}; disabling binding",
-            binding.label, first_field
-        );
+        let diag = format!("{}: kept {first_field}, disabled {field}", binding.label);
         warn!(message = %diag, "config diagnostic");
         diagnostics.push(diag);
         return true;
@@ -1232,7 +1227,7 @@ command = "echo no"
         assert!(!keybinds.new_tab.bindings.is_empty());
         assert!(keybinds.custom_commands.is_empty());
         assert!(diagnostics.iter().any(|diag| {
-            diag.contains("duplicate keybinding") && diag.contains("keys.command[0].key")
+            diag.contains("kept keys.new_tab") && diag.contains("disabled keys.command[0].key")
         }));
     }
 
@@ -1296,8 +1291,8 @@ new_workspace = "prefix+n"
         let diagnostics = config.collect_diagnostics();
         let kb = config.keybinds();
         assert!(kb.next_tab.bindings.is_empty() || kb.new_workspace.bindings.is_empty());
-        assert!(diagnostics
-            .iter()
-            .any(|diag| diag.contains("duplicate keybinding")));
+        assert!(diagnostics.iter().any(|diag| {
+            diag.contains("kept keys.new_workspace") && diag.contains("disabled keys.next_tab")
+        }));
     }
 }

@@ -479,7 +479,6 @@ pub(crate) enum NavigateAction {
     CyclePanePrevious,
     Help,
     Settings,
-    Quit,
     ReloadConfig,
     OpenNotificationTarget,
     Detach,
@@ -545,7 +544,6 @@ fn action_for_key(
     for (bindings, action) in [
         (&kb.help, NavigateAction::Help),
         (&kb.settings, NavigateAction::Settings),
-        (&kb.quit, NavigateAction::Quit),
         (&kb.workspace_picker, NavigateAction::WorkspacePicker),
         (&kb.new_workspace, NavigateAction::NewWorkspace),
         (&kb.rename_workspace, NavigateAction::RenameWorkspace),
@@ -727,10 +725,6 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::Help => super::modal::open_keybind_help(state),
         NavigateAction::Settings => super::settings::open_settings(state),
-        NavigateAction::Quit => {
-            super::modal::request_quit_or_detach(state);
-            leave_navigate_mode(state);
-        }
         NavigateAction::ReloadConfig => {
             state.request_reload_config = true;
             leave_navigate_mode(state);
@@ -742,7 +736,7 @@ pub(super) fn execute_navigate_action_in_context(
             }
         }
         NavigateAction::Detach => {
-            state.detach_requested = true;
+            super::modal::request_detach(state);
             leave_navigate_mode(state);
         }
     }
@@ -1449,9 +1443,9 @@ mod tests {
     }
 
     #[test]
-    fn persistence_mode_navigate_q_detaches_instead_of_quitting_server() {
+    fn navigate_q_detaches_in_persistence_mode() {
         let mut state = crate::app::state::AppState::test_new();
-        state.quit_detaches = true;
+        state.detach_exits = false;
 
         handle_navigate_key(
             &mut state,

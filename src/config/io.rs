@@ -92,17 +92,22 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
+    const MAX_VISIBLE_DIAGNOSTICS: usize = 4;
+
     if diagnostics.is_empty() {
-        None
-    } else if diagnostics.len() == 1 {
-        Some(diagnostics[0].clone())
-    } else {
-        Some(format!(
-            "{} (and {} more)",
-            diagnostics[0],
-            diagnostics.len() - 1
-        ))
+        return None;
     }
+
+    let mut lines: Vec<String> = diagnostics
+        .iter()
+        .take(MAX_VISIBLE_DIAGNOSTICS)
+        .map(|diagnostic| diagnostic.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    let hidden = diagnostics.len().saturating_sub(MAX_VISIBLE_DIAGNOSTICS);
+    if hidden > 0 {
+        lines.push(format!("and {hidden} more config warnings"));
+    }
+    Some(lines.join("\n"))
 }
 
 pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
@@ -432,6 +437,22 @@ mod tests {
         assert!(!updated.contains("[ui.toast]\nenabled = true"));
         assert!(updated.contains("delivery = \"herdr\""));
         assert!(updated.contains("[ui.sound]\nenabled = true"));
+    }
+
+    #[test]
+    fn config_diagnostic_summary_keeps_multiple_warnings_visible() {
+        let diagnostics = vec![
+            "one".to_string(),
+            "two".to_string(),
+            "three".to_string(),
+            "four".to_string(),
+            "five".to_string(),
+        ];
+
+        assert_eq!(
+            config_diagnostic_summary(&diagnostics).as_deref(),
+            Some("one\ntwo\nthree\nfour\nand 1 more config warnings")
+        );
     }
 
     #[test]

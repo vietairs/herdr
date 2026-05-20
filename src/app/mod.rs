@@ -338,7 +338,7 @@ impl App {
             selected,
             mode,
             should_quit: false,
-            quit_detaches: !no_session,
+            detach_exits: no_session,
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
@@ -466,10 +466,7 @@ impl App {
         });
 
         Self {
-            config_diagnostic_deadline: state
-                .config_diagnostic
-                .as_ref()
-                .map(|_| Instant::now() + Duration::from_secs(8)),
+            config_diagnostic_deadline: None,
             toast_deadline: None,
             state,
             event_tx,
@@ -797,7 +794,7 @@ impl App {
                 self.state.toast = None;
                 self.state.config_diagnostic =
                     crate::config::config_diagnostic_summary(&diagnostics);
-                self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(8));
+                self.config_diagnostic_deadline = None;
                 crate::config::ConfigReloadReport {
                     status: crate::config::ConfigReloadStatus::Failed,
                     diagnostics,
@@ -827,11 +824,11 @@ impl App {
                     self.state.keybinds = live.keybinds;
                 }
                 Err(keybind_diagnostics) => {
-                    let mut message = keybind_diagnostics.join("; ");
-                    if !message.contains("keeping current keybinds") {
-                        message.push_str("; keeping current keybinds");
-                    }
-                    diagnostics.push(message);
+                    diagnostics.extend(
+                        keybind_diagnostics
+                            .into_iter()
+                            .map(|diagnostic| format!("{diagnostic}; kept current keybinds")),
+                    );
                 }
             }
         }
@@ -928,7 +925,7 @@ impl App {
             }
         } else {
             self.state.config_diagnostic = crate::config::config_diagnostic_summary(&diagnostics);
-            self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(8));
+            self.config_diagnostic_deadline = None;
             if notify_success {
                 self.state.toast = Some(crate::app::state::ToastNotification {
                     kind: crate::app::state::ToastKind::UpdateInstalled,
@@ -1545,8 +1542,7 @@ mod tests {
             .config_diagnostic
             .as_deref()
             .is_some_and(|message| {
-                message.contains("keys.new_workspace")
-                    && message.contains("keeping current keybinds")
+                message.contains("keys.new_workspace") && message.contains("kept current keybinds")
             }));
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
@@ -2514,7 +2510,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.quit_detaches = true;
+        app.state.detach_exits = false;
 
         // Start in navigate mode.
         app.state.mode = Mode::Navigate;
@@ -2540,7 +2536,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.quit_detaches = true;
+        app.state.detach_exits = false;
 
         // Start in terminal mode (default after workspace creation).
         app.state.mode = Mode::Terminal;

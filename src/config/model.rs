@@ -98,8 +98,6 @@ pub struct KeysConfig {
     pub help: BindingConfig,
     /// Open settings. Default: "prefix+s"
     pub settings: BindingConfig,
-    /// Quit or detach. Default: "prefix+q"
-    pub quit: BindingConfig,
     /// Create a new workspace. Default: "prefix+shift+n"
     pub new_workspace: BindingConfig,
     /// Rename the selected workspace. Default: "prefix+shift+w"
@@ -108,7 +106,7 @@ pub struct KeysConfig {
     pub close_workspace: BindingConfig,
     /// Open the workspace navigation surface. Default: "prefix+w"
     pub workspace_picker: BindingConfig,
-    /// Optional explicit detach shortcut in server/client mode. Default: "prefix+d".
+    /// Detach from server/client mode, or exit --no-session mode. Default: "prefix+q".
     pub detach: BindingConfig,
     /// Reload config.toml in the running app/server. Default: "prefix+shift+r".
     pub reload_config: BindingConfig,
@@ -234,12 +232,11 @@ impl Default for KeysConfig {
             prefix: "ctrl+b".into(),
             help: BindingConfig::one("prefix+?"),
             settings: BindingConfig::one("prefix+s"),
-            quit: BindingConfig::one("prefix+q"),
             new_workspace: BindingConfig::one("prefix+shift+n"),
             rename_workspace: BindingConfig::one("prefix+shift+w"),
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::one("prefix+w"),
-            detach: BindingConfig::one("prefix+d"),
+            detach: BindingConfig::one("prefix+q"),
             reload_config: BindingConfig::one("prefix+shift+r"),
             open_notification_target: BindingConfig::one("prefix+o"),
             previous_workspace: BindingConfig::empty(),
