@@ -4,7 +4,10 @@ use std::{
     process::{Command, Stdio},
 };
 
-use super::{ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess, Signal};
+use super::{
+    read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
+    LimitedRead, Signal,
+};
 
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -221,17 +224,53 @@ fn run_notification_command(mut command: Command) -> std::io::Result<bool> {
 }
 
 fn read_clipboard_image_with_command(program: &str, args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let mut command = Command::new(program);
+    command.args(args);
+    read_clipboard_image_with_spawned_command(command)
+}
 
-    if output.status.success() && !output.stdout.is_empty() {
-        Some(output.stdout)
-    } else {
-        None
+fn read_clipboard_image_with_spawned_command(command: Command) -> Option<Vec<u8>> {
+    read_clipboard_image_with_spawned_command_max(
+        command,
+        crate::server::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD,
+    )
+}
+
+fn read_clipboard_image_with_spawned_command_max(
+    mut command: Command,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+
+    let read = match read_limited_reader(stdout, max_bytes) {
+        Ok(read) => read,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+
+    if read == LimitedRead::Oversized {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+
+    let status = child.wait().ok()?;
+    if !status.success() {
+        return None;
+    }
+
+    match read {
+        LimitedRead::Complete(bytes) => Some(bytes),
+        LimitedRead::Empty | LimitedRead::Oversized => None,
     }
 }
 
@@ -327,6 +366,28 @@ mod tests {
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].program, "xclip");
         assert_eq!(commands[1].program, "xsel");
+    }
+
+    #[test]
+    fn read_clipboard_image_with_spawned_command_reads_under_limit() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("printf image");
+
+        assert_eq!(
+            read_clipboard_image_with_spawned_command_max(command, 16),
+            Some(b"image".to_vec())
+        );
+    }
+
+    #[test]
+    fn read_clipboard_image_with_spawned_command_rejects_over_limit() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("printf oversized");
+
+        assert_eq!(
+            read_clipboard_image_with_spawned_command_max(command, 4),
+            None
+        );
     }
 
     #[test]
