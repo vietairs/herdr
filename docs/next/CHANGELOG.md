@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-- Added keybinding v2 with explicit `prefix+...` syntax, array bindings per action, configurable prefix-mode pane focus, tab switching, and direct modified chords for users who opt in. (#154)
+- Added keybinding v2 with explicit `prefix+...` syntax, array bindings per action, configurable prefix-mode pane focus, tab switching, and direct modified chords for users who opt in. (#154, #201, #202, #219)
 - Added `herdr config reset-keys` to back up `config.toml` and remove custom keybindings so built-in v2 defaults apply on restart or config reload. (#154)
 - Added an integrations tab in settings and first-run onboarding so users can install recommended agent integrations from inside Herdr.
 - Added update badges on the sidebar menu, settings menu item, and integrations settings tab when installed integrations are outdated.
@@ -12,6 +12,12 @@
 
 ### Fixed
 - Keybinding conflict warnings now stay visible and show one readable yellow row per conflicting binding.
+- Update prompts that need to stop a running server now default Enter to yes and show `[Y/n]`.
+- Pending release notes no longer open automatically on startup; the latest notes remain available from the menu.
+- Running `herdr server` directly now prints socket and log paths and explains that normal TUI users should run `herdr`.
+- Kitty graphics virtual Unicode placeholders now render image placements instead of leaving placeholder cells behind. (#136)
+- Clipboard image reads are now capped to Herdr's image payload limit, preventing oversized local clipboard images from being read into memory.
+- The install script now reads Herdr's public latest-release manifest, so fresh installs use the same binary URLs as `herdr update`.
 - The Claude Code integration no longer lets subagent completion hooks report durable `working`, preventing delayed recap or subagent completion events from reviving an idle pane. (#198)
 - Remote clients now bridge local clipboard images into the remote pane by staging them as temporary image files and pasting the remote path, so Claude Code image paste works over `herdr --remote`. (#205)
 

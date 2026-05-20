@@ -53,10 +53,10 @@ herdr session stop work
 herdr session delete side-project
 ```
 
-1. press `n` to create a workspace
+1. press `ctrl+b`, then `shift+n` to create a workspace
 2. run an agent in the root pane
-3. press `ctrl+b` to enter navigate mode
-4. use `v` or `-` to split panes, or `c` to create a new tab
+3. press `ctrl+b`, then `w` to open workspace navigation
+4. use `ctrl+b`, then `v` or `minus` to split panes, or `ctrl+b`, then `c` to create a new tab
 5. watch the sidebar for blocked, working, and done states
 
 on first run herdr opens a short onboarding flow. after that, restored sessions land in terminal mode; fresh sessions start in **navigate mode**.
@@ -179,6 +179,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 | [opencode](https://github.com/anomalyco/opencode) | ✓ | ✓ | ✓ |
 | [grok cli](https://x.ai/grok) | ✓ | ✓ | ✓ |
 | [hermes agent](https://github.com/NousResearch/hermes-agent) | ✓ | ✓ | ✓ |
+| [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
 
 detected but not fully tested: gemini cli, cursor agent, cline, kimi, github copilot cli.
 
@@ -200,31 +201,37 @@ see the [integrations docs](https://herdr.dev/docs/integrations/) for setup deta
 
 ## keybindings
 
-press `ctrl+b` to enter navigate mode.
+press `ctrl+b` to enter prefix mode. default actions are prefix-first and tmux-like:
 
 | key | action |
 |-----|--------|
-| `n` | new workspace |
-| `shift+n` | rename workspace |
-| `shift+d` | close workspace |
-| `c` | new tab |
-| `v` / `-` | split pane |
-| `x` | close pane |
-| `b` | toggle sidebar |
-| `f` | zoom pane |
-| `r` | resize mode |
-| `q` | detach (quit client) |
+| `prefix+c` | new tab |
+| `prefix+n` / `prefix+p` | next / previous tab |
+| `prefix+1..9` | switch tab |
+| `prefix+w` | workspace navigation |
+| `prefix+shift+n` | new workspace |
+| `prefix+shift+w` | rename workspace |
+| `prefix+shift+d` | close workspace |
+| `prefix+h/j/k/l` | focus pane |
+| `prefix+v` / `prefix+minus` | split pane |
+| `prefix+x` | close pane |
+| `prefix+b` | toggle sidebar |
+| `prefix+z` | zoom pane |
+| `prefix+r` | resize mode |
+| `prefix+q` | detach |
 
 resize mode: `h`/`l` resize width, `j`/`k` resize height, `esc` exit.
 
-custom command keybindings can launch detached shell helpers or temporary panes from prefix mode:
+custom command keybindings can launch detached shell helpers or temporary panes:
 
 ```toml
 [[keys.command]]
-key = "g"
+key = "prefix+g"
 type = "pane" # "shell" or "pane"
 command = "lazygit"
 ```
+
+if you have old custom keybindings and want the new defaults, run `herdr config reset-keys`. herdr backs up `config.toml`, removes only keybinding config, and uses built-in v2 defaults after restart or config reload.
 
 mouse is supported throughout. full reference: [configuration docs](https://herdr.dev/docs/configuration/).
 

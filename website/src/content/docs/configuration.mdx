@@ -27,7 +27,7 @@ herdr --default-config > ~/.config/herdr/config.toml
 
 If a config value is invalid, Herdr falls back to a safe default and shows a startup warning.
 
-Herdr shows first-run notification setup when `onboarding` is missing or true. Set it when you want to skip that flow after choosing your notification settings.
+Herdr shows first-run setup when `onboarding` is missing or true. Continuing from onboarding writes `onboarding = false` and opens settings on the integrations tab. Set it when you want to skip that flow after setup.
 
 ```toml
 onboarding = false
@@ -45,74 +45,93 @@ You can also open the global menu in Herdr and choose `reload config`.
 
 Reload applies most UI settings without restarting panes. Startup-only settings still need a restart.
 
+## Default shell
+
+Set the executable Herdr uses for newly created interactive panes:
+
+```toml
+[terminal]
+default_shell = "nu"
+```
+
+When unset or empty, Herdr uses `$SHELL`, then `/bin/sh`. This is an executable name or path, not a shell command line. Existing panes keep their current shell until they are recreated. Command panes still run through `/bin/sh -c`; detached custom command keybindings use Herdr's existing `/bin/sh -lc` path.
+
 ## Keybindings
 
-Herdr has a prefix mode similar to tmux. The default prefix is `ctrl+b`.
+Herdr has a prefix mode similar to tmux. The default prefix is `ctrl+b`. Keybinding strings are explicit: `prefix+n` means press the configured prefix and then `n`; `ctrl+alt+n` is a direct terminal-mode shortcut.
 
 A small keybinding override looks like this:
 
 ```toml
 [keys]
 prefix = "ctrl+b"
-new_workspace = "n"
-rename_workspace = "shift+n"
-close_workspace = "shift+d"
-new_tab = "c"
-split_vertical = "v"
-split_horizontal = "-"
-close_pane = "x"
-zoom = "f"
-resize_mode = "r"
-toggle_sidebar = "b"
+new_tab = "prefix+c"
+next_tab = "prefix+n"
+previous_tab = "prefix+p"
+focus_pane_left = "prefix+h"
+split_horizontal = "prefix+minus"
 ```
 
-Optional actions are unset by default. Bind them when you want direct shortcuts:
+The default keymap is prefix-first and avoids direct shortcuts that can steal input from shells, editors, tmux, or terminal apps. Common defaults include:
 
 ```toml
 [keys]
-detach = "q"
-reload_config = "R"
-open_notification_target = "o"
-previous_workspace = "H"
-next_workspace = "L"
-previous_agent = "A"
-next_agent = "D"
-previous_tab = "J"
-next_tab = "K"
-rename_tab = "T"
-close_tab = "W"
-rename_pane = "p"
-edit_scrollback = "e"
-focus_pane_left = "h"
-focus_pane_down = "j"
-focus_pane_up = "k"
-focus_pane_right = "l"
+detach = "prefix+q"
+workspace_picker = "prefix+w"
+new_workspace = "prefix+shift+n"
+rename_workspace = "prefix+shift+w"
+close_workspace = "prefix+shift+d"
+new_tab = "prefix+c"
+previous_tab = "prefix+p"
+next_tab = "prefix+n"
+switch_tab = "prefix+1..9"
+rename_tab = "prefix+shift+t"
+close_tab = "prefix+shift+x"
+focus_pane_left = "prefix+h"
+focus_pane_down = "prefix+j"
+focus_pane_up = "prefix+k"
+focus_pane_right = "prefix+l"
+split_vertical = "prefix+v"
+split_horizontal = "prefix+minus"
+close_pane = "prefix+x"
+zoom = "prefix+z"
+resize_mode = "prefix+r"
+toggle_sidebar = "prefix+b"
 ```
 
-Use the full default config to see every available action.
+Optional actions are unset by default. Bind them with `prefix+` for prefix-mode behavior, or with an explicit modified chord when you intentionally want a direct shortcut:
 
-Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Plain keys, `ctrl+letter`, Escape, Tab, Enter, and function keys are the most reliable. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
+```toml
+[keys]
+previous_workspace = "prefix+shift+left"
+next_workspace = "prefix+shift+right"
+next_tab = ["prefix+n", "ctrl+alt+]"]
+```
+
+Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Named punctuation such as `minus`, `comma`, `ampersand`, `plus`, and `backtick` is also accepted. Plain direct printable keys such as `n` are unsafe because they intercept typing; use `prefix+n` unless you intentionally want a direct binding. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
+
+If you have old custom keybindings and want the new defaults, run `herdr config reset-keys`. Herdr backs up `config.toml`, removes `[keys]` and `[[keys.command]]`, and uses built-in v2 defaults after restart or `herdr server reload-config`.
 
 ## Indexed jumps
 
-Indexed keybindings let you jump directly to visible positions.
+Indexed keybindings use `1..9` in normal keybinding fields:
 
 ```toml
-[keys.indexed]
-workspaces = "ctrl+shift"
-tabs = "ctrl"
-agents = "alt"
+[keys]
+switch_tab = "prefix+1..9"
+switch_workspace = "prefix+shift+1..9"
+focus_agent = "prefix+alt+1..9"
 ```
 
-These expand over number keys 1 through 9. For example, `tabs = "ctrl"` makes `ctrl+1` through `ctrl+9` switch tabs.
+The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
 
 ## Custom command keybindings
 
-Custom prefix-mode commands can run shell helpers from inside Herdr.
+Custom commands use the same keybinding syntax.
 
 ```toml
 [[keys.command]]
-key = "g"
+key = "prefix+g"
 type = "pane"
 command = "lazygit"
 ```
