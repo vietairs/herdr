@@ -376,6 +376,7 @@ mod tests {
                 pid: shell_pid,
                 name: "zsh".to_string(),
                 argv0: Some("zsh".to_string()),
+                argv: Some(vec!["zsh".to_string()]),
                 cmdline: Some("zsh".to_string()),
             }],
         }
@@ -550,6 +551,10 @@ mod tests {
                 pid: 42,
                 name: "droid".to_string(),
                 argv0: None,
+                argv: Some(vec![
+                    "/opt/factory/droid".to_string(),
+                    "--resume".to_string(),
+                ]),
                 cmdline: Some("/opt/factory/droid --resume".to_string()),
             }],
         };
@@ -561,6 +566,11 @@ mod tests {
                 pid: 42,
                 name: "bun".to_string(),
                 argv0: Some("bun".to_string()),
+                argv: Some(vec![
+                    "bun".to_string(),
+                    "/home/can/.local/bin/droid".to_string(),
+                    "--resume".to_string(),
+                ]),
                 cmdline: Some("/home/can/.local/bin/droid --resume".to_string()),
             }],
         };
@@ -584,6 +594,7 @@ mod tests {
                 pid: 42,
                 name: "droid".to_string(),
                 argv0: Some("droid".to_string()),
+                argv: Some(vec!["droid".to_string()]),
                 cmdline: Some("droid".to_string()),
             }],
         };
@@ -626,6 +637,7 @@ mod tests {
                     pid: 42,
                     name: "droid".to_string(),
                     argv0: Some("droid".to_string()),
+                    argv: Some(vec!["droid".to_string()]),
                     cmdline: Some("droid".to_string()),
                 }],
             }),

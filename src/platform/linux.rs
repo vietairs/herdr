@@ -34,11 +34,13 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
             continue;
         }
 
+        let argv = process_argv(pid);
         processes.push(ForegroundProcess {
             pid,
             name,
             argv0: None,
-            cmdline: process_cmdline(pid),
+            cmdline: argv.as_ref().map(|parts| parts.join(" ")),
+            argv,
         });
     }
 
@@ -73,7 +75,7 @@ fn process_pgrp_and_comm(pid: u32) -> Option<(i32, String)> {
     Some((pgrp, comm))
 }
 
-fn process_cmdline(pid: u32) -> Option<String> {
+fn process_argv(pid: u32) -> Option<Vec<String>> {
     let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     if bytes.is_empty() {
         return None;
@@ -83,7 +85,7 @@ fn process_cmdline(pid: u32) -> Option<String> {
         .filter(|part| !part.is_empty())
         .map(|part| String::from_utf8_lossy(part).into_owned())
         .collect();
-    (!parts.is_empty()).then(|| parts.join(" "))
+    (!parts.is_empty()).then_some(parts)
 }
 
 /// Get the current working directory of a process.

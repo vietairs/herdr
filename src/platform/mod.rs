@@ -8,6 +8,7 @@ pub struct ForegroundProcess {
     pub pid: u32,
     pub name: String,
     pub argv0: Option<String>,
+    pub argv: Option<Vec<String>>,
     pub cmdline: Option<String>,
 }
 

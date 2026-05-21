@@ -32,11 +32,13 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
         let Some(name) = comm_from_bsdinfo(&info) else {
             continue;
         };
+        let argv = process_argv(pid);
         processes.push(ForegroundProcess {
             pid,
             name,
             argv0: process_argv0_name(pid),
-            cmdline: process_cmdline(pid),
+            cmdline: argv.as_ref().map(|parts| parts.join(" ")),
+            argv,
         });
     }
 
@@ -462,10 +464,9 @@ fn comm_from_bsdinfo(info: &libc::proc_bsdinfo) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-fn process_cmdline(pid: u32) -> Option<String> {
+fn process_argv(pid: u32) -> Option<Vec<String>> {
     let buf = kern_procargs2(pid)?;
-    let argv = procargs2_argv(&buf)?;
-    Some(argv.join(" "))
+    procargs2_argv(&buf)
 }
 
 fn procargs2_argv(buf: &[u8]) -> Option<Vec<String>> {
