@@ -1654,9 +1654,13 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
 
     fs::create_dir_all(&bin_dir).unwrap();
     let fake_pi = bin_dir.join("pi");
+    let stop_file = base.join("pi-stop");
     fs::write(
         &fake_pi,
-        "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
+        format!(
+            "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\n",
+            stop_file.display()
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -1763,6 +1767,8 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
         ),
     );
     assert_eq!(pane_after_focus["result"]["pane"]["agent_status"], "idle");
+
+    fs::write(&stop_file, "stop").unwrap();
 
     cleanup_spawned_herdr(child, base);
 }
