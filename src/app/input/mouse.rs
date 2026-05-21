@@ -62,14 +62,16 @@ impl AppState {
             return None;
         }
 
-        if self.clickable_toast_at(mouse.column, mouse.row)
+        if self.mode == Mode::Terminal
+            && self.clickable_toast_at(mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             self.focus_toast_target();
             return None;
         }
 
-        if self.clickable_toast_at(mouse.column, mouse.row)
+        if self.mode == Mode::Terminal
+            && self.clickable_toast_at(mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
         {
             return None;
@@ -1454,6 +1456,40 @@ mod tests {
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target_pane));
         assert!(app.state.toast.is_none());
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn toast_click_does_not_steal_mouse_from_settings_overlay() {
+        let mut app = app_for_mouse_test();
+        let active = Workspace::test_new("active");
+        let background = Workspace::test_new("background");
+        let target_pane = background.tabs[0].root_pane;
+        let workspace_id = background.id.clone();
+
+        app.state.workspaces = vec![active, background];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::Finished,
+            title: "pi finished".into(),
+            context: "background · 2".into(),
+            target: Some(crate::app::state::ToastTarget {
+                workspace_id,
+                pane_id: target_pane,
+            }),
+        });
+        app.state.mode = Mode::Settings;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let hit = app.state.view.toast_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            hit.x + 1,
+            hit.y + 1,
+        ));
+
+        assert_eq!(app.state.active, Some(0));
+        assert!(app.state.toast.is_some());
     }
 
     #[test]
