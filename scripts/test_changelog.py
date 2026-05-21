@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scripts.changelog import (
     ChangelogError,
+    archived_releases_from_current_manifest,
     build_latest_json,
     canonicalize_manifest,
     DEFAULT_PRODUCT_ANNOUNCEMENT_PATH,
@@ -94,6 +95,75 @@ class ChangelogScriptTests(unittest.TestCase):
             manifest["announcement"],
             {"id": "keybinding-v2", "title": "Keybind Refactor", "body": "body"},
         )
+        self.assertEqual(
+            manifest["releases"]["0.1.1"]["announcement"],
+            {"id": "keybinding-v2", "title": "Keybind Refactor", "body": "body"},
+        )
+
+    def test_build_latest_json_preserves_previous_release_metadata(self) -> None:
+        manifest = json.loads(
+            build_latest_json(
+                "0.1.2",
+                "### Fixed\n- Two",
+                default_release_assets("0.1.2"),
+                releases={"0.1.1": {"notes": "### Fixed\n- One"}},
+            )
+        )
+
+        self.assertEqual(list(manifest["releases"]), ["0.1.2", "0.1.1"])
+        self.assertEqual(manifest["releases"]["0.1.2"], {"notes": "### Fixed\n- Two"})
+        self.assertEqual(manifest["releases"]["0.1.1"], {"notes": "### Fixed\n- One"})
+
+    def test_build_latest_json_rejects_release_metadata_assets(self) -> None:
+        with self.assertRaisesRegex(ChangelogError, "unsupported"):
+            build_latest_json(
+                "0.1.2",
+                "### Fixed\n- Two",
+                default_release_assets("0.1.2"),
+                releases={"0.1.1": {"notes": "### Fixed\n- One", "assets": {}}},
+            )
+
+    def test_archived_releases_from_current_manifest_seeds_legacy_root(self) -> None:
+        releases = archived_releases_from_current_manifest(
+            {
+                "version": "0.1.1",
+                "notes": "### Fixed\n- One",
+                "announcement": {
+                    "id": "one",
+                    "title": "One",
+                    "body": "body",
+                },
+            }
+        )
+
+        self.assertEqual(
+            releases,
+            {
+                "0.1.1": {
+                    "notes": "### Fixed\n- One",
+                    "announcement": {
+                        "id": "one",
+                        "title": "One",
+                        "body": "body",
+                    },
+                }
+            },
+        )
+
+    def test_archived_releases_from_current_manifest_prefers_root_for_current_version(self) -> None:
+        releases = archived_releases_from_current_manifest(
+            {
+                "version": "0.1.2",
+                "notes": "### Fixed\n- Root",
+                "releases": {
+                    "0.1.2": {"notes": "### Fixed\n- Stale"},
+                    "0.1.1": {"notes": "### Fixed\n- One"},
+                },
+            }
+        )
+
+        self.assertEqual(releases["0.1.2"], {"notes": "### Fixed\n- Root"})
+        self.assertEqual(releases["0.1.1"], {"notes": "### Fixed\n- One"})
 
     def write_temp_json(self, content: str) -> Path:
         tmp = tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8")

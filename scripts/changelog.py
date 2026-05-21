@@ -134,12 +134,81 @@ def read_protocol_version(source_path: Path = PROTOCOL_SOURCE_PATH) -> int:
     return int(match.group(1))
 
 
+def normalize_announcement(value: Any, label: str) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ChangelogError(f"{label} announcement must be an object")
+
+    allowed_keys = {"id", "title", "body"}
+    extra_keys = sorted(set(value) - allowed_keys)
+    if extra_keys:
+        raise ChangelogError(
+            f"{label} announcement has unsupported field(s): {', '.join(extra_keys)}"
+        )
+
+    announcement: dict[str, str] = {}
+    for key in ("id", "title", "body"):
+        field_value = value.get(key)
+        if not isinstance(field_value, str) or not field_value.strip():
+            raise ChangelogError(f"{label} announcement is missing non-empty string field: {key}")
+        announcement[key] = field_value.strip()
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", announcement["id"]):
+        raise ChangelogError(
+            f"{label} announcement has invalid id; use lowercase letters, numbers, dots, underscores, or dashes"
+        )
+
+    return announcement
+
+
+def normalize_release_metadata(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ChangelogError(f"{label} must be an object")
+
+    allowed_keys = {"notes", "announcement"}
+    extra_keys = sorted(set(value) - allowed_keys)
+    if extra_keys:
+        raise ChangelogError(f"{label} has unsupported field(s): {', '.join(extra_keys)}")
+
+    notes = value.get("notes")
+    if not isinstance(notes, str) or not notes.strip():
+        raise ChangelogError(f"{label} is missing non-empty release notes")
+
+    metadata: dict[str, Any] = {"notes": notes.strip()}
+    announcement = normalize_announcement(value.get("announcement"), label)
+    if announcement is not None:
+        metadata["announcement"] = announcement
+    return metadata
+
+
+def normalize_releases(value: Any) -> dict[str, dict[str, Any]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ChangelogError("releases must be an object")
+
+    releases: dict[str, dict[str, Any]] = {}
+    for raw_version, raw_metadata in value.items():
+        if not isinstance(raw_version, str) or not raw_version.strip():
+            raise ChangelogError("releases contains an empty version key")
+        version = normalize_version(raw_version)
+        parse_version(version)
+        releases[version] = normalize_release_metadata(raw_metadata, f"releases.{version}")
+
+    return {
+        version: releases[version]
+        for version in sorted(releases, key=parse_version, reverse=True)
+    }
+
+
 def build_latest_json(
     version: str,
     notes: str,
     assets: dict[str, str],
     protocol: int | None = None,
     announcement: dict[str, str] | None = None,
+    releases: dict[str, Any] | None = None,
 ) -> str:
     normalized_version = normalize_version(version)
     normalized_notes = notes.strip()
@@ -154,6 +223,16 @@ def build_latest_json(
         raise ChangelogError(f"missing asset targets: {', '.join(missing_targets)}")
 
     ordered_assets = {target: assets[target] for target in ASSET_TARGETS}
+    normalized_announcement = normalize_announcement(announcement, "root")
+    archived_releases = normalize_releases(releases)
+    current_metadata: dict[str, Any] = {"notes": normalized_notes}
+    if normalized_announcement is not None:
+        current_metadata["announcement"] = normalized_announcement
+    archived_releases[normalized_version] = current_metadata
+    archived_releases = {
+        release_version: archived_releases[release_version]
+        for release_version in sorted(archived_releases, key=parse_version, reverse=True)
+    }
 
     manifest: dict[str, Any] = {
         "version": normalized_version,
@@ -161,8 +240,9 @@ def build_latest_json(
         "notes": normalized_notes,
         "assets": ordered_assets,
     }
-    if announcement is not None:
-        manifest["announcement"] = announcement
+    if normalized_announcement is not None:
+        manifest["announcement"] = normalized_announcement
+    manifest["releases"] = archived_releases
 
     return json.dumps(manifest, indent=2) + "\n"
 
@@ -292,6 +372,23 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
+def archived_releases_from_current_manifest(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    releases = normalize_releases(manifest.get("releases"))
+    version = manifest.get("version")
+    notes = manifest.get("notes")
+    if isinstance(version, str) and version.strip() and isinstance(notes, str) and notes.strip():
+        metadata: dict[str, Any] = {"notes": notes.strip()}
+        announcement = normalize_announcement(manifest.get("announcement"), "current root")
+        if announcement is not None:
+            metadata["announcement"] = announcement
+        releases[normalize_version(version)] = metadata
+
+    return {
+        release_version: releases[release_version]
+        for release_version in sorted(releases, key=parse_version, reverse=True)
+    }
+
+
 def load_product_announcement(path: Path) -> dict[str, str] | None:
     try:
         content = path.read_text(encoding="utf-8")
@@ -305,29 +402,7 @@ def load_product_announcement(path: Path) -> dict[str, str] | None:
 
     if data is None:
         return None
-    if not isinstance(data, dict):
-        raise ChangelogError(f"expected announcement object or null in {path}")
-
-    allowed_keys = {"id", "title", "body"}
-    extra_keys = sorted(set(data) - allowed_keys)
-    if extra_keys:
-        raise ChangelogError(
-            f"announcement in {path} has unsupported field(s): {', '.join(extra_keys)}"
-        )
-
-    announcement: dict[str, str] = {}
-    for key in ("id", "title", "body"):
-        value = data.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise ChangelogError(f"announcement in {path} is missing non-empty string field: {key}")
-        announcement[key] = value.strip()
-
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", announcement["id"]):
-        raise ChangelogError(
-            f"announcement in {path} has invalid id; use lowercase letters, numbers, dots, underscores, or dashes"
-        )
-
-    return announcement
+    return normalize_announcement(data, f"announcement in {path}")
 
 
 def write_text(path: Path, text: str) -> None:
@@ -466,6 +541,7 @@ def cmd_sync_latest_json(args: argparse.Namespace) -> int:
         dict(new_manifest["assets"]),
         protocol=int(new_manifest["protocol"]),
         announcement=announcement,
+        releases=archived_releases_from_current_manifest(current_manifest),
     )
     write_text(manifest_path, output)
     if announcement is not None:
