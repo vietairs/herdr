@@ -191,6 +191,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     );
     load_live_section(
         table,
+        "worktrees",
+        "worktree config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.worktrees = section,
+    );
+    load_live_section(
+        table,
         "experimental",
         "experimental config",
         &mut diagnostics,

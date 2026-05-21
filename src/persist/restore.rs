@@ -99,6 +99,8 @@ fn restore_workspace(
         return None;
     }
 
+    let worktree_space = restored_worktree_space_membership(snap.worktree_space.clone());
+
     Some((
         Workspace {
             id: snap
@@ -107,8 +109,10 @@ fn restore_workspace(
                 .unwrap_or_else(crate::workspace::generate_workspace_id),
             custom_name: snap.custom_name.clone(),
             identity_cwd: snap.identity_cwd.clone(),
-            cached_git_branch: None,
+            cached_git_branch: crate::workspace::git_branch(&snap.identity_cwd),
             cached_git_ahead_behind: None,
+            cached_git_space: crate::workspace::git_space_metadata(&snap.identity_cwd),
+            worktree_space,
             public_pane_numbers,
             next_public_pane_number,
             active_tab: snap.active_tab.min(tabs.len().saturating_sub(1)),
@@ -119,6 +123,16 @@ fn restore_workspace(
         terminals,
         terminal_runtimes,
     ))
+}
+
+fn restored_worktree_space_membership(
+    space: Option<crate::workspace::WorktreeSpaceMembership>,
+) -> Option<crate::workspace::WorktreeSpaceMembership> {
+    space.filter(|space| {
+        space.checkout_path.exists()
+            && crate::workspace::git_space_metadata(&space.checkout_path)
+                .is_some_and(|current| current.key == space.key)
+    })
 }
 
 fn restore_tab(
@@ -406,5 +420,20 @@ mod tests {
             resolve_restored_pane(Some(1), &id_map, &surviving, &pane_ids),
             Some(first)
         );
+    }
+
+    #[test]
+    fn restored_worktree_space_membership_drops_missing_checkout() {
+        let missing =
+            std::env::temp_dir().join(format!("herdr-missing-worktree-{}", std::process::id()));
+        let membership = crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: missing.join("repo"),
+            checkout_path: missing.join("checkout"),
+            is_linked_worktree: true,
+        };
+
+        assert_eq!(restored_worktree_space_membership(Some(membership)), None);
     }
 }

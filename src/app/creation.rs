@@ -105,7 +105,7 @@ impl App {
         Ok(idx)
     }
 
-    pub(super) fn create_workspace_with_options(
+    pub(crate) fn create_workspace_with_options(
         &mut self,
         initial_cwd: std::path::PathBuf,
         focus: bool,

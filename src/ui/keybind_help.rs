@@ -80,6 +80,12 @@ pub(super) fn keybind_help_groups(
     let workspace_tab = vec![
         (keybind_label(&kb.workspace_picker), "workspace navigation"),
         (keybind_label(&kb.new_workspace), "new workspace"),
+        (keybind_label(&kb.new_worktree), "new worktree"),
+        (keybind_label(&kb.open_worktree), "open worktree"),
+        (
+            keybind_label(&kb.remove_worktree),
+            "delete worktree checkout",
+        ),
         (keybind_label(&kb.rename_workspace), "rename workspace"),
         (keybind_label(&kb.close_workspace), "close workspace"),
         (keybind_label(&kb.previous_workspace), "previous workspace"),

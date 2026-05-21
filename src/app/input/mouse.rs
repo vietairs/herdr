@@ -141,6 +141,33 @@ impl AppState {
             && mouse.row >= sidebar.y
             && mouse.row < sidebar.y + sidebar.height;
 
+        if self.mode == Mode::OpenExistingWorktree {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(open) = &mut self.worktree_open {
+                        open.selected = open.selected.saturating_sub(1);
+                    }
+                    return None;
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(open) = &mut self.worktree_open {
+                        open.selected =
+                            (open.selected + 1).min(open.entries.len().saturating_sub(1));
+                    }
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
+        if matches!(
+            self.mode,
+            Mode::NewLinkedWorktree | Mode::OpenExistingWorktree | Mode::ConfirmRemoveWorktree
+        ) && !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            return None;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
@@ -167,6 +194,135 @@ impl AppState {
                         Some(ModalAction::Confirm) => confirm_close_accept(self),
                         Some(ModalAction::Cancel) | None => confirm_close_cancel(self),
                         _ => {}
+                    }
+                    return None;
+                }
+
+                if self.mode == Mode::NewLinkedWorktree {
+                    if let Some(inner) =
+                        crate::ui::new_linked_worktree_inner_rect(self.screen_rect())
+                    {
+                        let (create, cancel) = crate::ui::new_linked_worktree_button_rects(inner);
+                        match modal_action_from_buttons(
+                            mouse.column,
+                            mouse.row,
+                            &[
+                                (create, ModalAction::Confirm),
+                                (cancel, ModalAction::Cancel),
+                            ],
+                        ) {
+                            Some(ModalAction::Confirm) => {
+                                self.request_submit_worktree_create = true;
+                            }
+                            Some(ModalAction::Cancel)
+                                if !self
+                                    .worktree_create
+                                    .as_ref()
+                                    .is_some_and(|create| create.creating) =>
+                            {
+                                self.worktree_create = None;
+                                self.name_input.clear();
+                                self.name_input_replace_on_type = false;
+                                leave_modal(self);
+                            }
+                            _ => {}
+                        }
+                    }
+                    return None;
+                }
+
+                if self.mode == Mode::OpenExistingWorktree {
+                    if let Some(open) = self.worktree_open.as_ref() {
+                        if let Some(inner) = crate::ui::open_existing_worktree_inner_rect(
+                            self.screen_rect(),
+                            open.entries.len(),
+                        ) {
+                            let max_rows = inner.height.saturating_sub(4) as usize;
+                            let start = crate::ui::open_existing_worktree_visible_start(
+                                open.selected,
+                                max_rows,
+                            );
+                            let row_idx = if rect_contains(inner, mouse.column, mouse.row) {
+                                mouse
+                                    .row
+                                    .checked_sub(inner.y.saturating_add(2))
+                                    .map(usize::from)
+                                    .filter(|row| *row < max_rows)
+                                    .and_then(|row| {
+                                        let entry_idx = start + row;
+                                        (entry_idx < open.entries.len()).then_some(entry_idx)
+                                    })
+                            } else {
+                                None
+                            };
+                            if let Some(entry_idx) = row_idx {
+                                if let Some(open) = &mut self.worktree_open {
+                                    open.selected = entry_idx;
+                                }
+                                self.request_submit_worktree_open = true;
+                                return None;
+                            }
+
+                            let (open_button, cancel) =
+                                crate::ui::open_existing_worktree_button_rects(inner);
+                            match modal_action_from_buttons(
+                                mouse.column,
+                                mouse.row,
+                                &[
+                                    (open_button, ModalAction::Confirm),
+                                    (cancel, ModalAction::Cancel),
+                                ],
+                            ) {
+                                Some(ModalAction::Confirm) => {
+                                    self.request_submit_worktree_open = true;
+                                }
+                                Some(ModalAction::Cancel) => {
+                                    self.worktree_open = None;
+                                    leave_modal(self);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    return None;
+                }
+
+                if self.mode == Mode::ConfirmRemoveWorktree {
+                    if let Some(popup) = crate::ui::remove_worktree_popup_rect(self.screen_rect()) {
+                        let inner = Rect::new(
+                            popup.x + 1,
+                            popup.y + 1,
+                            popup.width.saturating_sub(2),
+                            popup.height.saturating_sub(2),
+                        );
+                        let force_confirmation = self
+                            .worktree_remove
+                            .as_ref()
+                            .is_some_and(|remove| remove.force_confirmation);
+                        let (remove, cancel) =
+                            crate::ui::remove_worktree_button_rects(inner, force_confirmation);
+                        match modal_action_from_buttons(
+                            mouse.column,
+                            mouse.row,
+                            &[
+                                (remove, ModalAction::Confirm),
+                                (cancel, ModalAction::Cancel),
+                            ],
+                        ) {
+                            Some(ModalAction::Confirm) => {
+                                self.request_submit_worktree_remove = true;
+                            }
+                            Some(ModalAction::Cancel)
+                                if !self
+                                    .worktree_remove
+                                    .as_ref()
+                                    .is_some_and(|remove| remove.removing) =>
+                            {
+                                self.worktree_remove = None;
+                                leave_modal(self);
+                            }
+                            _ => {}
+                        }
                     }
                     return None;
                 }
@@ -336,6 +492,29 @@ impl AppState {
                         return None;
                     }
 
+                    let cards = if self.view.workspace_card_areas.is_empty() {
+                        crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
+                    } else {
+                        self.view.workspace_card_areas.clone()
+                    };
+                    if let Some(card) = cards.iter().find(|card| {
+                        mouse.row == card.rect.y
+                            && mouse.column == card.rect.x
+                            && mouse.column < card.rect.x + card.rect.width
+                    }) {
+                        if let Some((key, collapsed)) =
+                            crate::ui::workspace_parent_group_state(self, card.ws_idx)
+                        {
+                            if collapsed {
+                                self.collapsed_space_keys.remove(&key);
+                            } else {
+                                self.collapsed_space_keys.insert(key);
+                            }
+                            self.mark_session_dirty();
+                            return None;
+                        }
+                    }
+
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_press = Some(WorkspacePressState {
                             ws_idx: idx,
@@ -437,7 +616,11 @@ impl AppState {
                     if let Some(press) = &self.workspace_press {
                         let delta_col = mouse.column.abs_diff(press.start_col);
                         let delta_row = mouse.row.abs_diff(press.start_row);
-                        if delta_col.max(delta_row) >= WORKSPACE_DRAG_THRESHOLD {
+                        let can_reorder = self
+                            .workspaces
+                            .get(press.ws_idx)
+                            .is_some_and(|ws| ws.worktree_space().is_none());
+                        if can_reorder && delta_col.max(delta_row) >= WORKSPACE_DRAG_THRESHOLD {
                             self.drag = Some(DragState {
                                 target: DragTarget::WorkspaceReorder {
                                     source_ws_idx: press.ws_idx,
@@ -665,9 +848,8 @@ impl AppState {
                     crate::ui::workspace_list_scroll_metrics(self, self.workspace_list_rect()),
                 ) {
                     self.scroll_workspace_list(-1);
-                } else if self.selected > 0 {
-                    self.selected -= 1;
-                    self.ensure_workspace_visible(self.selected);
+                } else {
+                    self.move_selected_workspace_by_visible_delta(-1);
                 }
             }
             MouseEventKind::ScrollDown if in_sidebar => {
@@ -685,9 +867,8 @@ impl AppState {
                     crate::ui::workspace_list_scroll_metrics(self, self.workspace_list_rect()),
                 ) {
                     self.scroll_workspace_list(1);
-                } else if !self.workspaces.is_empty() && self.selected < self.workspaces.len() - 1 {
-                    self.selected += 1;
-                    self.ensure_workspace_visible(self.selected);
+                } else {
+                    self.move_selected_workspace_by_visible_delta(1);
                 }
             }
 
@@ -699,6 +880,8 @@ impl AppState {
             }
 
             MouseEventKind::Down(MouseButton::Right) if in_sidebar && !self.sidebar_collapsed => {
+                self.workspace_press = None;
+                self.tab_press = None;
                 if self
                     .workspace_list_scrollbar_target_at(mouse.column, mouse.row)
                     .is_some()
@@ -707,8 +890,40 @@ impl AppState {
                 }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
                     self.selected = idx;
+                    let kind = self
+                        .workspaces
+                        .get(idx)
+                        .and_then(|ws| {
+                            let group_state = crate::ui::workspace_parent_group_state(self, idx);
+                            let git_space = ws.git_space().cloned().or_else(|| {
+                                ws.resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
+                                    .as_deref()
+                                    .and_then(crate::workspace::git_space_metadata)
+                            });
+                            let is_linked_worktree = ws.worktree_space().map_or_else(
+                                || {
+                                    git_space
+                                        .as_ref()
+                                        .is_some_and(|space| space.is_linked_worktree)
+                                },
+                                |space| space.is_linked_worktree,
+                            );
+                            let show_git_menu = ws.worktree_space().is_some()
+                                || git_space
+                                    .as_ref()
+                                    .is_some_and(|space| !space.is_linked_worktree);
+                            show_git_menu.then_some(ContextMenuKind::GitWorkspace {
+                                ws_idx: idx,
+                                is_linked_worktree,
+                                has_worktree_children: group_state.is_some(),
+                                collapsed: group_state
+                                    .as_ref()
+                                    .is_some_and(|(_, collapsed)| *collapsed),
+                            })
+                        })
+                        .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
                     self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::Workspace { ws_idx: idx },
+                        kind,
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
@@ -1433,6 +1648,33 @@ mod tests {
         assert_eq!(metrics.offset_from_bottom, 7);
     }
 
+    fn sample_worktree_open_state() -> crate::app::state::WorktreeOpenState {
+        crate::app::state::WorktreeOpenState {
+            source_workspace_id: "source".into(),
+            source_existing_membership: None,
+            source_checkout_path: "/repo/herdr".into(),
+            source_repo_root: "/repo/herdr".into(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            entries: vec![
+                crate::app::state::WorktreeOpenEntry {
+                    path: "/repo/herdr".into(),
+                    branch: Some("main".into()),
+                    is_linked_worktree: false,
+                    already_open_ws_idx: Some(0),
+                },
+                crate::app::state::WorktreeOpenEntry {
+                    path: "/repo/herdr-issue".into(),
+                    branch: Some("worktree/issue".into()),
+                    is_linked_worktree: true,
+                    already_open_ws_idx: None,
+                },
+            ],
+            selected: 0,
+            error: None,
+        }
+    }
+
     #[test]
     fn hovering_context_menu_updates_highlight() {
         let mut app = app_for_mouse_test();
@@ -1556,6 +1798,131 @@ mod tests {
 
         assert_eq!(app.state.workspaces.len(), 1);
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn clicking_open_worktree_row_selects_and_requests_open() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::OpenExistingWorktree;
+        app.state.worktree_open = Some(sample_worktree_open_state());
+        let inner =
+            crate::ui::open_existing_worktree_inner_rect(app.state.screen_rect(), 2).unwrap();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            inner.x + 1,
+            inner.y + 3,
+        ));
+
+        assert_eq!(app.state.worktree_open.as_ref().unwrap().selected, 1);
+        assert!(app.state.request_submit_worktree_open);
+    }
+
+    #[test]
+    fn clicking_open_worktree_buttons_requests_open_or_cancels() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::OpenExistingWorktree;
+        app.state.worktree_open = Some(sample_worktree_open_state());
+        let inner =
+            crate::ui::open_existing_worktree_inner_rect(app.state.screen_rect(), 2).unwrap();
+        let (open, _) = crate::ui::open_existing_worktree_button_rects(inner);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            open.x,
+            open.y,
+        ));
+
+        assert!(app.state.worktree_open.is_some());
+        assert!(app.state.request_submit_worktree_open);
+
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::OpenExistingWorktree;
+        app.state.worktree_open = Some(sample_worktree_open_state());
+        let inner =
+            crate::ui::open_existing_worktree_inner_rect(app.state.screen_rect(), 2).unwrap();
+        let (_, cancel) = crate::ui::open_existing_worktree_button_rects(inner);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            cancel.x,
+            cancel.y,
+        ));
+
+        assert!(app.state.worktree_open.is_none());
+        assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn scrolling_open_worktree_picker_moves_selection() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::OpenExistingWorktree;
+        app.state.worktree_open = Some(sample_worktree_open_state());
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 1, 1));
+        assert_eq!(app.state.worktree_open.as_ref().unwrap().selected, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, 1, 1));
+        assert_eq!(app.state.worktree_open.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn clicking_remove_worktree_buttons_requests_remove_or_cancels() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::ConfirmRemoveWorktree;
+        app.state.worktree_remove = Some(crate::app::state::WorktreeRemoveState {
+            workspace_id: "issue".into(),
+            repo_root: "/repo/herdr".into(),
+            path: "/repo/herdr-issue".into(),
+            error: None,
+            removing: false,
+            force_confirmation: false,
+        });
+        let popup = crate::ui::remove_worktree_popup_rect(app.state.screen_rect()).unwrap();
+        let inner = Rect::new(
+            popup.x + 1,
+            popup.y + 1,
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        );
+        let (remove, _) = crate::ui::remove_worktree_button_rects(inner, false);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            remove.x,
+            remove.y,
+        ));
+
+        assert!(app.state.worktree_remove.is_some());
+        assert!(app.state.request_submit_worktree_remove);
+
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::ConfirmRemoveWorktree;
+        app.state.worktree_remove = Some(crate::app::state::WorktreeRemoveState {
+            workspace_id: "issue".into(),
+            repo_root: "/repo/herdr".into(),
+            path: "/repo/herdr-issue".into(),
+            error: None,
+            removing: false,
+            force_confirmation: false,
+        });
+        let popup = crate::ui::remove_worktree_popup_rect(app.state.screen_rect()).unwrap();
+        let inner = Rect::new(
+            popup.x + 1,
+            popup.y + 1,
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        );
+        let (_, cancel) = crate::ui::remove_worktree_button_rects(inner, false);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            cancel.x,
+            cancel.y,
+        ));
+
+        assert!(app.state.worktree_remove.is_none());
+        assert_eq!(app.state.mode, Mode::Navigate);
     }
 
     #[test]

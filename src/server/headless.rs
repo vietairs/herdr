@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use base64::Engine;
 use bytes::Bytes;
@@ -248,6 +248,47 @@ impl HeadlessServer {
             if self.app.state.request_new_tab {
                 self.app.state.request_new_tab = false;
                 self.app.create_tab();
+                needs_render = true;
+            }
+
+            if let Some(ws_idx) = self.app.state.request_new_linked_worktree.take() {
+                self.app.open_new_linked_worktree_dialog(ws_idx);
+                needs_render = true;
+            }
+
+            if let Some(ws_idx) = self.app.state.request_open_existing_worktree.take() {
+                self.app.open_existing_worktree_dialog(ws_idx);
+                needs_render = true;
+            }
+
+            if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
+                if let Err(err) = self.app.create_workspace_with_options(cwd, true) {
+                    error!(err = %err, "failed to create workspace at requested cwd");
+                    self.app.state.mode = app::Mode::Navigate;
+                }
+                needs_render = true;
+            }
+
+            if let Some(ws_idx) = self.app.state.request_remove_linked_worktree.take() {
+                self.app.open_remove_linked_worktree_confirmation(ws_idx);
+                needs_render = true;
+            }
+
+            if self.app.state.request_submit_worktree_create {
+                self.app.state.request_submit_worktree_create = false;
+                self.app.start_worktree_add();
+                needs_render = true;
+            }
+
+            if self.app.state.request_submit_worktree_open {
+                self.app.state.request_submit_worktree_open = false;
+                self.app.open_selected_existing_worktree();
+                needs_render = true;
+            }
+
+            if self.app.state.request_submit_worktree_remove {
+                self.app.state.request_submit_worktree_remove = false;
+                self.app.start_worktree_remove();
                 needs_render = true;
             }
 

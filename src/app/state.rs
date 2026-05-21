@@ -557,6 +557,52 @@ impl Palette {
 pub struct WorkspaceCardArea {
     pub ws_idx: usize,
     pub rect: Rect,
+    pub indented: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeCreateState {
+    pub source_workspace_id: String,
+    pub source_checkout_path: std::path::PathBuf,
+    pub source_existing_membership: Option<crate::workspace::WorktreeSpaceMembership>,
+    pub source_repo_root: std::path::PathBuf,
+    pub repo_key: String,
+    pub repo_name: String,
+    pub branch: String,
+    pub checkout_path: std::path::PathBuf,
+    pub error: Option<String>,
+    pub creating: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRemoveState {
+    pub workspace_id: String,
+    pub repo_root: std::path::PathBuf,
+    pub path: std::path::PathBuf,
+    pub error: Option<String>,
+    pub removing: bool,
+    pub force_confirmation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeOpenEntry {
+    pub path: std::path::PathBuf,
+    pub branch: Option<String>,
+    pub is_linked_worktree: bool,
+    pub already_open_ws_idx: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeOpenState {
+    pub source_workspace_id: String,
+    pub source_existing_membership: Option<crate::workspace::WorktreeSpaceMembership>,
+    pub source_checkout_path: std::path::PathBuf,
+    pub source_repo_root: std::path::PathBuf,
+    pub repo_key: String,
+    pub repo_name: String,
+    pub entries: Vec<WorktreeOpenEntry>,
+    pub selected: usize,
+    pub error: Option<String>,
 }
 
 /// Computed view geometry — derived from AppState + terminal size.
@@ -595,6 +641,9 @@ pub enum Mode {
     RenameWorkspace,
     RenameTab,
     RenamePane,
+    NewLinkedWorktree,
+    OpenExistingWorktree,
+    ConfirmRemoveWorktree,
     Resize,
     ConfirmClose,
     ContextMenu,
@@ -785,10 +834,16 @@ pub(crate) struct TabPressState {
     pub start_row: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextMenuKind {
     Workspace {
         ws_idx: usize,
+    },
+    GitWorkspace {
+        ws_idx: usize,
+        is_linked_worktree: bool,
+        has_worktree_children: bool,
+        collapsed: bool,
     },
     Tab {
         ws_idx: usize,
@@ -812,6 +867,39 @@ impl ContextMenuState {
     pub fn items(&self) -> &'static [&'static str] {
         match self.kind {
             ContextMenuKind::Workspace { .. } => &["Rename", "Close"],
+            ContextMenuKind::GitWorkspace {
+                is_linked_worktree: false,
+                has_worktree_children: false,
+                ..
+            } => &["Rename", "Close", "New worktree", "Open worktree..."],
+            ContextMenuKind::GitWorkspace {
+                is_linked_worktree: true,
+                ..
+            } => &["Rename", "Close", "Delete worktree checkout..."],
+            ContextMenuKind::GitWorkspace {
+                is_linked_worktree: false,
+                has_worktree_children: true,
+                collapsed: true,
+                ..
+            } => &[
+                "Rename",
+                "Close group",
+                "New worktree",
+                "Open worktree...",
+                "Expand",
+            ],
+            ContextMenuKind::GitWorkspace {
+                is_linked_worktree: false,
+                has_worktree_children: true,
+                collapsed: false,
+                ..
+            } => &[
+                "Rename",
+                "Close group",
+                "New worktree",
+                "Open worktree...",
+                "Collapse",
+            ],
             ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Close"],
             ContextMenuKind::Pane {
                 has_manual_label: true,
@@ -905,6 +993,13 @@ pub struct AppState {
     pub detach_requested: bool,
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
+    pub request_new_linked_worktree: Option<usize>,
+    pub request_open_existing_worktree: Option<usize>,
+    pub request_new_workspace_cwd: Option<std::path::PathBuf>,
+    pub request_remove_linked_worktree: Option<usize>,
+    pub request_submit_worktree_create: bool,
+    pub request_submit_worktree_open: bool,
+    pub request_submit_worktree_remove: bool,
     pub request_reload_config: bool,
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
@@ -915,6 +1010,11 @@ pub struct AppState {
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
     pub rename_pane_target: Option<PaneId>,
+    pub worktree_create: Option<WorktreeCreateState>,
+    pub worktree_open: Option<WorktreeOpenState>,
+    pub worktree_remove: Option<WorktreeRemoveState>,
+    pub worktree_directory: std::path::PathBuf,
+    pub collapsed_space_keys: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1182,12 +1282,24 @@ impl AppState {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_new_linked_worktree: None,
+            request_open_existing_worktree: None,
+            request_new_workspace_cwd: None,
+            request_remove_linked_worktree: None,
+            request_submit_worktree_create: false,
+            request_submit_worktree_open: false,
+            request_submit_worktree_remove: false,
             request_reload_config: false,
             request_client_sound_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
             rename_pane_target: None,
+            worktree_create: None,
+            worktree_open: None,
+            worktree_remove: None,
+            worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
+            collapsed_space_keys: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -1361,5 +1473,71 @@ mod tests {
             KeyCode::Char('b'),
             KeyModifiers::SHIFT,
         ));
+    }
+
+    #[test]
+    fn linked_worktree_context_menu_keeps_safe_close_and_explicit_remove() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: true,
+                has_worktree_children: false,
+                collapsed: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+
+        assert_eq!(
+            menu.items(),
+            &["Rename", "Close", "Delete worktree checkout..."]
+        );
+    }
+
+    #[test]
+    fn git_workspace_context_menu_keeps_remove_for_managed_worktrees_only() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: false,
+                has_worktree_children: false,
+                collapsed: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+
+        assert_eq!(
+            menu.items(),
+            &["Rename", "Close", "New worktree", "Open worktree..."]
+        );
+    }
+
+    #[test]
+    fn parent_worktree_context_menu_uses_repo_actions() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: false,
+                has_worktree_children: true,
+                collapsed: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+
+        assert_eq!(
+            menu.items(),
+            &[
+                "Rename",
+                "Close group",
+                "New worktree",
+                "Open worktree...",
+                "Collapse"
+            ]
+        );
     }
 }

@@ -506,10 +506,49 @@ pub(super) fn apply_context_menu_action(
 ) {
     let item = menu.items().get(idx).copied();
     match (menu.kind, item) {
-        (ContextMenuKind::Workspace { ws_idx }, Some("Rename")) => {
+        (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
+            state.request_new_linked_worktree = Some(ws_idx);
+            leave_modal(state);
+        }
+        (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("Delete worktree checkout...")) => {
+            state.request_remove_linked_worktree = Some(ws_idx);
+            leave_modal(state);
+        }
+        (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("Open worktree...")) => {
+            state.request_open_existing_worktree = Some(ws_idx);
+            leave_modal(state);
+        }
+        (
+            ContextMenuKind::GitWorkspace {
+                ws_idx, collapsed, ..
+            },
+            Some("Collapse" | "Expand"),
+        ) => {
+            if let Some(key) = state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.worktree_space())
+                .map(|space| space.key.clone())
+            {
+                if collapsed {
+                    state.collapsed_space_keys.remove(&key);
+                } else {
+                    state.collapsed_space_keys.insert(key);
+                }
+                state.mark_session_dirty();
+            }
+            leave_modal(state);
+        }
+        (
+            ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            Some("Rename"),
+        ) => {
             open_rename_workspace(state, ws_idx);
         }
-        (ContextMenuKind::Workspace { ws_idx }, Some("Close")) => {
+        (
+            ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            Some("Close" | "Close group"),
+        ) => {
             state.selected = ws_idx;
             if state.confirm_close {
                 open_confirm_close(state);
@@ -1032,5 +1071,72 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
         assert_eq!(state.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn confirm_close_for_linked_worktree_closes_workspace_only() {
+        let mut state = state_with_workspaces(&["main", "issue"]);
+        state.mode = Mode::ConfirmClose;
+        state.selected = 1;
+        state.workspaces[1].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-issue".into(),
+            is_linked_worktree: true,
+        });
+
+        handle_confirm_close_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.request_remove_linked_worktree, None);
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].display_name(), "main");
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn context_menu_close_group_opens_group_close_confirmation() {
+        let mut state = state_with_workspaces(&["main", "issue"]);
+        state.active = Some(0);
+        state.selected = 1;
+        state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        state.workspaces[1].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-issue".into(),
+            is_linked_worktree: true,
+        });
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: false,
+                has_worktree_children: true,
+                collapsed: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, 1);
+
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.mode, Mode::ConfirmClose);
+
+        confirm_close_accept(&mut state);
+
+        assert!(state.workspaces.is_empty());
+        assert_eq!(state.mode, Mode::Navigate);
     }
 }

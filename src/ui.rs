@@ -19,7 +19,10 @@ mod status;
 mod tabs;
 mod widgets;
 
-use self::dialogs::{render_confirm_close_overlay, render_rename_overlay};
+use self::dialogs::{
+    render_confirm_close_overlay, render_new_linked_worktree_overlay,
+    render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
+};
 use self::keybind_help::render_keybind_help_overlay;
 use self::menus::{
     render_context_menu, render_global_launcher_menu, render_navigate_overlay,
@@ -48,14 +51,20 @@ use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 use self::status::{render_config_diagnostic, render_toast_notification, toast_notification_rect};
 use self::tabs::render_tab_bar;
 pub(crate) use self::{
-    dialogs::{confirm_close_button_rects, confirm_close_popup_rect, rename_button_rects},
+    dialogs::{
+        confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
+        new_linked_worktree_inner_rect, open_existing_worktree_button_rects,
+        open_existing_worktree_inner_rect, open_existing_worktree_visible_start,
+        remove_worktree_button_rects, remove_worktree_popup_rect, rename_button_rects,
+    },
     settings::{settings_button_rects, settings_show_primary_action},
     sidebar::{
         agent_panel_body_rect, agent_panel_entries, agent_panel_scroll_metrics,
         agent_panel_scrollbar_rect, agent_panel_toggle_rect, collapsed_sidebar_sections,
         collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
-        sidebar_section_divider_rect, workspace_drop_indicator_row, workspace_list_rect,
-        workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
+        normalized_workspace_scroll, sidebar_section_divider_rect, workspace_drop_indicator_row,
+        workspace_list_entries, workspace_list_rect, workspace_list_scroll_metrics,
+        workspace_list_scrollbar_rect, workspace_parent_group_state, WorkspaceListEntry,
     },
 };
 pub(crate) use self::{
@@ -180,14 +189,15 @@ fn compute_view_internal(
         (Rect::default(), main_area)
     };
 
-    app.workspace_scroll = app
-        .workspace_scroll
-        .min(app.workspaces.len().saturating_sub(1));
     if !app.sidebar_collapsed {
+        app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
         let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
         let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
         app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
     } else {
+        app.workspace_scroll = app
+            .workspace_scroll
+            .min(app.workspaces.len().saturating_sub(1));
         app.agent_panel_scroll = 0;
     }
 
@@ -348,7 +358,7 @@ pub fn render_with_runtime_registry(
     } else if app.sidebar_collapsed {
         render_sidebar_collapsed(app, frame, sidebar_area);
     } else {
-        render_sidebar(app, frame, sidebar_area);
+        render_sidebar(app, terminal_runtimes, frame, sidebar_area);
     }
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
@@ -376,6 +386,11 @@ pub fn render_with_runtime_registry(
         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
             render_rename_overlay(app, frame, frame.area())
         }
+        Mode::NewLinkedWorktree => render_new_linked_worktree_overlay(app, frame, frame.area()),
+        Mode::OpenExistingWorktree => {
+            render_open_existing_worktree_overlay(app, frame, frame.area())
+        }
+        Mode::ConfirmRemoveWorktree => render_remove_worktree_overlay(app, frame, frame.area()),
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
         Mode::Terminal => {}

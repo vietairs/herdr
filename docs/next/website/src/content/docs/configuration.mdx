@@ -56,6 +56,23 @@ default_shell = "nu"
 
 When unset or empty, Herdr uses `$SHELL`, then `/bin/sh`. This is an executable name or path, not a shell command line. Existing panes keep their current shell until they are recreated. Command panes still run through `/bin/sh -c`; detached custom command keybindings use Herdr's existing `/bin/sh -lc` path.
 
+## Worktrees
+
+Set the root directory Herdr uses for Git worktree checkouts created from the sidebar:
+
+```toml
+[worktrees]
+directory = "~/.herdr/worktrees"
+```
+
+Herdr creates checkouts under `<directory>/<repo>/<branch-slug>`. For sibling-style checkouts, set this to a directory such as `~/Projects/herdr-worktrees`.
+
+Worktree actions are available from Git workspace rows. `New worktree` creates a branch and checkout, opens it as a new Herdr workspace, and groups it under the source workspace. `Open worktree...` lists existing Git worktree checkouts for that repo; choosing an already-open checkout focuses it, and choosing a closed checkout opens it in the same group.
+
+Grouped worktrees still behave like normal Herdr workspaces: they can be focused, renamed, closed, and contain their own tabs and panes. The parent row is the original workspace. Closing the parent row closes the whole Herdr group, but it does not delete checkout folders or branches.
+
+Deleting a worktree checkout is explicit. Use `Delete worktree checkout...` on a grouped child workspace to run `git worktree remove`. Herdr first asks Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. Branches are not deleted.
+
 ## Keybindings
 
 Herdr has a prefix mode similar to tmux. The default prefix is `ctrl+b`. Keybinding strings are explicit: `prefix+n` means press the configured prefix and then `n`; `ctrl+alt+n` is a direct terminal-mode shortcut.
@@ -79,6 +96,7 @@ The default keymap is prefix-first and avoids direct shortcuts that can steal in
 detach = "prefix+q"
 workspace_picker = "prefix+w"
 new_workspace = "prefix+shift+n"
+new_worktree = "prefix+shift+g"
 rename_workspace = "prefix+shift+w"
 close_workspace = "prefix+shift+d"
 new_tab = "prefix+c"
@@ -105,6 +123,8 @@ Optional actions are unset by default. Bind them with `prefix+` for prefix-mode 
 [keys]
 previous_workspace = "prefix+shift+left"
 next_workspace = "prefix+shift+right"
+open_worktree = "prefix+shift+o"
+remove_worktree = "prefix+alt+d"
 next_tab = ["prefix+n", "ctrl+alt+]"]
 ```
 

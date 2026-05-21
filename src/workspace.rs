@@ -21,9 +21,18 @@ mod tab;
 
 use self::git::git_ahead_behind;
 pub use self::{
-    git::{derive_label_from_cwd, git_branch},
+    git::{derive_label_from_cwd, git_branch, git_space_metadata, GitSpaceMetadata},
     tab::Tab,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorktreeSpaceMembership {
+    pub key: String,
+    pub label: String,
+    pub repo_root: PathBuf,
+    pub checkout_path: PathBuf,
+    pub is_linked_worktree: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceGitStatus {
@@ -31,6 +40,7 @@ pub struct WorkspaceGitStatus {
     pub resolved_identity_cwd: PathBuf,
     pub branch: Option<String>,
     pub ahead_behind: Option<(usize, usize)>,
+    pub space: Option<GitSpaceMetadata>,
 }
 
 static NEXT_WORKSPACE_ID: AtomicU64 = AtomicU64::new(1);
@@ -56,6 +66,10 @@ pub struct Workspace {
     pub(crate) cached_git_branch: Option<String>,
     /// Cached ahead/behind counts for the workspace repo's current branch upstream.
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
+    /// Cached derived Git repo metadata for worktree actions and status display.
+    pub(crate) cached_git_space: Option<GitSpaceMetadata>,
+    /// Explicit Herdr-managed worktree grouping provenance.
+    pub worktree_space: Option<WorktreeSpaceMembership>,
     /// Stable-ish public pane numbers within this workspace.
     /// New panes append at the end; closing a pane compacts higher numbers down.
     pub public_pane_numbers: HashMap<PaneId, usize>,
@@ -182,6 +196,8 @@ impl Workspace {
                 identity_cwd: initial_cwd.clone(),
                 cached_git_branch: git_branch(&initial_cwd),
                 cached_git_ahead_behind: None,
+                cached_git_space: None,
+                worktree_space: None,
                 public_pane_numbers,
                 next_public_pane_number: 2,
                 tabs: vec![tab],
@@ -576,11 +592,20 @@ impl Workspace {
         self.cached_git_ahead_behind
     }
 
+    pub fn git_space(&self) -> Option<&GitSpaceMetadata> {
+        self.cached_git_space.as_ref()
+    }
+
+    pub fn worktree_space(&self) -> Option<&WorktreeSpaceMembership> {
+        self.worktree_space.as_ref()
+    }
+
     #[cfg(test)]
     pub fn refresh_git_ahead_behind(&mut self) {
         let cwd = self.resolved_identity_cwd();
         self.cached_git_branch = cwd.as_deref().and_then(git_branch);
         self.cached_git_ahead_behind = cwd.as_deref().and_then(git_ahead_behind);
+        self.cached_git_space = cwd.as_deref().and_then(git_space_metadata);
     }
 
     pub fn git_status_for_cwd(
@@ -590,6 +615,7 @@ impl Workspace {
         WorkspaceGitStatus {
             branch: git_branch(&resolved_identity_cwd),
             ahead_behind: git_ahead_behind(&resolved_identity_cwd),
+            space: git_space_metadata(&resolved_identity_cwd),
             workspace_id,
             resolved_identity_cwd,
         }
@@ -704,6 +730,8 @@ impl Workspace {
             identity_cwd: identity_cwd.clone(),
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
+            cached_git_space: None,
+            worktree_space: None,
             public_pane_numbers,
             next_public_pane_number: 2,
             tabs: vec![tab],

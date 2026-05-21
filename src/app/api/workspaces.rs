@@ -166,3 +166,46 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
         format!("workspace {workspace_id} not found"),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{api::schema::SuccessResponse, config::Config, workspace::Workspace};
+
+    fn app_with_linked_worktree() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("issue")];
+        app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-issue".into(),
+            is_linked_worktree: true,
+        });
+        app
+    }
+
+    #[test]
+    fn api_workspace_close_closes_linked_worktree_workspace_only() {
+        let mut app = app_with_linked_worktree();
+
+        let response = app.handle_workspace_close(
+            "req".into(),
+            WorkspaceTarget {
+                workspace_id: app.state.workspaces[0].id.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        assert_eq!(app.state.request_remove_linked_worktree, None);
+        assert!(app.state.workspaces.is_empty());
+    }
+}
