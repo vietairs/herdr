@@ -144,7 +144,7 @@ impl AppState {
         terminal_runtimes: &TerminalRuntimeRegistry,
         mouse: MouseEvent,
     ) -> bool {
-        const LINES_PER_NOTCH: usize = 3;
+        let lines_per_notch = self.mouse_scroll_lines;
 
         let Some(selection) = self.selection.as_ref() else {
             return false;
@@ -156,10 +156,10 @@ impl AppState {
         self.focus_pane(pane_id);
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                self.scroll_pane_up(terminal_runtimes, pane_id, LINES_PER_NOTCH)
+                self.scroll_pane_up(terminal_runtimes, pane_id, lines_per_notch)
             }
             MouseEventKind::ScrollDown => {
-                self.scroll_pane_down(terminal_runtimes, pane_id, LINES_PER_NOTCH)
+                self.scroll_pane_down(terminal_runtimes, pane_id, lines_per_notch)
             }
             _ => return false,
         }

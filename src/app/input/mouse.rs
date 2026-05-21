@@ -1133,7 +1133,7 @@ impl AppState {
         terminal_runtimes: &TerminalRuntimeRegistry,
         mouse: MouseEvent,
     ) {
-        const LINES_PER_NOTCH: usize = 3;
+        let lines_per_notch = self.mouse_scroll_lines;
 
         if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
             self.focus_pane(info.id);
@@ -1142,10 +1142,10 @@ impl AppState {
             }
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.scroll_pane_up(terminal_runtimes, info.id, LINES_PER_NOTCH)
+                    self.scroll_pane_up(terminal_runtimes, info.id, lines_per_notch)
                 }
                 MouseEventKind::ScrollDown => {
-                    self.scroll_pane_down(terminal_runtimes, info.id, LINES_PER_NOTCH)
+                    self.scroll_pane_down(terminal_runtimes, info.id, lines_per_notch)
                 }
                 _ => {}
             }
@@ -1156,10 +1156,10 @@ impl AppState {
             self.focus_pane(info.id);
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.scroll_pane_up(terminal_runtimes, info.id, LINES_PER_NOTCH)
+                    self.scroll_pane_up(terminal_runtimes, info.id, lines_per_notch)
                 }
                 MouseEventKind::ScrollDown => {
-                    self.scroll_pane_down(terminal_runtimes, info.id, LINES_PER_NOTCH)
+                    self.scroll_pane_down(terminal_runtimes, info.id, lines_per_notch)
                 }
                 _ => {}
             }
@@ -1169,8 +1169,8 @@ impl AppState {
         if let Some(ws_idx) = self.active {
             if let Some(rt) = self.focused_runtime_in_workspace(terminal_runtimes, ws_idx) {
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => rt.scroll_up(LINES_PER_NOTCH),
-                    MouseEventKind::ScrollDown => rt.scroll_down(LINES_PER_NOTCH),
+                    MouseEventKind::ScrollUp => rt.scroll_up(lines_per_notch),
+                    MouseEventKind::ScrollDown => rt.scroll_down(lines_per_notch),
                     _ => {}
                 }
             }
@@ -1385,7 +1385,8 @@ mod tests {
     use ratatui::layout::{Direction, Rect};
 
     use super::super::{
-        app_for_mouse_test, capture_snapshot, handle_context_menu_key, mouse, root_layout_ratio,
+        app_for_mouse_test, capture_snapshot, handle_context_menu_key, mouse, numbered_lines_bytes,
+        root_layout_ratio,
     };
     use super::*;
     use crate::{
@@ -1393,6 +1394,44 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    #[tokio::test]
+    async fn terminal_wheel_uses_configured_mouse_scroll_lines() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = pane_infos[0].clone();
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                16 * 1024,
+                &numbered_lines_bytes(64),
+            ),
+        );
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        app.state.mouse_scroll_lines = 7;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollUp,
+            info.inner_rect.x + 1,
+            info.inner_rect.y + 1,
+        ));
+
+        let metrics = app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
+            .expect("scroll metrics after wheel");
+        assert_eq!(metrics.offset_from_bottom, 7);
+    }
 
     #[test]
     fn hovering_context_menu_updates_highlight() {

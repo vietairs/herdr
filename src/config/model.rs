@@ -1,7 +1,10 @@
+use std::num::NonZeroUsize;
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{
-    BindingConfig, CommandKeybindConfig, SoundConfig, ThemeConfig, DEFAULT_SCROLLBACK_LIMIT_BYTES,
+    BindingConfig, CommandKeybindConfig, SoundConfig, ThemeConfig, DEFAULT_MOUSE_SCROLL_LINES,
+    DEFAULT_SCROLLBACK_LIMIT_BYTES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -193,6 +196,8 @@ pub struct UiConfig {
     pub sidebar_max_width: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
+    /// Lines to scroll per mouse wheel notch. Default: 3.
+    pub mouse_scroll_lines: Option<NonZeroUsize>,
     /// Ask for confirmation before closing a workspace. Default: true.
     pub confirm_close: bool,
     /// Ask for a tab name before creating a new tab. Default: true.
@@ -328,6 +333,7 @@ impl Default for UiConfig {
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             mouse_capture: true,
+            mouse_scroll_lines: None,
             confirm_close: true,
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
@@ -336,6 +342,14 @@ impl Default for UiConfig {
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
         }
+    }
+}
+
+impl UiConfig {
+    pub fn mouse_scroll_lines(&self) -> usize {
+        self.mouse_scroll_lines
+            .map(NonZeroUsize::get)
+            .unwrap_or(DEFAULT_MOUSE_SCROLL_LINES)
     }
 }
 
@@ -514,6 +528,31 @@ mouse_capture = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.mouse_capture);
+    }
+
+    #[test]
+    fn mouse_scroll_lines_defaults_to_three_and_parses() {
+        let default_config = Config::default();
+        assert_eq!(
+            default_config.ui.mouse_scroll_lines(),
+            DEFAULT_MOUSE_SCROLL_LINES
+        );
+
+        let toml = r#"
+[ui]
+mouse_scroll_lines = 1
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.mouse_scroll_lines(), 1);
+    }
+
+    #[test]
+    fn mouse_scroll_lines_rejects_zero() {
+        let toml = r#"
+[ui]
+mouse_scroll_lines = 0
+"#;
+        assert!(toml::from_str::<Config>(toml).is_err());
     }
 
     #[test]
