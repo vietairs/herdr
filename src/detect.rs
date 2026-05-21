@@ -61,7 +61,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "claude" | "claude-code" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
-        "cursor" => Some(Agent::Cursor),
+        "cursor" | "cursor-agent" => Some(Agent::Cursor),
         "cline" => Some(Agent::Cline),
         "opencode" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
@@ -85,7 +85,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "claude" | "claude-code" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
-        "cursor" => Some(Agent::Cursor),
+        "cursor" | "cursor-agent" => Some(Agent::Cursor),
         "cline" => Some(Agent::Cline),
         "opencode" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
@@ -265,14 +265,7 @@ fn detect_cursor(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
     // Blocked
-    if lower.contains("(y) (enter)")
-        || lower.contains("keep (n)")
-        || lower.contains("skip (esc or n)")
-    {
-        return AgentState::Blocked;
-    }
-    // "allow ...(y)" or "run ...(y)" patterns
-    if lower.contains("(y)") && (lower.contains("allow") || lower.contains("run")) {
+    if has_cursor_blocked_prompt(content, &lower) {
         return AgentState::Blocked;
     }
 
@@ -654,15 +647,59 @@ fn has_codex_working_header(content: &str) -> bool {
     })
 }
 
-/// Cursor spinner: ⬡ or ⬢ followed by a word ending in "ing"
-fn has_cursor_spinner(content: &str) -> bool {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if (trimmed.starts_with('⬡') || trimmed.starts_with('⬢')) && trimmed.contains("ing") {
-            return true;
-        }
+fn has_cursor_blocked_prompt(content: &str, lower: &str) -> bool {
+    if lower.contains("waiting for approval") || lower.contains("run this command?") {
+        return true;
     }
-    false
+
+    if lower.contains("(y) (enter)")
+        || lower.contains("keep (n)")
+        || lower.contains("skip (esc or n)")
+    {
+        return true;
+    }
+
+    content.lines().any(|line| {
+        let line = line.trim().to_lowercase();
+        let has_yes_action = line.contains("(y)");
+        has_yes_action
+            && (line.contains("allow")
+                || line.contains("run (once)")
+                || line.contains("→ run")
+                || line.starts_with("run "))
+    })
+}
+
+/// Cursor status line: spinner glyphs followed by a live action label.
+fn has_cursor_spinner(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let mut chars = trimmed.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        let rest = chars.as_str().trim_start();
+
+        if matches!(first, '⬡' | '⬢') {
+            return cursor_status_word_is_active(rest);
+        }
+
+        if ('\u{2800}'..='\u{28FF}').contains(&first) {
+            let rest = rest.trim_start_matches(|c| ('\u{2800}'..='\u{28FF}').contains(&c));
+            return cursor_status_word_is_active(rest.trim_start());
+        }
+
+        false
+    })
+}
+
+fn cursor_status_word_is_active(rest: &str) -> bool {
+    let Some(word) = rest.split_whitespace().next() else {
+        return false;
+    };
+    word.trim_end_matches(|c: char| !c.is_alphabetic())
+        .to_ascii_lowercase()
+        .ends_with("ing")
 }
 
 fn has_opencode_question_prompt(content: &str) -> bool {
@@ -802,6 +839,7 @@ mod tests {
         assert_eq!(identify_agent("codex"), Some(Agent::Codex));
         assert_eq!(identify_agent("gemini"), Some(Agent::Gemini));
         assert_eq!(identify_agent("cursor"), Some(Agent::Cursor));
+        assert_eq!(identify_agent("cursor-agent"), Some(Agent::Cursor));
         assert_eq!(identify_agent("cline"), Some(Agent::Cline));
         assert_eq!(identify_agent("opencode"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("kimi"), Some(Agent::Kimi));
@@ -819,6 +857,7 @@ mod tests {
     fn parse_known_agent_labels() {
         assert_eq!(parse_agent_label("pi"), Some(Agent::Pi));
         assert_eq!(parse_agent_label("claude"), Some(Agent::Claude));
+        assert_eq!(parse_agent_label("cursor-agent"), Some(Agent::Cursor));
         assert_eq!(parse_agent_label("copilot"), Some(Agent::GithubCopilot));
         assert_eq!(
             parse_agent_label("github-copilot"),
@@ -1241,6 +1280,35 @@ mod tests {
     }
 
     #[test]
+    fn cursor_working_braille_status() {
+        assert_eq!(
+            detect_cursor("⠠⠜ Running  5.52k tokens"),
+            AgentState::Working
+        );
+        assert_eq!(
+            detect_cursor("⠞ Working  5.62k tokens"),
+            AgentState::Working
+        );
+        assert_eq!(
+            detect_cursor("⠛ Grepping  1.2k tokens"),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn cursor_blocked_command_approval() {
+        let screen =
+            "Waiting for approval...\nRun this command?\n→ Run (once) (y)\nSkip (esc or n)";
+        assert_eq!(detect_cursor(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn cursor_running_text_with_unrelated_yes_is_not_blocked() {
+        let screen = "previous answer mentioned (y)\n⠠⠜ Running  5.52k tokens";
+        assert_eq!(detect_cursor(screen), AgentState::Working);
+    }
+
+    #[test]
     fn cursor_working_ctrl_c() {
         assert_eq!(
             detect_cursor("processing\nctrl+c to stop"),
@@ -1659,12 +1727,17 @@ mod tests {
     fn cursor_spinner_detected() {
         assert!(has_cursor_spinner("⬡ Grepping.."));
         assert!(has_cursor_spinner("⬢ Reading…"));
+        assert!(has_cursor_spinner("⠠⠜ Running  5.52k tokens"));
+        assert!(has_cursor_spinner("⠞ Working  5.62k tokens"));
+        assert!(has_cursor_spinner("⠛ Grepping  1.2k tokens"));
+        assert!(has_cursor_spinner("⠛ Analyzing  1.2k tokens"));
     }
 
     #[test]
     fn cursor_spinner_not_false_positive() {
         assert!(!has_cursor_spinner("normal text"));
         assert!(!has_cursor_spinner("some ⬡ in middle"));
+        assert!(!has_cursor_spinner("⠛ Read notes"));
     }
 
     // ---- Process identification (real PTY) ----
