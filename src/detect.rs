@@ -24,6 +24,7 @@ pub enum Agent {
     Codex,
     Gemini,
     Cursor,
+    Antigravity,
     Cline,
     OpenCode,
     GithubCopilot,
@@ -42,6 +43,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Codex => "codex",
         Agent::Gemini => "gemini",
         Agent::Cursor => "cursor",
+        Agent::Antigravity => "agy",
         Agent::Cline => "cline",
         Agent::OpenCode => "opencode",
         Agent::GithubCopilot => "copilot",
@@ -62,6 +64,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
         "cursor" | "cursor-agent" => Some(Agent::Cursor),
+        "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
         "opencode" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
@@ -86,6 +89,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
         "cursor" | "cursor-agent" => Some(Agent::Cursor),
+        "agy" | "antigravity" | "antigravity-cli" => Some(Agent::Antigravity),
         "cline" => Some(Agent::Cline),
         "opencode" | "open-code" => Some(Agent::OpenCode),
         "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
@@ -141,6 +145,7 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
         Agent::Codex => detect_codex(screen_content),
         Agent::Gemini => detect_gemini(screen_content),
         Agent::Cursor => detect_cursor(screen_content),
+        Agent::Antigravity => detect_antigravity(screen_content),
         Agent::Cline => detect_cline(screen_content),
         Agent::OpenCode => detect_opencode(screen_content),
         Agent::GithubCopilot => detect_github_copilot(screen_content),
@@ -274,6 +279,23 @@ fn detect_cursor(content: &str) -> AgentState {
         return AgentState::Working;
     }
     if has_cursor_spinner(content) {
+        return AgentState::Working;
+    }
+
+    AgentState::Idle
+}
+
+fn detect_antigravity(content: &str) -> AgentState {
+    let lower = content.to_lowercase();
+
+    let has_permission_request = lower.contains("requesting permission for:");
+    let has_permission_question = lower.contains("do you want to proceed?");
+    let has_permission_controls = lower.contains("tab amend") && lower.contains("edit command");
+    if has_permission_request && (has_permission_question || has_permission_controls) {
+        return AgentState::Blocked;
+    }
+
+    if has_antigravity_spinner(content) || has_antigravity_background_tasks(content) {
         return AgentState::Working;
     }
 
@@ -702,6 +724,52 @@ fn cursor_status_word_is_active(rest: &str) -> bool {
         .ends_with("ing")
 }
 
+fn has_antigravity_spinner(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let mut chars = trimmed.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !('\u{2800}'..='\u{28FF}').contains(&first) {
+            return false;
+        }
+
+        let rest = chars
+            .as_str()
+            .trim_start_matches(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
+            .trim_start();
+        cursor_status_word_is_active(rest)
+    })
+}
+
+fn has_antigravity_background_tasks(content: &str) -> bool {
+    let bottom_lines: Vec<&str> = content
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(5)
+        .collect();
+
+    bottom_lines.into_iter().any(|line| {
+        let line = line.trim().to_lowercase();
+        line.contains("/tasks") && antigravity_task_count(&line).is_some_and(|count| count > 0)
+    })
+}
+
+fn antigravity_task_count(line: &str) -> Option<u32> {
+    for marker in [" task(s)", " tasks", " task"] {
+        let Some((before, _)) = line.split_once(marker) else {
+            continue;
+        };
+        let raw_count = before.split_whitespace().last()?.trim_matches(|c| c == '·');
+        if let Ok(count) = raw_count.parse() {
+            return Some(count);
+        }
+    }
+    None
+}
+
 fn has_opencode_question_prompt(content: &str) -> bool {
     let lower = content.to_lowercase();
     let has_enter_action = lower.contains("enter confirm")
@@ -840,6 +908,8 @@ mod tests {
         assert_eq!(identify_agent("gemini"), Some(Agent::Gemini));
         assert_eq!(identify_agent("cursor"), Some(Agent::Cursor));
         assert_eq!(identify_agent("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(identify_agent("agy"), Some(Agent::Antigravity));
+        assert_eq!(identify_agent("antigravity-cli"), Some(Agent::Antigravity));
         assert_eq!(identify_agent("cline"), Some(Agent::Cline));
         assert_eq!(identify_agent("opencode"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("kimi"), Some(Agent::Kimi));
@@ -858,6 +928,8 @@ mod tests {
         assert_eq!(parse_agent_label("pi"), Some(Agent::Pi));
         assert_eq!(parse_agent_label("claude"), Some(Agent::Claude));
         assert_eq!(parse_agent_label("cursor-agent"), Some(Agent::Cursor));
+        assert_eq!(parse_agent_label("agy"), Some(Agent::Antigravity));
+        assert_eq!(parse_agent_label("antigravity"), Some(Agent::Antigravity));
         assert_eq!(parse_agent_label("copilot"), Some(Agent::GithubCopilot));
         assert_eq!(
             parse_agent_label("github-copilot"),
@@ -874,6 +946,7 @@ mod tests {
         assert_eq!(agent_label(Agent::Pi), "pi");
         assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
         assert_eq!(agent_label(Agent::OpenCode), "opencode");
+        assert_eq!(agent_label(Agent::Antigravity), "agy");
         assert_eq!(agent_label(Agent::Kiro), "kiro");
         assert_eq!(agent_label(Agent::Grok), "grok");
         assert_eq!(agent_label(Agent::Hermes), "hermes");
@@ -1319,6 +1392,71 @@ mod tests {
     #[test]
     fn cursor_idle() {
         assert_eq!(detect_cursor("> "), AgentState::Idle);
+    }
+
+    // ---- Antigravity ----
+
+    #[test]
+    fn antigravity_blocked_permission_prompt() {
+        let screen = "Requesting permission for: git log -n 50\nDo you want to proceed?\n> 1. Yes\n↑/↓ Navigate · tab Amend · e edit command";
+        assert_eq!(detect_antigravity(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn antigravity_question_without_permission_request_stays_idle() {
+        assert_eq!(
+            detect_antigravity("Do you want to proceed?\n>"),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn antigravity_working_spinner() {
+        assert_eq!(detect_antigravity("⡿ Working..."), AgentState::Working);
+        assert_eq!(detect_antigravity("⣯ Loading..."), AgentState::Working);
+        assert_eq!(detect_antigravity("⢿ Generating..."), AgentState::Working);
+        assert_eq!(detect_antigravity("⣷ Running..."), AgentState::Working);
+    }
+
+    #[test]
+    fn antigravity_background_task_footer_is_working() {
+        let screen = "? for shortcuts     Gemini 3.5 Flash (High) · 1 task(s) · /tasks";
+        assert_eq!(detect_antigravity(screen), AgentState::Working);
+    }
+
+    #[test]
+    fn antigravity_background_task_footer_parses_plural_variants() {
+        assert_eq!(
+            detect_antigravity("Gemini 3.5 Flash (High) · 10 task(s) · /tasks"),
+            AgentState::Working
+        );
+        assert_eq!(
+            detect_antigravity("model · 2 tasks · /tasks"),
+            AgentState::Working
+        );
+        assert_eq!(
+            detect_antigravity("model · 1 task · /tasks"),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn antigravity_zero_background_tasks_is_idle() {
+        let screen = "Gemini 3.5 Flash (High) · 0 task(s) · /tasks";
+        assert_eq!(detect_antigravity(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn antigravity_task_text_outside_bottom_footer_is_idle() {
+        let screen =
+            "User said the footer had /tasks and 1 task(s)\nline 1\nline 2\nline 3\nline 4\nline 5";
+        assert_eq!(detect_antigravity(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn antigravity_idle_prompt() {
+        let screen = "Antigravity CLI\n────────────────\n>\n────────────────\n? for shortcuts";
+        assert_eq!(detect_antigravity(screen), AgentState::Idle);
     }
 
     // ---- Cline ----

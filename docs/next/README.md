@@ -180,6 +180,7 @@ automatic detection works out of the box. process name matching plus terminal ou
 | [grok cli](https://x.ai/grok) | ✓ | ✓ | ✓ |
 | [hermes agent](https://github.com/NousResearch/hermes-agent) | ✓ | ✓ | ✓ |
 | cursor agent | ✓ | ✓ | ✓ |
+| antigravity cli | ✓ | ✓ | ✓ |
 | [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
 
 detected but not fully tested: gemini cli, cline, kimi, github copilot cli.
