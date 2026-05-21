@@ -69,6 +69,32 @@ export default defineConfig({
         SiteTitle: './src/components/SiteTitle.astro',
       },
       customCss: ['./src/styles/starlight.css'],
+      head: [
+        {
+          tag: 'meta',
+          attrs: { property: 'og:image', content: 'https://herdr.dev/assets/doc-og-card-v1.png' },
+        },
+        { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
+        { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+        {
+          tag: 'meta',
+          attrs: {
+            property: 'og:image:alt',
+            content: 'Herdr documentation — One terminal. The whole herd.',
+          },
+        },
+        {
+          tag: 'meta',
+          attrs: { name: 'twitter:image', content: 'https://herdr.dev/assets/doc-og-card-v1.png' },
+        },
+        {
+          tag: 'meta',
+          attrs: {
+            name: 'twitter:image:alt',
+            content: 'Herdr documentation — One terminal. The whole herd.',
+          },
+        },
+      ],
       editLink: {
         baseUrl: 'https://github.com/ogulcancelik/herdr/edit/master/',
       },
