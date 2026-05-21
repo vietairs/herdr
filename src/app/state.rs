@@ -891,8 +891,6 @@ pub enum SidebarWidthSource {
 pub struct AppState {
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
-    pub terminal_runtimes:
-        std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalRuntime>,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
     pub workspaces: Vec<Workspace>,
@@ -1001,6 +999,9 @@ pub struct AppState {
     pub host_terminal_theme: TerminalTheme,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
+    /// Terminal runtimes that should be shut down by the app/runtime layer
+    /// after state has detached their terminal metadata.
+    pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
 }
 
 impl AppState {
@@ -1039,17 +1040,23 @@ impl AppState {
         section == SettingsSection::Integrations && self.integration_updates_available()
     }
 
-    pub fn focused_pane_requests_mouse_capture(&self) -> bool {
+    pub(crate) fn focused_pane_requests_mouse_capture_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> bool {
         self.mode == Mode::Terminal
             && self
                 .active
-                .and_then(|idx| self.focused_runtime_in_workspace(idx))
+                .and_then(|idx| self.focused_runtime_in_workspace(terminal_runtimes, idx))
                 .and_then(crate::terminal::TerminalRuntime::input_state)
                 .is_some_and(crate::pane::InputState::mouse_reporting_enabled)
     }
 
-    pub fn should_capture_host_mouse(&self) -> bool {
-        self.mouse_capture || self.focused_pane_requests_mouse_capture()
+    pub(crate) fn should_capture_host_mouse_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> bool {
+        self.mouse_capture || self.focused_pane_requests_mouse_capture_from(terminal_runtimes)
     }
 
     pub fn is_prefix_key(&self, key: crate::input::TerminalKey) -> bool {
@@ -1066,11 +1073,12 @@ impl AppState {
 
     /// Returns true when the given (workspace, tab, pane) refers to the
     /// currently focused pane in the active workspace's active tab.
-    pub(crate) fn runtime_for_pane_in_workspace(
-        &self,
+    pub(crate) fn runtime_for_pane_in_workspace<'a>(
+        &'a self,
+        terminal_runtimes: &'a crate::terminal::TerminalRuntimeRegistry,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
-    ) -> Option<&crate::terminal::TerminalRuntime> {
+    ) -> Option<&'a crate::terminal::TerminalRuntime> {
         #[cfg(test)]
         if let Some(runtime) = self.workspaces.get(ws_idx)?.test_runtimes.get(&pane_id) {
             return Some(runtime);
@@ -1086,14 +1094,15 @@ impl AppState {
             return Some(runtime);
         }
         let terminal_id = self.workspaces.get(ws_idx)?.terminal_id(pane_id)?;
-        self.terminal_runtimes.get(terminal_id)
+        terminal_runtimes.get(terminal_id)
     }
 
     #[cfg(test)]
-    pub(crate) fn runtime_for_pane(
-        &self,
+    pub(crate) fn runtime_for_pane<'a>(
+        &'a self,
+        terminal_runtimes: &'a crate::terminal::TerminalRuntimeRegistry,
         pane_id: crate::layout::PaneId,
-    ) -> Option<&crate::terminal::TerminalRuntime> {
+    ) -> Option<&'a crate::terminal::TerminalRuntime> {
         self.workspaces.iter().find_map(|ws| {
             #[cfg(test)]
             if let Some(runtime) = ws.test_runtimes.get(&pane_id) {
@@ -1104,17 +1113,18 @@ impl AppState {
                 return Some(runtime);
             }
             let terminal_id = ws.terminal_id(pane_id)?;
-            self.terminal_runtimes.get(terminal_id)
+            terminal_runtimes.get(terminal_id)
         })
     }
 
-    pub(crate) fn focused_runtime_in_workspace(
-        &self,
+    pub(crate) fn focused_runtime_in_workspace<'a>(
+        &'a self,
+        terminal_runtimes: &'a crate::terminal::TerminalRuntimeRegistry,
         ws_idx: usize,
-    ) -> Option<&crate::terminal::TerminalRuntime> {
+    ) -> Option<&'a crate::terminal::TerminalRuntime> {
         let ws = self.workspaces.get(ws_idx)?;
         let pane_id = ws.focused_pane_id()?;
-        self.runtime_for_pane_in_workspace(ws_idx, pane_id)
+        self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
     }
 
     pub fn is_active_pane(
@@ -1161,7 +1171,6 @@ impl AppState {
     pub fn test_new() -> Self {
         Self {
             terminals: std::collections::HashMap::new(),
-            terminal_runtimes: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             workspaces: Vec::new(),
             active: None,
@@ -1262,6 +1271,7 @@ impl AppState {
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
+            terminal_runtime_shutdowns: Vec::new(),
         }
     }
 
@@ -1289,14 +1299,13 @@ impl AppState {
         pane_id: crate::layout::PaneId,
         runtime: crate::terminal::TerminalRuntime,
     ) {
-        let Some(terminal_id) = self
+        if let Some(ws) = self
             .workspaces
-            .iter()
-            .find_map(|ws| ws.terminal_id(pane_id).cloned())
-        else {
-            return;
-        };
-        self.terminal_runtimes.insert(terminal_id, runtime);
+            .iter_mut()
+            .find(|ws| ws.terminal_id(pane_id).is_some())
+        {
+            ws.insert_test_runtime(pane_id, runtime);
+        }
     }
 }
 

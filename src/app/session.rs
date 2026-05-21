@@ -28,7 +28,7 @@ impl App {
             let snap = crate::persist::capture(
                 &self.state.workspaces,
                 &self.state.terminals,
-                &self.state.terminal_runtimes,
+                &self.terminal_runtimes,
                 self.state.active,
                 self.state.selected,
                 self.state.agent_panel_scope,

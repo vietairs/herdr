@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, Notify};
 use crate::events::AppEvent;
 use crate::layout::{PaneId, TileLayout};
 use crate::pane::PaneState;
-use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
+use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 pub(crate) type DetachedPane = (PaneId, TerminalId);
 
@@ -393,7 +393,7 @@ impl Tab {
         &self,
         pane_id: PaneId,
         terminals: &HashMap<TerminalId, TerminalState>,
-        terminal_runtimes: &HashMap<TerminalId, TerminalRuntime>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> Option<PathBuf> {
         let terminal_id = self.terminal_id(pane_id)?;
         terminal_runtimes

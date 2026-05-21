@@ -13,6 +13,7 @@ use crate::app::state::AppState;
 use crate::app::Mode;
 use crate::ghostty::{KittyImageDescriptor, KittyImageFormat, KittyImagePlacement};
 use crate::layout::PaneId;
+use crate::terminal::TerminalRuntimeRegistry;
 
 const KITTY_CHUNK_BYTES: usize = 3072;
 const HOST_IMAGE_ID_BASE: u32 = 10_000;
@@ -133,11 +134,15 @@ pub(crate) fn is_enabled() -> bool {
     KITTY_GRAPHICS_ENABLED.load(Ordering::Acquire)
 }
 
-pub(crate) fn paint_local_pane_graphics(app: &AppState, cell_size: HostCellSize) -> io::Result<()> {
+pub(crate) fn paint_local_pane_graphics(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    cell_size: HostCellSize,
+) -> io::Result<()> {
     let cache = LOCAL_HOST_GRAPHICS.get_or_init(|| Mutex::new(HostGraphicsCache::default()));
     let mut bytes = Vec::new();
     if let Ok(mut cache) = cache.lock() {
-        bytes = encode_local_pane_graphics(app, cell_size, &mut cache);
+        bytes = encode_local_pane_graphics(app, terminal_runtimes, cell_size, &mut cache);
     }
     if bytes.is_empty() {
         return Ok(());
@@ -155,6 +160,7 @@ pub(crate) fn paint_local_pane_graphics(app: &AppState, cell_size: HostCellSize)
 
 pub(crate) fn encode_local_pane_graphics(
     app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
     cell_size: HostCellSize,
     cache: &mut HostGraphicsCache,
 ) -> Vec<u8> {
@@ -183,7 +189,8 @@ pub(crate) fn encode_local_pane_graphics(
 
     let view_key = active_view_key(app);
     let uploaded_images = cache.images.clone();
-    let placements = collect_visible_placements(app, cell_size, &uploaded_images);
+    let placements =
+        collect_visible_placements(app, terminal_runtimes, cell_size, &uploaded_images);
     tracing::debug!(
         placements_collected = placements.len(),
         "collect_visible_placements result"
@@ -352,6 +359,7 @@ fn active_view_key(app: &AppState) -> Option<HostViewKey> {
 
 fn collect_visible_placements(
     app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
     cell_size: HostCellSize,
     uploaded_images: &HashMap<u32, ImageSignature>,
 ) -> Vec<HostPlacement> {
@@ -374,13 +382,13 @@ fn collect_visible_placements(
 
     tracing::debug!(
         ws_idx,
-        terminal_runtimes_len = app.terminal_runtimes.len(),
+        terminal_runtimes_len = terminal_runtimes.len(),
         pane_infos_len = app.view.pane_infos.len(),
         "collect_visible_placements: starting iteration"
     );
     let mut placements = Vec::new();
     for info in &app.view.pane_infos {
-        let runtime = match app.runtime_for_pane_in_workspace(ws_idx, info.id) {
+        let runtime = match app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             Some(rt) => rt,
             None => {
                 tracing::debug!(pane_id = ?info.id, "collect_visible_placements: runtime not found");

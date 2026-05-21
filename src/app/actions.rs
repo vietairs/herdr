@@ -461,11 +461,11 @@ impl AppState {
                         .any(|pane| pane.attached_terminal_id == terminal_id)
                 })
             });
-            if !still_attached {
-                self.terminals.remove(&terminal_id);
-                if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
-                    runtime.shutdown();
-                }
+            if !still_attached
+                && self.terminals.remove(&terminal_id).is_some()
+                && !self.terminal_runtime_shutdowns.contains(&terminal_id)
+            {
+                self.terminal_runtime_shutdowns.push(terminal_id);
             }
         }
     }
@@ -682,7 +682,7 @@ impl AppState {
         self.selection_autoscroll = None;
     }
 
-    pub fn copy_selection(&mut self) {
+    pub fn copy_selection(&mut self, terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry) {
         let mut sel = match self.selection.take() {
             Some(sel) => sel,
             None => return,
@@ -697,7 +697,7 @@ impl AppState {
         };
 
         let text = self
-            .runtime_for_pane_in_workspace(ws_idx, sel.pane_id)
+            .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, sel.pane_id)
             .and_then(|rt| rt.extract_selection(&sel));
 
         if let Some(text) = text {
@@ -717,7 +717,11 @@ impl AppState {
 // ---------------------------------------------------------------------------
 
 impl AppState {
-    pub fn apply_workspace_git_statuses(&mut self, results: Vec<WorkspaceGitStatus>) -> bool {
+    pub fn apply_workspace_git_statuses(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        results: Vec<WorkspaceGitStatus>,
+    ) -> bool {
         let mut changed = false;
         for result in results {
             let Some(ws_idx) = self
@@ -729,7 +733,7 @@ impl AppState {
             };
 
             if self.workspaces[ws_idx]
-                .resolved_identity_cwd_from(&self.terminals, &self.terminal_runtimes)
+                .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
                 .as_ref()
                 != Some(&result.resolved_identity_cwd)
             {
@@ -833,7 +837,7 @@ impl AppState {
             // dispatch; never touches AppState.
             AppEvent::ClipboardWrite { .. } => Vec::new(),
             AppEvent::GitStatusRefreshed { results } => {
-                self.apply_workspace_git_statuses(results);
+                let _ = results;
                 Vec::new()
             }
         }
@@ -1019,12 +1023,16 @@ mod tests {
         let first_cwd = state.workspaces[0].resolved_identity_cwd().unwrap();
         let second_id = state.workspaces[1].id.clone();
 
-        let changed = state.apply_workspace_git_statuses(vec![WorkspaceGitStatus {
-            workspace_id: first_id,
-            resolved_identity_cwd: first_cwd,
-            branch: Some("main".into()),
-            ahead_behind: Some((2, 1)),
-        }]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let changed = state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![WorkspaceGitStatus {
+                workspace_id: first_id,
+                resolved_identity_cwd: first_cwd,
+                branch: Some("main".into()),
+                ahead_behind: Some((2, 1)),
+            }],
+        );
 
         assert!(changed);
         assert_eq!(state.workspaces[0].branch().as_deref(), Some("main"));
@@ -1040,12 +1048,16 @@ mod tests {
         state.workspaces[0].cached_git_branch = Some("old".into());
         state.workspaces[0].cached_git_ahead_behind = Some((1, 0));
 
-        let changed = state.apply_workspace_git_statuses(vec![WorkspaceGitStatus {
-            workspace_id,
-            resolved_identity_cwd: std::path::PathBuf::from("/definitely/not/current"),
-            branch: Some("main".into()),
-            ahead_behind: Some((0, 1)),
-        }]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let changed = state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: std::path::PathBuf::from("/definitely/not/current"),
+                branch: Some("main".into()),
+                ahead_behind: Some((0, 1)),
+            }],
+        );
 
         assert!(!changed);
         assert_eq!(state.workspaces[0].branch().as_deref(), Some("old"));
@@ -1060,12 +1072,16 @@ mod tests {
         state.workspaces[0].cached_git_branch = Some("main".into());
         state.workspaces[0].cached_git_ahead_behind = Some((1, 2));
 
-        let changed = state.apply_workspace_git_statuses(vec![WorkspaceGitStatus {
-            workspace_id,
-            resolved_identity_cwd: cwd,
-            branch: None,
-            ahead_behind: None,
-        }]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let changed = state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: cwd,
+                branch: None,
+                ahead_behind: None,
+            }],
+        );
 
         assert!(changed);
         assert_eq!(state.workspaces[0].branch(), None);

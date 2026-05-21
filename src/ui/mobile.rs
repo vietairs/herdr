@@ -286,10 +286,7 @@ fn render_header_status(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled(dot, dot_style.bg(p.panel_bg)),
             Span::raw(" "),
             Span::styled(
-                truncate(
-                    &ws.display_name_from(&app.terminals, &app.terminal_runtimes),
-                    name_w.saturating_sub(4) as usize,
-                ),
+                truncate(&ws.display_name(), name_w.saturating_sub(4) as usize),
                 Style::default()
                     .fg(p.text)
                     .bg(p.panel_bg)
@@ -440,10 +437,7 @@ fn render_mobile_switcher_content(app: &AppState, frame: &mut Frame, viewport: R
             Span::styled(dot, dot_style.bg(bg)),
             Span::styled(" ", Style::default().bg(bg)),
             Span::styled(
-                truncate(
-                    &ws.display_name_from(&app.terminals, &app.terminal_runtimes),
-                    content.width.saturating_sub(5) as usize,
-                ),
+                truncate(&ws.display_name(), content.width.saturating_sub(5) as usize),
                 Style::default()
                     .fg(p.text)
                     .bg(bg)

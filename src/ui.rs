@@ -70,6 +70,7 @@ pub(crate) use self::{
 };
 use crate::app::state::ViewLayout;
 use crate::app::{AppState, Mode};
+use crate::terminal::TerminalRuntimeRegistry;
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
 
@@ -86,8 +87,18 @@ pub(super) fn spinner_frame(tick: u32) -> &'static str {
 /// Called before render to separate mutation from drawing.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn compute_view(app: &mut AppState, area: Rect) {
+    let terminal_runtimes = TerminalRuntimeRegistry::new();
+    compute_view_with_runtime_registry(app, &terminal_runtimes, area);
+}
+
+pub fn compute_view_with_runtime_registry(
+    app: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+) {
     compute_view_internal(
         app,
+        terminal_runtimes,
         area,
         true,
         crate::kitty_graphics::HostCellSize::default(),
@@ -96,10 +107,11 @@ pub fn compute_view(app: &mut AppState, area: Rect) {
 
 pub fn compute_view_with_cell_size(
     app: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
     area: Rect,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    compute_view_internal(app, area, true, cell_size);
+    compute_view_internal(app, terminal_runtimes, area, true, cell_size);
 }
 
 /// Compute view geometry for a client-sized render without resizing pane runtimes.
@@ -107,9 +119,14 @@ pub fn compute_view_with_cell_size(
 /// This is used by the headless server when a non-foreground client needs its
 /// own frame size while the shared pane runtimes stay pinned to the foreground
 /// client.
-pub(crate) fn compute_view_without_resizing_panes(app: &mut AppState, area: Rect) {
+pub(crate) fn compute_view_without_resizing_panes(
+    app: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+) {
     compute_view_internal(
         app,
+        terminal_runtimes,
         area,
         false,
         crate::kitty_graphics::HostCellSize::default(),
@@ -118,6 +135,7 @@ pub(crate) fn compute_view_without_resizing_panes(app: &mut AppState, area: Rect
 
 fn resize_background_tab_panes_to_terminal_area(
     app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
     terminal_area: Rect,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
@@ -126,19 +144,20 @@ fn resize_background_tab_panes_to_terminal_area(
             if app.active == Some(ws_idx) && tab_idx == ws.active_tab_index() {
                 continue;
             }
-            resize_tab_panes(app, tab, terminal_area, cell_size);
+            resize_tab_panes(app, terminal_runtimes, tab, terminal_area, cell_size);
         }
     }
 }
 
 fn compute_view_internal(
     app: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
     area: Rect,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
     if is_mobile_width(area) {
-        compute_mobile_view(app, area, resize_panes, cell_size);
+        compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
     }
 
@@ -199,9 +218,20 @@ fn compute_view_internal(
         .map(|ws| ws.layout.splits(terminal_area))
         .unwrap_or_default();
 
-    let pane_infos = compute_pane_infos(app, terminal_area, resize_panes, cell_size);
+    let pane_infos = compute_pane_infos(
+        app,
+        terminal_runtimes,
+        terminal_area,
+        resize_panes,
+        cell_size,
+    );
     if resize_panes {
-        resize_background_tab_panes_to_terminal_area(app, terminal_area, cell_size);
+        resize_background_tab_panes_to_terminal_area(
+            app,
+            terminal_runtimes,
+            terminal_area,
+            cell_size,
+        );
     }
 
     let toast_hit_area = app
@@ -230,6 +260,7 @@ fn compute_view_internal(
 
 fn compute_mobile_view(
     app: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
     area: Rect,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
@@ -255,9 +286,20 @@ fn compute_mobile_view(
         .map(|ws| ws.layout.splits(terminal_area))
         .unwrap_or_default();
 
-    let pane_infos = compute_pane_infos(app, terminal_area, resize_panes, cell_size);
+    let pane_infos = compute_pane_infos(
+        app,
+        terminal_runtimes,
+        terminal_area,
+        resize_panes,
+        cell_size,
+    );
     if resize_panes {
-        resize_background_tab_panes_to_terminal_area(app, terminal_area, cell_size);
+        resize_background_tab_panes_to_terminal_area(
+            app,
+            terminal_runtimes,
+            terminal_area,
+            cell_size,
+        );
     }
     let header_hits = compute_mobile_header_hit_areas(app, header_rect);
 
@@ -286,7 +328,17 @@ fn compute_mobile_view(
 }
 
 /// Render the UI — reads AppState but does not mutate it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render(app: &AppState, frame: &mut Frame) {
+    let terminal_runtimes = TerminalRuntimeRegistry::new();
+    render_with_runtime_registry(app, &terminal_runtimes, frame);
+}
+
+pub fn render_with_runtime_registry(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+) {
     let sidebar_area = app.view.sidebar_rect;
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
@@ -301,7 +353,7 @@ pub fn render(app: &AppState, frame: &mut Frame) {
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
     }
-    render_panes(app, frame, terminal_area);
+    render_panes(app, terminal_runtimes, frame, terminal_area);
 
     match app.mode {
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),

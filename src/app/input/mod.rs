@@ -70,7 +70,13 @@ impl App {
                     }
                     Mode::Resize => handle_resize_key(&mut self.state, key),
                     Mode::ConfirmClose => handle_confirm_close_key(&mut self.state, key_event),
-                    Mode::ContextMenu => handle_context_menu_key(&mut self.state, key_event),
+                    Mode::ContextMenu => {
+                        handle_context_menu_key(
+                            &mut self.state,
+                            &mut self.terminal_runtimes,
+                            key_event,
+                        );
+                    }
                     Mode::Settings => self.handle_settings_key(key_event),
                     Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
                     Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key_event),
@@ -85,7 +91,10 @@ impl App {
             return;
         }
         if let Some(ws_idx) = self.state.active {
-            if let Some(rt) = self.state.focused_runtime_in_workspace(ws_idx) {
+            if let Some(rt) = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            {
                 let _ = rt.send_paste(text).await;
             }
         }
@@ -183,7 +192,7 @@ impl App {
 
         let previous_agent_panel_scope = self.state.agent_panel_scope;
         let previous_settings_section = self.state.settings.section;
-        if let Some(action) = self.state.handle_mouse(mouse) {
+        if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
             match action {
                 SettingsAction::SaveTheme(name) => self.save_theme(&name),
                 SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
@@ -232,7 +241,11 @@ impl App {
 
 // Note: split_pane needs runtime (event_tx for PTY spawn), so it lives on App
 impl AppState {
-    pub(crate) fn split_pane(&mut self, direction: Direction) {
+    pub(crate) fn split_pane(
+        &mut self,
+        terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
+        direction: Direction,
+    ) {
         // Actual PTY spawning happens in Workspace::split_focused
         // which needs events channel — this is called from navigate_key
         // where we don't have async context, so the workspace handles it
@@ -245,11 +258,7 @@ impl AppState {
             .and_then(|i| self.workspaces.get(i))
             .and_then(|ws| {
                 let tab = ws.active_tab()?;
-                tab.cwd_for_pane(
-                    tab.layout.focused(),
-                    &self.terminals,
-                    &self.terminal_runtimes,
-                )
+                tab.cwd_for_pane(tab.layout.focused(), &self.terminals, terminal_runtimes)
             });
 
         if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
@@ -263,8 +272,7 @@ impl AppState {
                 &self.default_shell,
             ) {
                 let new_id = new_pane.pane_id;
-                self.terminal_runtimes
-                    .insert(new_pane.terminal.id.clone(), new_pane.runtime);
+                terminal_runtimes.insert(new_pane.terminal.id.clone(), new_pane.runtime);
                 self.terminals
                     .insert(new_pane.terminal.id.clone(), new_pane.terminal);
                 ws.layout.focus_pane(new_id);
@@ -332,10 +340,11 @@ fn numbered_lines_bytes(count: usize) -> Vec<u8> {
 
 #[cfg(test)]
 fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
+    let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
     crate::persist::capture(
         &state.workspaces,
         &state.terminals,
-        &state.terminal_runtimes,
+        &terminal_runtimes,
         state.active,
         state.selected,
         state.agent_panel_scope,

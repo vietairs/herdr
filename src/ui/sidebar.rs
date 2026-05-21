@@ -138,7 +138,7 @@ pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
             .enumerate()
             .flat_map(|(ws_idx, ws)| {
                 let multi_tab = ws.tabs.len() > 1;
-                let workspace_label = ws.display_name_from(&app.terminals, &app.terminal_runtimes);
+                let workspace_label = ws.display_name();
                 ws.pane_details(&app.terminals)
                     .into_iter()
                     .map(move |detail| AgentPanelEntry {
@@ -647,10 +647,7 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
             Span::styled(" ", Style::default()),
             Span::styled(icon, icon_style),
             Span::styled(" ", Style::default()),
-            Span::styled(
-                ws.display_name_from(&app.terminals, &app.terminal_runtimes),
-                name_style,
-            ),
+            Span::styled(ws.display_name(), name_style),
         ];
 
         frame.render_widget(

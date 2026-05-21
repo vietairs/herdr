@@ -36,6 +36,7 @@ mod pane;
 mod persist;
 mod platform;
 mod product_announcements;
+mod protocol;
 mod raw_input;
 mod release_notes;
 mod remote;

@@ -29,7 +29,7 @@ use std::io::Write;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::server::protocol::{CellData, FrameData};
+use crate::protocol::{CellData, FrameData};
 
 /// Bytes produced by a [`BlitEncoder`] for one terminal frame.
 pub(crate) struct EncodedBlit {
@@ -612,7 +612,7 @@ fn write_changed_cells(writer: &mut impl Write, frame: &FrameData, prev: &FrameD
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::protocol::{CellData, CursorState};
+    use crate::protocol::{CellData, CursorState};
 
     const WIDE_GRAPHEME: &str = "💡";
 

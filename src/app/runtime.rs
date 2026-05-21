@@ -11,10 +11,20 @@ use crate::events::AppEvent;
 use crate::workspace::{Workspace, WorkspaceGitStatus};
 
 impl App {
+    pub(crate) fn shutdown_detached_terminal_runtimes(&mut self) {
+        let terminal_ids = std::mem::take(&mut self.state.terminal_runtime_shutdowns);
+        for terminal_id in terminal_ids {
+            if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
+                runtime.shutdown();
+            }
+        }
+    }
+
     pub(crate) fn drain_api_requests(&mut self) -> bool {
         let mut changed = false;
         while let Ok(msg) = self.api_rx.try_recv() {
             changed |= self.handle_api_request_message(msg);
+            self.shutdown_detached_terminal_runtimes();
         }
         changed
     }
@@ -53,7 +63,7 @@ impl App {
         &mut self,
         event: crate::raw_input::RawInputEvent,
     ) -> bool {
-        match event {
+        let changed = match event {
             crate::raw_input::RawInputEvent::Key(key) => {
                 let key_id = repeat_key_identity(&key);
                 match key.kind {
@@ -90,7 +100,8 @@ impl App {
                 if self.state.mouse_capture {
                     self.handle_mouse(mouse);
                 } else {
-                    self.state.handle_pane_mouse_only(mouse);
+                    self.state
+                        .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
                 }
                 true
             }
@@ -108,7 +119,9 @@ impl App {
                 self.update_host_terminal_theme(kind, color)
             }
             crate::raw_input::RawInputEvent::Unsupported => false,
-        }
+        };
+        self.shutdown_detached_terminal_runtimes();
+        changed
     }
 
     fn handle_resize_poll(&mut self) -> bool {
@@ -248,7 +261,10 @@ impl App {
         }
 
         // Scrollback boundary detection via ScrollMetrics — fail-closed if unavailable
-        let Some(metrics) = self.state.pane_scroll_metrics(pane_id) else {
+        let Some(metrics) = self
+            .state
+            .pane_scroll_metrics(&self.terminal_runtimes, pane_id)
+        else {
             self.stop_selection_autoscroll();
             return;
         };
@@ -259,7 +275,8 @@ impl App {
                     self.stop_selection_autoscroll();
                     return;
                 }
-                self.state.scroll_pane_up(pane_id, 1);
+                self.state
+                    .scroll_pane_up(&self.terminal_runtimes, pane_id, 1);
             }
             crate::app::state::SelectionAutoscrollDirection::Down => {
                 let at_bottom = metrics.offset_from_bottom == 0;
@@ -267,12 +284,14 @@ impl App {
                     self.stop_selection_autoscroll();
                     return;
                 }
-                self.state.scroll_pane_down(pane_id, 1);
+                self.state
+                    .scroll_pane_down(&self.terminal_runtimes, pane_id, 1);
             }
         }
 
         // Extend selection cursor to last known mouse position
         self.state.update_selection_cursor(
+            &self.terminal_runtimes,
             pane_id,
             autoscroll.last_mouse_screen_col,
             autoscroll.last_mouse_screen_row,
@@ -328,7 +347,7 @@ impl App {
             .workspaces
             .iter()
             .filter_map(|ws| {
-                ws.resolved_identity_cwd_from(&self.state.terminals, &self.state.terminal_runtimes)
+                ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
                     .map(|cwd| (ws.id.clone(), cwd))
             })
             .collect();

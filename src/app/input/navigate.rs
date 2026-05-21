@@ -16,6 +16,7 @@ use crate::{
     },
     input::TerminalKey,
     layout::NavDirection,
+    terminal::TerminalRuntimeRegistry,
 };
 
 pub(crate) fn terminal_direct_navigation_action(
@@ -55,7 +56,12 @@ impl App {
                 self.launch_focused_scrollback_editor();
                 finish_action_context(&mut self.state, ActionContext::Prefix, previous_mode);
             } else {
-                execute_navigate_action_in_context(&mut self.state, action, ActionContext::Prefix);
+                execute_navigate_action_in_context(
+                    &mut self.state,
+                    &mut self.terminal_runtimes,
+                    action,
+                    ActionContext::Prefix,
+                );
             }
             self.selection_autoscroll_deadline = None;
             return;
@@ -88,6 +94,7 @@ impl App {
             } else {
                 execute_navigate_action_in_context(
                     &mut self.state,
+                    &mut self.terminal_runtimes,
                     action,
                     ActionContext::Navigate,
                 );
@@ -105,7 +112,10 @@ impl App {
         let Some(ws_idx) = self.state.active else {
             return false;
         };
-        let Some(rt) = self.state.focused_runtime_in_workspace(ws_idx) else {
+        let Some(rt) = self
+            .state
+            .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+        else {
             return false;
         };
 
@@ -174,11 +184,7 @@ impl App {
                         env.push(("HERDR_ACTIVE_PANE_ID".to_string(), public_pane_id));
                     }
                     if let Some(pane_cwd) = workspace.active_tab().and_then(|tab| {
-                        tab.cwd_for_pane(
-                            pane_id,
-                            &self.state.terminals,
-                            &self.state.terminal_runtimes,
-                        )
+                        tab.cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
                     }) {
                         env.push((
                             "HERDR_ACTIVE_PANE_CWD".to_string(),
@@ -245,7 +251,7 @@ impl App {
             .ok_or_else(|| std::io::Error::other("no focused pane"))?;
         let scrollback = self
             .state
-            .runtime_for_pane_in_workspace(ws_idx, pane_id)
+            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
             .ok_or_else(|| std::io::Error::other("focused pane has no scrollback runtime"))?
             .recent_text(usize::MAX);
 
@@ -298,7 +304,7 @@ impl App {
             tab.cwd_for_pane(
                 previous_focus,
                 &self.state.terminals,
-                &self.state.terminal_runtimes,
+                &self.terminal_runtimes,
             )
         });
         let new_pane = ws.split_focused_command(
@@ -312,8 +318,7 @@ impl App {
             self.state.host_terminal_theme,
         )?;
         let new_pane_id = new_pane.pane_id;
-        self.state
-            .terminal_runtimes
+        self.terminal_runtimes
             .insert(new_pane.terminal.id.clone(), new_pane.runtime);
         self.state
             .terminals
@@ -428,6 +433,7 @@ pub(super) fn handle_navigate_reserved_key(state: &mut AppState, key: KeyEvent) 
 
 #[allow(dead_code)] // exercised in input unit tests; production uses App::handle_navigate_key
 pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
+    let mut terminal_runtimes = TerminalRuntimeRegistry::new();
     state.update_dismissed = true;
     let terminal_key = TerminalKey::from(key);
 
@@ -441,7 +447,12 @@ pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     }
 
     if let Some(action) = action_for_key(state, terminal_key, BindingDispatch::Prefix) {
-        execute_navigate_action_in_context(state, action, ActionContext::Navigate);
+        execute_navigate_action_in_context(
+            state,
+            &mut terminal_runtimes,
+            action,
+            ActionContext::Navigate,
+        );
     }
 }
 
@@ -587,11 +598,18 @@ fn action_for_key(
 
 #[cfg(test)]
 pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateAction) {
-    execute_navigate_action_in_context(state, action, ActionContext::Navigate);
+    let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+    execute_navigate_action_in_context(
+        state,
+        &mut terminal_runtimes,
+        action,
+        ActionContext::Navigate,
+    );
 }
 
 pub(super) fn execute_navigate_action_in_context(
     state: &mut AppState,
+    terminal_runtimes: &mut TerminalRuntimeRegistry,
     action: NavigateAction,
     context: ActionContext,
 ) {
@@ -694,11 +712,11 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::FocusPaneUp => state.navigate_pane(NavDirection::Up),
         NavigateAction::FocusPaneRight => state.navigate_pane(NavDirection::Right),
         NavigateAction::SplitVertical => {
-            state.split_pane(Direction::Horizontal);
+            state.split_pane(terminal_runtimes, Direction::Horizontal);
             leave_navigate_mode(state);
         }
         NavigateAction::SplitHorizontal => {
-            state.split_pane(Direction::Vertical);
+            state.split_pane(terminal_runtimes, Direction::Vertical);
             leave_navigate_mode(state);
         }
         NavigateAction::ClosePane => {
@@ -1192,10 +1210,12 @@ mod tests {
     #[test]
     fn empty_state_new_tab_is_no_op() {
         let mut state = crate::app::state::AppState::test_new();
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
         state.mode = Mode::Prefix;
 
         execute_navigate_action_in_context(
             &mut state,
+            &mut terminal_runtimes,
             NavigateAction::NewTab,
             ActionContext::Prefix,
         );
@@ -1277,9 +1297,7 @@ mod tests {
         )
         .expect("workspace should spawn");
         app.state.workspaces = vec![workspace];
-        app.state
-            .terminal_runtimes
-            .insert(terminal.id.clone(), runtime);
+        app.terminal_runtimes.insert(terminal.id.clone(), runtime);
         app.state.terminals.insert(terminal.id.clone(), terminal);
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -1303,7 +1321,7 @@ mod tests {
             .await;
 
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
-        assert_eq!(app.state.terminal_runtimes.len(), 2);
+        assert_eq!(app.terminal_runtimes.len(), 2);
         assert!(app.state.workspaces[0].tabs[0].zoomed);
 
         let _ = wait_for_file(&output_path);
@@ -1321,6 +1339,11 @@ mod tests {
         assert!(!app.state.workspaces[0].tabs[0].zoomed);
         assert_eq!(app.state.mode, Mode::Terminal);
         let _ = std::fs::remove_file(output_path);
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
     }
 
     #[tokio::test]
@@ -1337,7 +1360,12 @@ mod tests {
         let root_pane = workspace.tabs[0].root_pane;
         workspace.tabs[0].runtimes.insert(
             root_pane,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(20, 5, 4096, b"alpha\nbeta\n"),
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                20,
+                5,
+                4096,
+                b"alpha\nbeta\n",
+            ),
         );
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);

@@ -498,7 +498,12 @@ pub(crate) fn handle_confirm_close_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
-pub(super) fn apply_context_menu_action(state: &mut AppState, menu: ContextMenuState, idx: usize) {
+pub(super) fn apply_context_menu_action(
+    state: &mut AppState,
+    terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
+    menu: ContextMenuState,
+    idx: usize,
+) {
     let item = menu.items().get(idx).copied();
     match (menu.kind, item) {
         (ContextMenuKind::Workspace { ws_idx }, Some("Rename")) => {
@@ -554,11 +559,11 @@ pub(super) fn apply_context_menu_action(state: &mut AppState, menu: ContextMenuS
             state.mode = Mode::Terminal;
         }
         (ContextMenuKind::Pane { .. }, Some("Split vertical")) => {
-            state.split_pane(Direction::Horizontal);
+            state.split_pane(terminal_runtimes, Direction::Horizontal);
             state.mode = Mode::Terminal;
         }
         (ContextMenuKind::Pane { .. }, Some("Split horizontal")) => {
-            state.split_pane(Direction::Vertical);
+            state.split_pane(terminal_runtimes, Direction::Vertical);
             state.mode = Mode::Terminal;
         }
         (ContextMenuKind::Pane { .. }, Some("Zoom")) => {
@@ -577,7 +582,11 @@ pub(super) fn apply_context_menu_action(state: &mut AppState, menu: ContextMenuS
     }
 }
 
-pub(crate) fn handle_context_menu_key(state: &mut AppState, key: KeyEvent) {
+pub(crate) fn handle_context_menu_key(
+    state: &mut AppState,
+    terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
+    key: KeyEvent,
+) {
     match key.code {
         KeyCode::Esc => {
             state.context_menu = None;
@@ -596,7 +605,7 @@ pub(crate) fn handle_context_menu_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Enter => {
             if let Some(menu) = state.context_menu.take() {
                 let idx = menu.list.highlighted;
-                apply_context_menu_action(state, menu, idx);
+                apply_context_menu_action(state, terminal_runtimes, menu, idx);
             }
         }
         _ => {}

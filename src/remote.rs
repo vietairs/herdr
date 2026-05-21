@@ -20,7 +20,7 @@ const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
 const REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const CURRENT_PROTOCOL: u32 = crate::server::protocol::PROTOCOL_VERSION;
+const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
 const UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
 pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
@@ -165,7 +165,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
 pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
     ensure_remote_server_running()?;
 
-    let socket_path = crate::server::headless::client_socket_path();
+    let socket_path = crate::server::socket_paths::client_socket_path();
     let stream = UnixStream::connect(&socket_path).map_err(|err| {
         io::Error::new(
             err.kind(),
@@ -190,7 +190,7 @@ pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
 }
 
 fn ensure_remote_server_running() -> io::Result<()> {
-    let socket_path = crate::server::headless::client_socket_path();
+    let socket_path = crate::server::socket_paths::client_socket_path();
     if crate::server::autodetect::is_server_listening() {
         let status = crate::api::read_runtime_status_at(
             &crate::api::socket_path(),
@@ -398,7 +398,7 @@ fn remote_path_probe_command() -> &'static str {
     r#"path=$(command -v herdr) || exit 1
 test -n "$path" || exit 1
 version=$("$path" --version) || exit 1
-status=$("$path" status client) || exit 1
+status=$("$path" status client --json) || exit 1
 printf '%s\n%s\n%s\n' "$path" "$version" "$status"
 "#
 }
@@ -407,8 +407,8 @@ fn remote_herdr_from_path_probe(remote_herdr: &RemoteHerdr, stdout: &str) -> Opt
     let mut lines = stdout.lines();
     let path = lines.next()?;
     let version = lines.next()?.trim();
-    let status = lines.collect::<Vec<_>>().join("\n");
-    let protocol = parse_status_protocol(&status)?;
+    let status = lines.next()?;
+    let protocol = parse_client_status_json(status)?.protocol;
     if !path.starts_with('/')
         || version != format!("herdr {CURRENT_VERSION}")
         || protocol != CURRENT_PROTOCOL
@@ -421,7 +421,7 @@ fn remote_herdr_from_path_probe(remote_herdr: &RemoteHerdr, stdout: &str) -> Opt
 
 fn remote_binary_matches(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
     let command = format!(
-        "test -x {0} && {0} --version && {0} status client",
+        "test -x {0} && {0} --version && {0} status client --json",
         remote_herdr.shell_path
     );
     let output = ssh_output(target, &command)?;
@@ -432,9 +432,11 @@ fn remote_binary_matches(target: &str, remote_herdr: &RemoteHerdr) -> io::Result
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut lines = stdout.lines();
     let version = lines.next().unwrap_or_default().trim();
-    let status = lines.collect::<Vec<_>>().join("\n");
+    let status = lines.next().unwrap_or_default();
     Ok(version == format!("herdr {CURRENT_VERSION}")
-        && parse_status_protocol(&status) == Some(CURRENT_PROTOCOL))
+        && parse_client_status_json(status)
+            .map(|status| status.protocol == CURRENT_PROTOCOL)
+            .unwrap_or(false))
 }
 
 fn remote_binary_override_path() -> io::Result<Option<PathBuf>> {
@@ -561,47 +563,46 @@ fn remote_server_status(
     target: &str,
     remote_herdr: &RemoteHerdr,
 ) -> io::Result<RemoteServerStatus> {
-    let command = format!("{} status server", remote_herdr.shell_path);
+    let command = format!("{} status server --json", remote_herdr.shell_path);
     let output = ssh_output(target, &command)?;
     if !output.status.success() {
         return Err(command_failed("remote server status failed", &output));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout
-        .lines()
-        .any(|line| line.trim() == "status: not running")
-    {
+    parse_remote_server_status_json(stdout.trim())
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteClientStatusJson {
+    protocol: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteServerStatusJson {
+    running: bool,
+    version: Option<String>,
+    protocol: Option<u32>,
+}
+
+fn parse_client_status_json(status: &str) -> Option<RemoteClientStatusJson> {
+    serde_json::from_str(status).ok()
+}
+
+fn parse_remote_server_status_json(status: &str) -> io::Result<RemoteServerStatus> {
+    let parsed: RemoteServerStatusJson = serde_json::from_str(status).map_err(|err| {
+        io::Error::other(format!(
+            "could not parse remote server status JSON from `{status}`: {err}"
+        ))
+    })?;
+    if !parsed.running {
         return Ok(RemoteServerStatus::NotRunning);
     }
 
-    if stdout.lines().any(|line| line.trim() == "status: running") {
-        return Ok(RemoteServerStatus::Running {
-            version: parse_status_version(&stdout).map(str::to_owned),
-            protocol: parse_status_protocol(&stdout),
-        });
-    }
-
-    Err(io::Error::other(format!(
-        "could not parse remote server status from `{}`",
-        stdout.trim()
-    )))
-}
-
-fn parse_status_value<'a>(status: &'a str, key: &str) -> Option<&'a str> {
-    status.lines().find_map(|line| {
-        let line = line.trim();
-        let (found_key, value) = line.split_once(':')?;
-        (found_key == key).then_some(value.trim())
+    Ok(RemoteServerStatus::Running {
+        version: parsed.version,
+        protocol: parsed.protocol,
     })
-}
-
-fn parse_status_version(status: &str) -> Option<&str> {
-    parse_status_value(status, "version")
-}
-
-fn parse_status_protocol(status: &str) -> Option<u32> {
-    parse_status_value(status, "protocol")?.parse().ok()
 }
 
 fn confirm_remote_server_stop(
@@ -1095,7 +1096,7 @@ fn run_client_process(
     let status = Command::new(exe)
         .arg("client")
         .env(
-            crate::server::headless::CLIENT_SOCKET_PATH_ENV_VAR,
+            crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
             local_socket,
         )
         .env("HERDR_RENDER_ENCODING", "terminal-ansi")
@@ -1452,7 +1453,7 @@ mod tests {
         });
         let remote_herdr = remote_herdr_from_path_probe(
             &remote_herdr,
-            &format!("/usr/bin/herdr\nherdr 0.0.0\nprotocol: {CURRENT_PROTOCOL}\n"),
+            &format!("/usr/bin/herdr\nherdr 0.0.0\n{{\"protocol\":{CURRENT_PROTOCOL}}}\n"),
         );
 
         assert!(remote_herdr.is_none());
@@ -1476,32 +1477,45 @@ mod tests {
             os: "linux",
             arch: "x86_64",
         });
-        let stdout = format!("/usr/bin/herdr\nherdr {CURRENT_VERSION}\nprotocol: 0\n");
+        let stdout = format!("/usr/bin/herdr\nherdr {CURRENT_VERSION}\n{{\"protocol\":0}}\n");
         let remote_herdr = remote_herdr_from_path_probe(&remote_herdr, &stdout);
 
         assert!(remote_herdr.is_none());
     }
 
     #[test]
-    fn parse_status_protocol_reads_protocol_line() {
+    fn parse_client_status_json_reads_protocol() {
         assert_eq!(
-            parse_status_protocol("version: x\nprotocol: 8\nbinary: y"),
+            parse_client_status_json(r#"{"version":"x","protocol":8,"binary":"/bin/herdr"}"#)
+                .map(|status| status.protocol),
             Some(8)
         );
-        assert_eq!(
-            parse_status_protocol("status: running\nprotocol: unknown"),
-            None
-        );
-        assert_eq!(parse_status_protocol("status: not running"), None);
+        assert!(parse_client_status_json(r#"{"protocol":"unknown"}"#).is_none());
     }
 
     #[test]
-    fn parse_status_version_reads_version_line() {
+    fn parse_remote_server_status_json_reads_running_server() {
         assert_eq!(
-            parse_status_version("status: running\nversion: 0.6.0\nprotocol: 8"),
-            Some("0.6.0")
+            parse_remote_server_status_json(
+                r#"{"status":"running","running":true,"version":"0.6.0","protocol":8}"#
+            )
+            .unwrap(),
+            RemoteServerStatus::Running {
+                version: Some("0.6.0".into()),
+                protocol: Some(8)
+            }
         );
-        assert_eq!(parse_status_version("status: not running"), None);
+    }
+
+    #[test]
+    fn parse_remote_server_status_json_reads_stopped_server() {
+        assert_eq!(
+            parse_remote_server_status_json(
+                r#"{"status":"not_running","running":false,"version":null,"protocol":null}"#
+            )
+            .unwrap(),
+            RemoteServerStatus::NotRunning
+        );
     }
 
     #[test]
@@ -1565,7 +1579,7 @@ mod tests {
     }
 
     fn matching_path_probe_stdout(path: &str) -> String {
-        format!("{path}\nherdr {CURRENT_VERSION}\nprotocol: {CURRENT_PROTOCOL}\n")
+        format!("{path}\nherdr {CURRENT_VERSION}\n{{\"protocol\":{CURRENT_PROTOCOL}}}\n")
     }
 
     fn remote_env_lock() -> &'static std::sync::Mutex<()> {

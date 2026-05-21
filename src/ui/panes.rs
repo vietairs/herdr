@@ -11,7 +11,7 @@ use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
 use crate::layout::PaneInfo;
-use crate::terminal::TerminalRuntime;
+use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
 
 pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
     rt.scroll_metrics()
@@ -64,7 +64,7 @@ fn pane_inner_rect(area: Rect, framed: bool) -> Rect {
 }
 
 fn runtime_for_tab_pane<'a>(
-    app: &'a AppState,
+    terminal_runtimes: &'a TerminalRuntimeRegistry,
     tab: &'a crate::workspace::Tab,
     pane_id: crate::layout::PaneId,
 ) -> Option<(&'a crate::terminal::TerminalId, &'a TerminalRuntime)> {
@@ -73,7 +73,7 @@ fn runtime_for_tab_pane<'a>(
     if let Some(runtime) = tab.runtimes.get(&pane_id) {
         return Some((terminal_id, runtime));
     }
-    app.terminal_runtimes
+    terminal_runtimes
         .get(terminal_id)
         .map(|runtime| (terminal_id, runtime))
 }
@@ -100,6 +100,7 @@ fn stable_scrollbar_gutter(rt: &TerminalRuntime, pane_inner: Rect) -> (Rect, Opt
 /// Resize every visible runtime in a tab to the geometry it would receive if the tab were selected.
 pub(super) fn resize_tab_panes(
     app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
     tab: &crate::workspace::Tab,
     area: Rect,
     cell_size: crate::kitty_graphics::HostCellSize,
@@ -108,7 +109,7 @@ pub(super) fn resize_tab_panes(
 
     if tab.zoomed {
         let focused_id = tab.layout.focused();
-        if let Some((terminal_id, rt)) = runtime_for_tab_pane(app, tab, focused_id) {
+        if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, focused_id) {
             let pane_inner = pane_inner_rect(area, multi_pane);
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
@@ -130,7 +131,7 @@ pub(super) fn resize_tab_panes(
             area
         };
 
-        if let Some((terminal_id, rt)) = runtime_for_tab_pane(app, tab, info.id) {
+        if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, info.id) {
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -147,6 +148,7 @@ pub(super) fn resize_tab_panes(
 /// Compute pane layout info and optionally resize pane runtimes to match.
 pub(super) fn compute_pane_infos(
     app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
     area: Rect,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
@@ -166,7 +168,7 @@ pub(super) fn compute_pane_infos(
         let pane_inner = pane_inner_rect(area, multi_pane);
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
-        if let Some(rt) = app.runtime_for_pane_in_workspace(ws_idx, focused_id) {
+        if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
             (inner_rect, scrollbar_rect) = stable_scrollbar_gutter(rt, pane_inner);
             if resize_panes
                 && ws.terminal_id(focused_id).is_some_and(|terminal_id| {
@@ -209,7 +211,7 @@ pub(super) fn compute_pane_infos(
 
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
-        if let Some(rt) = app.runtime_for_pane_in_workspace(ws_idx, info.id) {
+        if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             (inner_rect, scrollbar_rect) = stable_scrollbar_gutter(rt, pane_inner);
             if resize_panes
                 && ws.terminal_id(info.id).is_some_and(|terminal_id| {
@@ -232,7 +234,12 @@ pub(super) fn compute_pane_infos(
     pane_infos
 }
 
-pub(super) fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
+pub(super) fn render_panes(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let Some(ws_idx) = app.active else {
         render_empty(app, frame, area);
         return;
@@ -246,7 +253,7 @@ pub(super) fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
     let terminal_active = app.mode == Mode::Terminal;
 
     for info in &app.view.pane_infos {
-        if let Some(rt) = app.runtime_for_pane_in_workspace(ws_idx, info.id) {
+        if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             if multi_pane {
                 let (border_style, border_set) = if info.is_focused && terminal_active {
                     (
@@ -404,8 +411,10 @@ mod tests {
         app.active = Some(0);
 
         let area = Rect::new(10, 3, 40, 8);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
         let infos = compute_pane_infos(
             &app,
+            &terminal_runtimes,
             area,
             false,
             crate::kitty_graphics::HostCellSize::default(),
@@ -431,8 +440,10 @@ mod tests {
         app.active = Some(0);
 
         let area = Rect::new(10, 3, 40, 8);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
         let infos = compute_pane_infos(
             &app,
+            &terminal_runtimes,
             area,
             false,
             crate::kitty_graphics::HostCellSize::default(),
@@ -458,8 +469,10 @@ mod tests {
         app.active = Some(0);
 
         let area = Rect::new(10, 3, 40, 8);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
         let infos = compute_pane_infos(
             &app,
+            &terminal_runtimes,
             area,
             false,
             crate::kitty_graphics::HostCellSize::default(),
@@ -485,8 +498,10 @@ mod tests {
         app.active = Some(0);
 
         let area = Rect::new(10, 3, 4, 8);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
         let infos = compute_pane_infos(
             &app,
+            &terminal_runtimes,
             area,
             false,
             crate::kitty_graphics::HostCellSize::default(),
@@ -516,8 +531,10 @@ mod tests {
         app.active = Some(0);
 
         let area = Rect::new(10, 3, 40, 8);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
         let infos = compute_pane_infos(
             &app,
+            &terminal_runtimes,
             area,
             false,
             crate::kitty_graphics::HostCellSize::default(),

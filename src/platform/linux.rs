@@ -232,7 +232,7 @@ fn read_clipboard_image_with_command(program: &str, args: &[&str]) -> Option<Vec
 fn read_clipboard_image_with_spawned_command(command: Command) -> Option<Vec<u8>> {
     read_clipboard_image_with_spawned_command_max(
         command,
-        crate::server::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD,
+        crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD,
     )
 }
 

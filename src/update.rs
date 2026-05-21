@@ -420,7 +420,7 @@ fn client_protocol_server_is_running_at(socket_path: &Path) -> bool {
 }
 
 fn client_protocol_server_is_running() -> bool {
-    client_protocol_server_is_running_at(&crate::server::headless::client_socket_path())
+    client_protocol_server_is_running_at(&crate::server::socket_paths::client_socket_path())
 }
 
 fn read_running_server_info() -> Result<Option<crate::api::RuntimeStatus>, String> {

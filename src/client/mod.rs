@@ -12,7 +12,6 @@
 //! - Forwards OSC 52 clipboard writes from server to its own stdout
 //! - Displays sound/toast notifications forwarded from server
 
-pub(crate) mod blit;
 mod input;
 
 use std::collections::HashSet;
@@ -30,11 +29,12 @@ use crossterm::event::{
 use crossterm::execute;
 use tracing::{debug, info, warn};
 
-use crate::server::headless::client_socket_path;
-use crate::server::protocol::{
+use crate::protocol::render_ansi;
+use crate::protocol::{
     self, ClientKeybindings, ClientMessage, NotifyKind, RenderEncoding, ServerMessage,
     MAX_CLIPBOARD_IMAGE_PAYLOAD, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
+use crate::server::socket_paths::client_socket_path;
 
 static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 
@@ -45,7 +45,7 @@ static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::ne
 /// State tracking for the thin client.
 struct ClientState {
     /// Stateful semantic-frame encoder used when the server sends FrameData.
-    blit_encoder: blit::BlitEncoder,
+    blit_encoder: render_ansi::BlitEncoder,
     /// Whether host mouse capture is currently active.
     mouse_capture_active: bool,
     /// The terminal size we reported to the server in our last Hello/Resize.
@@ -106,7 +106,7 @@ impl AttachEscapeState {
 
 impl ClientState {
     fn request_full_redraw(&mut self) {
-        self.blit_encoder = blit::BlitEncoder::new();
+        self.blit_encoder = render_ansi::BlitEncoder::new();
     }
 }
 
@@ -574,7 +574,7 @@ async fn run_client_loop(
     attach_escape: Option<AttachEscapeState>,
 ) -> Result<(), ClientError> {
     let mut state = ClientState {
-        blit_encoder: blit::BlitEncoder::new(),
+        blit_encoder: render_ansi::BlitEncoder::new(),
         mouse_capture_active,
         reported_size: (cols, rows),
         sound_config,

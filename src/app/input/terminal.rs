@@ -47,6 +47,7 @@ impl App {
             } else {
                 super::navigate::execute_navigate_action_in_context(
                     &mut self.state,
+                    &mut self.terminal_runtimes,
                     action,
                     super::navigate::ActionContext::Direct,
                 );
@@ -88,7 +89,9 @@ impl App {
         let ws_idx = self.state.active?;
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_id = ws.focused_pane_id()?;
-        let rt = self.state.runtime_for_pane_in_workspace(ws_idx, pane_id)?;
+        let rt =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)?;
 
         // Intercept plain PageUp/PageDown presses for pane scrollback when the
         // focused pane doesn't handle its own scrolling (e.g., a plain shell
@@ -116,9 +119,11 @@ impl App {
                             .unwrap_or(10)
                             .max(1);
                         if key_event.code == KeyCode::PageUp {
-                            self.state.scroll_pane_up(pane_id, lines);
+                            self.state
+                                .scroll_pane_up(&self.terminal_runtimes, pane_id, lines);
                         } else {
-                            self.state.scroll_pane_down(pane_id, lines);
+                            self.state
+                                .scroll_pane_down(&self.terminal_runtimes, pane_id, lines);
                         }
                         debug!(
                             code = ?key_event.code,
@@ -223,7 +228,7 @@ mod tests {
 
         let start_metrics = app
             .state
-            .runtime_for_pane(pane_id)
+            .runtime_for_pane(&app.terminal_runtimes, pane_id)
             .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("initial scroll metrics");
         let start_row = info.inner_rect.y;
@@ -242,7 +247,7 @@ mod tests {
 
         let end_metrics = app
             .state
-            .runtime_for_pane(pane_id)
+            .runtime_for_pane(&app.terminal_runtimes, pane_id)
             .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("scroll metrics after drag");
         assert_eq!(
@@ -329,7 +334,7 @@ mod tests {
 
         let start_metrics = app
             .state
-            .runtime_for_pane(pane_id)
+            .runtime_for_pane(&app.terminal_runtimes, pane_id)
             .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("initial scroll metrics");
         let top_row = info.inner_rect.y;
@@ -340,7 +345,7 @@ mod tests {
 
         let end_metrics = app
             .state
-            .runtime_for_pane(pane_id)
+            .runtime_for_pane(&app.terminal_runtimes, pane_id)
             .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("scroll metrics after wheel");
         assert_eq!(
@@ -523,7 +528,12 @@ mod tests {
         let root_pane = workspace.tabs[0].root_pane;
         workspace.tabs[0].runtimes.insert(
             root_pane,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(20, 5, 4096, b"alpha\nbeta\n"),
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                20,
+                5,
+                4096,
+                b"alpha\nbeta\n",
+            ),
         );
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
@@ -602,6 +612,7 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         );
+        app.state.default_shell = "/usr/bin/true".into();
         let (workspace, terminal, runtime) = Workspace::new(
             std::env::current_dir().unwrap_or_else(|_| "/".into()),
             24,
@@ -615,9 +626,7 @@ mod tests {
         )
         .expect("workspace should spawn");
         app.state.workspaces = vec![workspace];
-        app.state
-            .terminal_runtimes
-            .insert(terminal.id.clone(), runtime);
+        app.terminal_runtimes.insert(terminal.id.clone(), runtime);
         app.state.terminals.insert(terminal.id.clone(), terminal);
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -639,6 +648,11 @@ mod tests {
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
         assert!(app.state.workspaces[0].tabs[0].zoomed);
         assert_eq!(app.state.mode, Mode::Terminal);
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
     }
 
     #[tokio::test]
@@ -648,7 +662,7 @@ mod tests {
         let pane_id = ws.tabs[0].root_pane;
         let pane_infos = ws.tabs[0].layout.panes(Rect::new(0, 0, 80, 24));
         let info = pane_infos[0].clone();
-        let (runtime, mut rx) = crate::pane::PaneRuntime::test_with_channel(
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(
             info.inner_rect.width,
             info.inner_rect.height,
         );
@@ -677,7 +691,7 @@ mod tests {
         let info = pane_infos[0].clone();
         ws.tabs[0].runtimes.insert(
             pane_id,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
                 info.inner_rect.width,
                 info.inner_rect.height,
                 16 * 1024,
@@ -693,8 +707,8 @@ mod tests {
 
         let start_metrics = app
             .state
-            .runtime_for_pane_in_workspace(0, pane_id)
-            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("initial scroll metrics");
         assert_eq!(start_metrics.offset_from_bottom, 0);
 
@@ -702,8 +716,8 @@ mod tests {
 
         let end_metrics = app
             .state
-            .runtime_for_pane_in_workspace(0, pane_id)
-            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("scroll metrics after PageUp");
         assert_eq!(
             end_metrics.offset_from_bottom,
@@ -720,7 +734,7 @@ mod tests {
         let info = pane_infos[0].clone();
         ws.tabs[0].runtimes.insert(
             pane_id,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
                 info.inner_rect.width,
                 info.inner_rect.height,
                 16 * 1024,
@@ -737,8 +751,8 @@ mod tests {
         app.handle_terminal_key_headless(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
         let after_up = app
             .state
-            .runtime_for_pane_in_workspace(0, pane_id)
-            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("scroll metrics after PageUp");
         assert!(after_up.offset_from_bottom > 0);
 
@@ -748,8 +762,8 @@ mod tests {
         ));
         let after_down = app
             .state
-            .runtime_for_pane_in_workspace(0, pane_id)
-            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("scroll metrics after PageDown");
         assert_eq!(after_down.offset_from_bottom, 0);
     }
@@ -763,7 +777,7 @@ mod tests {
         let info = pane_infos[0].clone();
         ws.tabs[0].runtimes.insert(
             pane_id,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
                 info.inner_rect.width,
                 info.inner_rect.height,
                 16 * 1024,
@@ -780,8 +794,8 @@ mod tests {
         app.handle_terminal_key_headless(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
         let after_press = app
             .state
-            .runtime_for_pane_in_workspace(0, pane_id)
-            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("scroll metrics after PageUp press");
         assert_eq!(
             after_press.offset_from_bottom,
@@ -795,8 +809,8 @@ mod tests {
 
         let after_release = app
             .state
-            .runtime_for_pane_in_workspace(0, pane_id)
-            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("scroll metrics after PageUp release");
         assert_eq!(
             after_release.offset_from_bottom,
@@ -813,7 +827,7 @@ mod tests {
         let info = pane_infos[0].clone();
         ws.tabs[0].runtimes.insert(
             pane_id,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
                 info.inner_rect.width,
                 info.inner_rect.height,
                 16 * 1024,
@@ -831,8 +845,8 @@ mod tests {
 
         let metrics = app
             .state
-            .runtime_for_pane_in_workspace(0, pane_id)
-            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("scroll metrics after modified PageUp");
         assert_eq!(metrics.offset_from_bottom, 0);
     }
@@ -848,7 +862,7 @@ mod tests {
         bytes.extend_from_slice(&numbered_lines_bytes(64));
         ws.tabs[0].runtimes.insert(
             pane_id,
-            crate::pane::PaneRuntime::test_with_scrollback_bytes(
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
                 info.inner_rect.width,
                 info.inner_rect.height,
                 16 * 1024,
@@ -864,8 +878,8 @@ mod tests {
 
         let start_metrics = app
             .state
-            .runtime_for_pane_in_workspace(0, pane_id)
-            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("initial scroll metrics");
         assert_eq!(start_metrics.offset_from_bottom, 0);
 
@@ -873,8 +887,8 @@ mod tests {
 
         let end_metrics = app
             .state
-            .runtime_for_pane_in_workspace(0, pane_id)
-            .and_then(crate::pane::PaneRuntime::scroll_metrics)
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
             .expect("scroll metrics after PageUp");
         // Forwarded to pane, so test runtime doesn't process it — scroll stays at bottom.
         assert_eq!(end_metrics.offset_from_bottom, 0);

@@ -37,7 +37,7 @@ impl App {
             return;
         }
 
-        for runtime in self.state.terminal_runtimes.values() {
+        for runtime in self.terminal_runtimes.values() {
             runtime.apply_host_terminal_theme(self.state.host_terminal_theme);
         }
 

@@ -6,7 +6,7 @@ const KITTY_FLAG_REPORT_EVENT_TYPES: u16 = 0b0000_0010;
 const KITTY_FLAG_REPORT_ALTERNATE_KEYS: u16 = 0b0000_0100;
 
 /// Encode a key event for a PTY child using the pane's negotiated keyboard protocol.
-#[allow(dead_code)] // exercised in input unit tests; production uses PaneRuntime helpers
+#[allow(dead_code)] // exercised in input unit tests; production uses TerminalRuntime helpers
 pub fn encode_key(key: KeyEvent, protocol: KeyboardProtocol) -> Vec<u8> {
     encode_terminal_key(key.into(), protocol)
 }
@@ -24,7 +24,7 @@ pub fn encode_terminal_key(key: TerminalKey, protocol: KeyboardProtocol) -> Vec<
     encode_legacy(key.as_key_event())
 }
 
-#[allow(dead_code)] // exercised in input unit tests; production uses PaneRuntime helpers
+#[allow(dead_code)] // exercised in input unit tests; production uses TerminalRuntime helpers
 pub fn encode_cursor_key(code: KeyCode, application_cursor: bool) -> Vec<u8> {
     match (code, application_cursor) {
         (KeyCode::Up, true) => b"\x1bOA".to_vec(),

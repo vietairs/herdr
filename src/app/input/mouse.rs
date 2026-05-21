@@ -10,6 +10,7 @@ use crate::{
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
+    terminal::TerminalRuntimeRegistry,
 };
 
 #[cfg(test)]
@@ -25,7 +26,11 @@ use super::{
 };
 
 impl AppState {
-    pub(crate) fn handle_pane_mouse_only(&mut self, mouse: MouseEvent) {
+    pub(crate) fn handle_pane_mouse_only(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        mouse: MouseEvent,
+    ) {
         if self.mode != Mode::Terminal {
             return;
         }
@@ -38,16 +43,20 @@ impl AppState {
             | MouseEventKind::ScrollDown
             | MouseEventKind::ScrollLeft
             | MouseEventKind::ScrollRight => {
-                self.forward_pane_reported_wheel(&info, mouse);
+                self.forward_pane_reported_wheel(terminal_runtimes, &info, mouse);
             }
             MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
-                self.forward_pane_mouse_button(&info, mouse);
+                self.forward_pane_mouse_button(terminal_runtimes, &info, mouse);
             }
             MouseEventKind::Moved => {}
         }
     }
 
-    pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<SettingsAction> {
+    pub(super) fn handle_mouse(
+        &mut self,
+        terminal_runtimes: &mut TerminalRuntimeRegistry,
+        mouse: MouseEvent,
+    ) -> Option<SettingsAction> {
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
             return None;
@@ -187,7 +196,7 @@ impl AppState {
                     let item_idx = self.context_menu_item_at(mouse.column, mouse.row);
                     if let Some(menu) = self.context_menu.take() {
                         if let Some(idx) = item_idx {
-                            apply_context_menu_action(self, menu, idx);
+                            apply_context_menu_action(self, terminal_runtimes, menu, idx);
                         } else {
                             leave_modal(self);
                         }
@@ -224,7 +233,7 @@ impl AppState {
                     }
 
                     if let Some((pane_id, target)) =
-                        self.scrollbar_target_at(mouse.column, mouse.row)
+                        self.scrollbar_target_at(terminal_runtimes, mouse.column, mouse.row)
                     {
                         self.focus_pane(pane_id);
                         match target {
@@ -237,7 +246,11 @@ impl AppState {
                                 });
                             }
                             ScrollbarClickTarget::Track { offset_from_bottom } => {
-                                self.set_pane_scroll_offset(pane_id, offset_from_bottom);
+                                self.set_pane_scroll_offset(
+                                    terminal_runtimes,
+                                    pane_id,
+                                    offset_from_bottom,
+                                );
                             }
                         }
                         if self.mode != Mode::Terminal {
@@ -370,7 +383,7 @@ impl AppState {
                         self.mode = Mode::Terminal;
                     }
 
-                    if self.forward_pane_mouse_button(&info, mouse) {
+                    if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
                         self.selection = None;
                         self.selection_autoscroll = None;
                         return None;
@@ -384,7 +397,7 @@ impl AppState {
                         info.id,
                         row,
                         col,
-                        self.pane_scroll_metrics(info.id),
+                        self.pane_scroll_metrics(terminal_runtimes, info.id),
                     ));
                 } else if let Some(info) = self.view.pane_infos.iter().find(|p| {
                     mouse.column >= p.rect.x
@@ -402,13 +415,13 @@ impl AppState {
 
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.selection.is_some() {
-                    self.update_selection_drag(mouse.column, mouse.row);
+                    self.update_selection_drag(terminal_runtimes, mouse.column, mouse.row);
                     return None;
                 }
 
                 if self.drag.is_none() {
                     if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
-                        if self.forward_pane_mouse_button(&info, mouse) {
+                        if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
                             self.selection = None;
                             self.selection_autoscroll = None;
                             return None;
@@ -504,11 +517,16 @@ impl AppState {
                             grab_row_offset,
                         } => {
                             if let Some(offset_from_bottom) = self.scrollbar_offset_for_pane_row(
+                                terminal_runtimes,
                                 *pane_id,
                                 mouse.row,
                                 *grab_row_offset,
                             ) {
-                                self.set_pane_scroll_offset(*pane_id, offset_from_bottom);
+                                self.set_pane_scroll_offset(
+                                    terminal_runtimes,
+                                    *pane_id,
+                                    offset_from_bottom,
+                                );
                             }
                         }
                         DragTarget::SidebarDivider => {
@@ -535,14 +553,14 @@ impl AppState {
                         self.selection = None;
                         self.selection_autoscroll = None;
                     } else {
-                        self.copy_selection();
+                        self.copy_selection(terminal_runtimes);
                     }
                     return None;
                 }
 
                 if self.drag.is_none() {
                     if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
-                        if self.forward_pane_mouse_button(&info, mouse) {
+                        if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
                             self.selection = None;
                             self.selection_autoscroll = None;
                             self.workspace_press = None;
@@ -597,7 +615,7 @@ impl AppState {
                             self.selection = None;
                             self.selection_autoscroll = None;
                         } else {
-                            self.copy_selection();
+                            self.copy_selection(terminal_runtimes);
                         }
                     }
                 }
@@ -607,7 +625,7 @@ impl AppState {
                 if !in_sidebar =>
             {
                 if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
-                    let _ = self.forward_pane_mouse_button(&info, mouse);
+                    let _ = self.forward_pane_mouse_button(terminal_runtimes, &info, mouse);
                 }
             }
 
@@ -622,12 +640,12 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                if !in_sidebar && self.scroll_selection_with_wheel(mouse) => {}
+                if !in_sidebar && self.scroll_selection_with_wheel(terminal_runtimes, mouse) => {}
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !in_sidebar => {
                 self.selection = None;
                 self.selection_autoscroll = None;
-                self.handle_terminal_wheel(mouse);
+                self.handle_terminal_wheel(terminal_runtimes, mouse);
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
@@ -1070,17 +1088,29 @@ impl AppState {
         self.mode = Mode::Terminal;
     }
 
-    pub(crate) fn scroll_pane_up(&self, pane_id: crate::layout::PaneId, lines: usize) {
+    pub(crate) fn scroll_pane_up(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        pane_id: crate::layout::PaneId,
+        lines: usize,
+    ) {
         if let Some(ws_idx) = self.active {
-            if let Some(rt) = self.runtime_for_pane_in_workspace(ws_idx, pane_id) {
+            if let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+            {
                 rt.scroll_up(lines);
             }
         }
     }
 
-    pub(crate) fn scroll_pane_down(&self, pane_id: crate::layout::PaneId, lines: usize) {
+    pub(crate) fn scroll_pane_down(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        pane_id: crate::layout::PaneId,
+        lines: usize,
+    ) {
         if let Some(ws_idx) = self.active {
-            if let Some(rt) = self.runtime_for_pane_in_workspace(ws_idx, pane_id) {
+            if let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+            {
                 rt.scroll_down(lines);
             }
         }
@@ -1088,24 +1118,33 @@ impl AppState {
 
     pub(crate) fn pane_scroll_metrics(
         &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
         pane_id: crate::layout::PaneId,
     ) -> Option<crate::pane::ScrollMetrics> {
         self.active
-            .and_then(|i| self.runtime_for_pane_in_workspace(i, pane_id))
+            .and_then(|i| self.runtime_for_pane_in_workspace(terminal_runtimes, i, pane_id))
             .and_then(crate::terminal::TerminalRuntime::scroll_metrics)
     }
 
-    pub(super) fn handle_terminal_wheel(&mut self, mouse: MouseEvent) {
+    pub(super) fn handle_terminal_wheel(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        mouse: MouseEvent,
+    ) {
         const LINES_PER_NOTCH: usize = 3;
 
         if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
             self.focus_pane(info.id);
-            if self.forward_pane_wheel(&info, mouse) {
+            if self.forward_pane_wheel(terminal_runtimes, &info, mouse) {
                 return;
             }
             match mouse.kind {
-                MouseEventKind::ScrollUp => self.scroll_pane_up(info.id, LINES_PER_NOTCH),
-                MouseEventKind::ScrollDown => self.scroll_pane_down(info.id, LINES_PER_NOTCH),
+                MouseEventKind::ScrollUp => {
+                    self.scroll_pane_up(terminal_runtimes, info.id, LINES_PER_NOTCH)
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_pane_down(terminal_runtimes, info.id, LINES_PER_NOTCH)
+                }
                 _ => {}
             }
             return;
@@ -1114,15 +1153,19 @@ impl AppState {
         if let Some(info) = self.pane_frame_at(mouse.column, mouse.row).cloned() {
             self.focus_pane(info.id);
             match mouse.kind {
-                MouseEventKind::ScrollUp => self.scroll_pane_up(info.id, LINES_PER_NOTCH),
-                MouseEventKind::ScrollDown => self.scroll_pane_down(info.id, LINES_PER_NOTCH),
+                MouseEventKind::ScrollUp => {
+                    self.scroll_pane_up(terminal_runtimes, info.id, LINES_PER_NOTCH)
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_pane_down(terminal_runtimes, info.id, LINES_PER_NOTCH)
+                }
                 _ => {}
             }
             return;
         }
 
         if let Some(ws_idx) = self.active {
-            if let Some(rt) = self.focused_runtime_in_workspace(ws_idx) {
+            if let Some(rt) = self.focused_runtime_in_workspace(terminal_runtimes, ws_idx) {
                 match mouse.kind {
                     MouseEventKind::ScrollUp => rt.scroll_up(LINES_PER_NOTCH),
                     MouseEventKind::ScrollDown => rt.scroll_down(LINES_PER_NOTCH),
@@ -1132,11 +1175,17 @@ impl AppState {
         }
     }
 
-    pub(super) fn forward_pane_mouse_button(&self, info: &PaneInfo, mouse: MouseEvent) -> bool {
+    pub(super) fn forward_pane_mouse_button(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        info: &PaneInfo,
+        mouse: MouseEvent,
+    ) -> bool {
         let Some(ws_idx) = self.active else {
             return false;
         };
-        let Some(rt) = self.runtime_for_pane_in_workspace(ws_idx, info.id) else {
+        let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
+        else {
             return false;
         };
         let column = mouse.column.saturating_sub(info.inner_rect.x);
@@ -1151,11 +1200,17 @@ impl AppState {
         true
     }
 
-    fn forward_pane_reported_wheel(&self, info: &PaneInfo, mouse: MouseEvent) -> bool {
+    fn forward_pane_reported_wheel(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        info: &PaneInfo,
+        mouse: MouseEvent,
+    ) -> bool {
         let Some(ws_idx) = self.active else {
             return false;
         };
-        let Some(rt) = self.runtime_for_pane_in_workspace(ws_idx, info.id) else {
+        let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
+        else {
             return false;
         };
         if !rt
@@ -1177,11 +1232,17 @@ impl AppState {
         true
     }
 
-    pub(super) fn forward_pane_wheel(&self, info: &PaneInfo, mouse: MouseEvent) -> bool {
+    pub(super) fn forward_pane_wheel(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        info: &PaneInfo,
+        mouse: MouseEvent,
+    ) -> bool {
         let Some(ws_idx) = self.active else {
             return false;
         };
-        let Some(rt) = self.runtime_for_pane_in_workspace(ws_idx, info.id) else {
+        let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
+        else {
             return false;
         };
         match rt.wheel_routing() {
@@ -1215,11 +1276,13 @@ impl AppState {
 
     pub(super) fn set_pane_scroll_offset(
         &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
         pane_id: crate::layout::PaneId,
         offset_from_bottom: usize,
     ) {
         if let Some(ws_idx) = self.active {
-            if let Some(rt) = self.runtime_for_pane_in_workspace(ws_idx, pane_id) {
+            if let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+            {
                 rt.set_scroll_offset_from_bottom(offset_from_bottom);
             }
         }
@@ -1227,6 +1290,7 @@ impl AppState {
 
     pub(super) fn scrollbar_target_at(
         &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
         col: u16,
         row: u16,
     ) -> Option<(crate::layout::PaneId, ScrollbarClickTarget)> {
@@ -1239,7 +1303,7 @@ impl AppState {
                     && row < track.y + track.height
             })
         })?;
-        let rt = self.runtime_for_pane_in_workspace(ws_idx, info.id)?;
+        let rt = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)?;
         let metrics = rt.scroll_metrics()?;
         if metrics.max_offset_from_bottom == 0 {
             return None;
@@ -1259,6 +1323,7 @@ impl AppState {
 
     pub(super) fn scrollbar_offset_for_pane_row(
         &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
         pane_id: crate::layout::PaneId,
         row: u16,
         grab_row_offset: u16,
@@ -1270,7 +1335,7 @@ impl AppState {
             .iter()
             .find(|info| info.id == pane_id)?;
         let track = crate::ui::pane_scrollbar_rect(info)?;
-        let rt = self.runtime_for_pane_in_workspace(ws_idx, pane_id)?;
+        let rt = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)?;
         let metrics = rt.scroll_metrics()?;
         if metrics.max_offset_from_bottom == 0 {
             return None;
@@ -1435,6 +1500,7 @@ mod tests {
         app.state.mode = Mode::ContextMenu;
         handle_context_menu_key(
             &mut app.state,
+            &mut app.terminal_runtimes,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
         assert_eq!(app.state.mode, Mode::ConfirmClose);
@@ -1456,6 +1522,56 @@ mod tests {
 
         assert_eq!(app.state.workspaces.len(), 1);
         assert_eq!(app.state.workspaces[0].display_name(), "a");
+    }
+
+    #[tokio::test]
+    async fn keyboard_context_menu_split_keeps_new_runtime() {
+        let mut app = app_for_mouse_test();
+        app.state.default_shell = "/usr/bin/true".into();
+        let (workspace, terminal, runtime) = Workspace::new(
+            std::env::current_dir().unwrap_or_else(|_| "/".into()),
+            24,
+            80,
+            app.state.pane_scrollback_limit_bytes,
+            app.state.host_terminal_theme,
+            &app.state.default_shell,
+            app.event_tx.clone(),
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )
+        .expect("workspace should spawn");
+        app.state.workspaces = vec![workspace];
+        app.terminal_runtimes.insert(terminal.id.clone(), runtime);
+        app.state.terminals.insert(terminal.id.clone(), terminal);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let runtime_count = app.terminal_runtimes.len();
+        app.state.context_menu = Some(ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                pane_id,
+                has_manual_label: false,
+            },
+            x: 2,
+            y: 2,
+            list: MenuListState::new(1),
+        });
+        app.state.mode = Mode::ContextMenu;
+
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert_eq!(app.terminal_runtimes.len(), runtime_count + 1);
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
     }
 
     #[test]

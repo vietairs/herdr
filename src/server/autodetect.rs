@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use super::headless::client_socket_path;
+use super::socket_paths::client_socket_path;
 
 /// Maximum time to wait for the server's client socket to become ready
 /// after spawning the server process.
@@ -91,7 +91,7 @@ fn validate_running_server_compatibility() -> io::Result<()> {
         ));
     };
 
-    if status.protocol == Some(crate::server::protocol::PROTOCOL_VERSION) {
+    if status.protocol == Some(crate::protocol::PROTOCOL_VERSION) {
         return Ok(());
     }
 
@@ -103,7 +103,7 @@ fn validate_running_server_compatibility() -> io::Result<()> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unknown".to_string()),
         env!("CARGO_PKG_VERSION"),
-        crate::server::protocol::PROTOCOL_VERSION
+        crate::protocol::PROTOCOL_VERSION
     )))
 }
 

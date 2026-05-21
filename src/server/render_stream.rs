@@ -5,10 +5,9 @@ use ratatui::layout::{Position, Rect, Size};
 
 use crate::app::state::AppState;
 use crate::app::Mode;
-use crate::client::blit::{BlitEncoder, EncodedBlit};
-use crate::server::protocol::{
-    CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame,
-};
+use crate::protocol::render_ansi::{BlitEncoder, EncodedBlit};
+use crate::protocol::{CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame};
+use crate::terminal::TerminalRuntimeRegistry;
 
 /// Per-client render baseline for the negotiated render encoding.
 pub(crate) enum ClientRenderState {
@@ -217,29 +216,33 @@ impl Backend for CursorTrackingBackend {
 /// This produces the same output as the monolithic binary's terminal draw,
 /// but writes to a `Buffer` instead of stdout. Cursor visibility is captured
 /// from explicit frame cursor intent rather than incidental backend state.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_virtual(
     app_state: &mut AppState,
     area: Rect,
     resize_panes: bool,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
-    render_virtual_with_cell_size(
+    let terminal_runtimes = TerminalRuntimeRegistry::new();
+    render_virtual_with_runtime_registry(
         app_state,
+        &terminal_runtimes,
         area,
         resize_panes,
         crate::kitty_graphics::HostCellSize::default(),
     )
 }
 
-pub(crate) fn render_virtual_with_cell_size(
+pub(crate) fn render_virtual_with_runtime_registry(
     app_state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
     area: Rect,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
     if resize_panes {
-        crate::ui::compute_view_with_cell_size(app_state, area, cell_size);
+        crate::ui::compute_view_with_cell_size(app_state, terminal_runtimes, area, cell_size);
     } else {
-        crate::ui::compute_view_without_resizing_panes(app_state, area);
+        crate::ui::compute_view_without_resizing_panes(app_state, terminal_runtimes, area);
     }
 
     let backend = CursorTrackingBackend::new(area.width, area.height);
@@ -247,13 +250,13 @@ pub(crate) fn render_virtual_with_cell_size(
 
     terminal
         .draw(|frame| {
-            crate::ui::render(app_state, frame);
+            crate::ui::render_with_runtime_registry(app_state, terminal_runtimes, frame);
         })
         .expect("render to TestBackend should never fail");
 
     let buffer = terminal.backend().buffer().clone();
-    let cursor =
-        focused_terminal_cursor(app_state).or_else(|| terminal.backend().rendered_cursor());
+    let cursor = focused_terminal_cursor(app_state, terminal_runtimes)
+        .or_else(|| terminal.backend().rendered_cursor());
 
     (buffer, cursor)
 }
@@ -286,7 +289,10 @@ pub(crate) fn render_terminal_virtual(
     (buffer, cursor)
 }
 
-pub(crate) fn visible_hyperlinks(app_state: &AppState) -> Vec<((u16, u16), String, String)> {
+pub(crate) fn visible_hyperlinks(
+    app_state: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Vec<((u16, u16), String, String)> {
     let Some(ws_idx) = app_state.active else {
         return Vec::new();
     };
@@ -302,7 +308,7 @@ pub(crate) fn visible_hyperlinks(app_state: &AppState) -> Vec<((u16, u16), Strin
     for info in &app_state.view.pane_infos {
         if let Some(runtime) = tab
             .terminal_id(info.id)
-            .and_then(|terminal_id| app_state.terminal_runtimes.get(terminal_id))
+            .and_then(|terminal_id| terminal_runtimes.get(terminal_id))
         {
             links.extend(runtime.visible_hyperlinks(info.inner_rect));
         }
@@ -310,7 +316,10 @@ pub(crate) fn visible_hyperlinks(app_state: &AppState) -> Vec<((u16, u16), Strin
     links
 }
 
-fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
+fn focused_terminal_cursor(
+    app_state: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Option<CursorState> {
     if app_state.mode != Mode::Terminal {
         return None;
     }
@@ -321,7 +330,7 @@ fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
         .pane_infos
         .iter()
         .find(|info| info.is_focused)?;
-    let rt = app_state.runtime_for_pane_in_workspace(ws_idx, info.id)?;
+    let rt = app_state.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)?;
     let scrolled_back = crate::ui::pane_is_scrolled_back(rt);
 
     // Determine whether the IME-anchor reveal applies to this focused pane.

@@ -336,9 +336,7 @@ impl App {
             self.render_dirty.clone(),
         )
         .map_err(|err| AgentStartError::SpawnFailed(err.to_string()))?;
-        self.state
-            .terminal_runtimes
-            .insert(terminal.id.clone(), runtime);
+        self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);
         let ws_idx = self.state.workspaces.len() - 1;
@@ -386,8 +384,7 @@ impl App {
                 target: target_pane.raw().to_string(),
             })?
             .map_err(|err| AgentStartError::SpawnFailed(err.to_string()))?;
-        self.state
-            .terminal_runtimes
+        self.terminal_runtimes
             .insert(result.1.terminal.id.clone(), result.1.runtime);
         self.state
             .terminals
