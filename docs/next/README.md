@@ -90,7 +90,7 @@ ssh you@yourserver
 herdr
 ```
 
-or attach from your local terminal through ssh without opening a shell first. your local herdr acts as a thin client, connects over ssh, starts or attaches to the remote herdr server, and streams the ui back to your terminal.
+or attach from your local terminal through ssh without opening a shell first. your local herdr acts as a thin client, connects over ssh, starts or attaches to the remote herdr server, and streams the ui back to your terminal. remote attach uses your local keybindings by default; pass `--remote-keybindings server` to use the remote server config instead.
 
 ```bash
 herdr --remote workbox

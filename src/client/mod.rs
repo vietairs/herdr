@@ -32,8 +32,8 @@ use tracing::{debug, info, warn};
 
 use crate::server::headless::client_socket_path;
 use crate::server::protocol::{
-    self, ClientMessage, NotifyKind, RenderEncoding, ServerMessage, MAX_CLIPBOARD_IMAGE_PAYLOAD,
-    MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
+    self, ClientKeybindings, ClientMessage, NotifyKind, RenderEncoding, ServerMessage,
+    MAX_CLIPBOARD_IMAGE_PAYLOAD, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
@@ -309,6 +309,20 @@ fn requested_render_encoding() -> RenderEncoding {
     }
 }
 
+fn requested_keybindings() -> ClientKeybindings {
+    match std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR)
+        .ok()
+        .as_deref()
+    {
+        Some("local") => crate::config::Config::load()
+            .config
+            .local_keybindings_profile_toml()
+            .map(|keys_toml| ClientKeybindings::Local { keys_toml })
+            .unwrap_or(ClientKeybindings::Server),
+        _ => ClientKeybindings::Server,
+    }
+}
+
 /// Performs the client→server handshake.
 ///
 /// Sends Hello with the terminal size and protocol version, reads the Welcome
@@ -333,6 +347,7 @@ fn do_handshake(
         cell_width_px,
         cell_height_px,
         requested_encoding,
+        keybindings: requested_keybindings(),
     };
     protocol::write_message(stream, &hello)
         .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;

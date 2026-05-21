@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crossterm::event::KeyEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::Config;
@@ -9,13 +9,13 @@ use crate::input::TerminalKey;
 
 pub type KeyCombo = (KeyCode, KeyModifiers);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LiveKeybindConfig {
     pub prefix: KeyCombo,
     pub keybinds: Keybinds,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum BindingConfig {
     One(String),
@@ -45,7 +45,7 @@ impl BindingConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandKeybindType {
     #[default]
@@ -53,7 +53,7 @@ pub enum CommandKeybindType {
     Pane,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CommandKeybindConfig {
     /// Key that runs a command. Use `prefix+g` for prefix mode or a modified chord for direct mode.

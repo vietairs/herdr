@@ -209,6 +209,19 @@ fn derive_client_socket_from_api_socket(api_socket_path: &Path) -> PathBuf {
     parent.join(format!("{stem}-client.sock"))
 }
 
+fn app_keybindings(app: &app::App) -> crate::config::LiveKeybindConfig {
+    crate::config::LiveKeybindConfig {
+        prefix: (app.state.prefix_code, app.state.prefix_mods),
+        keybinds: app.state.keybinds.clone(),
+    }
+}
+
+fn apply_keybindings(app: &mut app::App, keybindings: &crate::config::LiveKeybindConfig) {
+    app.state.prefix_code = keybindings.prefix.0;
+    app.state.prefix_mods = keybindings.prefix.1;
+    app.state.keybinds = keybindings.keybinds.clone();
+}
+
 // ---------------------------------------------------------------------------
 // Connected client state
 // ---------------------------------------------------------------------------
@@ -231,6 +244,8 @@ type RenderTarget = (
 struct ClientConnection {
     /// Whether this connection is the full app client or a direct terminal attach.
     mode: ClientConnectionMode,
+    /// Client-local app keybindings. None means use the server's keybindings.
+    keybindings: Option<Box<crate::config::LiveKeybindConfig>>,
     /// The client's terminal size (after clamping).
     terminal_size: (u16, u16),
     /// Pixel size of one client terminal cell.
@@ -270,6 +285,7 @@ impl ClientConnection {
     ) -> Self {
         Self::new_with_mode(
             ClientConnectionMode::App,
+            None,
             terminal_size,
             cell_size,
             host_terminal_theme,
@@ -282,6 +298,7 @@ impl ClientConnection {
 
     fn new_with_mode(
         mode: ClientConnectionMode,
+        keybindings: Option<Box<crate::config::LiveKeybindConfig>>,
         terminal_size: (u16, u16),
         cell_size: crate::kitty_graphics::HostCellSize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
@@ -292,6 +309,7 @@ impl ClientConnection {
     ) -> Self {
         Self {
             mode,
+            keybindings,
             terminal_size,
             cell_size,
             host_terminal_theme,
@@ -349,8 +367,10 @@ pub struct HeadlessServer {
     client_socket_path: PathBuf,
     clients: HashMap<u64, ClientConnection>,
     next_client_id: u64,
-    /// The client currently driving the shared pane runtime size and theme.
+    /// The client currently driving the shared pane runtime size, theme, and input keybindings.
     foreground_client_id: Option<u64>,
+    /// Server-owned keybindings, restored when foreground clients use server mode.
+    server_keybindings: crate::config::LiveKeybindConfig,
     /// Writable direct attach owner per terminal id string.
     terminal_attach_owners: HashMap<String, u64>,
     /// Monotonic activity counter used to pick the most recently active client.
@@ -390,6 +410,7 @@ impl HeadlessServer {
 
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
+        let server_keybindings = app_keybindings(&app);
 
         Ok(Self {
             app,
@@ -398,6 +419,7 @@ impl HeadlessServer {
             clients: HashMap::new(),
             next_client_id: 1,
             foreground_client_id: None,
+            server_keybindings,
             terminal_attach_owners: HashMap::new(),
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
@@ -498,7 +520,7 @@ impl HeadlessServer {
 
             if self.app.state.request_reload_config {
                 self.app.state.request_reload_config = false;
-                self.app.reload_config();
+                self.reload_server_config();
                 needs_render = true;
             }
 
@@ -611,23 +633,42 @@ impl HeadlessServer {
         let Some(client_id) = self.foreground_client_id else {
             self.effective_size = (MIN_COLS, MIN_ROWS);
             self.app.state.outer_terminal_focus = None;
+            let server_keybindings = self.server_keybindings.clone();
+            apply_keybindings(&mut self.app, &server_keybindings);
             return;
         };
         let Some(client) = self.clients.get(&client_id) else {
             self.foreground_client_id = None;
             self.effective_size = (MIN_COLS, MIN_ROWS);
             self.app.state.outer_terminal_focus = None;
+            let server_keybindings = self.server_keybindings.clone();
+            apply_keybindings(&mut self.app, &server_keybindings);
             return;
         };
 
         self.effective_size = client.terminal_size;
         self.app.state.outer_terminal_focus = client.outer_terminal_focus;
+        let keybindings = client
+            .keybindings
+            .as_deref()
+            .unwrap_or(&self.server_keybindings)
+            .clone();
+        apply_keybindings(&mut self.app, &keybindings);
         if client.outer_terminal_focus == Some(true) {
             self.app.state.mark_active_tab_seen();
         }
         if !client.host_terminal_theme.is_empty() {
             self.app.set_host_terminal_theme(client.host_terminal_theme);
         }
+    }
+
+    fn reload_server_config(&mut self) -> crate::config::ConfigReloadReport {
+        let server_keybindings = self.server_keybindings.clone();
+        apply_keybindings(&mut self.app, &server_keybindings);
+        let report = self.app.reload_config();
+        self.server_keybindings = app_keybindings(&self.app);
+        self.sync_foreground_client_state();
+        report
     }
 
     fn foreground_client_outer_focus(&self) -> Option<bool> {
@@ -1393,6 +1434,7 @@ impl HeadlessServer {
                 rows,
                 cell_width_px,
                 cell_height_px,
+                keybindings,
                 writer,
                 render_encoding,
             } => {
@@ -1410,6 +1452,7 @@ impl HeadlessServer {
                     client_id,
                     ClientConnection::new_with_mode(
                         ClientConnectionMode::App,
+                        keybindings,
                         (cols, rows),
                         crate::kitty_graphics::HostCellSize {
                             width_px: cell_width_px,
@@ -1675,7 +1718,31 @@ impl HeadlessServer {
         };
 
         self.sync_foreground_client_state();
-        let response = self.app.handle_api_request(msg.request);
+        let response = if matches!(
+            &msg.request.method,
+            api::schema::Method::ServerReloadConfig(_)
+        ) {
+            let report = self.reload_server_config();
+            serde_json::to_string(&api::schema::SuccessResponse {
+                id: msg.request.id.clone(),
+                result: api::schema::ResponseResult::ConfigReload {
+                    status: report.status,
+                    diagnostics: report.diagnostics,
+                },
+            })
+            .unwrap_or_else(|err| {
+                serde_json::to_string(&api::schema::ErrorResponse {
+                    id: String::new(),
+                    error: api::schema::ErrorBody {
+                        code: "serialization_error".into(),
+                        message: err.to_string(),
+                    },
+                })
+                .unwrap_or_else(|_| "{}".to_string())
+            })
+        } else {
+            self.app.handle_api_request(msg.request)
+        };
         let _ = msg.respond_to.send(response);
 
         // Forward new toast state only when a client-local delivery mode is selected.
@@ -2373,6 +2440,7 @@ mod tests {
             .set_nonblocking(true)
             .expect("set listener nonblocking");
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
+        let server_keybindings = app_keybindings(&app);
 
         HeadlessServer {
             app,
@@ -2381,6 +2449,7 @@ mod tests {
             clients: HashMap::new(),
             next_client_id: 1,
             foreground_client_id: None,
+            server_keybindings,
             terminal_attach_owners: HashMap::new(),
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
@@ -2428,6 +2497,68 @@ mod tests {
     }
 
     #[test]
+    fn foreground_client_applies_client_keybindings() {
+        let mut server = test_headless_server();
+        let local_config: crate::config::Config = toml::from_str(
+            r#"
+[keys]
+prefix = "ctrl+a"
+new_tab = "prefix+t"
+"#,
+        )
+        .unwrap();
+        let local_keybindings = local_config.live_keybinds().unwrap();
+        let (writer_a, _control_a, _render_a) = test_client_writer();
+        let (writer_b, _control_b, _render_b) = test_client_writer();
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: Some(Box::new(local_keybindings)),
+            writer: writer_a,
+        }));
+        assert_eq!(
+            server.app.state.prefix_code,
+            crossterm::event::KeyCode::Char('a')
+        );
+        assert!(server
+            .app
+            .state
+            .keybinds
+            .new_tab
+            .bindings
+            .iter()
+            .any(|binding| binding.label == "prefix+t"));
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            writer: writer_b,
+        }));
+        assert_eq!(
+            server.app.state.prefix_code,
+            crossterm::event::KeyCode::Char('b')
+        );
+        assert!(server
+            .app
+            .state
+            .keybinds
+            .new_tab
+            .bindings
+            .iter()
+            .any(|binding| binding.label == "prefix+c"));
+    }
+
+    #[test]
     fn terminal_attach_rejects_missing_terminal_and_removes_client() {
         let mut server = test_headless_server();
         let (writer, control_rx, _render_rx) = test_client_writer();
@@ -2439,6 +2570,7 @@ mod tests {
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
+            keybindings: None,
             writer,
         }));
         assert!(server.clients.contains_key(&7));
@@ -2479,6 +2611,7 @@ mod tests {
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
+            keybindings: None,
             writer,
         }));
         assert!(

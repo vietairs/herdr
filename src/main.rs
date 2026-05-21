@@ -394,6 +394,8 @@ fn main() -> io::Result<()> {
         println!("  --no-session        Run monolithically (no server/client, escape hatch)");
         println!("  --session <name>    Use or create a named persistent session");
         println!("  --remote <target>   Attach through SSH to a remote Herdr server");
+        println!("  --remote-keybindings <local|server>");
+        println!("                      Keybindings for --remote app attach (default: local)");
         println!("  --default-config    Print default configuration and exit");
         println!("  --version, -V       Print version and exit");
         println!("  --help, -h          Show this help");
@@ -420,6 +422,7 @@ fn main() -> io::Result<()> {
         "--no-session",
         "--session",
         "--remote",
+        "--remote-keybindings",
         "--version",
         "-V",
         "--default-config",
@@ -427,7 +430,8 @@ fn main() -> io::Result<()> {
         "-h",
     ];
     for arg in &args[1..] {
-        if arg.starts_with('-') && !known_flags.contains(&arg.as_str()) {
+        let arg_name = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
+        if arg.starts_with('-') && !known_flags.contains(&arg_name) {
             eprintln!("unknown option: {arg}");
             eprintln!("run 'herdr --help' for usage");
             std::process::exit(1);

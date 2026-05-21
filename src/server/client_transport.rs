@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::server::protocol::{
-    self, ClientMessage, RenderEncoding, ServerMessage, MAX_CLIPBOARD_IMAGE_PAYLOAD,
-    MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
+    self, ClientKeybindings, ClientMessage, RenderEncoding, ServerMessage,
+    MAX_CLIPBOARD_IMAGE_PAYLOAD, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 /// Minimum accepted attached client size.
@@ -55,6 +55,7 @@ pub(crate) enum ServerEvent {
         cell_width_px: u32,
         cell_height_px: u32,
         render_encoding: RenderEncoding,
+        keybindings: Option<Box<crate::config::LiveKeybindConfig>>,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -96,6 +97,23 @@ pub(crate) fn clamp_terminal_size(cols: u16, rows: u16) -> (u16, u16) {
     (clamped_cols, clamped_rows)
 }
 
+fn parse_client_keybindings(
+    keybindings: ClientKeybindings,
+) -> Result<Option<Box<crate::config::LiveKeybindConfig>>, String> {
+    match keybindings {
+        ClientKeybindings::Server => Ok(None),
+        ClientKeybindings::Local { keys_toml } => {
+            let mut config = toml::from_str::<crate::config::Config>(&keys_toml)
+                .map_err(|err| format!("invalid client keybindings: {err}"))?;
+            config.keys.command.clear();
+            Ok(Some(Box::new(crate::config::LiveKeybindConfig {
+                prefix: config.prefix_key(),
+                keybinds: config.keybinds(),
+            })))
+        }
+    }
+}
+
 /// Handles the client handshake on a blocking thread.
 ///
 /// Reads the `Hello` message, validates the version, sends `Welcome`,
@@ -130,52 +148,68 @@ pub(crate) fn handle_client_handshake(
         }
     };
 
-    let (client_cols, client_rows, cell_width_px, cell_height_px, render_encoding) = match hello {
-        ClientMessage::Hello {
-            version,
-            cols,
-            rows,
-            cell_width_px,
-            cell_height_px,
-            requested_encoding,
-        } => {
-            // Version check.
-            match protocol::check_client_version(version) {
-                protocol::VersionCheck::Compatible => {}
-                protocol::VersionCheck::Incompatible(reason) => {
-                    // Send rejection Welcome.
-                    let welcome = ServerMessage::Welcome {
-                        version: PROTOCOL_VERSION,
-                        encoding: RenderEncoding::SemanticFrame,
-                        error: Some(reason),
-                    };
-                    let _ = protocol::write_message(&mut stream, &welcome);
-                    return Ok(());
-                }
-            }
-
-            // Clamp size.
-            let (clamped_cols, clamped_rows) = clamp_terminal_size(cols, rows);
-            (
-                clamped_cols,
-                clamped_rows,
+    let (client_cols, client_rows, cell_width_px, cell_height_px, render_encoding, keybindings) =
+        match hello {
+            ClientMessage::Hello {
+                version,
+                cols,
+                rows,
                 cell_width_px,
                 cell_height_px,
                 requested_encoding,
-            )
-        }
-        _ => {
-            // First message must be Hello.
-            debug!(client_id, "first message was not Hello, closing");
-            let welcome = ServerMessage::Welcome {
-                version: PROTOCOL_VERSION,
-                encoding: RenderEncoding::SemanticFrame,
-                error: Some("expected Hello as first message".to_owned()),
-            };
-            let _ = protocol::write_message(&mut stream, &welcome);
-            return Ok(());
-        }
-    };
+                keybindings,
+            } => {
+                // Version check.
+                match protocol::check_client_version(version) {
+                    protocol::VersionCheck::Compatible => {}
+                    protocol::VersionCheck::Incompatible(reason) => {
+                        // Send rejection Welcome.
+                        let welcome = ServerMessage::Welcome {
+                            version: PROTOCOL_VERSION,
+                            encoding: RenderEncoding::SemanticFrame,
+                            error: Some(reason),
+                        };
+                        let _ = protocol::write_message(&mut stream, &welcome);
+                        return Ok(());
+                    }
+                }
+
+                let keybindings = match parse_client_keybindings(keybindings) {
+                    Ok(keybindings) => keybindings,
+                    Err(error) => {
+                        let welcome = ServerMessage::Welcome {
+                            version: PROTOCOL_VERSION,
+                            encoding: RenderEncoding::SemanticFrame,
+                            error: Some(error),
+                        };
+                        let _ = protocol::write_message(&mut stream, &welcome);
+                        return Ok(());
+                    }
+                };
+
+                // Clamp size.
+                let (clamped_cols, clamped_rows) = clamp_terminal_size(cols, rows);
+                (
+                    clamped_cols,
+                    clamped_rows,
+                    cell_width_px,
+                    cell_height_px,
+                    requested_encoding,
+                    keybindings,
+                )
+            }
+            _ => {
+                // First message must be Hello.
+                debug!(client_id, "first message was not Hello, closing");
+                let welcome = ServerMessage::Welcome {
+                    version: PROTOCOL_VERSION,
+                    encoding: RenderEncoding::SemanticFrame,
+                    error: Some("expected Hello as first message".to_owned()),
+                };
+                let _ = protocol::write_message(&mut stream, &welcome);
+                return Ok(());
+            }
+        };
 
     // Send Welcome.
     let welcome = ServerMessage::Welcome {
@@ -204,6 +238,7 @@ pub(crate) fn handle_client_handshake(
         cell_width_px,
         cell_height_px,
         render_encoding,
+        keybindings,
         writer,
     });
 
@@ -447,6 +482,54 @@ mod tests {
     }
 
     #[test]
+    fn parse_client_keybindings_accepts_local_profile() {
+        let keybindings = parse_client_keybindings(ClientKeybindings::Local {
+            keys_toml: r#"
+[keys]
+prefix = "ctrl+a"
+new_tab = "prefix+t"
+
+[[keys.command]]
+key = "prefix+g"
+command = "lazygit"
+"#
+            .to_owned(),
+        })
+        .expect("valid client keybindings")
+        .expect("local profile");
+
+        assert_eq!(keybindings.prefix.0, crossterm::event::KeyCode::Char('a'));
+        assert!(keybindings
+            .keybinds
+            .new_tab
+            .bindings
+            .iter()
+            .any(|binding| binding.label == "prefix+t"));
+        assert!(keybindings.keybinds.custom_commands.is_empty());
+    }
+
+    #[test]
+    fn parse_client_keybindings_tolerates_disabled_bindings() {
+        let keybindings = parse_client_keybindings(ClientKeybindings::Local {
+            keys_toml: r#"
+[keys]
+new_tab = "ctrl+notakey"
+"#
+            .to_owned(),
+        })
+        .expect("diagnostic-only client keybindings should be accepted")
+        .expect("local profile");
+
+        assert!(keybindings.keybinds.new_tab.bindings.is_empty());
+        assert!(keybindings
+            .keybinds
+            .next_tab
+            .bindings
+            .iter()
+            .any(|binding| binding.label == "prefix+n"));
+    }
+
+    #[test]
     fn handshake_negotiates_terminal_ansi_encoding() {
         let (mut client_stream, server_stream) = UnixStream::pair().expect("socket pair");
         let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
@@ -465,6 +548,7 @@ mod tests {
                 cell_width_px: 8,
                 cell_height_px: 16,
                 requested_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: ClientKeybindings::Server,
             },
         )
         .expect("write hello");
@@ -495,12 +579,14 @@ mod tests {
                 cell_width_px,
                 cell_height_px,
                 render_encoding,
+                keybindings,
                 writer,
             } => {
                 assert_eq!(client_id, 42);
                 assert_eq!((cols, rows), (100, 30));
                 assert_eq!((cell_width_px, cell_height_px), (8, 16));
                 assert_eq!(render_encoding, RenderEncoding::TerminalAnsi);
+                assert!(keybindings.is_none());
                 drop(writer);
             }
             other => panic!("expected ClientConnected, got {other:?}"),

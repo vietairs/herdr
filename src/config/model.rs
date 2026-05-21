@@ -89,7 +89,7 @@ pub struct LoadedConfig {
     pub invalid_sections: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct KeysConfig {
     /// Prefix key to enter prefix mode (e.g. "ctrl+b", "f12", "esc").
@@ -168,10 +168,11 @@ pub struct KeysConfig {
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<CommandKeybindConfig>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct IndexedKeysConfig {
     /// Modifier combo for tab shortcuts 1-9. Unset by default.
