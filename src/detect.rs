@@ -434,11 +434,19 @@ fn has_kimi_working_status(content: &str) -> bool {
 
 /// Kiro CLI detection.
 ///
-/// Kiro exposes reliable working and idle terminal markers. Confirmation
-/// prompts currently render as normal inline conversation followed by the input
-/// prompt, so they are intentionally treated as idle instead of guessing.
+/// Kiro exposes reliable working and idle terminal markers. Tool approval
+/// prompts render with a stable "requires approval" line and an action menu.
 fn detect_kiro(content: &str) -> AgentState {
     let lower = content.to_lowercase();
+
+    let has_approval_request = lower.contains("requires approval");
+    let has_approval_actions = lower.contains("yes, single permission")
+        || lower.contains("trust, always allow")
+        || lower.contains("no (tab to edit)")
+        || lower.contains("esc to close");
+    if has_approval_request && has_approval_actions {
+        return AgentState::Blocked;
+    }
 
     if lower.contains("kiro is working")
         || (lower.contains("esc to cancel") && has_kiro_tool_spinner(content))
@@ -2122,6 +2130,12 @@ mod tests {
     fn kiro_idle_at_prompt() {
         let screen = "● 1 MCP failure — see /mcp\n──────────────────────────────────────────────────────────────────────────────────────\nKiro · auto · ◔ 6%                                                                   ~\n\n ask a question or describe a task ↵\n                                                                   /copy to clipboard";
         assert_eq!(detect_state(Some(Agent::Kiro), screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn kiro_blocked_on_tool_approval_prompt() {
+        let screen = "↓ Shell mkdir -p /tmp/test-kiro-{a,b,c} && ls /tmp/test-kiro-*\n\n─────────────────────────────────────────────────────────────────────────────────────────\n shell requires approval\n ❯ Yes, single permission\n   Trust, always allow in this session\n   No (Tab to edit)\n─────────────────────────────────────────────────────────────────────────────────────────\n ESC to close | Tab to edit";
+        assert_eq!(detect_state(Some(Agent::Kiro), screen), AgentState::Blocked);
     }
 
     #[test]
