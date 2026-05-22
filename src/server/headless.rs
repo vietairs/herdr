@@ -104,6 +104,10 @@ pub struct HeadlessServer {
     foreground_client_id: Option<u64>,
     /// Server-owned keybindings, restored when foreground clients use server mode.
     server_keybindings: crate::config::LiveKeybindConfig,
+    /// Full server config warning shown to clients that use server keybindings.
+    server_config_diagnostic: Option<String>,
+    /// Server config warning with keybinding diagnostics removed for local-keybinding clients.
+    server_config_diagnostic_without_keybindings: Option<String>,
     /// Writable direct attach owner per terminal id string.
     terminal_attach_owners: HashMap<String, u64>,
     /// Monotonic activity counter used to pick the most recently active client.
@@ -128,7 +132,7 @@ impl HeadlessServer {
     /// 1. Prepares the client socket path (cleans up stale sockets)
     /// 2. Binds the client socket listener
     /// 3. Returns the server ready to run
-    pub fn new(app: app::App) -> io::Result<Self> {
+    pub fn new(app: app::App, config_diagnostics: &[String]) -> io::Result<Self> {
         let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
 
@@ -144,6 +148,8 @@ impl HeadlessServer {
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
         let server_keybindings = app_keybindings(&app);
+        let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
+            server_config_diagnostic_summaries(config_diagnostics);
 
         Ok(Self {
             app,
@@ -153,6 +159,8 @@ impl HeadlessServer {
             next_client_id: 1,
             foreground_client_id: None,
             server_keybindings,
+            server_config_diagnostic,
+            server_config_diagnostic_without_keybindings,
             terminal_attach_owners: HashMap::new(),
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
@@ -294,7 +302,7 @@ impl HeadlessServer {
 
             if self.app.state.request_reload_config {
                 self.app.state.request_reload_config = false;
-                self.reload_server_config();
+                self.reload_server_config(true);
                 needs_render = true;
             }
 
@@ -418,6 +426,7 @@ impl HeadlessServer {
             self.app.state.outer_terminal_focus = None;
             let server_keybindings = self.server_keybindings.clone();
             apply_keybindings(&mut self.app, &server_keybindings);
+            self.sync_visible_server_config_diagnostic(false);
             return;
         };
         let Some(client) = self.clients.get(&client_id) else {
@@ -426,30 +435,56 @@ impl HeadlessServer {
             self.app.state.outer_terminal_focus = None;
             let server_keybindings = self.server_keybindings.clone();
             apply_keybindings(&mut self.app, &server_keybindings);
+            self.sync_visible_server_config_diagnostic(false);
             return;
         };
 
-        self.effective_size = client.terminal_size;
-        self.app.state.outer_terminal_focus = client.outer_terminal_focus;
+        let terminal_size = client.terminal_size;
+        let outer_terminal_focus = client.outer_terminal_focus;
+        let host_terminal_theme = client.host_terminal_theme;
+        let uses_local_keybindings = client.keybindings.is_some();
         let keybindings = client
             .keybindings
             .as_deref()
             .unwrap_or(&self.server_keybindings)
             .clone();
+
+        self.effective_size = terminal_size;
+        self.app.state.outer_terminal_focus = outer_terminal_focus;
         apply_keybindings(&mut self.app, &keybindings);
-        if client.outer_terminal_focus == Some(true) {
+        self.sync_visible_server_config_diagnostic(uses_local_keybindings);
+        if outer_terminal_focus == Some(true) {
             self.app.state.mark_active_tab_seen();
         }
-        if !client.host_terminal_theme.is_empty() {
-            self.app.set_host_terminal_theme(client.host_terminal_theme);
+        if !host_terminal_theme.is_empty() {
+            self.app.set_host_terminal_theme(host_terminal_theme);
         }
     }
 
-    fn reload_server_config(&mut self) -> crate::config::ConfigReloadReport {
+    fn sync_visible_server_config_diagnostic(&mut self, uses_local_keybindings: bool) {
+        let visible = if uses_local_keybindings {
+            &self.server_config_diagnostic_without_keybindings
+        } else {
+            &self.server_config_diagnostic
+        };
+        if self.app.state.config_diagnostic == self.server_config_diagnostic
+            || self.app.state.config_diagnostic == self.server_config_diagnostic_without_keybindings
+        {
+            self.app.state.config_diagnostic = visible.clone();
+        }
+    }
+
+    fn reload_server_config(&mut self, notify_success: bool) -> crate::config::ConfigReloadReport {
         let server_keybindings = self.server_keybindings.clone();
         apply_keybindings(&mut self.app, &server_keybindings);
-        let report = self.app.reload_config();
+        let report = self.app.apply_config_from_disk(notify_success);
+        self.app.take_config_reloaded_from_disk();
         self.server_keybindings = app_keybindings(&self.app);
+        let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
+            server_config_diagnostic_summaries(&report.diagnostics);
+        self.server_config_diagnostic = server_config_diagnostic;
+        self.server_config_diagnostic_without_keybindings =
+            server_config_diagnostic_without_keybindings;
         self.sync_foreground_client_state();
         report
     }
@@ -1225,6 +1260,11 @@ impl HeadlessServer {
                 let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
                 self.app
                     .route_client_events(events, self.foreground_client_id == Some(client_id));
+                if self.app.take_config_reloaded_from_disk() {
+                    self.reload_server_config(false);
+                } else {
+                    self.sync_foreground_client_state();
+                }
 
                 // Check if the detach keybind was triggered during input processing.
                 if self.app.state.detach_requested {
@@ -1431,7 +1471,7 @@ impl HeadlessServer {
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)
         ) {
-            let report = self.reload_server_config();
+            let report = self.reload_server_config(true);
             serde_json::to_string(&api::schema::SuccessResponse {
                 id: msg.request.id.clone(),
                 result: api::schema::ResponseResult::ConfigReload {
@@ -2020,6 +2060,22 @@ async fn sleep_until_or_pending(deadline: Option<Instant>) {
     }
 }
 
+fn server_config_diagnostic_summaries(diagnostics: &[String]) -> (Option<String>, Option<String>) {
+    let without_keybindings = diagnostics
+        .iter()
+        .filter(|diagnostic| !is_keybinding_config_diagnostic(diagnostic))
+        .cloned()
+        .collect::<Vec<_>>();
+    (
+        config::config_diagnostic_summary(diagnostics),
+        config::config_diagnostic_summary(&without_keybindings),
+    )
+}
+
+fn is_keybinding_config_diagnostic(diagnostic: &str) -> bool {
+    diagnostic.contains("keybinding") || diagnostic.contains("keys.")
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -2067,7 +2123,7 @@ pub fn run_server() -> io::Result<()> {
         app.local_terminal_notifications = false;
 
         // Create the headless server.
-        let mut server = match HeadlessServer::new(app) {
+        let mut server = match HeadlessServer::new(app, &loaded_config.diagnostics) {
             Ok(server) => server,
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
                 eprintln!("error: herdr server is already running");
@@ -2154,6 +2210,8 @@ mod tests {
             next_client_id: 1,
             foreground_client_id: None,
             server_keybindings,
+            server_config_diagnostic: None,
+            server_config_diagnostic_without_keybindings: None,
             terminal_attach_owners: HashMap::new(),
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
@@ -2260,6 +2318,194 @@ new_tab = "prefix+t"
             .bindings
             .iter()
             .any(|binding| binding.label == "prefix+c"));
+    }
+
+    #[test]
+    fn local_keybinding_client_hides_server_keybinding_warnings() {
+        let mut server = test_headless_server();
+        let diagnostics = vec![
+            "unsafe direct keybinding: keys.close_pane = \"x\" would intercept typing".to_owned(),
+            "theme warning".to_owned(),
+        ];
+        let (full, without_keybindings) = server_config_diagnostic_summaries(&diagnostics);
+        server.server_config_diagnostic = full.clone();
+        server.server_config_diagnostic_without_keybindings = without_keybindings.clone();
+        server.app.state.config_diagnostic = full;
+        let local_keybindings = crate::config::Config::default().live_keybinds().unwrap();
+        let (writer_a, _control_a, _render_a) = test_client_writer();
+        let (writer_b, _control_b, _render_b) = test_client_writer();
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: Some(Box::new(local_keybindings)),
+            writer: writer_a,
+        }));
+        assert_eq!(server.app.state.config_diagnostic, without_keybindings);
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            writer: writer_b,
+        }));
+        assert_eq!(
+            server.app.state.config_diagnostic,
+            server.server_config_diagnostic
+        );
+    }
+
+    #[test]
+    fn local_keybinding_client_keeps_local_keybindings_after_settings_save() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-headless-settings-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut server = test_headless_server();
+        let local_config: crate::config::Config = toml::from_str(
+            r#"
+[keys]
+prefix = "ctrl+a"
+new_workspace = "prefix+n"
+next_tab = ""
+"#,
+        )
+        .unwrap();
+        let local_keybindings = local_config.live_keybinds().unwrap();
+        let (writer, _control, _render) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: Some(Box::new(local_keybindings)),
+            writer,
+        }));
+        server.app.state.mode = crate::app::Mode::Settings;
+        server.app.state.settings.section = crate::app::state::SettingsSection::Toast;
+        server.app.state.settings.list.selected = 1;
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\r".to_vec(),
+        }));
+
+        assert_eq!(
+            server.app.state.prefix_code,
+            crossterm::event::KeyCode::Char('a')
+        );
+        assert!(server
+            .app
+            .state
+            .keybinds
+            .new_workspace
+            .bindings
+            .iter()
+            .any(|binding| binding.label == "prefix+n"));
+        assert!(server.app.state.toast.is_none());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("delivery = \"herdr\""));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_server_keybindings_do_not_cache_local_keybindings_after_settings_save() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-headless-invalid-settings-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(
+            &path,
+            "onboarding = false\n[keys]\nnew_workspace = \"x\"\n[ui.toast]\ndelivery = \"off\"\n",
+        )
+        .unwrap();
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut server = test_headless_server();
+        let previous_server_config: crate::config::Config =
+            toml::from_str("[keys]\nprefix = \"ctrl+c\"\nnew_workspace = \"prefix+m\"\n").unwrap();
+        server.server_keybindings = previous_server_config.live_keybinds().unwrap();
+        let local_config: crate::config::Config = toml::from_str(
+            r#"
+[keys]
+prefix = "ctrl+a"
+new_workspace = "prefix+n"
+next_tab = ""
+"#,
+        )
+        .unwrap();
+        let (writer_a, _control_a, _render_a) = test_client_writer();
+        let (writer_b, _control_b, _render_b) = test_client_writer();
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: Some(Box::new(local_config.live_keybinds().unwrap())),
+            writer: writer_a,
+        }));
+        server.app.state.mode = crate::app::Mode::Settings;
+        server.app.state.settings.section = crate::app::state::SettingsSection::Toast;
+        server.app.state.settings.list.selected = 1;
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\r".to_vec(),
+        }));
+
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            writer: writer_b,
+        }));
+        assert_eq!(
+            server.app.state.prefix_code,
+            crossterm::event::KeyCode::Char('c')
+        );
+        assert!(server
+            .app
+            .state
+            .keybinds
+            .new_workspace
+            .bindings
+            .iter()
+            .any(|binding| binding.label == "prefix+m"));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

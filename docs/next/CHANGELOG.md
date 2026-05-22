@@ -5,6 +5,9 @@
 ### Added
 - Added `terminal.new_cwd` to choose whether new panes, tabs, and workspaces follow the source pane/workspace, start in `$HOME`, use Herdr's process directory, or use a fixed path.
 
+### Fixed
+- Remote clients using local keybindings no longer show stale server keybinding warnings from the remote host.
+
 ## [0.6.1] - 2026-05-22
 
 ### Added
