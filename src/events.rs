@@ -3,6 +3,8 @@
 //! Background tasks (PTY child watchers, future hook listeners, etc.) send
 //! events to the main loop through this channel. No polling needed.
 
+use std::time::Instant;
+
 use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
 use crate::workspace::WorkspaceGitStatus;
@@ -30,6 +32,11 @@ pub enum AppEvent {
         pane_id: PaneId,
         agent: Option<Agent>,
         state: AgentState,
+        visible_blocker: bool,
+        visible_idle: bool,
+        visible_working: bool,
+        process_exited: bool,
+        observed_at: Instant,
     },
     /// Hook-authoritative agent state was reported for a pane.
     HookStateReported {

@@ -16,6 +16,24 @@ pub enum AgentState {
     Unknown,
 }
 
+/// Screen-derived agent state plus confidence metadata used for source arbitration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentDetection {
+    pub state: AgentState,
+    /// True when the current screen visibly shows live UI chrome that needs
+    /// human input. This is stronger than arbitrary prompt-like text in the
+    /// scrollback and may override a non-blocked integration state.
+    pub visible_blocker: bool,
+    /// True when the current screen visibly shows the agent's idle input UI.
+    /// This lets Herdr recover from integrations that miss an interrupt/stop
+    /// event without treating an empty or ambiguous screen as idle authority.
+    pub visible_idle: bool,
+    /// True when the current screen visibly shows live working chrome. This is
+    /// narrower than a fallback `Working` heuristic and may guard against stale
+    /// hook idle reports.
+    pub visible_working: bool,
+}
+
 /// Which agent we detected running in a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
@@ -135,11 +153,22 @@ pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Ag
 
 /// Detect the state of an agent from the live terminal tail snapshot.
 /// If `agent` is `None`, returns `Unknown`.
+#[cfg(test)]
 pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
+    detect_agent(agent, screen_content).state
+}
+
+/// Detect state and whether a visible blocker is present on the current screen.
+pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetection {
     let Some(agent) = agent else {
-        return AgentState::Unknown;
+        return AgentDetection {
+            state: AgentState::Unknown,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+        };
     };
-    match agent {
+    let state = match agent {
         Agent::Pi => detect_pi(screen_content),
         Agent::Claude => detect_claude(screen_content),
         Agent::Codex => detect_codex(screen_content),
@@ -155,6 +184,12 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
         Agent::Amp => detect_amp(screen_content),
         Agent::Grok => detect_grok(screen_content),
         Agent::Hermes => detect_hermes(screen_content),
+    };
+    AgentDetection {
+        state,
+        visible_blocker: has_visible_blocker(agent, screen_content, state),
+        visible_idle: has_visible_idle(agent, screen_content, state),
+        visible_working: has_visible_working(agent, screen_content, state),
     }
 }
 
@@ -201,14 +236,7 @@ fn detect_claude(content: &str) -> AgentState {
 
     // --- Working detection (content above the prompt box) ---
 
-    let above = content_above_prompt_box(content);
-    let above_lower = above.to_lowercase();
-
-    if above_lower.contains("esc to interrupt") || above_lower.contains("ctrl+c to interrupt") {
-        return AgentState::Working;
-    }
-
-    if has_spinner_activity(above) {
+    if has_claude_working_chrome(content) {
         return AgentState::Working;
     }
 
@@ -221,6 +249,7 @@ fn detect_codex(content: &str) -> AgentState {
     // Blocked patterns
     if lower.contains("press enter to confirm or esc to cancel")
         || lower.contains("enter to submit answer")
+        || lower.contains("enter to submit all")
         || lower.contains("allow command?")
         || lower.contains("[y/n]")
         || lower.contains("yes (y)")
@@ -681,10 +710,97 @@ fn has_spinner_activity(content: &str) -> bool {
     false
 }
 
+fn has_visible_blocker(agent: Agent, content: &str, state: AgentState) -> bool {
+    if state != AgentState::Blocked {
+        return false;
+    }
+
+    match agent {
+        // Strong visible blockers are opt-in because this flag can override
+        // hook authority. Plain blocked heuristics remain valid fallback state,
+        // but they must not become hook overrides unless the current UI chrome
+        // is known to be structural and live.
+        Agent::Claude => has_claude_visible_blocker(content),
+        Agent::Codex => has_codex_visible_blocker(content),
+        _ => false,
+    }
+}
+
+fn has_claude_visible_blocker(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    lower.contains("do you want to proceed?")
+        && has_claude_yes_no_choice(content)
+        && (lower.contains("bash command")
+            || lower.contains("bash(")
+            || lower.contains("contains expansion")
+            || lower.contains("tab to amend")
+            || lower.contains("ctrl+e to explain"))
+}
+
+fn has_codex_visible_blocker(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    lower.contains("press enter to confirm or esc to cancel")
+        || lower.contains("enter to submit answer")
+        || lower.contains("enter to submit all")
+        || lower.contains("allow command?")
+}
+
+fn has_visible_idle(agent: Agent, content: &str, state: AgentState) -> bool {
+    if state != AgentState::Idle {
+        return false;
+    }
+
+    match agent {
+        Agent::Claude => has_claude_prompt_box(content),
+        Agent::Codex => has_codex_prompt(content),
+        _ => false,
+    }
+}
+
+fn has_visible_working(agent: Agent, content: &str, state: AgentState) -> bool {
+    if state != AgentState::Working {
+        return false;
+    }
+
+    match agent {
+        Agent::Claude => has_claude_working_chrome(content),
+        Agent::Codex => has_codex_visible_working(content),
+        _ => false,
+    }
+}
+
+fn has_codex_visible_working(content: &str) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(working_index) = lines.iter().rposition(|line| {
+        let trimmed = line.trim_start();
+        let lower = trimmed.to_lowercase();
+        trimmed.starts_with('•')
+            && trimmed.contains("Working (")
+            && (lower.contains("esc to interrupt") || lower.contains("esc…"))
+    }) else {
+        return false;
+    };
+
+    lines[working_index + 1..].iter().all(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with('•')
+            && !trimmed.starts_with('■')
+            && !trimmed.starts_with('✗')
+            && !trimmed.starts_with('✓')
+    })
+}
+
 fn has_codex_working_header(content: &str) -> bool {
     content.lines().any(|line| {
         let trimmed = line.trim_start();
         trimmed.starts_with('•') && trimmed.contains("Working (")
+    })
+}
+
+fn has_codex_prompt(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed == "›" || trimmed.starts_with("› ")
     })
 }
 
@@ -799,26 +915,58 @@ fn has_opencode_question_prompt(content: &str) -> bool {
     lower.contains("esc dismiss") && has_enter_action && has_question_nav
 }
 
+fn has_claude_working_chrome(content: &str) -> bool {
+    let above = content_above_prompt_box(content);
+    let above_lower = above.to_lowercase();
+    above_lower.contains("esc to interrupt")
+        || above_lower.contains("ctrl+c to interrupt")
+        || has_spinner_activity(above)
+}
+
 /// Extract content above Claude's prompt box.
 /// The prompt box is two ─── border lines with ❯ between them.
 fn content_above_prompt_box(content: &str) -> &str {
     let lines: Vec<&str> = content.lines().collect();
-    let mut border_count = 0;
 
-    for i in (0..lines.len()).rev() {
-        let trimmed = lines[i].trim();
-        if !trimmed.is_empty() && trimmed.chars().all(|c| c == '─') {
-            border_count += 1;
-            if border_count == 2 {
-                // Return everything above this border
-                let byte_offset: usize = lines[..i].iter().map(|l| l.len() + 1).sum();
-                return &content[..byte_offset.min(content.len())];
-            }
-        }
+    if let Some(i) = claude_prompt_box_top_border_index(&lines) {
+        let byte_offset: usize = lines[..i].iter().map(|l| l.len() + 1).sum();
+        return &content[..byte_offset.min(content.len())];
     }
 
     // No prompt box found, return all content
     content
+}
+
+fn has_claude_prompt_box(content: &str) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    let Some(top_border_index) = claude_prompt_box_top_border_index(&lines) else {
+        return false;
+    };
+
+    lines[top_border_index + 1..]
+        .iter()
+        .take_while(|line| !is_horizontal_rule(line))
+        .any(|line| line.trim_start().starts_with('❯'))
+}
+
+fn claude_prompt_box_top_border_index(lines: &[&str]) -> Option<usize> {
+    let mut border_count = 0;
+
+    for i in (0..lines.len()).rev() {
+        if is_horizontal_rule(lines[i]) {
+            border_count += 1;
+            if border_count == 2 {
+                return Some(i);
+            }
+        }
+    }
+
+    None
+}
+
+fn is_horizontal_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && trimmed.chars().all(|c| c == '─')
 }
 
 // ---------------------------------------------------------------------------
@@ -1402,6 +1550,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_bash_permission_modal_is_visible_blocker() {
+        let screen = "● Bash(mkdir -p /tmp/herdr-claude-detector-test && for i in 1 2 3; do dd if=/dev/urandom)\n  ⎿  Waiting…\n\n────────────────────────\n Bash command\n\n   mkdir -p /tmp/herdr-claude-detector-test && ls -la /tmp/herdr-claude-detector-test\n   Create random files in temporary detector directory\n\n Contains expansion\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend · ctrl+e to explain";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn claude_cropped_bash_permission_modal_is_visible_blocker() {
+        let screen = "● Bash(mkdir -p /tmp/herdr-claude-detector-test && ls -la /tmp/herdr-claude-detector-test)\n  ⎿  Waiting…\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+    }
+
+    #[test]
     fn claude_waiting_ask_user_question_menu() {
         let screen =
             "Which approach should I take?\n❯ 1. Minimal change\n  2. Bigger refactor\n3. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel";
@@ -1424,6 +1591,33 @@ mod tests {
     fn claude_idle_prompt_box() {
         let screen = "Task complete.\n─────────────\n❯ \n─────────────";
         assert_eq!(detect_claude(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn claude_prompt_box_is_visible_idle() {
+        let screen = "Interrupted.\n─────────────\n❯ \n─────────────";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+    }
+
+    #[test]
+    fn claude_separators_without_prompt_are_not_visible_idle() {
+        let screen = "Task complete.\n─────────────\nplain text\n─────────────";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn claude_spinner_above_prompt_box_is_working() {
+        let screen = "✢ Imagining… (3s · thinking with high effort)\n  ⎿  Tip: Run /terminal-setup\n\n─────────────\n❯ \n─────────────\n~/project";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1463,6 +1657,42 @@ mod tests {
     }
 
     #[test]
+    fn codex_question_ui_is_visible_blocker() {
+        let screen = "Question 1/1 (1 unanswered)\nWhat kind of code improvement do you want?\n› 1. Reduce complexity\n  2. Improve reliability\n\ntab to add notes | enter to submit answer | esc to interrupt";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+    }
+
+    #[test]
+    fn codex_bare_yes_no_hint_is_not_visible_blocker() {
+        let detection = detect_agent(Some(Agent::Codex), "The docs mention [y/n] prompts.");
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn codex_generic_confirmation_prompt_is_not_visible_blocker() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "Earlier output asked: do you want to continue? The answer was yes.",
+        );
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn non_codex_blocked_heuristics_are_not_strong_visible_blockers_by_default() {
+        let detection = detect_agent(Some(Agent::Gemini), "Do you want to proceed?\n\nYes  No");
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
     fn codex_waiting_submit_answer_wrapped_footer() {
         assert_eq!(
             detect_codex(
@@ -1470,6 +1700,25 @@ mod tests {
             ),
             AgentState::Blocked
         );
+    }
+
+    #[test]
+    fn codex_waiting_submit_all_multi_question_footer() {
+        let screen = "Question 2/2 (1 unanswered)\nAt a high level, what is issue 249 supposed to fix?\n› 1. State arbitration (Recommended)\n  2. UI behavior\n  3. Test reliability\n  4. None of the above\n\ntab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_interrupted_prompt_is_visible_idle() {
+        let screen = "■ Conversation interrupted - tell the model what to do differently. Something went\nwrong? Hit `/feedback` to report the issue.\n\n\n› Run /review on my current changes\n\n  gpt-5.5 high · ~/Projects/herdr-worktrees/issue-249-state-arbitration";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1483,6 +1732,40 @@ mod tests {
     #[test]
     fn codex_working_truncated_status_header() {
         assert_eq!(detect_codex("• Working (0s • esc…"), AgentState::Working);
+    }
+
+    #[test]
+    fn codex_status_line_is_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Ran git status --short\n  └ M src/detect.rs\n\n• Working (17s • esc to interrupt)\n\n\n› Implement {feature}",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_working_header_without_interrupt_is_not_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Working (17s)\n\n› Implement {feature}",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(!detection.visible_working);
+    }
+
+    #[test]
+    fn codex_old_working_line_before_later_block_is_not_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Working (17s • esc to interrupt)\n\n• Ran git status --short\n  └ M src/detect.rs\n\n› Implement {feature}",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(!detection.visible_working);
     }
 
     #[test]

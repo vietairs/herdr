@@ -25,7 +25,6 @@ pub use self::{
     state::PaneState,
     terminal::{InputState, ScrollMetrics, TerminalCursorState},
 };
-use crate::terminal::stabilize_agent_state;
 
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
 const PANE_TERM: &str = "xterm-256color";
@@ -66,6 +65,11 @@ async fn publish_state_changed_event(
     pane_id: PaneId,
     agent: Option<Agent>,
     state: AgentState,
+    visible_blocker: bool,
+    visible_idle: bool,
+    visible_working: bool,
+    process_exited: bool,
+    observed_at: std::time::Instant,
 ) {
     // This runs on the async detector task, not the PTY reader thread.
     // Waiting for queue space here preserves correctness-critical state transitions
@@ -75,6 +79,11 @@ async fn publish_state_changed_event(
             pane_id,
             agent,
             state,
+            visible_blocker,
+            visible_idle,
+            visible_working,
+            process_exited,
+            observed_at,
         })
         .await
     {
@@ -100,6 +109,57 @@ fn should_clear_agent_for_foreground_shell(
     foreground_is_pane_shell: bool,
 ) -> bool {
     previous_agent.is_some() && new_agent.is_none() && foreground_is_pane_shell
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForegroundShellAgentAction {
+    ObserveProbe,
+    ReportProcessExit,
+    ClearAgent,
+}
+
+fn foreground_shell_agent_action(
+    previous_agent: Option<Agent>,
+    new_agent: Option<Agent>,
+    foreground_is_pane_shell: bool,
+    process_exit_reported: bool,
+) -> ForegroundShellAgentAction {
+    if !should_clear_agent_for_foreground_shell(previous_agent, new_agent, foreground_is_pane_shell)
+    {
+        return ForegroundShellAgentAction::ObserveProbe;
+    }
+
+    // Do not clear identity immediately. First publish an idle process-exit
+    // transition for the previous agent so notifications and wait-agent callers
+    // observe completion before the pane becomes unknown.
+    if process_exit_reported {
+        ForegroundShellAgentAction::ClearAgent
+    } else {
+        ForegroundShellAgentAction::ReportProcessExit
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DetectionPublishState {
+    state: AgentState,
+    visible_blocker: bool,
+    visible_idle: bool,
+    visible_working: bool,
+}
+
+fn should_publish_detection_update(
+    previous: DetectionPublishState,
+    next: DetectionPublishState,
+    agent_changed: bool,
+    process_exited: bool,
+) -> bool {
+    next.state != previous.state
+        || next.visible_blocker != previous.visible_blocker
+        || next.visible_idle != previous.visible_idle
+        || next.visible_working != previous.visible_working
+        || agent_changed
+        || process_exited
+        || (next.visible_idle && previous.visible_idle)
 }
 
 impl AgentDetectionPresence {
@@ -550,7 +610,11 @@ impl PaneRuntime {
                 let mut last_process_check = Instant::now();
                 let mut last_foreground_pgid = None;
                 let mut pending_foreground_shell_clear = false;
+                let mut foreground_shell_exit_reported = false;
                 let mut last_claude_working_at = None;
+                let mut last_visible_blocker = false;
+                let mut last_visible_idle = false;
+                let mut last_visible_working = false;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -572,7 +636,11 @@ impl PaneRuntime {
                             state = AgentState::Unknown;
                             last_foreground_pgid = None;
                             pending_foreground_shell_clear = false;
+                            foreground_shell_exit_reported = false;
                             last_claude_working_at = None;
+                            last_visible_blocker = false;
+                            last_visible_idle = false;
+                            last_visible_working = false;
                         }
                     }
 
@@ -627,21 +695,26 @@ impl PaneRuntime {
                             }
 
                             let previous_agent = agent_presence.current_agent();
-                            let changed = if should_clear_agent_for_foreground_shell(
+                            let changed = match foreground_shell_agent_action(
                                 previous_agent,
                                 new_agent,
                                 foreground_is_pane_shell,
+                                foreground_shell_exit_reported,
                             ) {
-                                if state == AgentState::Idle {
-                                    pending_foreground_shell_clear = false;
-                                    agent_presence.clear_current_agent()
-                                } else {
+                                ForegroundShellAgentAction::ReportProcessExit => {
                                     pending_foreground_shell_clear = true;
                                     false
                                 }
-                            } else {
-                                pending_foreground_shell_clear = false;
-                                agent_presence.observe_process_probe(new_agent)
+                                ForegroundShellAgentAction::ClearAgent => {
+                                    pending_foreground_shell_clear = false;
+                                    foreground_shell_exit_reported = false;
+                                    agent_presence.clear_current_agent()
+                                }
+                                ForegroundShellAgentAction::ObserveProbe => {
+                                    pending_foreground_shell_clear = false;
+                                    foreground_shell_exit_reported = false;
+                                    agent_presence.observe_process_probe(new_agent)
+                                }
                             };
                             if new_agent.is_some() {
                                 last_foreground_pgid = process_group_id;
@@ -683,16 +756,50 @@ impl PaneRuntime {
                     }
 
                     let content = terminal.detection_text();
-                    let raw_state = detect::detect_state(agent, &content);
-                    let new_state = stabilize_agent_state(
+                    let process_exited = pending_foreground_shell_clear
+                        && agent.is_some()
+                        && !foreground_shell_exit_reported;
+                    let detection = if process_exited {
+                        detect::AgentDetection {
+                            state: AgentState::Idle,
+                            visible_blocker: false,
+                            visible_idle: false,
+                            visible_working: false,
+                        }
+                    } else {
+                        detect::detect_agent(agent, &content)
+                    };
+                    let raw_state = detection.state;
+                    let new_state = crate::terminal::state::stabilize_agent_detection(
                         agent,
                         state,
-                        raw_state,
+                        detection,
+                        process_exited,
                         now,
                         &mut last_claude_working_at,
                     );
+                    let visible_blocker =
+                        detection.visible_blocker && new_state == AgentState::Blocked;
+                    let visible_idle = detection.visible_idle && new_state == AgentState::Idle;
+                    let visible_working =
+                        detection.visible_working && new_state == AgentState::Working;
 
-                    if new_state != state || agent_changed {
+                    if should_publish_detection_update(
+                        DetectionPublishState {
+                            state,
+                            visible_blocker: last_visible_blocker,
+                            visible_idle: last_visible_idle,
+                            visible_working: last_visible_working,
+                        },
+                        DetectionPublishState {
+                            state: new_state,
+                            visible_blocker,
+                            visible_idle,
+                            visible_working,
+                        },
+                        agent_changed,
+                        process_exited,
+                    ) {
                         debug!(
                             pane = pane_id.raw(),
                             ?state,
@@ -702,13 +809,24 @@ impl PaneRuntime {
                             "state changed"
                         );
                         state = new_state;
+                        last_visible_blocker = visible_blocker;
+                        last_visible_idle = visible_idle;
+                        last_visible_working = visible_working;
                         publish_state_changed_event(
                             state_events.clone(),
                             pane_id,
                             agent,
                             new_state,
+                            visible_blocker,
+                            visible_idle,
+                            visible_working,
+                            process_exited,
+                            now,
                         )
                         .await;
+                        if process_exited {
+                            foreground_shell_exit_reported = true;
+                        }
                     }
                 }
             });
@@ -1218,6 +1336,46 @@ mod tests {
     }
 
     #[test]
+    fn foreground_shell_reports_process_exit_before_clearing_agent() {
+        assert_eq!(
+            foreground_shell_agent_action(Some(Agent::Codex), None, true, false),
+            ForegroundShellAgentAction::ReportProcessExit
+        );
+        assert_eq!(
+            foreground_shell_agent_action(Some(Agent::Codex), None, true, true),
+            ForegroundShellAgentAction::ClearAgent
+        );
+    }
+
+    #[test]
+    fn stable_visible_idle_republishes_for_stale_hook_deadline() {
+        let previous = DetectionPublishState {
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_idle: true,
+            visible_working: false,
+        };
+
+        assert!(should_publish_detection_update(
+            previous, previous, false, false
+        ));
+    }
+
+    #[test]
+    fn stable_plain_idle_does_not_republish() {
+        let previous = DetectionPublishState {
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+        };
+
+        assert!(!should_publish_detection_update(
+            previous, previous, false, false
+        ));
+    }
+
+    #[test]
     fn unknown_non_shell_foreground_job_is_not_immediate_clear_signal() {
         assert!(!should_clear_agent_for_foreground_shell(
             Some(Agent::Claude),
@@ -1274,8 +1432,17 @@ mod tests {
         })
         .unwrap();
 
-        let publish =
-            publish_state_changed_event(tx.clone(), pane_id, Some(Agent::Pi), AgentState::Idle);
+        let publish = publish_state_changed_event(
+            tx.clone(),
+            pane_id,
+            Some(Agent::Pi),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            std::time::Instant::now(),
+        );
         tokio::pin!(publish);
 
         let blocked = tokio::time::timeout(std::time::Duration::from_millis(20), async {
@@ -1309,6 +1476,11 @@ mod tests {
                 pane_id: delivered_pane,
                 agent: Some(Agent::Pi),
                 state: AgentState::Idle,
+                visible_blocker: false,
+                visible_idle: false,
+                visible_working: false,
+                process_exited: false,
+                observed_at: _,
             } if delivered_pane == pane_id
         ));
     }

@@ -876,9 +876,22 @@ impl AppState {
                 pane_id,
                 agent,
                 state,
+                visible_blocker,
+                visible_idle,
+                visible_working,
+                process_exited,
+                observed_at,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_detected_state(agent, state)
+                    terminal.set_detected_state_with_screen_signals_at(
+                        agent,
+                        state,
+                        visible_blocker,
+                        visible_idle,
+                        visible_working,
+                        process_exited,
+                        observed_at,
+                    )
                 })
                 .into_iter()
                 .collect(),
@@ -1610,6 +1623,11 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Working,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
         });
 
         let terminal_id = state.workspaces[0]
@@ -1643,6 +1661,11 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
         });
 
         let pane = state.workspaces[1].panes.get(&bg_pane_id).unwrap();
@@ -1668,6 +1691,11 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
         });
 
         let terminal = state.terminals.get(&terminal_id).unwrap();
@@ -1686,6 +1714,11 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
         });
 
         let pane = state.workspaces[1].panes.get(&bg_pane_id).unwrap();
@@ -1727,6 +1760,11 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
         });
 
         let toast = state.toast.as_ref().unwrap();
@@ -1759,6 +1797,104 @@ mod tests {
     }
 
     #[test]
+    fn visible_blocker_overrides_hook_working_and_notifies() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+        let bg_terminal_id = state.workspaces[1]
+            .panes
+            .get(&bg_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Codex),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id: bg_pane_id,
+            source: "herdr:codex".into(),
+            agent_label: "codex".into(),
+            state: AgentState::Working,
+            message: None,
+            custom_status: None,
+            seq: Some(1),
+        });
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Codex),
+            state: AgentState::Blocked,
+            visible_blocker: true,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        let terminal = state.terminals.get(&bg_terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Blocked);
+        let toast = state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, ToastKind::NeedsAttention);
+        assert_eq!(toast.title, "codex needs attention");
+    }
+
+    #[test]
+    fn visible_idle_waits_before_overriding_claude_hook_working() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+        let bg_terminal_id = state.workspaces[1]
+            .panes
+            .get(&bg_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id: bg_pane_id,
+            source: "herdr:claude".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Working,
+            message: None,
+            custom_status: None,
+            seq: Some(1),
+        });
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_idle: true,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        let terminal = state.terminals.get(&bg_terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Working);
+        assert!(state.toast.is_none());
+    }
+
+    #[test]
     fn background_idle_sets_finished_toast() {
         let mut state = app_with_workspaces(&["active", "background"]);
         state.active = Some(0);
@@ -1776,6 +1912,11 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Droid),
             state: AgentState::Idle,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
         });
 
         let toast = state.toast.as_ref().unwrap();
@@ -1801,6 +1942,11 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
         });
 
         let toast = state.toast.as_ref().unwrap();
@@ -1823,6 +1969,11 @@ mod tests {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
         });
 
         let toast = state.toast.as_ref().unwrap();
@@ -1842,6 +1993,11 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
         });
 
         assert!(state.toast.is_none());
@@ -1859,6 +2015,11 @@ mod tests {
             pane_id,
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
         });
 
         assert!(state.toast.is_none());
