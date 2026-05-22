@@ -63,15 +63,13 @@ impl App {
         } else {
             return encode_error(id, "workspace_not_found", "no active workspace");
         };
-        let cwd = cwd
-            .map(PathBuf::from)
-            .or_else(|| {
-                self.state
-                    .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
-                    .and_then(|rt| rt.cwd())
-            })
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("/"));
+        let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
+            let follow_cwd = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+                .and_then(|rt| rt.cwd());
+            self.resolve_new_terminal_cwd(follow_cwd)
+        });
         let (rows, cols) = self.state.estimate_pane_size();
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;

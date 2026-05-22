@@ -1,17 +1,42 @@
+use std::path::PathBuf;
+
 use tracing::error;
 
 use super::{
     api_helpers::{pane_agent_status, tab_attention_priority},
     App, Mode,
 };
-use crate::workspace::Workspace;
+use crate::{config::NewTerminalCwdConfig, workspace::Workspace};
+
+pub(crate) fn resolve_new_terminal_cwd(
+    policy: &NewTerminalCwdConfig,
+    follow_cwd: Option<PathBuf>,
+) -> PathBuf {
+    match policy {
+        NewTerminalCwdConfig::Follow => follow_cwd
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("/")),
+        NewTerminalCwdConfig::Home => std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("/")),
+        NewTerminalCwdConfig::Current => {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+        }
+        NewTerminalCwdConfig::Path(path) => crate::worktree::expand_tilde_path(path),
+    }
+}
 
 impl App {
-    pub(super) fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<std::path::PathBuf> {
+    pub(super) fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         self.state
             .workspaces
             .get(ws_idx)?
             .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
+    }
+
+    pub(super) fn resolve_new_terminal_cwd(&self, follow_cwd: Option<PathBuf>) -> PathBuf {
+        resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
     }
 
     pub(super) fn workspace_creation_source(&self) -> Option<usize> {
@@ -31,11 +56,10 @@ impl App {
 
     /// Create a workspace with a real PTY (needs event_tx).
     pub(crate) fn create_workspace(&mut self) {
-        let initial_cwd = self
+        let follow_cwd = self
             .workspace_creation_source()
-            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+        let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
         if let Err(e) = self.create_workspace_with_options(initial_cwd, true) {
             error!(err = %e, "failed to create workspace");
             self.state.mode = Mode::Navigate;
@@ -44,12 +68,11 @@ impl App {
 
     pub(crate) fn create_tab(&mut self) {
         let custom_name = self.state.requested_new_tab_name.take();
-        let initial_cwd = self
+        let follow_cwd = self
             .state
             .active
-            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx))
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+            .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
+        let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
         match self.create_tab_with_options(initial_cwd, true) {
             Ok(tab_idx) => {
                 if let Some(name) = custom_name {
@@ -73,7 +96,7 @@ impl App {
 
     pub(super) fn create_tab_with_options(
         &mut self,
-        initial_cwd: std::path::PathBuf,
+        initial_cwd: PathBuf,
         focus: bool,
     ) -> std::io::Result<usize> {
         let Some(ws_idx) = self.state.active else {
@@ -107,7 +130,7 @@ impl App {
 
     pub(crate) fn create_workspace_with_options(
         &mut self,
-        initial_cwd: std::path::PathBuf,
+        initial_cwd: PathBuf,
         focus: bool,
     ) -> std::io::Result<usize> {
         let (rows, cols) = self.state.estimate_pane_size();

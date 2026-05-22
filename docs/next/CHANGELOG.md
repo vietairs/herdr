@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added `terminal.new_cwd` to choose whether new panes, tabs, and workspaces follow the source pane/workspace, start in `$HOME`, use Herdr's process directory, or use a fixed path.
+
 ## [0.6.1] - 2026-05-22
 
 ### Added

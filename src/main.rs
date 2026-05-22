@@ -82,6 +82,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Empty means $SHELL, then /bin/sh.
 # default_shell = ""
 
+# CWD policy for new panes, tabs, and workspaces when no explicit --cwd is provided.
+# Use "follow" to inherit the source pane/workspace, "home" for $HOME,
+# "current" for Herdr's process directory, or a fixed path such as "~/Projects".
+# new_cwd = "follow"
+
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")
 # Examples: "ctrl+b", "f12", "esc", "-"
