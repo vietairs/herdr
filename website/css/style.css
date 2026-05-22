@@ -758,11 +758,7 @@ samp {
 .logo-track {
     display: flex;
     width: max-content;
-    animation: logo-marquee 36s linear infinite;
-}
-
-.logo-marquee:hover .logo-track {
-    animation-play-state: paused;
+    animation: logo-marquee 22s linear infinite;
 }
 
 .logo-row {
