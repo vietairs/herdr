@@ -6,6 +6,28 @@ use crate::layout::PaneId;
 
 use super::terminal::GhosttyPaneCore;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DefaultColorQuery {
+    Foreground,
+    Background,
+}
+
+impl DefaultColorQuery {
+    pub(super) fn osc_number(self) -> u8 {
+        match self {
+            Self::Foreground => 10,
+            Self::Background => 11,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DefaultColorEvent {
+    Query(DefaultColorQuery),
+    Set(DefaultColorQuery),
+    Reset(DefaultColorQuery),
+}
+
 #[derive(Debug, Default)]
 pub(super) struct DefaultColorOscTracker {
     state: DefaultColorOscTrackerState,
@@ -19,6 +41,14 @@ enum DefaultColorOscTrackerState {
     Escape,
     OscBody,
     OscEscape,
+    IgnoreString,
+    IgnoreStringEscape,
+    OversizedOsc,
+    OversizedOscEscape,
+}
+
+fn is_ignored_string_intro(byte: u8) -> bool {
+    matches!(byte, b'P' | b'_' | b'^' | b'X')
 }
 
 impl DefaultColorOscTracker {
@@ -36,6 +66,9 @@ impl DefaultColorOscTracker {
                     if byte == b']' {
                         self.body.clear();
                         self.state = DefaultColorOscTrackerState::OscBody;
+                    } else if is_ignored_string_intro(byte) {
+                        self.body.clear();
+                        self.state = DefaultColorOscTrackerState::IgnoreString;
                     } else if byte == 0x1b {
                         self.state = DefaultColorOscTrackerState::Escape;
                     } else {
@@ -62,11 +95,37 @@ impl DefaultColorOscTracker {
                         self.state = DefaultColorOscTrackerState::OscBody;
                     }
                 }
+                DefaultColorOscTrackerState::IgnoreString => {
+                    if byte == 0x1b {
+                        self.state = DefaultColorOscTrackerState::IgnoreStringEscape;
+                    }
+                }
+                DefaultColorOscTrackerState::IgnoreStringEscape => {
+                    if byte == b'\\' {
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    } else if byte != 0x1b {
+                        self.state = DefaultColorOscTrackerState::IgnoreString;
+                    }
+                }
+                DefaultColorOscTrackerState::OversizedOsc => {
+                    if byte == 0x1b {
+                        self.state = DefaultColorOscTrackerState::OversizedOscEscape;
+                    } else if byte == 0x07 {
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    }
+                }
+                DefaultColorOscTrackerState::OversizedOscEscape => {
+                    if byte == b'\\' {
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    } else if byte != 0x1b {
+                        self.state = DefaultColorOscTrackerState::OversizedOsc;
+                    }
+                }
             }
 
             if self.body.len() > 1024 {
                 self.body.clear();
-                self.state = DefaultColorOscTrackerState::Ground;
+                self.state = DefaultColorOscTrackerState::OversizedOsc;
             }
         }
 
@@ -75,12 +134,125 @@ impl DefaultColorOscTracker {
 }
 
 fn is_default_color_set_osc(body: &[u8]) -> bool {
-    let Some(separator) = body.iter().position(|byte| *byte == b';') else {
-        return false;
+    matches!(
+        parse_default_color_event(body),
+        Some(DefaultColorEvent::Set(_))
+    )
+}
+
+#[derive(Debug, Default)]
+pub(super) struct DefaultColorEventTracker {
+    state: DefaultColorOscTrackerState,
+    body: Vec<u8>,
+    pending: Vec<DefaultColorEvent>,
+}
+
+impl DefaultColorEventTracker {
+    pub(super) fn observe(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            match self.state {
+                DefaultColorOscTrackerState::Ground => {
+                    if byte == 0x1b {
+                        self.state = DefaultColorOscTrackerState::Escape;
+                    }
+                }
+                DefaultColorOscTrackerState::Escape => {
+                    if byte == b']' {
+                        self.body.clear();
+                        self.state = DefaultColorOscTrackerState::OscBody;
+                    } else if is_ignored_string_intro(byte) {
+                        self.body.clear();
+                        self.state = DefaultColorOscTrackerState::IgnoreString;
+                    } else if byte == 0x1b {
+                        self.state = DefaultColorOscTrackerState::Escape;
+                    } else {
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    }
+                }
+                DefaultColorOscTrackerState::OscBody => match byte {
+                    0x07 => {
+                        self.finalize();
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    }
+                    0x1b => self.state = DefaultColorOscTrackerState::OscEscape,
+                    _ => self.body.push(byte),
+                },
+                DefaultColorOscTrackerState::OscEscape => {
+                    if byte == b'\\' {
+                        self.finalize();
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    } else {
+                        self.body.push(0x1b);
+                        self.body.push(byte);
+                        self.state = DefaultColorOscTrackerState::OscBody;
+                    }
+                }
+                DefaultColorOscTrackerState::IgnoreString => {
+                    if byte == 0x1b {
+                        self.state = DefaultColorOscTrackerState::IgnoreStringEscape;
+                    }
+                }
+                DefaultColorOscTrackerState::IgnoreStringEscape => {
+                    if byte == b'\\' {
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    } else if byte != 0x1b {
+                        self.state = DefaultColorOscTrackerState::IgnoreString;
+                    }
+                }
+                DefaultColorOscTrackerState::OversizedOsc => {
+                    if byte == 0x1b {
+                        self.state = DefaultColorOscTrackerState::OversizedOscEscape;
+                    } else if byte == 0x07 {
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    }
+                }
+                DefaultColorOscTrackerState::OversizedOscEscape => {
+                    if byte == b'\\' {
+                        self.state = DefaultColorOscTrackerState::Ground;
+                    } else if byte != 0x1b {
+                        self.state = DefaultColorOscTrackerState::OversizedOsc;
+                    }
+                }
+            }
+
+            if self.body.len() > 1024 {
+                self.body.clear();
+                self.state = DefaultColorOscTrackerState::OversizedOsc;
+            }
+        }
+    }
+
+    fn finalize(&mut self) {
+        if let Some(event) = parse_default_color_event(&self.body) {
+            self.pending.push(event);
+        }
+        self.body.clear();
+    }
+
+    pub(super) fn drain_pending(&mut self) -> Vec<DefaultColorEvent> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+fn parse_default_color_event(body: &[u8]) -> Option<DefaultColorEvent> {
+    match body {
+        b"10;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Foreground)),
+        b"11;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Background)),
+        b"110" | b"110;" => Some(DefaultColorEvent::Reset(DefaultColorQuery::Foreground)),
+        b"111" | b"111;" => Some(DefaultColorEvent::Reset(DefaultColorQuery::Background)),
+        _ => parse_default_color_set_event(body),
+    }
+}
+
+fn parse_default_color_set_event(body: &[u8]) -> Option<DefaultColorEvent> {
+    let separator = body.iter().position(|byte| *byte == b';')?;
+    let query = match &body[..separator] {
+        b"10" => DefaultColorQuery::Foreground,
+        b"11" => DefaultColorQuery::Background,
+        _ => return None,
     };
-    let command = &body[..separator];
     let value = &body[separator + 1..];
-    matches!(command, b"10" | b"11") && !value.is_empty() && value != b"?"
+    (!value.is_empty() && value != b"?").then_some(DefaultColorEvent::Set(query))
 }
 
 /// 256 KiB of base64 ≈ 192 KiB of text — enough for real source-file copies
@@ -329,6 +501,8 @@ pub(super) fn restore_host_terminal_theme_if_needed(
     }
 
     core.transient_default_color_owner_pgid = None;
+    core.child_default_foreground_changed = false;
+    core.child_default_background_changed = false;
     write_host_terminal_theme(&mut core.terminal, core.host_terminal_theme);
     info!(
         pane = pane_id.raw(),
@@ -396,6 +570,68 @@ mod tests {
 
         assert!(!tracker.observe(b"\x1b]10;?\x1b\\"));
         assert!(!tracker.observe(b"\x1b]11;?\x07"));
+    }
+
+    #[test]
+    fn default_color_event_tracker_detects_queries_sets_and_resets() {
+        let mut tracker = DefaultColorEventTracker::default();
+
+        tracker.observe(b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]10;rgb:11/22/33\x07\x1b]111\x07");
+
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![
+                DefaultColorEvent::Query(DefaultColorQuery::Foreground),
+                DefaultColorEvent::Query(DefaultColorQuery::Background),
+                DefaultColorEvent::Set(DefaultColorQuery::Foreground),
+                DefaultColorEvent::Reset(DefaultColorQuery::Background),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_color_event_tracker_handles_split_queries() {
+        let mut tracker = DefaultColorEventTracker::default();
+
+        tracker.observe(b"\x1b]11");
+        assert!(tracker.drain_pending().is_empty());
+        tracker.observe(b";?\x1b");
+        assert!(tracker.drain_pending().is_empty());
+        tracker.observe(b"\\");
+
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![DefaultColorEvent::Query(DefaultColorQuery::Background)]
+        );
+    }
+
+    #[test]
+    fn default_color_event_tracker_ignores_other_osc_and_dcs_payloads() {
+        let mut tracker = DefaultColorEventTracker::default();
+
+        tracker.observe(b"\x1b]0;title\x07");
+        tracker.observe(b"\x1b]52;c;?\x07");
+        tracker.observe(b"\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\");
+        tracker.observe(b"\x1bPtmux;payload\x07\x1b]11;?\x07\x1b\\");
+
+        assert!(tracker.drain_pending().is_empty());
+    }
+
+    #[test]
+    fn default_color_event_tracker_ignores_oversized_osc_until_terminator() {
+        let mut tracker = DefaultColorEventTracker::default();
+        let mut oversized = Vec::from(b"\x1b]11;".as_slice());
+        oversized.extend(std::iter::repeat_n(b'a', 1025));
+        oversized.extend_from_slice(b"\x1b]11;?\x07");
+
+        tracker.observe(&oversized);
+        assert!(tracker.drain_pending().is_empty());
+
+        tracker.observe(b"\x1b]11;?\x07");
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![DefaultColorEvent::Query(DefaultColorQuery::Background)]
+        );
     }
 
     #[test]
