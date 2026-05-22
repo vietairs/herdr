@@ -231,6 +231,11 @@ pub(crate) fn flush_incomplete_input_bytes(buffer: &mut Vec<u8>) -> Option<Vec<u
         return None;
     }
 
+    if buffer.first() == Some(&ESC) && starts_with_incomplete_utf8_char(&buffer[1..]) {
+        tracing::trace!(bytes = ?buffer, "waiting for escaped UTF-8 continuation bytes");
+        return None;
+    }
+
     tracing::debug!(bytes = ?buffer, "dropping incomplete raw input buffer after timeout");
     buffer.clear();
     None
@@ -388,7 +393,12 @@ fn complete_escape_sequence_len(buffer: &[u8]) -> Option<usize> {
         return (buffer.len() >= 3).then_some(3);
     }
 
-    Some(2)
+    let escaped_char_width = utf8_char_width(buffer[1])?;
+    if buffer.len() < 1 + escaped_char_width {
+        return None;
+    }
+    std::str::from_utf8(&buffer[1..1 + escaped_char_width]).ok()?;
+    Some(1 + escaped_char_width)
 }
 
 fn find_osc_terminator(buffer: &[u8]) -> Option<usize> {
@@ -1043,6 +1053,41 @@ mod tests {
         let chunks = drain_complete_input_bytes(&mut buffer);
         assert_eq!(chunks, vec!["好".as_bytes().to_vec()]);
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn alt_utf8_char_drains_as_one_event_before_following_input() {
+        let events = parse_raw_input_bytes_sync("\x1béx".as_bytes());
+        assert_eq!(events.len(), 2);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('é'),
+            KeyModifiers::ALT,
+        );
+    }
+
+    #[test]
+    fn chunked_alt_utf8_waits_for_continuation_byte_after_escape() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut buffer = Vec::new();
+        let bytes = "\x1bé".as_bytes();
+
+        drain_chunk(&mut buffer, &tx, &bytes[..2]);
+        assert_eq!(buffer, bytes[..2]);
+        assert!(collect_events(&mut rx).is_empty());
+        flush_incomplete_buffer(&mut buffer, &tx);
+        assert_eq!(buffer, bytes[..2]);
+        assert!(collect_events(&mut rx).is_empty());
+
+        drain_chunk(&mut buffer, &tx, &bytes[2..]);
+        assert!(buffer.is_empty());
+        let events = collect_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('é'),
+            KeyModifiers::ALT,
+        );
     }
 
     #[test]

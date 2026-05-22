@@ -820,6 +820,7 @@ pub(super) fn parse_key_combo(s: &str) -> Option<KeyCombo> {
     }
 
     let key_str = key_str?;
+    let single_char = single_key_char(key_str);
     let lower = key_str.to_lowercase();
     let code = match lower.as_str() {
         "space" | " " => KeyCode::Char(' '),
@@ -848,8 +849,8 @@ pub(super) fn parse_key_combo(s: &str) -> Option<KeyCombo> {
         "ampersand" => KeyCode::Char('&'),
         "backtick" => KeyCode::Char('`'),
         "plus" => KeyCode::Char('+'),
-        s if s.len() == 1 => {
-            let ch = key_str.chars().next().unwrap();
+        _ if single_char.is_some() => {
+            let ch = single_char?;
             if ch.is_ascii_uppercase() {
                 modifiers |= KeyModifiers::SHIFT;
                 KeyCode::Char(ch.to_ascii_lowercase())
@@ -862,6 +863,16 @@ pub(super) fn parse_key_combo(s: &str) -> Option<KeyCombo> {
     };
 
     Some(normalize_key_combo((code, modifiers)))
+}
+
+fn single_key_char(s: &str) -> Option<char> {
+    let mut chars = s.chars();
+    let ch = chars.next()?;
+    if chars.next().is_none() {
+        Some(ch)
+    } else {
+        None
+    }
 }
 
 fn parse_key_combo_with_diagnostic(
@@ -1002,6 +1013,34 @@ mod tests {
             parse_key_combo("v"),
             Some((KeyCode::Char('v'), KeyModifiers::empty()))
         );
+    }
+
+    #[test]
+    fn parse_unicode_char_combo() {
+        assert_eq!(
+            parse_key_combo("ö"),
+            Some((KeyCode::Char('ö'), KeyModifiers::empty()))
+        );
+        assert_eq!(
+            parse_key_combo("alt+é"),
+            Some((KeyCode::Char('é'), KeyModifiers::ALT))
+        );
+    }
+
+    #[test]
+    fn unicode_prefix_config_is_valid() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+prefix = "ö"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.prefix_key(),
+            (KeyCode::Char('ö'), KeyModifiers::empty())
+        );
+        assert!(config.collect_diagnostics().is_empty());
     }
 
     #[test]
