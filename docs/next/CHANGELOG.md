@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.6.2] - 2026-05-23
+
 ### Added
 - Added optional Nix flake support for building, running, installing, and developing Herdr with Nix. (#208, #221, #264)
 - Added `terminal.new_cwd` to choose whether new panes, tabs, and workspaces follow the source pane/workspace, start in `$HOME`, use Herdr's process directory, or use a fixed path.
