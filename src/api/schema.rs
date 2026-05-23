@@ -394,6 +394,7 @@ pub struct IntegrationUninstallParams {
 #[serde(rename_all = "snake_case")]
 pub enum IntegrationTarget {
     Pi,
+    Omp,
     Claude,
     Codex,
     Opencode,

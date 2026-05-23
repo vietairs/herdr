@@ -4,6 +4,7 @@
 
 ### Added
 - Added `terminal.new_cwd` to choose whether new panes, tabs, and workspaces follow the source pane/workspace, start in `$HOME`, use Herdr's process directory, or use a fixed path.
+- Added `herdr integration install omp` for OMP's `.omp` extension directory. The extension reports OMP pane state through Herdr's socket API without relying on native `omp` process detection.
 
 ### Fixed
 - Remote clients using local keybindings no longer show stale server keybinding warnings from the remote host.
