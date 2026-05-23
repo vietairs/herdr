@@ -66,6 +66,19 @@ Create a workspace without stealing focus:
 herdr workspace create --cwd ~/project --label api --no-focus
 ```
 
+## Worktrees
+
+```bash
+herdr worktree list [--workspace ID | --cwd PATH] [--json]
+herdr worktree create [--workspace ID | --cwd PATH] [--branch NAME] [--base REF] [--path PATH] [--label TEXT] [--focus] [--no-focus] [--json]
+herdr worktree open [--workspace ID | --cwd PATH] (--path PATH | --branch NAME) [--label TEXT] [--focus] [--no-focus] [--json]
+herdr worktree remove --workspace ID [--force] [--json]
+```
+
+Worktrees are normal Herdr workspaces with Git checkout provenance. `worktree create` creates a Git worktree checkout, opens it as a workspace, and groups it with the parent repo workspace. Without `--path`, Herdr creates the checkout under `<worktrees.directory>/<repo>/<branch-slug>`.
+
+`workspace close` closes Herdr state only. `worktree remove` is the explicit checkout deletion path; it runs `git worktree remove`, never deletes the branch, and requires `--force` when Git refuses a dirty checkout.
+
 ## Tabs
 
 ```bash

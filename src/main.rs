@@ -347,6 +347,7 @@ fn main() -> io::Result<()> {
         println!("       herdr server reload-config");
         println!("       herdr config <subcommand> ...");
         println!("       herdr workspace <subcommand> ...");
+        println!("       herdr worktree <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
         println!("       herdr agent <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
@@ -377,6 +378,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr workspace <subcommand>",
                 "Workspace helpers over the socket API",
+            ),
+            (
+                "herdr worktree <subcommand>",
+                "Git worktree helpers over the socket API",
             ),
             ("herdr tab <subcommand>", "Tab helpers over the socket API"),
             (
@@ -461,6 +466,7 @@ fn main() -> io::Result<()> {
                 "status",
                 "config",
                 "workspace",
+                "worktree",
                 "pane",
                 "wait",
                 "session",

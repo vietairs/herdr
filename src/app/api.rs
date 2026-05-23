@@ -7,6 +7,7 @@ mod panes;
 mod responses;
 mod tabs;
 mod workspaces;
+mod worktrees;
 
 use super::{api_helpers::pane_agent_status, App, Mode, OverlayPaneState, ToastKind};
 use crate::events::AppEvent;
@@ -355,6 +356,14 @@ impl App {
             }
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target)
+            }
+            Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
+            Method::WorktreeCreate(params) => {
+                return self.handle_worktree_create(request.id, params);
+            }
+            Method::WorktreeOpen(params) => return self.handle_worktree_open(request.id, params),
+            Method::WorktreeRemove(params) => {
+                return self.handle_worktree_remove(request.id, params);
             }
             Method::TabList(params) => return self.handle_tab_list(request.id, params),
             Method::TabGet(target) => return self.handle_tab_get(request.id, target),
