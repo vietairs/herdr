@@ -106,6 +106,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
 # workspace_picker = "prefix+w"
+# goto = "prefix+g"
 # new_workspace = "prefix+shift+n"
 # new_worktree = "prefix+shift+g"
 # open_worktree = ""    # optional, unset by default
@@ -143,7 +144,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # type = "shell" runs detached in the background.
 # type = "pane" opens a temporary pane and closes it when the command exits.
 # [[keys.command]]
-# key = "prefix+g"
+# key = "prefix+alt+g"
 # type = "pane"
 # command = "lazygit"
 

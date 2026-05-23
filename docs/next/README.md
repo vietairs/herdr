@@ -214,6 +214,7 @@ press `ctrl+b` to enter prefix mode. default actions are prefix-first and tmux-l
 | `prefix+n` / `prefix+p` | next / previous tab |
 | `prefix+1..9` | switch tab |
 | `prefix+w` | workspace navigation |
+| `prefix+g` | session navigator |
 | `prefix+shift+n` | new workspace |
 | `prefix+shift+g` | new worktree |
 | `prefix+shift+w` | rename workspace |
@@ -228,11 +229,13 @@ press `ctrl+b` to enter prefix mode. default actions are prefix-first and tmux-l
 
 resize mode: `h`/`l` resize width, `j`/`k` resize height, `esc` exit.
 
+session navigator opens a searchable workspace, tab, and pane tree. Use `/` for text search, `b`/`w`/`i`/`d` for blocked, working, idle, and done filters, `a` or Backspace to clear a state filter, and Enter to switch to the highlighted row.
+
 custom command keybindings can launch detached shell helpers or temporary panes:
 
 ```toml
 [[keys.command]]
-key = "prefix+g"
+key = "prefix+alt+g"
 type = "pane" # "shell" or "pane"
 command = "lazygit"
 ```

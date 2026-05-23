@@ -151,6 +151,8 @@ pub struct KeysConfig {
     pub close_workspace: BindingConfig,
     /// Open the workspace navigation surface. Default: "prefix+w"
     pub workspace_picker: BindingConfig,
+    /// Open the session navigator. Default: "prefix+g"
+    pub goto: BindingConfig,
     /// Detach from server/client mode, or exit --no-session mode. Default: "prefix+q".
     pub detach: BindingConfig,
     /// Reload config.toml in the running app/server. Default: "prefix+shift+r".
@@ -343,6 +345,7 @@ impl Default for KeysConfig {
             rename_workspace: BindingConfig::one("prefix+shift+w"),
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::one("prefix+w"),
+            goto: BindingConfig::one("prefix+g"),
             detach: BindingConfig::one("prefix+q"),
             reload_config: BindingConfig::one("prefix+shift+r"),
             open_notification_target: BindingConfig::one("prefix+o"),

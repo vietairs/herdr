@@ -252,6 +252,7 @@ pub struct Keybinds {
     pub rename_workspace: ActionKeybinds,
     pub close_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
+    pub goto: ActionKeybinds,
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
     pub open_notification_target: ActionKeybinds,
@@ -384,6 +385,7 @@ impl Config {
             rename_workspace: action!("keys.rename_workspace", &self.keys.rename_workspace),
             close_workspace: action!("keys.close_workspace", &self.keys.close_workspace),
             workspace_picker: action!("keys.workspace_picker", &self.keys.workspace_picker),
+            goto: action!("keys.goto", &self.keys.goto),
             detach: action!("keys.detach", &self.keys.detach),
             reload_config: action!("keys.reload_config", &self.keys.reload_config),
             open_notification_target: action!(
@@ -1094,6 +1096,18 @@ next_tab = "prefix+n"
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('g'),
                 KeyModifiers::SHIFT
+            ))]
+        );
+    }
+
+    #[test]
+    fn goto_defaults_to_prefix_g() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.goto),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('g'),
+                KeyModifiers::empty()
             ))]
         );
     }

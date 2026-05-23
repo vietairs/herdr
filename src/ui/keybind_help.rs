@@ -79,6 +79,7 @@ pub(super) fn keybind_help_groups(
 
     let workspace_tab = vec![
         (keybind_label(&kb.workspace_picker), "workspace navigation"),
+        (keybind_label(&kb.goto), "session navigator"),
         (keybind_label(&kb.new_workspace), "new workspace"),
         (keybind_label(&kb.new_worktree), "new worktree"),
         (keybind_label(&kb.open_worktree), "open worktree"),

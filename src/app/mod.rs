@@ -401,6 +401,7 @@ impl App {
                 }
             }),
             keybind_help: state::KeybindHelpState { scroll: 0 },
+            navigator: state::NavigatorState::default(),
             workspace_scroll: 0,
             agent_panel_scroll: 0,
             tab_scroll: 0,
@@ -1224,6 +1225,9 @@ impl App {
             Mode::Settings => {
                 self.handle_settings_key(key_event);
             }
+            Mode::Navigator => {
+                input::handle_navigator_key(&mut self.state, key_event);
+            }
             Mode::Terminal => {
                 // Should not be called in terminal mode.
             }
@@ -1473,7 +1477,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+g\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\n[ui.toast]\ndelivery = \"herdr\"\n",
+            "[terminal]\ndefault_shell = \"nu\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\n[ui.toast]\ndelivery = \"herdr\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -1488,7 +1492,7 @@ mod tests {
             .state
             .keybinds
             .new_workspace
-            .matches_prefix(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())));
+            .matches_prefix(&KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty())));
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Herdr
@@ -1703,7 +1707,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[keys]\nnew_workspace = \"prefix+g\"\n[ui.toast]\ndelivery = \"desktop\"\n",
+            "[keys]\nnew_workspace = \"prefix+m\"\n[ui.toast]\ndelivery = \"desktop\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -1717,7 +1721,7 @@ mod tests {
             .state
             .keybinds
             .new_workspace
-            .matches_prefix(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty())));
+            .matches_prefix(&KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty())));
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Herdr

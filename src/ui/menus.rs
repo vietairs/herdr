@@ -76,6 +76,7 @@ pub(super) fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: R
     let resize = prefix_rhs_label(&kb.resize_mode);
     let help = prefix_rhs_label(&kb.help);
     let settings = prefix_rhs_label(&kb.settings);
+    let goto = prefix_rhs_label(&kb.goto);
     let detach = prefix_rhs_label(&kb.detach);
     let line = Line::from(vec![
         Span::styled(" NAVIGATE ", mode_style),
@@ -86,6 +87,8 @@ pub(super) fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: R
         Span::styled(" ws  ", dim),
         Span::styled("⇥", key),
         Span::styled(" pane  ", dim),
+        Span::styled(goto, key),
+        Span::styled(" navigator  ", dim),
         Span::styled(new_tab, key),
         Span::styled(" new tab  ", dim),
         Span::styled(split_vertical, key),

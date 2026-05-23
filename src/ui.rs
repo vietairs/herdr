@@ -9,6 +9,7 @@ mod dialogs;
 mod keybind_help;
 mod menus;
 mod mobile;
+mod navigator;
 mod onboarding;
 mod panes;
 mod release_notes;
@@ -33,6 +34,7 @@ use self::mobile::{
     mobile_toast_banner_rect, render_mobile_header, render_mobile_panel,
     render_mobile_toast_banner,
 };
+use self::navigator::render_navigator_overlay;
 pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
 use self::onboarding::render_onboarding_overlay;
 use self::panes::{compute_pane_infos, render_panes, resize_tab_panes};
@@ -393,6 +395,7 @@ pub fn render_with_runtime_registry(
         Mode::ConfirmRemoveWorktree => render_remove_worktree_overlay(app, frame, frame.area()),
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
+        Mode::Navigator => render_navigator_overlay(app, frame),
         Mode::Terminal => {}
     }
 }

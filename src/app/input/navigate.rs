@@ -490,6 +490,7 @@ pub(crate) enum NavigateAction {
     ReloadConfig,
     OpenNotificationTarget,
     Detach,
+    OpenNavigator,
 }
 
 fn indexed_navigation_action(
@@ -588,6 +589,7 @@ fn action_for_key(
             NavigateAction::OpenNotificationTarget,
         ),
         (&kb.detach, NavigateAction::Detach),
+        (&kb.goto, NavigateAction::OpenNavigator),
     ] {
         if action_matches(bindings, key, dispatch) {
             return Some(action);
@@ -780,6 +782,7 @@ pub(super) fn execute_navigate_action_in_context(
             super::modal::request_detach(state);
             leave_navigate_mode(state);
         }
+        NavigateAction::OpenNavigator => state.open_navigator(),
     }
 
     finish_action_context(state, context, previous_mode);
@@ -927,6 +930,18 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: ws_idx != 0,
         });
+    }
+
+    #[test]
+    fn default_goto_key_opens_navigator() {
+        let mut state = state_with_workspaces(&["test"]);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Navigator);
     }
 
     #[test]
@@ -1502,8 +1517,8 @@ mod tests {
             output_path.display()
         );
         app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
-            bindings: crate::config::ActionKeybinds::prefix("g"),
-            label: "prefix+g".into(),
+            bindings: crate::config::ActionKeybinds::prefix("m"),
+            label: "prefix+m".into(),
             command,
             action: crate::config::CustomCommandAction::Shell,
         }];
@@ -1515,7 +1530,7 @@ mod tests {
         .await;
         assert_eq!(app.state.mode, Mode::Prefix);
 
-        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
+        app.handle_key(TerminalKey::new(KeyCode::Char('m'), KeyModifiers::empty()))
             .await;
 
         let content = wait_for_file(&output_path);
@@ -1561,8 +1576,8 @@ mod tests {
         let output_path = unique_temp_path("custom-pane-command");
         let command = format!("printf done > '{}'", output_path.display());
         app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
-            bindings: crate::config::ActionKeybinds::prefix("g"),
-            label: "prefix+g".into(),
+            bindings: crate::config::ActionKeybinds::prefix("m"),
+            label: "prefix+m".into(),
             command,
             action: crate::config::CustomCommandAction::Pane,
         }];
@@ -1572,7 +1587,7 @@ mod tests {
             app.state.prefix_mods,
         ))
         .await;
-        app.handle_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()))
+        app.handle_key(TerminalKey::new(KeyCode::Char('m'), KeyModifiers::empty()))
             .await;
 
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);

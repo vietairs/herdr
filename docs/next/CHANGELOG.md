@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added a session navigator at `prefix+g` with a searchable workspace/tab/pane tree, agent state filters, mouse switching, and keyboard navigation. (#157)
+
 ## [0.6.2] - 2026-05-23
 
 ### Added

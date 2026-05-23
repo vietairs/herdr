@@ -91,6 +91,7 @@ A small keybinding override looks like this:
 ```toml
 [keys]
 prefix = "ctrl+b"
+goto = "prefix+g"
 new_tab = "prefix+c"
 next_tab = "prefix+n"
 previous_tab = "prefix+p"
@@ -104,6 +105,7 @@ The default keymap is prefix-first and avoids direct shortcuts that can steal in
 [keys]
 detach = "prefix+q"
 workspace_picker = "prefix+w"
+goto = "prefix+g"
 new_workspace = "prefix+shift+n"
 new_worktree = "prefix+shift+g"
 rename_workspace = "prefix+shift+w"
@@ -160,7 +162,7 @@ Custom commands use the same keybinding syntax.
 
 ```toml
 [[keys.command]]
-key = "prefix+g"
+key = "prefix+alt+g"
 type = "pane"
 command = "lazygit"
 ```

@@ -2,7 +2,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 
 use crate::{
-    app::state::{AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode},
+    app::state::{
+        AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+    },
     input::TerminalKey,
     layout::NavDirection,
 };
@@ -145,6 +147,121 @@ pub(crate) fn handle_global_menu_key(state: &mut AppState, key: KeyEvent) {
             if let Some(action) = actions.get(state.global_menu.highlighted).copied() {
                 apply_global_menu_action(state, action);
             }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn handle_navigator_key(state: &mut AppState, key: KeyEvent) {
+    if state.navigator.search_focused {
+        match key.code {
+            KeyCode::Esc => {
+                if state.navigator.query.is_empty() {
+                    state.navigator.search_focused = false;
+                    leave_modal(state);
+                } else {
+                    state.navigator.query.clear();
+                    state.navigator.state_filter = None;
+                    state.navigator.search_focused = false;
+                    state.clamp_navigator_selection();
+                }
+            }
+            KeyCode::Enter => {
+                state.accept_navigator_selection();
+            }
+            KeyCode::Backspace => {
+                state.navigator.state_filter = None;
+                state.navigator.query.pop();
+                state.clamp_navigator_selection();
+            }
+            KeyCode::Up => state.move_navigator_selection(-1),
+            KeyCode::Down => state.move_navigator_selection(1),
+            KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+                state.move_navigator_selection(1)
+            }
+            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                state.move_navigator_selection(-1)
+            }
+            KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                state.navigator.query.clear();
+                state.navigator.state_filter = None;
+                state.clamp_navigator_selection();
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                state.navigator.state_filter = None;
+                state.navigator.query.push(c);
+                state.clamp_navigator_selection();
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            if state.navigator.query.is_empty() && state.navigator.state_filter.is_none() {
+                leave_modal(state);
+            } else {
+                state.navigator.query.clear();
+                state.navigator.state_filter = None;
+                state.clamp_navigator_selection();
+            }
+        }
+        KeyCode::Enter => {
+            state.accept_navigator_selection();
+        }
+        KeyCode::Char('/') => {
+            state.navigator.query.clear();
+            state.navigator.state_filter = None;
+            state.navigator.search_focused = true;
+            state.clamp_navigator_selection();
+        }
+        KeyCode::Backspace if state.navigator.state_filter.is_some() => {
+            state.navigator.state_filter = None;
+            state.clamp_navigator_selection();
+        }
+        KeyCode::Char('a') if key.modifiers.is_empty() => {
+            state.navigator.query.clear();
+            state.navigator.state_filter = None;
+            state.clamp_navigator_selection();
+        }
+        KeyCode::Char('b') if key.modifiers.is_empty() => {
+            state.navigator.query.clear();
+            state.navigator.state_filter = Some(NavigatorStateFilter::Blocked);
+            state.clamp_navigator_selection();
+        }
+        KeyCode::Char('w') if key.modifiers.is_empty() => {
+            state.navigator.query.clear();
+            state.navigator.state_filter = Some(NavigatorStateFilter::Working);
+            state.clamp_navigator_selection();
+        }
+        KeyCode::Char('i') if key.modifiers.is_empty() => {
+            state.navigator.query.clear();
+            state.navigator.state_filter = Some(NavigatorStateFilter::Idle);
+            state.clamp_navigator_selection();
+        }
+        KeyCode::Char('d') if key.modifiers.is_empty() => {
+            state.navigator.query.clear();
+            state.navigator.state_filter = Some(NavigatorStateFilter::Done);
+            state.clamp_navigator_selection();
+        }
+        KeyCode::Char('j') | KeyCode::Down => state.move_navigator_selection(1),
+        KeyCode::Char('k') | KeyCode::Up => state.move_navigator_selection(-1),
+        KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+            state.move_navigator_selection((state.navigator_body_rect().height / 2).max(1) as isize)
+        }
+        KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => state
+            .move_navigator_selection(-((state.navigator_body_rect().height / 2).max(1) as isize)),
+        KeyCode::Char(' ') => state.toggle_selected_navigator_workspace(),
+        KeyCode::Home => {
+            state.navigator.selected = 0;
+            state.ensure_navigator_selection_visible();
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            state.navigator.selected = state.navigator_rows().len().saturating_sub(1);
+            state.ensure_navigator_selection_visible();
         }
         _ => {}
     }

@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
 
+use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
 
@@ -650,6 +651,56 @@ pub enum Mode {
     Settings,
     GlobalMenu,
     KeybindHelp,
+    Navigator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NavigatorTarget {
+    Workspace {
+        ws_idx: usize,
+    },
+    Tab {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
+    Pane {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: PaneId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NavigatorRow {
+    pub target: NavigatorTarget,
+    pub depth: u8,
+    pub label: String,
+    pub meta: String,
+    pub status: AgentState,
+    pub seen: bool,
+    pub is_current: bool,
+    pub is_workspace: bool,
+    pub is_tab: bool,
+    pub expanded: bool,
+    pub search_text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NavigatorStateFilter {
+    Blocked,
+    Working,
+    Idle,
+    Done,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NavigatorState {
+    pub query: String,
+    pub selected: usize,
+    pub scroll: usize,
+    pub search_focused: bool,
+    pub state_filter: Option<NavigatorStateFilter>,
+    pub expanded_workspaces: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1021,6 +1072,7 @@ pub struct AppState {
     pub release_notes: Option<ReleaseNotesState>,
     pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
+    pub navigator: NavigatorState,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
     pub tab_scroll: usize,
@@ -1307,6 +1359,7 @@ impl AppState {
             release_notes: None,
             product_announcement: None,
             keybind_help: KeybindHelpState { scroll: 0 },
+            navigator: NavigatorState::default(),
             workspace_scroll: 0,
             agent_panel_scroll: 0,
             tab_scroll: 0,
