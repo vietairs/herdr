@@ -31,4 +31,4 @@ jobs:
             -v "$PWD:/work" \
             -w /work \
             docker.io/nixos/nix:2.31.2 \
-            sh -c 'nix --extra-experimental-features "nix-command flakes" flake check --print-build-logs && nix --extra-experimental-features "nix-command flakes" flake check --all-systems --no-build --print-build-logs'
+            sh -c 'git config --global --add safe.directory /work && nix --extra-experimental-features "nix-command flakes" flake check --print-build-logs && nix --extra-experimental-features "nix-command flakes" flake check --all-systems --no-build --print-build-logs'
