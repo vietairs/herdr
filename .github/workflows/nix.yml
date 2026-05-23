@@ -3,10 +3,16 @@ name: Nix
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
+      - "**/*.md"
   push:
     branches: [master]
     paths-ignore:
       - "website/**"
+      - "docs/**"
+      - "**/*.md"
 
 permissions:
   contents: read
@@ -25,10 +31,23 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            always-allow-substitutes = true
+
+      - name: Enable Magic Nix Cache
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
+        continue-on-error: true
+        with:
+          source-tag: v0.1.6
+          use-flakehub: disabled
+          diagnostic-endpoint: ""
+
       - name: Run Nix flake check
         run: |
-          docker run --rm \
-            -v "$PWD:/work" \
-            -w /work \
-            docker.io/nixos/nix:2.31.2 \
-            sh -c 'git config --global --add safe.directory /work && nix --extra-experimental-features "nix-command flakes" flake check --print-build-logs && nix --extra-experimental-features "nix-command flakes" flake check --all-systems --no-build --print-build-logs'
+          nix flake check --print-build-logs
+          nix flake check --all-systems --no-build --print-build-logs

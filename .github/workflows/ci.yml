@@ -29,16 +29,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install just
-        uses: extractions/setup-just@v4
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-nextest
+      - name: Install Rust tools
         uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2
         with:
-          tool: cargo-nextest
+          tool: just,cargo-nextest
 
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
