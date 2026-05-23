@@ -300,10 +300,12 @@ cargo build --release
 Herdr provides optional Nix flake outputs for users who already use Nix. The flake builds Herdr from source.
 
 ```bash
-nix run github:ogulcancelik/herdr
-nix build github:ogulcancelik/herdr
-nix develop github:ogulcancelik/herdr
+nix run github:ogulcancelik/herdr/v0.x.y
+nix build github:ogulcancelik/herdr/v0.x.y
+nix develop github:ogulcancelik/herdr/v0.x.y
 ```
+
+Replace `v0.x.y` with the latest release tag. You can omit the tag to track `master`, but release tags are recommended for normal installs.
 
 The flake exposes `packages.<system>.default`, `apps.<system>.default`, `devShells.<system>.default`, and `overlays.default`.
 
