@@ -32,9 +32,14 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/build.zig");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/build.zig.zon");
+    println!("cargo:rerun-if-changed=vendor/libghostty-vt/include");
+    println!("cargo:rerun-if-changed=vendor/libghostty-vt/pkg");
+    println!("cargo:rerun-if-changed=vendor/libghostty-vt/src");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt/VERSION");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_OPTIMIZE");
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SIMD");
+    println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_ZIG_SYSTEM_DIR");
+    println!("cargo:rerun-if-env-changed=ZIG");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let vendored_dir = manifest_dir.join("vendor/libghostty-vt");
@@ -47,13 +52,20 @@ fn main() {
         .trim()
         .to_string();
 
-    let status = Command::new("zig")
+    let zig = env::var("ZIG").unwrap_or_else(|_| "zig".into());
+    let mut command = Command::new(zig);
+    command
         .arg("build")
         .arg("-Demit-lib-vt")
         .arg(format!("-Doptimize={optimize}"))
         .arg(format!("-Dsimd={simd}"))
         .arg(format!("-Dtarget={zig_target}"))
-        .arg(format!("-Dversion-string={version_string}"))
+        .arg(format!("-Dversion-string={version_string}"));
+    if let Ok(system_dir) = env::var("LIBGHOSTTY_VT_ZIG_SYSTEM_DIR") {
+        command.arg("--system").arg(system_dir);
+    }
+
+    let status = command
         .current_dir(&vendored_dir)
         .status()
         .expect("failed to execute zig build for vendored libghostty-vt");

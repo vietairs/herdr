@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added optional Nix flake support for building, running, installing, and developing Herdr with Nix. (#208, #221, #264)
 - Added `terminal.new_cwd` to choose whether new panes, tabs, and workspaces follow the source pane/workspace, start in `$HOME`, use Herdr's process directory, or use a fixed path.
 - Added `herdr integration install omp` for OMP's `.omp` extension directory. The extension reports OMP pane state through Herdr's socket API without relying on native `omp` process detection.
 - Added CLI and socket API support for Git worktrees with `herdr worktree list/create/open/remove`, optional worktree provenance on workspace responses, and client/server protocol version 10.

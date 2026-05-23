@@ -295,6 +295,20 @@ cargo build --release
 ./target/release/herdr
 ```
 
+## nix
+
+Herdr provides optional Nix flake outputs for users who already use Nix. The flake builds Herdr from source.
+
+```bash
+nix run github:ogulcancelik/herdr
+nix build github:ogulcancelik/herdr
+nix develop github:ogulcancelik/herdr
+```
+
+The flake exposes `packages.<system>.default`, `apps.<system>.default`, `devShells.<system>.default`, and `overlays.default`.
+
+Update through the same Nix workflow you used to install Herdr. For profile installs, run `nix profile list` and then `nix profile upgrade <index-or-name>`. For flake inputs, run `nix flake update herdr` in your own flake and rebuild.
+
 ## testing
 
 ```bash
