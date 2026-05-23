@@ -72,7 +72,7 @@ export default defineConfig({
       head: [
         {
           tag: 'meta',
-          attrs: { property: 'og:image', content: 'https://herdr.dev/assets/doc-og-card-v1.png' },
+          attrs: { property: 'og:image', content: 'https://herdr.dev/assets/doc-og-card-v2.png' },
         },
         { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
         { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
@@ -85,7 +85,7 @@ export default defineConfig({
         },
         {
           tag: 'meta',
-          attrs: { name: 'twitter:image', content: 'https://herdr.dev/assets/doc-og-card-v1.png' },
+          attrs: { name: 'twitter:image', content: 'https://herdr.dev/assets/doc-og-card-v2.png' },
         },
         {
           tag: 'meta',
