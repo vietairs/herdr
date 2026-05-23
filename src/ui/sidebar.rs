@@ -110,6 +110,29 @@ pub(crate) fn agent_panel_toggle_rect(area: Rect, scope: AgentPanelScope) -> Rec
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+    agent_panel_entries_with_runtimes(app, None)
+}
+
+pub(crate) fn agent_panel_entries_from(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Vec<AgentPanelEntry> {
+    agent_panel_entries_with_runtimes(app, Some(terminal_runtimes))
+}
+
+fn agent_panel_entries_with_runtimes(
+    app: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+) -> Vec<AgentPanelEntry> {
+    let empty_runtimes;
+    let terminal_runtimes = match terminal_runtimes {
+        Some(terminal_runtimes) => terminal_runtimes,
+        None => {
+            empty_runtimes = TerminalRuntimeRegistry::new();
+            &empty_runtimes
+        }
+    };
+
     match app.agent_panel_scope {
         AgentPanelScope::CurrentWorkspace => {
             let Some(ws_idx) = agent_panel_current_workspace_idx(app) else {
@@ -139,7 +162,7 @@ pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
             .enumerate()
             .flat_map(|(ws_idx, ws)| {
                 let multi_tab = ws.tabs.len() > 1;
-                let workspace_label = ws.display_name();
+                let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
                 ws.pane_details(&app.terminals)
                     .into_iter()
                     .map(move |detail| AgentPanelEntry {
@@ -797,7 +820,7 @@ pub(super) fn render_sidebar(
     let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
-    render_agent_detail(app, frame, detail_area);
+    render_agent_detail(app, terminal_runtimes, frame, detail_area);
     render_sidebar_toggle(app, frame, area, false, p);
 }
 
@@ -1010,7 +1033,12 @@ fn render_workspace_list(
     }
 }
 
-fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
+fn render_agent_detail(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let p = &app.palette;
 
     if area.height < 3 {
@@ -1042,7 +1070,7 @@ fn render_agent_detail(app: &AppState, frame: &mut Frame, area: Rect) {
         );
     }
 
-    let details = agent_panel_entries(app);
+    let details = agent_panel_entries_from(app, terminal_runtimes);
     let metrics = agent_panel_scroll_metrics(app, area);
     let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
     let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
@@ -1197,6 +1225,73 @@ mod tests {
         assert_eq!(entries[1].primary_label, "two");
         assert_eq!(entries[1].primary_tab_label.as_deref(), Some("logs"));
         assert_eq!(entries[1].agent_label.as_deref(), Some("claude"));
+    }
+
+    #[tokio::test]
+    async fn all_workspaces_agent_panel_entries_use_live_root_runtime_cwd_for_workspace_label() {
+        let unique = format!(
+            "herdr-agent-panel-runtime-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let stale_cwd = root.join("issue-264-nix-support");
+        let live_cwd = root.join("herdr");
+        std::fs::create_dir_all(stale_cwd.join(".git")).unwrap();
+        std::fs::create_dir_all(live_cwd.join(".git")).unwrap();
+
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("stale-name");
+        workspace.custom_name = None;
+        workspace.identity_cwd = stale_cwd.clone();
+        let pane = workspace.tabs[0].root_pane;
+
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.cwd = stale_cwd;
+        terminal.detected_agent = Some(Agent::Pi);
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_scope = AgentPanelScope::AllWorkspaces;
+
+        let (events, _) = tokio::sync::mpsc::channel(4);
+        let runtime = crate::terminal::TerminalRuntime::spawn(
+            pane,
+            24,
+            80,
+            live_cwd.clone(),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            "/bin/sh",
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while runtime.cwd() != Some(live_cwd.clone()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut runtime_registry = TerminalRuntimeRegistry::new();
+        runtime_registry.insert(terminal_id, runtime);
+        let entries = agent_panel_entries_from(&app, &runtime_registry);
+        let primary_label = entries[0].primary_label.clone();
+
+        for (_, runtime) in runtime_registry.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(root);
+
+        assert_eq!(primary_label, "herdr");
     }
 
     #[test]

@@ -354,7 +354,7 @@ pub fn render_with_runtime_registry(
     let terminal_area = app.view.terminal_area;
 
     if app.view.layout == ViewLayout::Mobile {
-        render_mobile_header(app, frame, app.view.mobile_header_rect);
+        render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
     } else if app.sidebar_collapsed {
         render_sidebar_collapsed(app, frame, sidebar_area);
     } else {
@@ -373,7 +373,7 @@ pub fn render_with_runtime_registry(
         Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
         Mode::ProductAnnouncement => render_product_announcement_overlay(app, frame, frame.area()),
         Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
-            render_mobile_panel(app, frame, frame.area())
+            render_mobile_panel(app, terminal_runtimes, frame, frame.area())
         }
         Mode::Navigate => render_navigate_overlay(app, frame, terminal_area),
         Mode::Prefix => render_prefix_overlay(app, frame, terminal_area),
