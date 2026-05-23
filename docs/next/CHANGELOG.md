@@ -9,6 +9,9 @@
 - Added CLI and socket API support for Git worktrees with `herdr worktree list/create/open/remove`, optional worktree provenance on workspace responses, and client/server protocol version 10.
 
 ### Fixed
+- GitHub Copilot CLI sessions now use tested terminal heuristics for approval prompts, freeform input, plan review, and thinking states in the Agents panel. (#232, #256, thanks @LaneBirmingham)
+- Kiro approval prompts are now detected as blocked in the Agents panel. (#255)
+- Workspace labels now follow the live pane working directory after directory changes.
 - Remote clients using local keybindings no longer show stale server keybinding warnings from the remote host.
 
 ## [0.6.1] - 2026-05-22

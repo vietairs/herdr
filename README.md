@@ -182,18 +182,20 @@ automatic detection works out of the box. process name matching plus terminal ou
 | cursor agent | ✓ | ✓ | ✓ |
 | antigravity cli | ✓ | ✓ | ✓ |
 | kimi code cli | ✓ | ✓ | ✓ |
+| [github copilot cli](https://github.com/features/copilot) | ✓ | ✓ | ✓ |
 | [kiro cli](https://kiro.dev/docs/cli/) | ✓ | ✓ | — |
 
-detected but not fully tested: gemini cli, cline, github copilot cli.
+detected but not fully tested: gemini cli, cline.
 
 for agents outside the built-in list, herdr still works as a terminal multiplexer with workspaces, panes, and tiling. custom integrations can report agent labels over the socket api. see the [socket api docs](https://herdr.dev/docs/socket-api/).
 
 ### direct integrations
 
-the built-in pi, claude code, codex, opencode, and hermes integrations forward semantic state to herdr over the socket api. install with:
+the built-in pi, omp, claude code, codex, opencode, and hermes integrations forward semantic state to herdr over the socket api. install with:
 
 ```bash
 herdr integration install pi
+herdr integration install omp
 herdr integration install claude
 herdr integration install codex
 herdr integration install opencode
@@ -276,7 +278,7 @@ full logging and environment variable details: [configuration docs](https://herd
 ## docs
 
 - [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
-- [integrations](https://herdr.dev/docs/integrations/) — pi, claude code, codex, opencode, hermes integrations
+- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, opencode, hermes integrations
 - [`SKILL.md`](./SKILL.md) — reusable agent skill
 - [socket api](https://herdr.dev/docs/socket-api/) — socket protocol and cli reference
 
@@ -292,6 +294,22 @@ cd herdr
 cargo build --release
 ./target/release/herdr
 ```
+
+## nix
+
+Herdr provides optional Nix flake outputs for users who already use Nix. The flake builds Herdr from source.
+
+```bash
+nix run github:ogulcancelik/herdr/v0.x.y
+nix build github:ogulcancelik/herdr/v0.x.y
+nix develop github:ogulcancelik/herdr/v0.x.y
+```
+
+Replace `v0.x.y` with the latest release tag. You can omit the tag to track `master`, but release tags are recommended for normal installs.
+
+The flake exposes `packages.<system>.default`, `apps.<system>.default`, `devShells.<system>.default`, and `overlays.default`.
+
+Update through the same Nix workflow you used to install Herdr. For profile installs, run `nix profile list` and then `nix profile upgrade <index-or-name>`. For flake inputs, run `nix flake update herdr` in your own flake and rebuild.
 
 ## testing
 

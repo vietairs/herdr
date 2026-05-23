@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+- Added optional Nix flake support for building, running, installing, and developing Herdr with Nix. (#208, #221, #264)
+- Added `terminal.new_cwd` to choose whether new panes, tabs, and workspaces follow the source pane/workspace, start in `$HOME`, use Herdr's process directory, or use a fixed path.
+- Added `herdr integration install omp` for OMP's `.omp` extension directory. The extension reports OMP pane state through Herdr's socket API without relying on native `omp` process detection.
+- Added CLI and socket API support for Git worktrees with `herdr worktree list/create/open/remove`, optional worktree provenance on workspace responses, and client/server protocol version 10.
+
+### Fixed
+- GitHub Copilot CLI sessions now use tested terminal heuristics for approval prompts, freeform input, plan review, and thinking states in the Agents panel. (#232, #256, thanks @LaneBirmingham)
+- Kiro approval prompts are now detected as blocked in the Agents panel. (#255)
+- Workspace labels now follow the live pane working directory after directory changes.
+- Remote clients using local keybindings no longer show stale server keybinding warnings from the remote host.
+
 ## [0.6.1] - 2026-05-22
 
 ### Added

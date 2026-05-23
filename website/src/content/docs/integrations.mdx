@@ -1,6 +1,6 @@
 ---
 title: Integrations
-description: Install Herdr integrations for Pi, Claude Code, Codex, OpenCode, and Hermes Agent.
+description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, OpenCode, and Hermes Agent.
 ---
 
 Herdr detects supported agents automatically. Integrations make that detection more precise by reporting semantic state directly to Herdr.
@@ -13,6 +13,7 @@ Open settings inside Herdr and use the integrations tab to install recommended i
 
 ```bash
 herdr integration install pi
+herdr integration install omp
 herdr integration install claude
 herdr integration install codex
 herdr integration install opencode
@@ -23,6 +24,7 @@ herdr integration install hermes
 
 ```bash
 herdr integration uninstall pi
+herdr integration uninstall omp
 herdr integration uninstall claude
 herdr integration uninstall codex
 herdr integration uninstall opencode
@@ -56,6 +58,24 @@ Herdr writes the bundled extension to:
 ```
 
 If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. The extensions directory must already exist. Uninstall removes only that extension file.
+
+## OMP
+
+Install the OMP integration:
+
+```bash
+herdr integration install omp
+```
+
+Herdr writes the bundled extension to:
+
+```text
+~/.omp/agent/extensions/herdr-omp-agent-state.ts
+```
+
+If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-omp-agent-state.ts` instead. The extensions directory must already exist. Uninstall removes only that extension file.
+
+The OMP integration reports `omp` as the agent label through Herdr's socket API. It does not require native process detection for the `omp` executable.
 
 ## Claude Code
 
