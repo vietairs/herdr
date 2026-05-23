@@ -1367,7 +1367,10 @@ mod tests {
             let ResponseResult::WorktreeList { source, worktrees } = success.result else {
                 panic!("expected worktree_list response");
             };
-            assert_eq!(source.repo_root, repo.display().to_string());
+            assert_eq!(
+                crate::worktree::canonical_or_original(std::path::Path::new(&source.repo_root)),
+                crate::worktree::canonical_or_original(&repo)
+            );
             assert_eq!(
                 source.source_workspace_id.as_deref(),
                 Some(parent_id.as_str())
