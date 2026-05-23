@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Write};
 use std::sync::{
     atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
     Arc, Mutex,
@@ -326,11 +326,7 @@ fn pane_shell_from(configured_shell: &str, env_shell: Option<String>) -> String 
         .unwrap_or_else(|| "/bin/sh".into())
 }
 
-fn restore_command_builder(agent: &str, fallback_shell: &str, argv: &[String]) -> CommandBuilder {
-    let mut cmd = CommandBuilder::new("/bin/sh");
-    cmd.arg("-c");
-    cmd.arg(
-        r#"agent="$1"
+const RESTORE_WRAPPER_SCRIPT: &str = r#"agent="$1"
 fallback_shell="$2"
 early_window="$3"
 shift 3
@@ -343,13 +339,24 @@ shift 3
 	  printf 'herdr: %s session restore failed; started a shell instead\n' "$agent"
 	fi
 	exec "$fallback_shell"
-	"#,
-    );
-    cmd.arg("herdr-agent-restore");
-    cmd.arg(agent);
-    cmd.arg(fallback_shell);
-    cmd.arg("30");
-    for arg in argv {
+	"#;
+
+fn restore_command_args(agent: &str, fallback_shell: &str, argv: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "-c".to_string(),
+        RESTORE_WRAPPER_SCRIPT.to_string(),
+        "herdr-agent-restore".to_string(),
+        agent.to_string(),
+        fallback_shell.to_string(),
+        "30".to_string(),
+    ];
+    args.extend(argv.iter().cloned());
+    args
+}
+
+fn restore_command_builder(agent: &str, fallback_shell: &str, argv: &[String]) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    for arg in restore_command_args(agent, fallback_shell, argv) {
         cmd.arg(arg);
     }
     cmd
@@ -1317,26 +1324,6 @@ mod tests {
         output
     }
 
-    fn capture_command_output(cmd: CommandBuilder) -> (bool, String) {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        let slave = pair.slave;
-        let mut child = slave.spawn_command(cmd).unwrap();
-        drop(slave);
-        let status = child.wait().unwrap();
-
-        let mut output = String::new();
-        reader.read_to_string(&mut output).unwrap();
-        (status.success(), output)
-    }
-
     #[test]
     fn pane_shell_prefers_configured_shell() {
         assert_eq!(
@@ -1375,22 +1362,20 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "macOS keeps short-lived PTY fallback commands alive under portable_pty"
-    )]
     fn restore_wrapper_falls_back_after_early_resume_failure() {
-        #[cfg(target_os = "macos")]
-        let true_cmd = "/usr/bin/true";
-        #[cfg(not(target_os = "macos"))]
-        let true_cmd = "/bin/true";
-
         let argv = vec!["/bin/sh".into(), "-c".into(), "exit 7".into()];
-        let cmd = restore_command_builder("codex", true_cmd, &argv);
-        let (success, output) = capture_command_output(cmd);
+        let output = std::process::Command::new("/bin/sh")
+            .args(restore_command_args("codex", "/bin/sh", &argv))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
 
-        assert!(success, "fallback command should own the final exit status");
-        assert!(output.contains("herdr: codex session restore failed; started a shell instead"));
+        assert!(
+            output.status.success(),
+            "fallback command should own the final exit status"
+        );
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .contains("herdr: codex session restore failed; started a shell instead"));
     }
 
     #[tokio::test]
