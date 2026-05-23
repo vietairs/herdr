@@ -175,6 +175,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     );
     load_live_section(
         table,
+        "session",
+        "session config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.session = section,
+    );
+    load_live_section(
+        table,
         "ui",
         "ui config",
         &mut diagnostics,
@@ -461,6 +469,21 @@ mod tests {
             config_diagnostic_summary(&diagnostics).as_deref(),
             Some("one\ntwo\nthree\nfour\nand 1 more config warnings")
         );
+    }
+
+    #[test]
+    fn load_live_config_parses_session_section() {
+        let loaded = load_live_config_from_str(
+            r#"
+[session]
+resume_agents_on_restore = true
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded.config.session.resume_agents_on_restore);
+        assert!(loaded.diagnostics.is_empty());
+        assert!(loaded.invalid_sections.is_empty());
     }
 
     #[test]

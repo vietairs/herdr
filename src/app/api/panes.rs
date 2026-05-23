@@ -179,6 +179,12 @@ impl App {
         };
         self.handle_internal_event(crate::events::AppEvent::HookStateReported {
             pane_id,
+            session_ref: crate::agent_resume::session_ref_from_report(
+                &params.source,
+                &agent_label,
+                params.agent_session_id,
+                params.agent_session_path,
+            ),
             source: params.source,
             agent_label,
             state: detect_state_from_api(params.state),

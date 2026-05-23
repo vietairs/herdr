@@ -6,7 +6,7 @@ use tracing::{info, warn};
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
-use crate::terminal::EffectiveStateChange;
+use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
 use crate::workspace::WorkspaceGitStatus;
 
 use super::state::{AppState, Mode, ToastKind, ToastNotification, ToastTarget, ViewLayout};
@@ -883,7 +883,7 @@ impl AppState {
                 observed_at,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_detected_state_with_screen_signals_at(
+                    Some(terminal.set_detected_state_with_screen_signals_at(
                         agent,
                         state,
                         visible_blocker,
@@ -891,7 +891,7 @@ impl AppState {
                         visible_working,
                         process_exited,
                         observed_at,
-                    )
+                    ))
                 })
                 .into_iter()
                 .collect(),
@@ -903,14 +903,16 @@ impl AppState {
                 message,
                 custom_status,
                 seq,
+                session_ref,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_hook_authority_with_custom_status(
+                    terminal.set_hook_authority_with_session_ref(
                         source,
                         agent_label,
                         state,
                         message,
                         custom_status,
+                        session_ref,
                         seq,
                     )
                 })
@@ -922,7 +924,7 @@ impl AppState {
                 seq,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.clear_hook_authority(source.as_deref(), seq)
+                    terminal.clear_hook_authority_with_mutation(source.as_deref(), seq)
                 })
                 .into_iter()
                 .collect(),
@@ -934,7 +936,7 @@ impl AppState {
                 ..
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.release_agent(&source, &agent_label, seq)
+                    terminal.release_agent_with_mutation(&source, &agent_label, seq)
                 })
                 .into_iter()
                 .collect(),
@@ -952,7 +954,7 @@ impl AppState {
 
     fn update_terminal_state<F>(&mut self, pane_id: PaneId, update: F) -> Option<PaneStateUpdate>
     where
-        F: FnOnce(&mut crate::terminal::TerminalState) -> Option<EffectiveStateChange>,
+        F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
     {
         let ws_idx = self
             .workspaces
@@ -962,10 +964,14 @@ impl AppState {
             .pane_state(pane_id)?
             .attached_terminal_id
             .clone();
-        let change = {
+        let mutation = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             update(terminal)?
         };
+        if mutation.session_ref_changed {
+            self.mark_session_dirty();
+        }
+        let change = mutation.effective_state_change?;
         let update = PaneStateUpdate {
             pane_id,
             ws_idx,
@@ -1788,6 +1794,7 @@ mod tests {
             message: None,
             custom_status: None,
             seq: None,
+            session_ref: None,
         });
 
         let toast = state.toast.as_ref().unwrap();
@@ -1827,6 +1834,7 @@ mod tests {
             message: None,
             custom_status: None,
             seq: Some(1),
+            session_ref: None,
         });
         state.handle_app_event(AppEvent::StateChanged {
             pane_id: bg_pane_id,
@@ -1877,6 +1885,7 @@ mod tests {
             message: None,
             custom_status: None,
             seq: Some(1),
+            session_ref: None,
         });
         state.handle_app_event(AppEvent::StateChanged {
             pane_id: bg_pane_id,
@@ -1892,6 +1901,39 @@ mod tests {
         let terminal = state.terminals.get(&bg_terminal_id).unwrap();
         assert_eq!(terminal.state, AgentState::Working);
         assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn hidden_session_ref_only_update_marks_session_dirty_without_visible_update() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+
+        let first_updates = state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:pi".into(),
+            agent_label: "pi".into(),
+            state: AgentState::Working,
+            message: None,
+            custom_status: None,
+            seq: Some(20),
+            session_ref: crate::agent_resume::AgentSessionRef::path("/tmp/one.jsonl"),
+        });
+        assert_eq!(first_updates.len(), 1);
+        state.session_dirty = false;
+
+        let second_updates = state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:pi".into(),
+            agent_label: "pi".into(),
+            state: AgentState::Working,
+            message: None,
+            custom_status: None,
+            seq: Some(21),
+            session_ref: crate::agent_resume::AgentSessionRef::path("/tmp/two.jsonl"),
+        });
+
+        assert!(second_updates.is_empty());
+        assert!(state.session_dirty);
     }
 
     #[test]

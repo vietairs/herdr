@@ -427,6 +427,22 @@ fn send_request(socket_path: &Path, json: &str) -> serde_json::Value {
 }
 
 fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
+    run_shell_hook(
+        "src/integration/assets/claude/herdr-agent-state.sh",
+        &[action],
+        hook_input,
+    )
+}
+
+fn run_codex_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
+    run_shell_hook(
+        "src/integration/assets/codex/herdr-agent-state.sh",
+        &[action],
+        hook_input,
+    )
+}
+
+fn run_shell_hook(asset_path: &str, args: &[&str], hook_input: &str) -> Option<serde_json::Value> {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
     let socket_path = base.join("herdr.sock");
@@ -455,11 +471,10 @@ fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> 
         None
     });
 
-    let hook_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/integration/assets/claude/herdr-agent-state.sh");
+    let hook_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(asset_path);
     let mut child = Command::new("bash")
         .arg(hook_path)
-        .arg(action)
+        .args(args)
         .env("HERDR_ENV", "1")
         .env("HERDR_SOCKET_PATH", &socket_path)
         .env("HERDR_PANE_ID", "p_test")
@@ -522,6 +537,31 @@ fn claude_hook_keeps_parent_agent_type_only_blocked() {
 
     assert_eq!(request["method"], "pane.report_agent");
     assert_eq!(request["params"]["state"], "blocked");
+}
+
+#[test]
+fn claude_hook_reports_session_id_from_stdin() {
+    let request = run_claude_hook(
+        "idle",
+        r#"{"hook_event_name":"SessionStart","session_id":"claude-session"}"#,
+    )
+    .expect("session start should report idle");
+
+    assert_eq!(request["method"], "pane.report_agent");
+    assert_eq!(request["params"]["agent_session_id"], "claude-session");
+}
+
+#[test]
+fn codex_hook_reports_session_id_from_stdin() {
+    let request = run_codex_hook(
+        "working",
+        r#"{"hook_event_name":"SessionStart","session_id":"codex-session"}"#,
+    )
+    .expect("codex hook should report working");
+
+    assert_eq!(request["method"], "pane.report_agent");
+    assert_eq!(request["params"]["state"], "working");
+    assert_eq!(request["params"]["agent_session_id"], "codex-session");
 }
 
 #[test]
@@ -915,7 +955,7 @@ fn integration_commands_run_locally_when_server_is_missing() {
         .unwrap();
     assert_eq!(integration_status.status.code(), Some(0));
     let status_stdout = String::from_utf8_lossy(&integration_status.stdout);
-    assert!(status_stdout.contains("pi: current (v1)"));
+    assert!(status_stdout.contains("pi: current (v2)"));
     assert!(status_stdout.contains("claude: not installed"));
 
     let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_herdr"))

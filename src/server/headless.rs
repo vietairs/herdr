@@ -3746,6 +3746,8 @@ next_tab = ""
                     message: None,
                     custom_status: None,
                     seq: Some(19),
+                    agent_session_id: None,
+                    agent_session_path: None,
                 }),
             },
             respond_to,

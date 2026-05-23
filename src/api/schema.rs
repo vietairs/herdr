@@ -331,6 +331,10 @@ pub struct PaneReportAgentParams {
     pub custom_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -959,6 +963,8 @@ mod tests {
                 message: Some("thinking".into()),
                 custom_status: Some("indexing".into()),
                 seq: Some(42),
+                agent_session_id: Some("pi-session".into()),
+                agent_session_path: Some("/tmp/pi-session.jsonl".into()),
             }),
         };
 

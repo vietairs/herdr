@@ -102,6 +102,35 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    pub fn spawn_agent_restore(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        cwd: std::path::PathBuf,
+        restore_plan: &crate::agent_resume::AgentResumePlan,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        default_shell: &str,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        crate::pane::PaneRuntime::spawn_agent_restore(
+            pane_id,
+            rows,
+            cols,
+            cwd,
+            restore_plan,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            default_shell,
+            events,
+            render_notify,
+            render_dirty,
+        )
+        .map(Self)
+    }
+
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
         self.0.apply_host_terminal_theme(theme);
     }

@@ -12,28 +12,28 @@ use crate::layout::PaneId;
 pub(crate) const HERDR_PANE_ID_ENV_VAR: &str = "HERDR_PANE_ID";
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
-const PI_INTEGRATION_VERSION: u32 = 1;
+const PI_INTEGRATION_VERSION: u32 = 2;
 const OMP_EXTENSION_INSTALL_NAME: &str = "herdr-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-agent-state.ts");
 const OMP_INTEGRATION_VERSION: u32 = 1;
 const PI_CODING_AGENT_DIR_ENV_VAR: &str = "PI_CODING_AGENT_DIR";
 const CLAUDE_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CLAUDE_HOOK_ASSET: &str = include_str!("assets/claude/herdr-agent-state.sh");
-const CLAUDE_INTEGRATION_VERSION: u32 = 3;
+const CLAUDE_INTEGRATION_VERSION: u32 = 4;
 const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
 const CODEX_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const CODEX_HOOK_ASSET: &str = include_str!("assets/codex/herdr-agent-state.sh");
-const CODEX_INTEGRATION_VERSION: u32 = 3;
+const CODEX_INTEGRATION_VERSION: u32 = 4;
 const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
-const OPENCODE_INTEGRATION_VERSION: u32 = 1;
+const OPENCODE_INTEGRATION_VERSION: u32 = 2;
 const HERMES_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state";
 const HERMES_PLUGIN_MANIFEST_INSTALL_NAME: &str = "plugin.yaml";
 const HERMES_PLUGIN_INIT_INSTALL_NAME: &str = "__init__.py";
 const HERMES_PLUGIN_MANIFEST_ASSET: &str = include_str!("assets/hermes/plugin.yaml");
 const HERMES_PLUGIN_INIT_ASSET: &str = include_str!("assets/hermes/__init__.py");
-const HERMES_INTEGRATION_VERSION: u32 = 1;
+const HERMES_INTEGRATION_VERSION: u32 = 2;
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 
 #[derive(Debug)]
@@ -685,6 +685,13 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     )?;
     ensure_command_hook(
         hooks,
+        "SessionStart",
+        format!("bash {quoted_hook_path} idle"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
         "UserPromptSubmit",
         format!("bash {quoted_hook_path} working"),
         10,
@@ -908,6 +915,11 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
             "claude settings hooks",
         )? {
             let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+            updated_settings |= remove_command_hook(
+                hooks,
+                "SessionStart",
+                &format!("bash {quoted_hook_path} idle"),
+            )?;
             updated_settings |= remove_command_hook(
                 hooks,
                 "UserPromptSubmit",
@@ -1901,6 +1913,11 @@ mod tests {
         );
         assert_eq!(hook_content, CLAUDE_HOOK_ASSET);
         assert!(settings["permissions"]["allow"].is_array());
+        assert_eq!(settings["hooks"]["SessionStart"][0]["matcher"], "*");
+        assert!(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(" idle"));
         assert_eq!(settings["hooks"]["UserPromptSubmit"][0]["matcher"], "*");
         assert!(
             settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
@@ -1982,6 +1999,10 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
+            1
+        );
+        assert_eq!(
+            settings["hooks"]["SessionStart"].as_array().unwrap().len(),
             1
         );
         assert!(settings["hooks"].get("PostToolUse").is_none());
@@ -2069,7 +2090,7 @@ mod tests {
 
         assert_eq!(claude.path, hook_path);
         assert_eq!(claude.installed_version, Some(1));
-        assert_eq!(claude.expected_version, 3);
+        assert_eq!(claude.expected_version, 4);
         assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -2099,7 +2120,7 @@ mod tests {
 
         assert_eq!(claude.path, hook_path);
         assert_eq!(claude.installed_version, Some(2));
-        assert_eq!(claude.expected_version, 3);
+        assert_eq!(claude.expected_version, 4);
         assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -2119,7 +2140,8 @@ mod tests {
         fs::write(
             claude_dir.join("settings.json"),
             format!(
-                r#"{{"hooks":{{"UserPromptSubmit":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"PermissionRequest":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' blocked","timeout":10}}]}}],"PostToolUse":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"PostToolUseFailure":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"SubagentStop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"Stop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"SessionEnd":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' release","timeout":10}}]}}]}}}}"#,
+                r#"{{"hooks":{{"SessionStart":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"UserPromptSubmit":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"PermissionRequest":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' blocked","timeout":10}}]}}],"PostToolUse":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"PostToolUseFailure":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"SubagentStop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"Stop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"SessionEnd":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' release","timeout":10}}]}}]}}}}"#,
+                hook_path.display(),
                 hook_path.display(),
                 hook_path.display(),
                 hook_path.display(),
@@ -2152,6 +2174,7 @@ mod tests {
             "echo keep"
         );
         assert!(settings["hooks"].get("PermissionRequest").is_none());
+        assert!(settings["hooks"].get("SessionStart").is_none());
         assert!(settings["hooks"].get("PostToolUse").is_none());
         assert!(settings["hooks"].get("PostToolUseFailure").is_none());
         assert!(settings["hooks"].get("SubagentStop").is_none());
@@ -2201,7 +2224,7 @@ mod tests {
 
         assert_eq!(codex.path, hook_path);
         assert_eq!(codex.installed_version, Some(2));
-        assert_eq!(codex.expected_version, 3);
+        assert_eq!(codex.expected_version, 4);
         assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -2589,5 +2612,19 @@ mod tests {
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn bundled_integration_assets_report_session_refs() {
+        assert!(PI_EXTENSION_ASSET.contains("agent_session_path: currentAgentSessionPath"));
+        assert!(PI_EXTENSION_ASSET.contains("agent_session_id: currentAgentSessionId"));
+        assert!(PI_EXTENSION_ASSET.contains("publishState(true)"));
+        assert!(CLAUDE_HOOK_ASSET.contains("agent_session_id"));
+        assert!(CODEX_HOOK_ASSET.contains("HERDR_HOOK_INPUT_FILE"));
+        assert!(CODEX_HOOK_ASSET.contains("agent_session_id"));
+        assert!(OPENCODE_PLUGIN_ASSET.contains("properties?.sessionID"));
+        assert!(OPENCODE_PLUGIN_ASSET.contains("agent_session_id: sessionID"));
+        assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = _session_id(kwargs)"));
+        assert!(HERMES_PLUGIN_INIT_ASSET.contains("agent_session_id"));
     }
 }

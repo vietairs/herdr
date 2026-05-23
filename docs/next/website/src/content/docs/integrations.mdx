@@ -43,6 +43,8 @@ Herdr combines three signals:
 
 Integrations enrich state reporting. They do not replace process detection.
 
+Some integrations also report native agent session references. If `[session] resume_agents_on_restore = true` is enabled, Herdr uses official session references to resume Claude Code, Codex, Pi, Hermes Agent, and OpenCode panes after a Herdr server restart.
+
 ## Pi
 
 Install the Pi integration:
@@ -111,7 +113,7 @@ herdr integration install opencode
 
 Herdr writes the plugin to `~/.config/opencode/plugins/herdr-agent-state.js`. The OpenCode config directory must already exist. Uninstall removes only that plugin file.
 
-The plugin reports semantic state while OpenCode runs inside a Herdr pane.
+The plugin reports semantic state while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`.
 
 ## Hermes Agent
 
@@ -123,7 +125,7 @@ herdr integration install hermes
 
 Herdr writes `~/.hermes/plugins/herdr-agent-state/` and enables `herdr-agent-state` in `~/.hermes/config.yaml`. The Hermes config directory must already exist. Restart Hermes after installing so the plugin loads. Uninstall removes the plugin directory and removes `herdr-agent-state` from `plugins.enabled`.
 
-The plugin reports lifecycle, tool, and approval state while Hermes runs inside a Herdr pane. Native screen heuristics remain available when the plugin is not installed.
+The plugin reports lifecycle, tool, approval state, and session id while Hermes runs inside a Herdr pane. Herdr can use the reported session id to resume the pane with `hermes --resume <id>`. Native screen heuristics remain available when the plugin is not installed.
 
 ## Custom status labels
 

@@ -18,6 +18,7 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
     "recursion detected. base case not found. aborting.",
 ];
 
+mod agent_resume;
 mod api;
 mod app;
 mod cli;
@@ -211,6 +212,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # By default, droid is muted.
 # [ui.sound.agents]
 # droid = "off"
+
+[session]
+# Resume supported AI-agent panes into their native conversation sessions after
+# a Herdr server restart. Requires official integrations that report session refs.
+# resume_agents_on_restore = false
 
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.

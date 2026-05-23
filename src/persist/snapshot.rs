@@ -77,6 +77,16 @@ pub struct PaneSnapshot {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<PaneAgentSessionSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneAgentSessionSnapshot {
+    pub source: String,
+    pub agent: String,
+    pub kind: crate::agent_resume::AgentSessionRefKind,
+    pub value: String,
 }
 
 /// Serializable BSP tree.
@@ -280,12 +290,37 @@ fn capture_tab(
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id))
             .and_then(|terminal| terminal.agent_name.clone());
+        let agent_session =
+            tab.panes
+                .get(id)
+                .and_then(|pane| terminals.get(&pane.attached_terminal_id))
+                .and_then(|terminal| {
+                    if let Some(authority) = terminal.hook_authority.as_ref() {
+                        if let Some(session_ref) = authority.session_ref.as_ref() {
+                            return Some(PaneAgentSessionSnapshot {
+                                source: authority.source.clone(),
+                                agent: authority.agent_label.clone(),
+                                kind: session_ref.kind,
+                                value: session_ref.value.clone(),
+                            });
+                        }
+                    }
+                    terminal.persisted_agent_session.as_ref().map(|session| {
+                        PaneAgentSessionSnapshot {
+                            source: session.source.clone(),
+                            agent: session.agent.clone(),
+                            kind: session.session_ref.kind,
+                            value: session.session_ref.value.clone(),
+                        }
+                    })
+                });
         panes.insert(
             id.raw(),
             PaneSnapshot {
                 cwd,
                 label,
                 agent_name,
+                agent_session,
             },
         );
     }
@@ -448,6 +483,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
                 agent_name: None,
+                agent_session: None,
             },
         );
         panes.insert(
@@ -456,6 +492,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
                 agent_name: None,
+                agent_session: None,
             },
         );
 
@@ -765,6 +802,76 @@ mod tests {
     }
 
     #[test]
+    fn capture_contract_tracks_hook_authority_agent_session() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                crate::detect::AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::path("/tmp/pi-session.jsonl"),
+                Some(20),
+            );
+
+        let snapshot = capture_from_state(&state);
+        let agent_session = snapshot.workspaces[0].tabs[0].panes[&root.raw()]
+            .agent_session
+            .as_ref()
+            .expect("agent session should be captured");
+
+        assert_eq!(agent_session.source, "herdr:pi");
+        assert_eq!(agent_session.agent, "pi");
+        assert_eq!(
+            agent_session.kind,
+            crate::agent_resume::AgentSessionRefKind::Path
+        );
+        assert_eq!(agent_session.value, "/tmp/pi-session.jsonl");
+    }
+
+    #[test]
+    fn capture_contract_preserves_restored_agent_session() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:opencode".into(),
+                agent: "opencode".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("opencode-session").unwrap(),
+            });
+
+        let snapshot = capture_from_state(&state);
+        let agent_session = snapshot.workspaces[0].tabs[0].panes[&root.raw()]
+            .agent_session
+            .as_ref()
+            .expect("persisted agent session should be captured");
+
+        assert_eq!(agent_session.source, "herdr:opencode");
+        assert_eq!(agent_session.agent, "opencode");
+        assert_eq!(
+            agent_session.kind,
+            crate::agent_resume::AgentSessionRefKind::Id
+        );
+        assert_eq!(agent_session.value, "opencode-session");
+    }
+
+    #[test]
     fn old_unversioned_snapshot_loads_as_version_0() {
         let json = r#"{"workspaces":[],"active":null,"selected":0}"#;
         let snap = parse_snapshot(json).unwrap();
@@ -793,6 +900,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
                 agent_name: None,
+                agent_session: None,
             },
         );
         panes.insert(
@@ -803,6 +911,7 @@ mod tests {
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 label: None,
                 agent_name: None,
+                agent_session: None,
             },
         );
 

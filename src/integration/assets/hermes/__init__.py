@@ -1,7 +1,7 @@
 """Hermes plugin installed by Herdr to report agent lifecycle state."""
 
 # HERDR_INTEGRATION_ID=hermes
-# HERDR_INTEGRATION_VERSION=1
+# HERDR_INTEGRATION_VERSION=2
 
 from __future__ import annotations
 
@@ -56,8 +56,19 @@ def _send(method: str, params: dict) -> None:
         pass
 
 
-def _report(state: str) -> None:
-    _send("pane.report_agent", {"state": state})
+def _session_id(kwargs: dict) -> str | None:
+    value = kwargs.get("session_id")
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _report(state: str, **kwargs) -> None:
+    params = {"state": state}
+    session_id = _session_id(kwargs)
+    if session_id:
+        params["agent_session_id"] = session_id
+    _send("pane.report_agent", params)
 
 
 def _release() -> None:
@@ -65,18 +76,15 @@ def _release() -> None:
 
 
 def _working(**kwargs) -> None:
-    del kwargs
-    _report("working")
+    _report("working", **kwargs)
 
 
 def _blocked(**kwargs) -> None:
-    del kwargs
-    _report("blocked")
+    _report("blocked", **kwargs)
 
 
 def _idle(**kwargs) -> None:
-    del kwargs
-    _report("idle")
+    _report("idle", **kwargs)
 
 
 def _finalize(**kwargs) -> None:
