@@ -110,9 +110,9 @@ same session, same agents, same state.
 
 ### direct agent attach
 
-`herdr` and `herdr --remote` attach to the full Herdr session UI. `herdr agent attach <target>` attaches your current terminal directly to one server-owned terminal, like a single-pane terminal attach. `herdr terminal attach <terminal_id>` does the same by terminal id.
+`herdr` and `herdr --remote` attach to the full herdr session ui. `herdr agent attach <target>` attaches your current terminal directly to one server-owned terminal, like a single-pane terminal attach. `herdr terminal attach <terminal_id>` does the same by terminal id.
 
-Direct attach streams the current rendered terminal state first, then live ANSI frames. Your input goes straight to that terminal. Detach with `ctrl+b q`; send a literal `ctrl+b` with `ctrl+b ctrl+b`. One writable client owns input and resize for a terminal. A second attach fails unless you pass `--takeover`.
+direct attach streams the current rendered terminal state first, then live ansi frames. your input goes straight to that terminal. detach with `ctrl+b q`; send a literal `ctrl+b` with `ctrl+b ctrl+b`. one writable client owns input and resize for a terminal. a second attach fails unless you pass `--takeover`.
 
 ## agent awareness
 
@@ -153,13 +153,13 @@ herdr tab create --label "logs"
 herdr pane split 1-1 --direction right
 herdr pane run 1-2 "npm test"
 
-# wait for a pane-level UI attention state
+# wait for a pane-level ui attention state
 herdr wait agent-status 1-1 --status done
 
 # read output
 herdr pane read 1-2 --source recent --lines 50
 
-# read a rendered ANSI snapshot for TUI feedback loops
+# read a rendered ansi snapshot for tui feedback loops
 herdr pane read 1-2 --source visible --ansi
 ```
 
@@ -284,7 +284,7 @@ full logging and environment variable details: [configuration docs](https://herd
 
 ## agent instructions
 
-If you are an AI agent helping with this repository, read [`AGENTS.md`](./AGENTS.md) before making changes and read [`CONTRIBUTING.md`](./CONTRIBUTING.md) before opening issues or PRs.
+if you are an ai agent helping with this repository, read [`AGENTS.md`](./AGENTS.md) before making changes and read [`CONTRIBUTING.md`](./CONTRIBUTING.md) before opening issues or PRs.
 
 ## building from source
 
@@ -297,7 +297,7 @@ cargo build --release
 
 ## nix
 
-Herdr provides optional Nix flake outputs for users who already use Nix. The flake builds Herdr from source.
+herdr provides optional nix flake outputs for users who already use nix. the flake builds herdr from source.
 
 ```bash
 nix run github:ogulcancelik/herdr/v0.x.y
@@ -305,11 +305,11 @@ nix build github:ogulcancelik/herdr/v0.x.y
 nix develop github:ogulcancelik/herdr/v0.x.y
 ```
 
-Replace `v0.x.y` with the latest release tag. You can omit the tag to track `master`, but release tags are recommended for normal installs.
+replace `v0.x.y` with the latest release tag. you can omit the tag to track `master`, but release tags are recommended for normal installs.
 
-The flake exposes `packages.<system>.default`, `apps.<system>.default`, `devShells.<system>.default`, and `overlays.default`.
+the flake exposes `packages.<system>.default`, `apps.<system>.default`, `devShells.<system>.default`, and `overlays.default`.
 
-Update through the same Nix workflow you used to install Herdr. For profile installs, run `nix profile list` and then `nix profile upgrade <index-or-name>`. For flake inputs, run `nix flake update herdr` in your own flake and rebuild.
+update through the same nix workflow you used to install herdr. for profile installs, run `nix profile list` and then `nix profile upgrade <index-or-name>`. for flake inputs, run `nix flake update herdr` in your own flake and rebuild.
 
 ## testing
 
@@ -320,7 +320,7 @@ just check       # formatting, tests, and maintenance checks
 
 ## license
 
-AGPL-3.0: free to use, modify, and distribute. modified versions must be open-sourced under the same license.
+agpl-3.0: free to use, modify, and distribute. modified versions must be open-sourced under the same license.
 
 ## pi, ghostty, and shift+enter
 
@@ -338,6 +338,6 @@ related context: #78, #81, #106, and earendil-works/pi#1872.
  <picture>
    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ogulcancelik/herdr&type=date&theme=dark&legend=top-left&v=2026-05-19" />
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ogulcancelik/herdr&type=date&legend=top-left&v=2026-05-19" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ogulcancelik/herdr&type=date&legend=top-left&v=2026-05-19" />
+   <img alt="star history chart" src="https://api.star-history.com/chart?repos=ogulcancelik/herdr&type=date&legend=top-left&v=2026-05-19" />
  </picture>
 </a>
