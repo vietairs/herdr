@@ -48,3 +48,22 @@ pub(crate) fn accept_pending_client_connections(
 
     Ok(())
 }
+
+/// Drains pending thin-client connections without starting handshakes.
+///
+/// During live handoff the old server must not let clients sit in the Unix
+/// listener backlog waiting for a welcome frame that will never be sent.
+pub(crate) fn reject_pending_client_connections(listener: &UnixListener) -> io::Result<()> {
+    loop {
+        match listener.accept() {
+            Ok((_stream, _addr)) => {}
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
+            Err(err) => {
+                error!(err = %err, "client listener reject failed");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}

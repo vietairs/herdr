@@ -328,16 +328,30 @@ pub fn wait_for_message_variant(
 }
 
 pub fn wait_for_disconnect(stream: &mut UnixStream, timeout: Duration) -> Result<bool, String> {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .map_err(|e| e.to_string())?;
+    stream.set_nonblocking(true).map_err(|e| e.to_string())?;
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if read_server_message(stream).is_err() {
-            return Ok(true);
+    let mut idle_since = None;
+    let result = loop {
+        match read_server_message(stream) {
+            Ok(_) => idle_since = None,
+            Err(err)
+                if err.to_ascii_lowercase().contains("would block")
+                    || err.contains("Resource temporarily unavailable") =>
+            {
+                let idle_started = *idle_since.get_or_insert_with(Instant::now);
+                if idle_started.elapsed() >= Duration::from_millis(200) {
+                    break Ok(true);
+                }
+            }
+            Err(_) => break Ok(true),
         }
-    }
-    Ok(false)
+        if Instant::now() >= deadline {
+            break Ok(false);
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let _ = stream.set_nonblocking(false);
+    result
 }
 
 pub fn cleanup_registered_herdr_pids() {

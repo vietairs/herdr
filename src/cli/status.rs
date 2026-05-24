@@ -74,6 +74,7 @@ enum ServerRuntimeStatus {
     Running {
         version: Option<String>,
         protocol: Option<u32>,
+        capabilities: Option<crate::api::schema::ServerCapabilities>,
     },
     NotRunning,
 }
@@ -127,7 +128,9 @@ fn print_client_status(json: bool) -> std::io::Result<()> {
 
 fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
     match server {
-        ServerRuntimeStatus::Running { version, protocol } => {
+        ServerRuntimeStatus::Running {
+            version, protocol, ..
+        } => {
             println!("{indent}status: running");
             println!("{indent}version: {}", option_label(version.as_deref()));
             println!("{indent}protocol: {}", protocol_label(*protocol));
@@ -146,6 +149,7 @@ fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
         Ok(status) => Ok(ServerRuntimeStatus::Running {
             version: status.version,
             protocol: status.protocol,
+            capabilities: status.capabilities,
         }),
         Err(ApiClientError::Io(err)) if server_not_running_error(&err) => {
             Ok(ServerRuntimeStatus::NotRunning)
@@ -218,10 +222,16 @@ struct ServerStatusJson {
     running: bool,
     version: Option<String>,
     protocol: Option<u32>,
+    capabilities: Option<ServerCapabilitiesJson>,
     compatible: Option<bool>,
     socket: String,
     session: Option<String>,
     restart_needed: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct ServerCapabilitiesJson {
+    live_handoff: bool,
 }
 
 #[derive(Serialize)]
@@ -240,11 +250,20 @@ fn client_status_json() -> ClientStatusJson {
 
 fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
     match server {
-        ServerRuntimeStatus::Running { version, protocol } => ServerStatusJson {
+        ServerRuntimeStatus::Running {
+            version,
+            protocol,
+            capabilities,
+        } => ServerStatusJson {
             status: "running",
             running: true,
             version: version.clone(),
             protocol: *protocol,
+            capabilities: capabilities
+                .as_ref()
+                .map(|capabilities| ServerCapabilitiesJson {
+                    live_handoff: capabilities.live_handoff,
+                }),
             compatible: protocol.map(|value| value == crate::protocol::PROTOCOL_VERSION),
             socket: api::socket_path().display().to_string(),
             session: crate::session::active_name(),
@@ -255,6 +274,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             running: false,
             version: None,
             protocol: None,
+            capabilities: None,
             compatible: None,
             socket: api::socket_path().display().to_string(),
             session: crate::session::active_name(),

@@ -14,6 +14,8 @@ pub enum Method {
     Ping(PingParams),
     #[serde(rename = "server.stop")]
     ServerStop(EmptyParams),
+    #[serde(rename = "server.live_handoff")]
+    ServerLiveHandoff(ServerLiveHandoffParams),
     #[serde(rename = "server.reload_config")]
     ServerReloadConfig(EmptyParams),
     #[serde(rename = "workspace.create")]
@@ -307,6 +309,16 @@ pub struct PaneSendInputParams {
     pub keys: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerLiveHandoffParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_exe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_protocol: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneReadParams {
     pub pane_id: String,
@@ -582,11 +594,18 @@ pub struct ErrorBody {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerCapabilities {
+    pub live_handoff: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
     Pong {
         version: String,
         protocol: u32,
+        #[serde(default)]
+        capabilities: Option<ServerCapabilities>,
     },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
@@ -1225,6 +1244,7 @@ mod tests {
             result: ResponseResult::Pong {
                 version: "0.1.2".into(),
                 protocol: 6,
+                capabilities: Some(ServerCapabilities { live_handoff: true }),
             },
         };
 

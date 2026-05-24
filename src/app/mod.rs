@@ -555,6 +555,70 @@ impl App {
         }
     }
 
+    #[cfg(unix)]
+    pub fn new_from_handoff(
+        config: &Config,
+        config_diagnostic: Option<String>,
+        api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
+        event_hub: crate::api::EventHub,
+        snapshot: &crate::persist::SessionSnapshot,
+        imports: &mut std::collections::HashMap<u32, crate::persist::ImportedPaneRuntime>,
+    ) -> io::Result<Self> {
+        let mut app = Self::new(config, true, config_diagnostic, api_rx, event_hub);
+        let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
+            snapshot,
+            config.advanced.scrollback_limit_bytes,
+            &config.terminal.default_shell,
+            imports,
+            app.event_tx.clone(),
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )?;
+
+        app.no_session = false;
+        app.state.detach_exits = false;
+        app.state.workspaces = workspaces;
+        app.state.terminals = terminals;
+        app.terminal_runtimes = runtimes.into();
+        app.state.active = snapshot
+            .active
+            .filter(|&idx| idx < app.state.workspaces.len());
+        app.state.selected = snapshot
+            .selected
+            .min(app.state.workspaces.len().saturating_sub(1));
+        app.state.agent_panel_scope = snapshot.agent_panel_scope;
+        if let Some(width) = snapshot.sidebar_width {
+            app.state.sidebar_width = width;
+            app.state.sidebar_width_source = state::SidebarWidthSource::Persisted;
+        }
+        if let Some(split) = snapshot.sidebar_section_split {
+            app.state.sidebar_section_split = split;
+        }
+        app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        app.state.mode = if app.state.active.is_some() {
+            state::Mode::Terminal
+        } else {
+            state::Mode::Navigate
+        };
+        app.last_focus = app.state.active.and_then(|idx| {
+            app.state
+                .workspaces
+                .get(idx)
+                .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
+        });
+        Ok(app)
+    }
+
+    #[cfg(unix)]
+    pub fn unpause_handoff_readers(&self) {
+        self.terminal_runtimes.set_handoff_readers_paused(false);
+    }
+
+    #[cfg(unix)]
+    pub fn assume_handoff_ownership(&mut self) {
+        self.terminal_runtimes.assume_handoff_ownership();
+    }
+
     fn request_full_redraw(&mut self) {
         self.full_redraw_pending = true;
     }

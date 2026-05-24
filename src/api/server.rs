@@ -1,4 +1,3 @@
-use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -8,12 +7,16 @@ use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
+#[cfg(test)]
+use std::fs;
+
 use crate::api::schema::{
-    ErrorBody, ErrorResponse, Method, Request, ResponseResult, SuccessResponse,
+    ErrorBody, ErrorResponse, Method, Request, ResponseResult, ServerCapabilities, SuccessResponse,
 };
 use crate::api::subscriptions::ActiveSubscription;
 use crate::api::wait::wait_for_output;
 use crate::api::{request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender, EventHub};
+use crate::ipc::{remove_socket_file_if_owned, socket_file_identity, SocketFileIdentity};
 
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
 pub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -24,6 +27,7 @@ const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct ServerHandle {
     _thread: std::thread::JoinHandle<()>,
     path: PathBuf,
+    identity: SocketFileIdentity,
     running: Arc<AtomicBool>,
 }
 
@@ -31,7 +35,7 @@ impl Drop for ServerHandle {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
 
-        if let Err(err) = fs::remove_file(&self.path) {
+        if let Err(err) = self.remove_socket_file_if_owned() {
             if err.kind() != std::io::ErrorKind::NotFound {
                 warn!(path = %self.path.display(), err = %err, "failed to remove api socket on shutdown");
             }
@@ -39,15 +43,34 @@ impl Drop for ServerHandle {
     }
 }
 
+impl ServerHandle {
+    pub(crate) fn remove_socket_file_if_owned(&self) -> std::io::Result<()> {
+        remove_socket_file_if_owned(&self.path, self.identity)
+    }
+}
+
 pub fn start_server(
     api_tx: ApiRequestSender,
     event_hub: EventHub,
+) -> std::io::Result<ServerHandle> {
+    start_server_with_capabilities(
+        api_tx,
+        event_hub,
+        Some(ServerCapabilities { live_handoff: true }),
+    )
+}
+
+pub fn start_server_with_capabilities(
+    api_tx: ApiRequestSender,
+    event_hub: EventHub,
+    capabilities: Option<ServerCapabilities>,
 ) -> std::io::Result<ServerHandle> {
     let path = socket_path();
     prepare_socket_path(&path)?;
 
     let listener = UnixListener::bind(&path)?;
     restrict_socket_permissions(&path)?;
+    let identity = socket_file_identity(&path)?;
     info!(path = %path.display(), "api server listening");
 
     let running = Arc::new(AtomicBool::new(true));
@@ -58,11 +81,16 @@ pub fn start_server(
                 Ok(stream) => {
                     let api_tx = api_tx.clone();
                     let event_hub = event_hub.clone();
+                    let capabilities = capabilities.clone();
                     let connection_running = Arc::clone(&listener_running);
                     std::thread::spawn(move || {
-                        if let Err(err) =
-                            handle_connection(stream, &api_tx, &event_hub, &connection_running)
-                        {
+                        if let Err(err) = handle_connection(
+                            stream,
+                            &api_tx,
+                            &event_hub,
+                            &connection_running,
+                            capabilities,
+                        ) {
                             warn!(err = %err, "api connection failed");
                         }
                     });
@@ -79,6 +107,7 @@ pub fn start_server(
     Ok(ServerHandle {
         _thread: thread,
         path,
+        identity,
         running,
     })
 }
@@ -101,6 +130,7 @@ fn handle_connection(
     api_tx: &ApiRequestSender,
     event_hub: &EventHub,
     running: &Arc<AtomicBool>,
+    capabilities: Option<ServerCapabilities>,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(INITIAL_REQUEST_TIMEOUT))?;
     stream.set_write_timeout(Some(STREAM_WRITE_TIMEOUT))?;
@@ -199,6 +229,7 @@ fn handle_connection(
                     method: method_body,
                 },
                 api_tx,
+                capabilities,
             );
             let result = write_text_line_allow_disconnect(&mut stream, &response);
             match &result {
@@ -217,13 +248,18 @@ fn handle_connection(
     }
 }
 
-fn handle_request(request: Request, api_tx: &ApiRequestSender) -> String {
+fn handle_request(
+    request: Request,
+    api_tx: &ApiRequestSender,
+    capabilities: Option<ServerCapabilities>,
+) -> String {
     match request.method {
         Method::Ping(_) => serde_json::to_string(&SuccessResponse {
             id: request.id,
             result: ResponseResult::Pong {
                 version: env!("CARGO_PKG_VERSION").into(),
                 protocol: crate::protocol::PROTOCOL_VERSION,
+                capabilities,
             },
         })
         .unwrap_or_else(|_| {
@@ -238,6 +274,7 @@ fn api_method_name(method: &Method) -> &'static str {
     match method {
         Method::Ping(_) => "ping",
         Method::ServerStop(_) => "server.stop",
+        Method::ServerLiveHandoff(_) => "server.live_handoff",
         Method::ServerReloadConfig(_) => "server.reload_config",
         Method::WorkspaceCreate(_) => "workspace.create",
         Method::WorkspaceList(_) => "workspace.list",
@@ -610,6 +647,7 @@ mod tests {
                 method: Method::Ping(crate::api::schema::PingParams::default()),
             },
             &tx,
+            Some(ServerCapabilities { live_handoff: true }),
         );
 
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -626,7 +664,7 @@ mod tests {
         };
 
         let request_for_thread = request.clone();
-        let thread = std::thread::spawn(move || handle_request(request_for_thread, &tx));
+        let thread = std::thread::spawn(move || handle_request(request_for_thread, &tx, None));
 
         let msg = rx.blocking_recv().unwrap();
         assert_eq!(msg.request.id, "req_2");
@@ -692,7 +730,7 @@ mod tests {
         let event_hub = EventHub::default();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let server_thread = std::thread::spawn(move || {
-            let result = handle_connection(server, &api_tx, &event_hub, &server_running);
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
             done_tx.send(result).unwrap();
         });
 
@@ -724,7 +762,7 @@ mod tests {
         let event_hub = EventHub::default();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let server_thread = std::thread::spawn(move || {
-            let result = handle_connection(server, &api_tx, &event_hub, &server_running);
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
             done_tx.send(result).unwrap();
         });
 
@@ -756,7 +794,7 @@ mod tests {
         let event_hub = EventHub::default();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let server_thread = std::thread::spawn(move || {
-            let result = handle_connection(server, &api_tx, &event_hub, &server_running);
+            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
             done_tx.send(result).unwrap();
         });
 

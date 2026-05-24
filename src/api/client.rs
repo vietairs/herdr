@@ -111,9 +111,14 @@ impl ApiClient {
             method: Method::Ping(PingParams::default()),
         })?;
         match response.result {
-            ResponseResult::Pong { version, protocol } => Ok(crate::api::RuntimeStatus {
+            ResponseResult::Pong {
+                version,
+                protocol,
+                capabilities,
+            } => Ok(crate::api::RuntimeStatus {
                 version: Some(version),
                 protocol: Some(protocol),
+                capabilities,
             }),
             result => Err(ApiClientError::UnexpectedResult(format!("{result:?}"))),
         }
