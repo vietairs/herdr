@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyModifiers, MouseEventKind};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -34,7 +35,10 @@ use crate::api;
 use crate::app;
 use crate::config;
 use crate::events::AppEvent;
-use crate::protocol::{self, FrameData, ServerMessage, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE};
+use crate::protocol::{
+    self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
+    MAX_GRAPHICS_FRAME_SIZE,
+};
 use crate::server::client_accept::accept_pending_client_connections;
 use crate::server::client_transport::ServerEvent;
 use crate::server::clients::{
@@ -123,6 +127,79 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+}
+
+fn apply_terminal_attach_scroll(
+    runtime: &crate::terminal::TerminalRuntime,
+    source: AttachScrollSource,
+    direction: AttachScrollDirection,
+    lines: u16,
+    column: Option<u16>,
+    row: Option<u16>,
+    modifiers: u8,
+) -> Result<(), String> {
+    let wheel_kind = match direction {
+        AttachScrollDirection::Up => MouseEventKind::ScrollUp,
+        AttachScrollDirection::Down => MouseEventKind::ScrollDown,
+    };
+    if let AttachScrollSource::PageKey { input } = source {
+        let host_scroll = runtime.input_state().is_some_and(|input_state| {
+            !input_state.alternate_screen && !input_state.mouse_reporting_enabled()
+        });
+        if host_scroll {
+            match direction {
+                AttachScrollDirection::Up => runtime.scroll_up(lines.max(1) as usize),
+                AttachScrollDirection::Down => runtime.scroll_down(lines.max(1) as usize),
+            }
+            return Ok(());
+        }
+        return apply_terminal_attach_input(runtime, input);
+    }
+
+    match runtime.wheel_routing() {
+        Some(crate::pane::WheelRouting::MouseReport) => {
+            runtime.scroll_reset();
+            let column = column.unwrap_or(0);
+            let row = row.unwrap_or(0);
+            let Some(bytes) = runtime.encode_mouse_wheel(
+                wheel_kind,
+                column,
+                row,
+                KeyModifiers::from_bits_truncate(modifiers),
+            ) else {
+                return Err(format!(
+                    "failed to encode terminal attach mouse wheel event: {wheel_kind:?}"
+                ));
+            };
+            runtime
+                .try_send_bytes(Bytes::from(bytes))
+                .map_err(|err| format!("terminal attach mouse wheel input failed: {err}"))?;
+        }
+        Some(crate::pane::WheelRouting::AlternateScroll) => {
+            runtime.scroll_reset();
+            let Some(bytes) = runtime.encode_alternate_scroll(wheel_kind) else {
+                return Ok(());
+            };
+            runtime
+                .try_send_bytes(Bytes::from(bytes))
+                .map_err(|err| format!("terminal attach alternate scroll input failed: {err}"))?;
+        }
+        Some(crate::pane::WheelRouting::HostScroll) | None => match direction {
+            AttachScrollDirection::Up => runtime.scroll_up(lines.max(1) as usize),
+            AttachScrollDirection::Down => runtime.scroll_down(lines.max(1) as usize),
+        },
+    }
+    Ok(())
+}
+
+fn apply_terminal_attach_input(
+    runtime: &crate::terminal::TerminalRuntime,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    runtime.scroll_reset();
+    runtime
+        .try_send_bytes(Bytes::from(data))
+        .map_err(|err| format!("terminal attach input failed: {err}"))
 }
 
 impl HeadlessServer {
@@ -546,6 +623,24 @@ impl HeadlessServer {
         }
     }
 
+    fn client_removal_needs_shared_resize(&self, client_id: u64) -> bool {
+        if self.foreground_client_id == Some(client_id) {
+            return true;
+        }
+        matches!(
+            self.clients.get(&client_id).map(|client| &client.mode),
+            Some(ClientConnectionMode::TerminalAttach { .. })
+        ) && self.foreground_client_id.is_some()
+    }
+
+    fn remove_client_and_resize_if_needed(&mut self, client_id: u64) {
+        let needs_shared_resize = self.client_removal_needs_shared_resize(client_id);
+        let foreground_changed = self.remove_client(client_id);
+        if needs_shared_resize || foreground_changed {
+            self.resize_shared_runtime_to_effective_size();
+        }
+    }
+
     fn send_client_graphics_cleanup(&mut self, client_id: u64) {
         let (writer, bytes) = match self.clients.get_mut(&client_id) {
             Some(client) => {
@@ -687,6 +782,35 @@ impl HeadlessServer {
             vec![crate::raw_input::RawInputEvent::Paste(path)],
             self.foreground_client_id == Some(client_id),
         );
+        true
+    }
+
+    fn handle_terminal_attach_scroll(
+        &mut self,
+        client_id: u64,
+        source: AttachScrollSource,
+        direction: AttachScrollDirection,
+        lines: u16,
+        column: Option<u16>,
+        row: Option<u16>,
+        modifiers: u8,
+    ) -> bool {
+        let Some(ClientConnection {
+            mode: ClientConnectionMode::TerminalAttach { terminal_id },
+            ..
+        }) = self.clients.get(&client_id)
+        else {
+            return false;
+        };
+        let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) else {
+            return false;
+        };
+
+        if let Err(err) =
+            apply_terminal_attach_scroll(runtime, source, direction, lines, column, row, modifiers)
+        {
+            warn!(client_id, terminal_id = %terminal_id, err = %err, "terminal attach scroll failed");
+        }
         true
     }
 
@@ -1058,10 +1182,7 @@ impl HeadlessServer {
 
         // Remove broken clients.
         for client_id in broken_clients {
-            let foreground_changed = self.remove_client(client_id);
-            if foreground_changed {
-                self.resize_shared_runtime_to_effective_size();
-            }
+            self.remove_client_and_resize_if_needed(client_id);
         }
     }
 
@@ -1091,10 +1212,7 @@ impl HeadlessServer {
                         client_id,
                         "client writer channel closed during targeted send"
                     );
-                    let foreground_changed = self.remove_client(client_id);
-                    if foreground_changed {
-                        self.resize_shared_runtime_to_effective_size();
-                    }
+                    self.remove_client_and_resize_if_needed(client_id);
                     return false;
                 }
             }
@@ -1114,10 +1232,7 @@ impl HeadlessServer {
                     reason: Some(reason.clone()),
                 },
             );
-            let foreground_changed = self.remove_client(client_id);
-            if foreground_changed {
-                self.resize_shared_runtime_to_effective_size();
-            }
+            self.remove_client_and_resize_if_needed(client_id);
         }
     }
 
@@ -1136,7 +1251,7 @@ impl HeadlessServer {
                     )),
                 },
             );
-            self.remove_client(client_id);
+            self.remove_client_and_resize_if_needed(client_id);
             return false;
         };
 
@@ -1150,7 +1265,7 @@ impl HeadlessServer {
                         )),
                     },
                 );
-                self.remove_client(client_id);
+                self.remove_client_and_resize_if_needed(client_id);
                 return false;
             }
             if existing_owner != client_id {
@@ -1160,7 +1275,7 @@ impl HeadlessServer {
                         reason: Some("terminal attach taken over".to_owned()),
                     },
                 );
-                self.remove_client(existing_owner);
+                self.remove_client_and_resize_if_needed(existing_owner);
             }
         }
 
@@ -1243,6 +1358,17 @@ impl HeadlessServer {
                 terminal_id,
                 takeover,
             } => self.attach_terminal_client(client_id, terminal_id, takeover),
+            ServerEvent::ClientAttachScroll {
+                client_id,
+                source,
+                direction,
+                lines,
+                column,
+                row,
+                modifiers,
+            } => self.handle_terminal_attach_scroll(
+                client_id, source, direction, lines, column, row, modifiers,
+            ),
             ServerEvent::ClientInput { client_id, data } => {
                 debug!(client_id, len = data.len(), "client input received");
                 if let Some(ClientConnection {
@@ -1251,8 +1377,8 @@ impl HeadlessServer {
                 }) = self.clients.get(&client_id)
                 {
                     if let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) {
-                        if let Err(err) = runtime.try_send_bytes(Bytes::from(data)) {
-                            warn!(client_id, terminal_id = %terminal_id, err = %err, "terminal attach input failed");
+                        if let Err(err) = apply_terminal_attach_input(runtime, data) {
+                            warn!(client_id, terminal_id = %terminal_id, err = %err);
                         }
                     }
                     return true;
@@ -1395,18 +1521,12 @@ impl HeadlessServer {
             }
             ServerEvent::ClientDetach { client_id } => {
                 info!(client_id, "client detached");
-                let foreground_changed = self.remove_client(client_id);
-                if foreground_changed {
-                    self.resize_shared_runtime_to_effective_size();
-                }
+                self.remove_client_and_resize_if_needed(client_id);
                 true
             }
             ServerEvent::ClientDisconnected { client_id } => {
                 info!(client_id, "client disconnected");
-                let foreground_changed = self.remove_client(client_id);
-                if foreground_changed {
-                    self.resize_shared_runtime_to_effective_size();
-                }
+                self.remove_client_and_resize_if_needed(client_id);
                 true
             }
             ServerEvent::ClientWriterDrained { client_id } => {
@@ -1689,10 +1809,7 @@ impl HeadlessServer {
         }
 
         for client_id in broken_clients {
-            let foreground_changed = self.remove_client(client_id);
-            if foreground_changed {
-                self.resize_shared_runtime_to_effective_size();
-            }
+            self.remove_client_and_resize_if_needed(client_id);
         }
     }
 
@@ -1890,10 +2007,7 @@ impl HeadlessServer {
 
         if !broken_clients.is_empty() {
             for client_id in broken_clients {
-                let foreground_changed = self.remove_client(client_id);
-                if foreground_changed {
-                    self.resize_shared_runtime_to_effective_size();
-                }
+                self.remove_client_and_resize_if_needed(client_id);
             }
         }
 
@@ -2646,6 +2760,181 @@ next_tab = ""
     }
 
     #[test]
+    fn terminal_attach_scroll_moves_attached_runtime_viewport() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _runtime_guard = rt.enter();
+        let mut bytes = Vec::new();
+        for line in 0..80 {
+            bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
+        }
+        let runtime =
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(20, 5, 4096, &bytes);
+
+        apply_terminal_attach_scroll(
+            &runtime,
+            AttachScrollSource::Wheel,
+            AttachScrollDirection::Up,
+            3,
+            None,
+            None,
+            0,
+        )
+        .expect("scroll up");
+        let metrics = runtime.scroll_metrics().expect("scroll metrics");
+        assert_eq!(metrics.offset_from_bottom, 3);
+
+        apply_terminal_attach_scroll(
+            &runtime,
+            AttachScrollSource::Wheel,
+            AttachScrollDirection::Down,
+            2,
+            None,
+            None,
+            0,
+        )
+        .expect("scroll down");
+        let metrics = runtime.scroll_metrics().expect("scroll metrics");
+        assert_eq!(metrics.offset_from_bottom, 1);
+        drop(runtime);
+        drop(_runtime_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn terminal_attach_input_resets_scrolled_viewport() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _runtime_guard = rt.enter();
+        let mut bytes = Vec::new();
+        for line in 0..80 {
+            bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
+        }
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                20, 5, 4096, &bytes, 4,
+            );
+
+        runtime.scroll_up(4);
+        assert_eq!(
+            runtime
+                .scroll_metrics()
+                .expect("scroll metrics")
+                .offset_from_bottom,
+            4
+        );
+
+        apply_terminal_attach_input(&runtime, b"x".to_vec()).expect("attach input");
+        assert_eq!(
+            runtime
+                .scroll_metrics()
+                .expect("scroll metrics")
+                .offset_from_bottom,
+            0
+        );
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded input"),
+            Bytes::from("x")
+        );
+
+        drop(runtime);
+        drop(_runtime_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn terminal_attach_page_key_host_scrolls_plain_terminal() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _runtime_guard = rt.enter();
+        let mut bytes = Vec::new();
+        for line in 0..80 {
+            bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
+        }
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                20, 5, 4096, &bytes, 4,
+            );
+
+        apply_terminal_attach_scroll(
+            &runtime,
+            AttachScrollSource::PageKey {
+                input: b"\x1b[5~".to_vec(),
+            },
+            AttachScrollDirection::Up,
+            4,
+            None,
+            None,
+            0,
+        )
+        .expect("page key scroll");
+
+        assert_eq!(
+            runtime
+                .scroll_metrics()
+                .expect("scroll metrics")
+                .offset_from_bottom,
+            4
+        );
+        assert!(input_rx.try_recv().is_err());
+        drop(runtime);
+        drop(_runtime_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn terminal_attach_page_key_forwards_when_mouse_reporting() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _runtime_guard = rt.enter();
+        let mut bytes = b"\x1b[?1000h".to_vec();
+        for line in 0..80 {
+            bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
+        }
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                20, 5, 4096, &bytes, 4,
+            );
+        runtime.scroll_up(3);
+
+        apply_terminal_attach_scroll(
+            &runtime,
+            AttachScrollSource::PageKey {
+                input: b"\x1b[5~".to_vec(),
+            },
+            AttachScrollDirection::Up,
+            4,
+            None,
+            None,
+            0,
+        )
+        .expect("page key forward");
+
+        assert_eq!(
+            runtime
+                .scroll_metrics()
+                .expect("scroll metrics")
+                .offset_from_bottom,
+            0
+        );
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded page key"),
+            Bytes::from_static(b"\x1b[5~")
+        );
+        drop(runtime);
+        drop(_runtime_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    #[test]
     fn virtual_render_produces_nonempty_buffer() {
         let mut state = AppState::test_new();
         let area = Rect::new(0, 0, 80, 24);
@@ -3261,6 +3550,105 @@ next_tab = ""
                 .current_size(),
             expected
         );
+    }
+
+    #[test]
+    fn terminal_attach_disconnect_restores_app_pane_size() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _runtime_guard = rt.enter();
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).expect("terminal id").clone();
+        let terminal_id_string = terminal_id.to_string();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+        let expected_app_size = server
+            .app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("runtime")
+            .current_size();
+        assert_ne!(expected_app_size, (24, 80));
+
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::TerminalAnsi,
+            keybindings: None,
+            writer,
+        }));
+        assert!(
+            server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                client_id: 2,
+                terminal_id: terminal_id_string.clone(),
+                takeover: false,
+            })
+        );
+        assert_eq!(server.foreground_client_id, Some(1));
+        assert!(server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .contains(&terminal_id));
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .current_size(),
+            (24, 80)
+        );
+
+        assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 2 }));
+
+        assert!(!server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .contains(&terminal_id));
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .current_size(),
+            expected_app_size
+        );
+        drop(server);
+        drop(_runtime_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
     }
 
     #[test]

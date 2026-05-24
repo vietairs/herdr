@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -108,6 +108,37 @@ pub enum ClientMessage {
         terminal_id: String,
         /// Replace an existing writable attach owner for this terminal.
         takeover: bool,
+    },
+
+    /// Scroll input handled by a direct terminal attach client.
+    AttachScroll {
+        /// Original input source for routing.
+        source: AttachScrollSource,
+        /// Scroll direction.
+        direction: AttachScrollDirection,
+        /// Number of terminal rows to move when using host scrollback.
+        lines: u16,
+        /// Mouse column relative to the attached terminal, when available.
+        column: Option<u16>,
+        /// Mouse row relative to the attached terminal, when available.
+        row: Option<u16>,
+        /// Crossterm-compatible modifier bits for forwarded mouse wheel events.
+        modifiers: u8,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttachScrollDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttachScrollSource {
+    Wheel,
+    PageKey {
+        /// Original key bytes to forward when the child application owns page keys.
+        input: Vec<u8>,
     },
 }
 
@@ -695,6 +726,22 @@ mod tests {
         let msg = ClientMessage::AttachTerminal {
             terminal_id: "term_123".to_owned(),
             takeover: true,
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn client_attach_scroll_roundtrip() {
+        let msg = ClientMessage::AttachScroll {
+            source: AttachScrollSource::Wheel,
+            direction: AttachScrollDirection::Up,
+            lines: 3,
+            column: Some(12),
+            row: Some(7),
+            modifiers: 4,
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ClientMessage, _) =

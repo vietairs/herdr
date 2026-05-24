@@ -14,8 +14,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::protocol::{
-    self, ClientKeybindings, ClientMessage, RenderEncoding, ServerMessage,
-    MAX_CLIPBOARD_IMAGE_PAYLOAD, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
+    self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientMessage,
+    RenderEncoding, ServerMessage, MAX_CLIPBOARD_IMAGE_PAYLOAD, MAX_FRAME_SIZE,
+    MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 
 /// Minimum accepted attached client size.
@@ -71,6 +72,16 @@ pub(crate) enum ServerEvent {
         client_id: u64,
         terminal_id: String,
         takeover: bool,
+    },
+    /// A direct terminal attach client requested scrollback movement.
+    ClientAttachScroll {
+        client_id: u64,
+        source: AttachScrollSource,
+        direction: AttachScrollDirection,
+        lines: u16,
+        column: Option<u16>,
+        row: Option<u16>,
+        modifiers: u8,
     },
     /// A client sent a resize message.
     ClientResize {
@@ -430,6 +441,22 @@ fn client_read_loop(
                 client_id,
                 terminal_id,
                 takeover,
+            },
+            ClientMessage::AttachScroll {
+                source,
+                direction,
+                lines,
+                column,
+                row,
+                modifiers,
+            } => ServerEvent::ClientAttachScroll {
+                client_id,
+                source,
+                direction,
+                lines,
+                column,
+                row,
+                modifiers,
             },
             ClientMessage::Hello { .. } => {
                 // Duplicate Hello — ignore.

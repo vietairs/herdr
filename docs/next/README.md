@@ -114,7 +114,7 @@ same session, same agents, same state.
 
 `herdr` and `herdr --remote` attach to the full herdr session ui. `herdr agent attach <target>` attaches your current terminal directly to one server-owned terminal, like a single-pane terminal attach. `herdr terminal attach <terminal_id>` does the same by terminal id.
 
-direct attach streams the current rendered terminal state first, then live ansi frames. your input goes straight to that terminal. detach with `ctrl+b q`; send a literal `ctrl+b` with `ctrl+b ctrl+b`. one writable client owns input and resize for a terminal. a second attach fails unless you pass `--takeover`.
+direct attach streams the current rendered terminal state first, then live ansi frames. your input goes straight to that terminal. scroll with the mouse wheel or plain page up/page down; normal input jumps back to the bottom. detach with `ctrl+b q`; send a literal `ctrl+b` with `ctrl+b ctrl+b`. one writable client owns input and resize for a terminal. a second attach fails unless you pass `--takeover`.
 
 ## agent awareness
 
