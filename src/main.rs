@@ -140,6 +140,15 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resize_mode = "prefix+r"
 # toggle_sidebar = "prefix+b"
 
+# Navigate-mode movement. These local shortcuts win while navigate mode is open.
+# They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.
+# navigate_workspace_up = "up"
+# navigate_workspace_down = "down"
+# navigate_pane_left = "h"      # left arrow always focuses the pane to the left
+# navigate_pane_down = "j"
+# navigate_pane_up = "k"
+# navigate_pane_right = "l"     # right arrow always focuses the pane to the right
+
 # Custom commands use the same binding syntax.
 # type = "shell" runs detached in the background.
 # type = "pane" opens a temporary pane and closes it when the command exits.

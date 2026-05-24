@@ -153,6 +153,18 @@ pub struct KeysConfig {
     pub workspace_picker: BindingConfig,
     /// Open the session navigator. Default: "prefix+g"
     pub goto: BindingConfig,
+    /// Move workspace selection up in navigate mode. Default: "up".
+    pub navigate_workspace_up: BindingConfig,
+    /// Move workspace selection down in navigate mode. Default: "down".
+    pub navigate_workspace_down: BindingConfig,
+    /// Focus the pane to the left in navigate mode. Default: "h". Left arrow is always an alias.
+    pub navigate_pane_left: BindingConfig,
+    /// Focus the pane below in navigate mode. Default: "j".
+    pub navigate_pane_down: BindingConfig,
+    /// Focus the pane above in navigate mode. Default: "k".
+    pub navigate_pane_up: BindingConfig,
+    /// Focus the pane to the right in navigate mode. Default: "l". Right arrow is always an alias.
+    pub navigate_pane_right: BindingConfig,
     /// Detach from server/client mode, or exit --no-session mode. Default: "prefix+q".
     pub detach: BindingConfig,
     /// Reload config.toml in the running app/server. Default: "prefix+shift+r".
@@ -346,6 +358,12 @@ impl Default for KeysConfig {
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::one("prefix+w"),
             goto: BindingConfig::one("prefix+g"),
+            navigate_workspace_up: BindingConfig::one("up"),
+            navigate_workspace_down: BindingConfig::one("down"),
+            navigate_pane_left: BindingConfig::one("h"),
+            navigate_pane_down: BindingConfig::one("j"),
+            navigate_pane_up: BindingConfig::one("k"),
+            navigate_pane_right: BindingConfig::one("l"),
             detach: BindingConfig::one("prefix+q"),
             reload_config: BindingConfig::one("prefix+shift+r"),
             open_notification_target: BindingConfig::one("prefix+o"),
