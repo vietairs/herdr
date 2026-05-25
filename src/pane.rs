@@ -476,42 +476,6 @@ fn pane_shell_from(configured_shell: &str, env_shell: Option<String>) -> String 
         .unwrap_or_else(|| "/bin/sh".into())
 }
 
-const RESTORE_WRAPPER_SCRIPT: &str = r#"agent="$1"
-fallback_shell="$2"
-early_window="$3"
-shift 3
-	start="$(date +%s 2>/dev/null || printf 0)"
-	"$@"
-	status="$?"
-	end="$(date +%s 2>/dev/null || printf 999999)"
-	elapsed="$((end - start))"
-	if [ "$status" -ne 0 ] && [ "$elapsed" -le "$early_window" ]; then
-	  printf 'herdr: %s session restore failed; started a shell instead\n' "$agent"
-	fi
-	exec "$fallback_shell"
-	"#;
-
-fn restore_command_args(agent: &str, fallback_shell: &str, argv: &[String]) -> Vec<String> {
-    let mut args = vec![
-        "-c".to_string(),
-        RESTORE_WRAPPER_SCRIPT.to_string(),
-        "herdr-agent-restore".to_string(),
-        agent.to_string(),
-        fallback_shell.to_string(),
-        "30".to_string(),
-    ];
-    args.extend(argv.iter().cloned());
-    args
-}
-
-fn restore_command_builder(agent: &str, fallback_shell: &str, argv: &[String]) -> CommandBuilder {
-    let mut cmd = CommandBuilder::new("/bin/sh");
-    for arg in restore_command_args(agent, fallback_shell, argv) {
-        cmd.arg(arg);
-    }
-    cmd
-}
-
 #[cfg(unix)]
 fn duplicate_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
     let duplicated = unsafe { libc::dup(fd) };
@@ -904,20 +868,21 @@ impl PaneRuntime {
         launch: crate::agent_resume::AgentResumeLaunch<'_>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
-        if launch.plan.argv.is_empty() {
+        let Some((program, args)) = launch.plan.argv.split_first() else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "restore argv must not be empty",
             ));
-        }
+        };
 
-        let shell = pane_shell(default_shell);
-        let mut cmd = restore_command_builder(&launch.plan.agent, &shell, &launch.plan.argv);
+        let mut cmd = CommandBuilder::new(program);
+        for arg in args {
+            cmd.arg(arg);
+        }
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
         apply_pane_terminal_env(&mut cmd);
@@ -2114,26 +2079,73 @@ mod tests {
         assert!(truncated.is_empty());
     }
 
-    #[test]
-    fn restore_wrapper_falls_back_after_early_resume_failure() {
-        let argv = vec!["/bin/sh".into(), "-c".into(), "exit 7".into()];
-        let output = std::process::Command::new("/bin/sh")
-            .args(restore_command_args("codex", "/bin/sh", &argv))
-            .stdin(std::process::Stdio::null())
+    fn process_command_name(pid: u32) -> Option<String> {
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
             .output()
-            .unwrap();
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!command.is_empty()).then_some(command)
+    }
 
-        assert!(
-            output.status.success(),
-            "fallback command should own the final exit status"
-        );
-        assert!(String::from_utf8_lossy(&output.stdout)
-            .contains("herdr: codex session restore failed; started a shell instead"));
+    async fn wait_for_child_pid(runtime: &PaneRuntime) -> u32 {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            let pid = runtime.child_pid.load(Ordering::Acquire);
+            if pid != 0 {
+                return pid;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("child pid was not published");
     }
 
     #[tokio::test]
-    async fn spawn_agent_restore_keeps_pane_alive_after_early_failure() {
-        let (events, mut event_rx) = mpsc::channel(4);
+    async fn spawn_agent_restore_uses_restore_command_as_pane_child() {
+        let (events, _event_rx) = mpsc::channel(4);
+        let plan = crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: vec!["/bin/cat".into()],
+            dedupe_key: "test".into(),
+        };
+        let runtime = PaneRuntime::spawn_agent_restore(
+            PaneId::from_raw(7),
+            24,
+            80,
+            std::env::current_dir().unwrap(),
+            crate::agent_resume::AgentResumeLaunch {
+                plan: &plan,
+                initial_history_ansi: None,
+            },
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+
+        let pid = wait_for_child_pid(&runtime).await;
+        let command = process_command_name(pid).expect("child process should be visible to ps");
+
+        assert!(
+            command.ends_with("cat"),
+            "restore command should be the pane child, got {command:?}"
+        );
+        assert!(
+            !command.ends_with("sh"),
+            "restore must not keep a shell wrapper as the pane child"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_restore_reports_pane_death_after_early_failure() {
+        let (events, mut event_rx) = mpsc::channel(8);
         let plan = crate::agent_resume::AgentResumePlan {
             agent: "codex".into(),
             argv: vec!["/bin/sh".into(), "-c".into(), "exit 7".into()],
@@ -2150,50 +2162,30 @@ mod tests {
             },
             0,
             crate::terminal_theme::TerminalTheme::default(),
-            "/bin/sh",
             events,
             Arc::new(Notify::new()),
             Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-        assert!(runtime
-            .visible_text()
-            .contains("herdr: codex session restore failed; started a shell instead"));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), event_rx.recv())
-                .await
-                .is_err(),
-            "fallback shell should keep the pane runtime alive"
-        );
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2500);
-        let mut cleared = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut died = false;
         while tokio::time::Instant::now() < deadline {
             let Some(event) = tokio::time::timeout(
                 deadline.saturating_duration_since(tokio::time::Instant::now()),
                 event_rx.recv(),
             )
             .await
-            .expect("fallback shell should clear the seeded restored agent") else {
+            .expect("pane death event should arrive") else {
                 break;
             };
-            if matches!(
-                event,
-                AppEvent::StateChanged {
-                    pane_id,
-                    agent: None,
-                    state: AgentState::Unknown,
-                    ..
-                } if pane_id == PaneId::from_raw(7)
-            ) {
-                cleared = true;
+            if matches!(event, AppEvent::PaneDied { pane_id } if pane_id == PaneId::from_raw(7)) {
+                died = true;
                 break;
             }
         }
-        assert!(cleared);
 
+        assert!(died, "failed direct agent restore should report pane death");
         runtime.shutdown();
     }
 

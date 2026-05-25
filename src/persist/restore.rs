@@ -419,7 +419,6 @@ fn restore_tab(
                 launch,
                 runtime_context.scrollback_limit_bytes,
                 crate::terminal_theme::TerminalTheme::default(),
-                runtime_context.default_shell,
                 runtime_context.events.clone(),
                 runtime_context.render_notify.clone(),
                 runtime_context.render_dirty.clone(),
