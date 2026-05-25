@@ -59,6 +59,8 @@ struct ClientState {
     attach_escape: Option<AttachEscapeState>,
     /// Rows scrolled for one direct-attach wheel notch.
     mouse_scroll_lines: usize,
+    /// Whether outer focus gain should force a full host-terminal redraw.
+    redraw_on_focus_gained: bool,
 }
 
 #[derive(Debug, Default)]
@@ -514,6 +516,7 @@ fn run_client_with_mode(
 
     let loaded_config = crate::config::Config::load();
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
+    let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
     let sound_config = loaded_config.config.ui.sound;
     let direct_attach_requested = attach_request.is_some();
     let kitty_graphics_enabled =
@@ -608,6 +611,7 @@ fn run_client_with_mode(
             should_quit,
             sound_config,
             mouse_scroll_lines,
+            redraw_on_focus_gained,
             kitty_graphics_enabled,
             false,
             negotiated_encoding,
@@ -655,6 +659,7 @@ async fn run_client_loop(
     should_quit: Arc<AtomicBool>,
     sound_config: crate::config::SoundConfig,
     mouse_scroll_lines: usize,
+    redraw_on_focus_gained: bool,
     kitty_graphics_enabled: bool,
     mouse_capture_active: bool,
     negotiated_encoding: RenderEncoding,
@@ -668,6 +673,7 @@ async fn run_client_loop(
         kitty_graphics_enabled,
         attach_escape,
         mouse_scroll_lines,
+        redraw_on_focus_gained,
     };
     debug!(?negotiated_encoding, "client render encoding active");
 
@@ -763,7 +769,10 @@ async fn run_client_loop(
                     }
                 } else {
                     let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
-                    if crate::raw_input::events_require_host_surface_redraw(&events) {
+                    if crate::raw_input::events_require_host_surface_redraw(
+                        &events,
+                        state.redraw_on_focus_gained,
+                    ) {
                         state.request_full_redraw();
                     }
                     data
@@ -854,7 +863,10 @@ async fn run_client_loop(
                     let _ = io::stdout().flush();
                 }
                 ServerMessage::ReloadSoundConfig => {
-                    reload_local_sound_config(&mut state.sound_config);
+                    reload_local_client_config(
+                        &mut state.sound_config,
+                        &mut state.redraw_on_focus_gained,
+                    );
                 }
                 ServerMessage::MouseCapture { enabled } => {
                     let desired = enabled;
@@ -955,17 +967,21 @@ fn write_to_server(stream: &mut UnixStream, msg: &ClientMessage) -> io::Result<(
 // Notifications
 // ---------------------------------------------------------------------------
 
-fn reload_local_sound_config(sound_config: &mut crate::config::SoundConfig) {
+fn reload_local_client_config(
+    sound_config: &mut crate::config::SoundConfig,
+    redraw_on_focus_gained: &mut bool,
+) {
     match crate::config::load_live_config() {
         Ok(loaded) => {
             for diagnostic in loaded.config.ui.sound.diagnostics() {
                 warn!(diagnostic = %diagnostic, "local sound config diagnostic");
             }
             *sound_config = loaded.config.ui.sound;
-            debug!("reloaded local sound config");
+            *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
+            debug!("reloaded local client config");
         }
         Err(diagnostics) => {
-            warn!(diagnostics = ?diagnostics, "failed to reload local sound config; keeping current sound config");
+            warn!(diagnostics = ?diagnostics, "failed to reload local client config; keeping current client config");
         }
     }
 }
@@ -1629,6 +1645,29 @@ mod tests {
     #[test]
     fn sound_from_notify_message_rejects_unknown_payloads() {
         assert_eq!(sound_from_notify_message("toast"), None);
+    }
+
+    #[test]
+    fn reload_local_client_config_refreshes_redraw_on_focus_gained() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-client-config-reload-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "[ui]\nredraw_on_focus_gained = false\n").unwrap();
+        let path_string = path.to_string_lossy().to_string();
+        let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
+        let mut sound_config = crate::config::SoundConfig::default();
+        let mut redraw_on_focus_gained = true;
+
+        reload_local_client_config(&mut sound_config, &mut redraw_on_focus_gained);
+
+        assert!(!redraw_on_focus_gained);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

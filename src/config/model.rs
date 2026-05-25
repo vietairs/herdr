@@ -259,6 +259,8 @@ pub struct UiConfig {
     pub sidebar_max_width: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
+    /// Force a full host-terminal redraw when the outer terminal regains focus. Default: true.
+    pub redraw_on_focus_gained: bool,
     /// Lines to scroll per mouse wheel notch. Default: 3.
     pub mouse_scroll_lines: Option<NonZeroUsize>,
     /// Ask for confirmation before closing a workspace. Default: true.
@@ -416,6 +418,7 @@ impl Default for UiConfig {
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             mouse_capture: true,
+            redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
             confirm_close: true,
             prompt_new_tab_name: true,
@@ -667,6 +670,19 @@ mouse_capture = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.ui.mouse_capture);
+    }
+
+    #[test]
+    fn redraw_on_focus_gained_default_on_and_parse() {
+        let default_config = Config::default();
+        assert!(default_config.ui.redraw_on_focus_gained);
+
+        let toml = r#"
+[ui]
+redraw_on_focus_gained = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.ui.redraw_on_focus_gained);
     }
 
     #[test]

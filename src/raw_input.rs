@@ -128,10 +128,14 @@ pub enum RawInputEvent {
     Unsupported,
 }
 
-pub(crate) fn events_require_host_surface_redraw(events: &[RawInputEvent]) -> bool {
-    events
-        .iter()
-        .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
+pub(crate) fn events_require_host_surface_redraw(
+    events: &[RawInputEvent],
+    redraw_on_focus_gained: bool,
+) -> bool {
+    redraw_on_focus_gained
+        && events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::OuterFocusGained))
 }
 
 pub fn spawn_input_reader() -> mpsc::Receiver<RawInputEvent> {
@@ -667,10 +671,11 @@ mod tests {
     #[test]
     fn outer_focus_gained_requests_host_surface_redraw() {
         let events = parse_raw_input_bytes_sync(b"\x1b[I");
-        assert!(events_require_host_surface_redraw(&events));
+        assert!(events_require_host_surface_redraw(&events, true));
+        assert!(!events_require_host_surface_redraw(&events, false));
 
         let events = parse_raw_input_bytes_sync(b"\x1b[O");
-        assert!(!events_require_host_surface_redraw(&events));
+        assert!(!events_require_host_surface_redraw(&events, true));
     }
 
     #[test]

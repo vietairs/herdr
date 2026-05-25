@@ -406,7 +406,7 @@ impl HeadlessServer {
                 needs_render = true;
             }
 
-            self.drain_client_sound_config_reload_request();
+            self.drain_client_config_reload_request();
             self.stream_host_mouse_capture_mode();
 
             self.app.sync_headless_animation_timer(now);
@@ -1423,11 +1423,11 @@ impl HeadlessServer {
         (had_event, changed)
     }
 
-    fn drain_client_sound_config_reload_request(&mut self) {
-        if !self.app.state.request_client_sound_config_reload {
+    fn drain_client_config_reload_request(&mut self) {
+        if !self.app.state.request_client_config_reload {
             return;
         }
-        self.app.state.request_client_sound_config_reload = false;
+        self.app.state.request_client_config_reload = false;
         self.send_to_all_clients(ServerMessage::ReloadSoundConfig);
     }
 
@@ -1726,8 +1726,10 @@ impl HeadlessServer {
                     return true;
                 }
                 let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
-                let host_surface_redraw =
-                    crate::raw_input::events_require_host_surface_redraw(&events);
+                let host_surface_redraw = crate::raw_input::events_require_host_surface_redraw(
+                    &events,
+                    self.app.state.redraw_on_focus_gained,
+                );
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     if host_surface_redraw {
                         client.request_full_redraw();
@@ -4287,6 +4289,52 @@ next_tab = ""
     }
 
     #[test]
+    fn outer_focus_gained_does_not_force_terminal_ansi_full_redraw_when_disabled() {
+        let mut server = test_headless_server();
+        server.app.state.redraw_on_focus_gained = false;
+        let (client_tx, _client_control_rx, client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::TerminalAnsi,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        server.render_and_stream();
+        let _ = client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial terminal frame");
+
+        server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        });
+        server.render_and_stream();
+
+        assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(server.clients[&1].outer_terminal_focus, Some(true));
+        assert_eq!(server.app.state.outer_terminal_focus, Some(true));
+        assert_eq!(
+            server
+                .clients
+                .get(&1)
+                .unwrap()
+                .render_state
+                .terminal_seq()
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn full_render_queue_does_not_advance_terminal_ansi_baseline() {
         let mut server = test_headless_server();
         let (client_tx, _client_control_rx, client_rx) = test_client_writer();
@@ -4420,7 +4468,7 @@ next_tab = ""
     }
 
     #[test]
-    fn client_sound_reload_request_refreshes_attached_clients() {
+    fn client_config_reload_request_refreshes_attached_clients() {
         let mut server = test_headless_server();
         let (client_tx, client_control_rx, _client_rx) = test_client_writer();
 
@@ -4436,19 +4484,19 @@ next_tab = ""
                 Some(client_tx),
             ),
         );
-        server.app.state.request_client_sound_config_reload = true;
+        server.app.state.request_client_config_reload = true;
 
-        server.drain_client_sound_config_reload_request();
+        server.drain_client_config_reload_request();
 
         match read_server_message(
             client_control_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("client sound reload message"),
+                .expect("client config reload message"),
         ) {
             ServerMessage::ReloadSoundConfig => {}
             other => panic!("expected ReloadSoundConfig, got {other:?}"),
         }
-        assert!(!server.app.state.request_client_sound_config_reload);
+        assert!(!server.app.state.request_client_config_reload);
     }
 
     #[test]

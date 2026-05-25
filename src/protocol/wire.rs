@@ -370,7 +370,7 @@ pub enum ServerMessage {
         data: String,
     },
 
-    /// Client-local sound config changed on disk; refresh it without reconnecting.
+    /// Client-local runtime config changed on disk; refresh it without reconnecting.
     ReloadSoundConfig,
 
     /// Whether the client should currently capture host mouse input.

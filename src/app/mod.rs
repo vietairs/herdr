@@ -386,7 +386,7 @@ impl App {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
-            request_client_sound_config_reload: false,
+            request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -458,6 +458,7 @@ impl App {
             sidebar_section_split,
             agent_panel_scope,
             mouse_capture: config.ui.mouse_capture,
+            redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             confirm_close: config.ui.confirm_close,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
@@ -1055,6 +1056,10 @@ impl App {
                     .sidebar_width
                     .clamp(self.state.sidebar_min_width, self.state.sidebar_max_width);
                 self.state.mouse_capture = config.ui.mouse_capture;
+                if self.state.redraw_on_focus_gained != config.ui.redraw_on_focus_gained {
+                    self.state.request_client_config_reload = true;
+                }
+                self.state.redraw_on_focus_gained = config.ui.redraw_on_focus_gained;
                 self.state.mouse_scroll_lines = config.ui.mouse_scroll_lines();
                 self.state.confirm_close = config.ui.confirm_close;
                 self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
@@ -1065,7 +1070,7 @@ impl App {
                 self.state.agent_panel_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
-                    self.state.request_client_sound_config_reload = true;
+                    self.state.request_client_config_reload = true;
                 }
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
@@ -1501,6 +1506,17 @@ mod tests {
     }
 
     #[test]
+    fn startup_uses_redraw_on_focus_gained_config() {
+        let mut config = Config::default();
+        config.ui.redraw_on_focus_gained = false;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert!(!app.state.redraw_on_focus_gained);
+    }
+
+    #[test]
     fn startup_restores_preview_update_available_from_saved_notes() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("startup-preview-update-available");
@@ -1610,7 +1626,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\n[ui.toast]\ndelivery = \"herdr\"\n",
+            "[terminal]\ndefault_shell = \"nu\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\nredraw_on_focus_gained = false\n[ui.toast]\ndelivery = \"herdr\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -1634,6 +1650,8 @@ mod tests {
             app.state.agent_panel_scope,
             state::AgentPanelScope::CurrentWorkspace
         );
+        assert!(!app.state.redraw_on_focus_gained);
+        assert!(app.state.request_client_config_reload);
         assert_eq!(app.state.default_shell, "nu");
         assert_eq!(
             app.state.new_terminal_cwd,
@@ -2071,6 +2089,20 @@ mod tests {
         assert!(app.state.workspaces[0].tabs[0].panes[&root_pane].seen);
         assert!(app.state.workspaces[0].tabs[0].panes[&split_pane].seen);
         assert!(!app.state.workspaces[0].tabs[background_tab].panes[&background_pane].seen);
+    }
+
+    #[tokio::test]
+    async fn outer_focus_gained_does_not_require_full_redraw_when_disabled() {
+        let mut app = test_app();
+        app.state.redraw_on_focus_gained = false;
+
+        let handled = app
+            .handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
+            .await;
+
+        assert!(handled);
+        assert_eq!(app.state.outer_terminal_focus, Some(true));
+        assert!(!app.full_redraw_pending);
     }
 
     #[tokio::test]
