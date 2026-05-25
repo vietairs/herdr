@@ -10,7 +10,7 @@ __pycache__/
 /docs/*
 !/docs/next/
 !/docs/next/**
-/.prd/
+/.local/
 
 /.pi/todos
 /.pi/issues

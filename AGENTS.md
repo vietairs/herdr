@@ -55,7 +55,7 @@ Unit tests live next to the code (`#[cfg(test)] mod tests`). If you add behavior
 - Treat website docs under `website/src/content/docs/` as the latest released public docs. These are Astro Starlight MDX docs published on herdr.dev. Do not document unreleased behavior there during normal feature or fix work.
 - Treat `docs/next/README.md` and `docs/next/CHANGELOG.md` as next-release staging for the root README and changelog. Treat `docs/next/website/src/content/docs/` as a full next-release mirror of `website/src/content/docs/`; these staged MDX files are the source for the next herdr.dev docs.
 - During normal work, update `docs/next/website/src/content/docs/` for unreleased website doc changes, not `website/src/content/docs/`. Before release, copy the approved mirror back to `website/src/content/docs/`. `just release-docs-check` verifies README/changelog sync, the website docs mirror is 1:1 with released website docs, and the removed root docs stay removed.
-- Put local PRDs, planning notes, and exploratory specs under `.prd/`; that directory is ignored and locally controlled.
+- Put local PRDs, planning notes, and exploratory specs under `.local/prd/`; `.local/` is ignored and locally controlled.
 - When a normal feature or fix commit relates to a GitHub issue, add a commit body line `refs #<issue-number>` after the subject. Use this shape:
   ```text
   fix: handle pane focus
