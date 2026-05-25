@@ -392,13 +392,47 @@ samp {
     border-color: var(--accent);
 }
 
+.install-panel {
+    max-width: 650px;
+    margin-top: 1rem;
+}
+
+.install-methods {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.42rem;
+    padding-left: 0.15rem;
+    color: var(--muted);
+    font-size: 0.86rem;
+    font-weight: 800;
+}
+
+.install-method {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 0;
+    font-weight: 800;
+}
+
+.install-method:hover,
+.install-method:focus-visible {
+    color: var(--ink);
+    outline: none;
+}
+
+.install-method.is-active {
+    color: var(--ink);
+}
+
 .install-card {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.75rem;
-    max-width: 650px;
-    margin-top: 1rem;
+    margin-top: 0.65rem;
     padding: 0.82rem 0.9rem;
     border-radius: 999px;
     background: var(--terminal);
@@ -407,10 +441,20 @@ samp {
 }
 
 .install-card code {
-    overflow: hidden;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
     white-space: nowrap;
-    text-overflow: ellipsis;
+    scrollbar-width: none;
     font-size: 0.86rem;
+}
+
+.install-card code.is-compact {
+    font-size: clamp(0.68rem, 1.15vw, 0.8rem);
+}
+
+.install-card code::-webkit-scrollbar {
+    display: none;
 }
 
 .prompt {

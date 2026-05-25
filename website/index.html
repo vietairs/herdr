@@ -48,7 +48,7 @@
             type="font/woff2"
             crossorigin
         />
-        <link rel="stylesheet" href="/css/style.css?v=18" />
+        <link rel="stylesheet" href="/css/style.css?v=19" />
     </head>
     <body>
         <header class="site-header">
@@ -94,16 +94,43 @@
                             >Read the docs</a
                         >
                     </div>
-                    <div class="install-card" aria-label="Install command">
-                        <span class="prompt">$</span>
-                        <code id="install-cmd"
-                            >curl -fsSL https://herdr.dev/install.sh | sh</code
-                        >
-                        <button id="copy-btn" type="button">Copy</button>
+                    <div class="install-panel" aria-label="Install options">
+                        <div class="install-methods" role="group" aria-label="Install method">
+                            <button
+                                class="install-method is-active"
+                                type="button"
+                                data-command="curl -fsSL https://herdr.dev/install.sh | sh"
+                                data-size="compact"
+                                aria-pressed="true"
+                            >Direct</button>
+                            <span aria-hidden="true">·</span>
+                            <button
+                                class="install-method"
+                                type="button"
+                                data-command="brew install herdr"
+                                data-size="normal"
+                                aria-pressed="false"
+                            >Homebrew</button>
+                            <span aria-hidden="true">·</span>
+                            <button
+                                class="install-method"
+                                type="button"
+                                data-command="nix run github:ogulcancelik/herdr"
+                                data-size="normal"
+                                aria-pressed="false"
+                            >Nix flake</button>
+                        </div>
+                        <div class="install-card" aria-label="Install command">
+                            <span class="prompt">$</span>
+                            <code id="install-cmd" class="is-compact"
+                                >curl -fsSL https://herdr.dev/install.sh | sh</code
+                            >
+                            <button id="copy-btn" type="button">Copy</button>
+                        </div>
                     </div>
                     <p class="hero-note">
-                        Real terminal panes · mouse and keyboard native · single
-                        Rust binary · Linux and macOS · no Electron
+                        Install script · Homebrew core · Nix flake · single Rust
+                        binary · no Electron
                     </p>
                 </div>
 
@@ -872,21 +899,40 @@ $ herdr</code></pre>
             })();
 
             (function () {
-                var button = document.getElementById("copy-btn");
+                var copyButton = document.getElementById("copy-btn");
                 var command = document.getElementById("install-cmd");
-                if (!button || !command) return;
+                var methods = Array.prototype.slice.call(
+                    document.querySelectorAll(".install-method"),
+                );
+                if (!copyButton || !command || methods.length === 0) return;
 
-                button.addEventListener("click", async function () {
+                methods.forEach(function (method) {
+                    method.addEventListener("click", function () {
+                        methods.forEach(function (entry) {
+                            var active = entry === method;
+                            entry.classList.toggle("is-active", active);
+                            entry.setAttribute("aria-pressed", String(active));
+                        });
+                        command.textContent = method.dataset.command;
+                        command.classList.toggle(
+                            "is-compact",
+                            method.dataset.size === "compact",
+                        );
+                        copyButton.textContent = "Copy";
+                    });
+                });
+
+                copyButton.addEventListener("click", async function () {
                     try {
                         await navigator.clipboard.writeText(
                             command.textContent.trim(),
                         );
-                        button.textContent = "Copied";
+                        copyButton.textContent = "Copied";
                         setTimeout(function () {
-                            button.textContent = "Copy";
+                            copyButton.textContent = "Copy";
                         }, 1500);
                     } catch (error) {
-                        button.textContent = "Select";
+                        copyButton.textContent = "Select";
                     }
                 });
             })();
