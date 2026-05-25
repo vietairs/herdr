@@ -41,6 +41,10 @@ herdr notifies you when a new version is available. run manually to update:
 herdr update
 ```
 
+By default, updating installs the new binary and leaves compatible running sessions alone, or asks before stopping sessions that must restart. To opt into live server handoff for supported running sessions, run `herdr update --handoff`.
+
+`herdr update` is disabled for Homebrew and Nix installs. Update those through `brew upgrade herdr` or your Nix workflow; live handoff does not apply to package-manager updates.
+
 ## quick start
 
 ```bash
@@ -85,9 +89,9 @@ tmux gives you persistence and panes, but it was built before agents existed. gu
 
 ## persistence
 
-start herdr where the work lives. locally, run `herdr`. it starts or attaches to the background session automatically, with no socket setup. run your agents, split panes, do your work. press `ctrl+b q` to detach. close your terminal, close your laptop; your agents keep running. open a new terminal, run `herdr`, you're back. same session, same panes, same agents. if you stop the server and later start herdr again, restored panes bring back workspaces, tabs, cwd, layout, and focus.
+start herdr where the work lives. locally, run `herdr`. it starts or attaches to the background session automatically, with no socket setup. run your agents, split panes, do your work. press `ctrl+b q` to detach. close your terminal, close your laptop; your agents keep running. open a new terminal, run `herdr`, you're back. same session, same panes, same agents.
 
-pane screen history is off by default because pane output can include secrets, tokens, prompts, and command output. enable it with `[experimental] pane_history = true` or settings > experiments > pane screen history. when enabled, herdr writes saved pane history to `session-history.json` next to `session.json`; treat the herdr config/session directory like terminal history. if native agent session restore is enabled for a pane, herdr resumes that agent session instead of replaying saved pane history.
+if you stop the server and later start herdr again, herdr restores the saved session shape. pane screen history, native agent session restore, and live handoff cover different restart/update cases; see [session state and restore](https://herdr.dev/docs/session-state/).
 
 ### from anywhere
 
@@ -98,7 +102,7 @@ ssh you@yourserver
 herdr
 ```
 
-or attach from your local terminal through ssh without opening a shell first. your local herdr acts as a thin client, connects over ssh, starts or attaches to the remote herdr server, and streams the ui back to your terminal. remote attach uses your local keybindings by default; pass `--remote-keybindings server` to use the remote server config instead.
+or attach from your local terminal through ssh without opening a shell first. your local herdr acts as a thin client, connects over ssh, starts or attaches to the remote herdr server, and streams the ui back to your terminal. remote attach uses your local keybindings by default; pass `--remote-keybindings server` to use the remote server config instead. pass `--handoff` to opt into live handoff if remote attach needs to replace a supported running remote server.
 
 ```bash
 herdr --remote workbox

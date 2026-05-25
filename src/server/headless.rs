@@ -655,17 +655,18 @@ impl HeadlessServer {
             params.expected_protocol,
             params.expected_version,
         );
-        let child_pid = match crate::server::handoff::spawn_handoff_import(
+        let mut import_child = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
             &socket_path,
             &token,
         ) {
-            Ok(child_pid) => child_pid,
+            Ok(child) => child,
             Err(err) => {
                 self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
                 return Err(err);
             }
         };
+        let child_pid = import_child.id();
         info!(pid = child_pid, socket = %socket_path.display(), "spawned handoff import server");
 
         let mut fds = Vec::new();
@@ -682,6 +683,7 @@ impl HeadlessServer {
             for fd in fds {
                 let _ = unsafe { libc::close(fd) };
             }
+            crate::server::handoff::cleanup_failed_import_child(&mut import_child);
             self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
             return Err(err);
         }
@@ -697,6 +699,7 @@ impl HeadlessServer {
                 for fd in fds {
                     let _ = unsafe { libc::close(fd) };
                 }
+                crate::server::handoff::cleanup_failed_import_child(&mut import_child);
                 self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
                 return Err(err);
             }
@@ -707,6 +710,7 @@ impl HeadlessServer {
             let _ = unsafe { libc::close(fd) };
         }
         if let Err(err) = send_result {
+            crate::server::handoff::cleanup_failed_import_child(&mut import_child);
             self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
             return Err(err);
         }
@@ -718,6 +722,7 @@ impl HeadlessServer {
         }
         let _ = remove_socket_file_if_owned(&self.client_socket_path, self.client_socket_identity);
         if let Err(err) = crate::server::handoff::wait_ready(&mut stream) {
+            crate::server::handoff::cleanup_failed_import_child(&mut import_child);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
                 Ok(()) => {
                     self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
@@ -734,6 +739,7 @@ impl HeadlessServer {
             )));
         }
         if let Err(err) = crate::server::handoff::report_committed(&mut stream) {
+            crate::server::handoff::cleanup_failed_import_child(&mut import_child);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
                 Ok(()) => {
                     self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);

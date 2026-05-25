@@ -345,7 +345,19 @@ fn main() -> io::Result<()> {
     }
 
     if args.get(1).map(|s| s.as_str()) == Some("update") {
-        match update::self_update() {
+        let options = match update::parse_self_update_args(&args[2..]) {
+            Ok(options) => options,
+            Err(err) if err.starts_with("usage:") => {
+                eprintln!("{err}");
+                std::process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("{err}");
+                eprintln!("usage: herdr update [--handoff]");
+                std::process::exit(2);
+            }
+        };
+        match update::self_update(options) {
             Ok(_) => return Ok(()),
             Err(e) => {
                 if e.starts_with("self-update is disabled") {
@@ -365,7 +377,7 @@ fn main() -> io::Result<()> {
         println!("       herdr --session <name> [options]");
         println!("       herdr --remote <ssh-target> [--session <name>]");
         println!("       herdr session attach <name>");
-        println!("       herdr update");
+        println!("       herdr update [--handoff]");
         println!("       herdr server stop");
         println!("       herdr server reload-config");
         println!("       herdr config <subcommand> ...");
@@ -440,6 +452,7 @@ fn main() -> io::Result<()> {
         println!("  --remote <target>   Attach through SSH to a remote Herdr server");
         println!("  --remote-keybindings <local|server>");
         println!("                      Keybindings for --remote app attach (default: local)");
+        println!("  --handoff           Opt into live handoff for update or remote attach");
         println!("  --default-config    Print default configuration and exit");
         println!("  --version, -V       Print version and exit");
         println!("  --help, -h          Show this help");

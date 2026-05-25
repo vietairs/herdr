@@ -27,6 +27,7 @@ const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_NOTES_VERSION";
 const DEFAULT_FAKE_UPDATE_NOTES_VERSION: &str = "0.3.0";
 const SERVER_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
 const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STAR_PROMPT_REPO: &str = "ogulcancelik/herdr";
@@ -422,7 +423,10 @@ fn version_label(version: Option<&str>) -> &str {
     version.unwrap_or("unknown")
 }
 
-fn update_requires_live_handoff(server: &crate::api::RuntimeStatus, release: &ReleaseInfo) -> bool {
+fn update_requires_server_restart(
+    server: &crate::api::RuntimeStatus,
+    release: &ReleaseInfo,
+) -> bool {
     match (server.protocol, release.target_protocol) {
         (Some(server_protocol), Some(target_protocol)) => server_protocol != target_protocol,
         _ => true,
@@ -449,7 +453,7 @@ fn parse_live_handoff_before_update_response(input: &str) -> Option<bool> {
 struct RunningServerUpdatePlan {
     target: RunningUpdateTarget,
     server: crate::api::RuntimeStatus,
-    requires_live_handoff: bool,
+    requires_server_restart: bool,
 }
 
 impl RunningServerUpdatePlan {
@@ -558,7 +562,7 @@ fn plan_running_server_updates(
         };
 
         plans.push(RunningServerUpdatePlan {
-            requires_live_handoff: update_requires_live_handoff(&server, release),
+            requires_server_restart: update_requires_server_restart(&server, release),
             server,
             target,
         });
@@ -670,19 +674,38 @@ fn target_client_protocol_server_is_running() -> Result<bool, String> {
     }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SelfUpdateOptions {
+    pub(crate) live_handoff: bool,
+}
+
+pub(crate) fn parse_self_update_args(args: &[String]) -> Result<SelfUpdateOptions, String> {
+    let mut options = SelfUpdateOptions::default();
+    for arg in args {
+        match arg.as_str() {
+            "--handoff" => options.live_handoff = true,
+            "--help" | "-h" => {
+                return Err("usage: herdr update [--handoff]".to_string());
+            }
+            _ => return Err(format!("unknown update option: {arg}")),
+        }
+    }
+    Ok(options)
+}
+
 fn prompt_to_stop_old_servers_before_update(
     plans: &[RunningServerUpdatePlan],
     release: &ReleaseInfo,
 ) -> Result<bool, String> {
     if !io::stdin().is_terminal() {
         return Err(
-            "one or more herdr targets are running and cannot perform live handoff for this update; run `herdr update` from an interactive terminal, or stop those targets and run `herdr update` again"
+            "one or more herdr targets must restart for this update; run `herdr update` from an interactive terminal, or stop those targets and run `herdr update` again"
                 .to_string(),
         );
     }
 
     eprintln!(
-        "these running herdr targets are too old to preserve panes during this update to v{}:",
+        "these running herdr targets must restart to use v{}:",
         release.version
     );
     for plan in plans {
@@ -693,9 +716,8 @@ fn prompt_to_stop_old_servers_before_update(
             protocol_label(plan.server.protocol)
         );
     }
-    eprintln!(
-        "herdr can leave them running, or stop them after installing the update. stopping them will exit their pane processes."
-    );
+    eprintln!("herdr can leave them running, or stop them after installing the update.");
+    eprintln!("stopping them will exit their pane processes.");
 
     loop {
         eprint!("stop these old targets after updating? [y/N] ");
@@ -722,12 +744,37 @@ fn prompt_to_stop_old_servers_before_update(
 fn confirm_running_server_update_action(
     plans: Vec<RunningServerUpdatePlan>,
     release: &ReleaseInfo,
+    options: SelfUpdateOptions,
 ) -> Result<Vec<RunningServerUpdateDecision>, String> {
     if plans.is_empty() {
         return Ok(Vec::new());
     }
 
-    print_running_session_update_summary(&plans, release);
+    print_running_session_update_summary(&plans, release, options);
+
+    if !options.live_handoff {
+        let restart_required: Vec<RunningServerUpdatePlan> = plans
+            .iter()
+            .filter(|plan| plan.requires_server_restart)
+            .cloned()
+            .collect();
+        let stop_restart_required = if restart_required.is_empty() {
+            false
+        } else {
+            prompt_to_stop_old_servers_before_update(&restart_required, release)?
+        };
+        return Ok(plans
+            .into_iter()
+            .map(|plan| {
+                let action = if plan.requires_server_restart && stop_restart_required {
+                    RunningServerUpdateAction::StopOldServer
+                } else {
+                    RunningServerUpdateAction::None
+                };
+                RunningServerUpdateDecision { plan, action }
+            })
+            .collect());
+    }
 
     let handoff_supported: Vec<&RunningServerUpdatePlan> = plans
         .iter()
@@ -735,7 +782,7 @@ fn confirm_running_server_update_action(
         .collect();
     let handoff_unsupported_requiring_update: Vec<&RunningServerUpdatePlan> = plans
         .iter()
-        .filter(|plan| !server_supports_live_handoff(&plan.server) && plan.requires_live_handoff)
+        .filter(|plan| !server_supports_live_handoff(&plan.server) && plan.requires_server_restart)
         .collect();
 
     let live_handoff = if handoff_supported.is_empty() {
@@ -744,7 +791,7 @@ fn confirm_running_server_update_action(
         prompt_to_live_handoff_sessions_before_update(
             &handoff_supported,
             release,
-            plans.iter().any(|plan| plan.requires_live_handoff),
+            plans.iter().any(|plan| plan.requires_server_restart),
         )?
     };
 
@@ -763,7 +810,7 @@ fn confirm_running_server_update_action(
         let action = if server_supports_live_handoff(&plan.server) && live_handoff {
             RunningServerUpdateAction::LiveHandoff
         } else if !server_supports_live_handoff(&plan.server)
-            && plan.requires_live_handoff
+            && plan.requires_server_restart
             && stop_unsupported
         {
             RunningServerUpdateAction::StopOldServer
@@ -776,21 +823,34 @@ fn confirm_running_server_update_action(
     Ok(decisions)
 }
 
-fn print_running_session_update_summary(plans: &[RunningServerUpdatePlan], release: &ReleaseInfo) {
+fn print_running_session_update_summary(
+    plans: &[RunningServerUpdatePlan],
+    release: &ReleaseInfo,
+    options: SelfUpdateOptions,
+) {
     eprintln!("running herdr targets:");
     for plan in plans {
-        let capability = if server_supports_live_handoff(&plan.server) {
-            "handoff supported"
+        if options.live_handoff {
+            let capability = if server_supports_live_handoff(&plan.server) {
+                "handoff supported"
+            } else {
+                "too old for handoff"
+            };
+            eprintln!(
+                "  {}: v{} protocol {} ({})",
+                plan.label(),
+                version_label(plan.server.version.as_deref()),
+                protocol_label(plan.server.protocol),
+                capability
+            );
         } else {
-            "too old for handoff"
-        };
-        eprintln!(
-            "  {}: v{} protocol {} ({})",
-            plan.label(),
-            version_label(plan.server.version.as_deref()),
-            protocol_label(plan.server.protocol),
-            capability
-        );
+            eprintln!(
+                "  {}: v{} protocol {}",
+                plan.label(),
+                version_label(plan.server.version.as_deref()),
+                protocol_label(plan.server.protocol)
+            );
+        }
     }
     eprintln!(
         "  update: v{} protocol {}",
@@ -1130,7 +1190,7 @@ fn live_handoff_server_via_api_for_update_at(
 ) -> Result<(), String> {
     live_handoff_server_via_api_for_release_at(
         socket_path,
-        SERVER_HANDOFF_CONFIRM_TIMEOUT,
+        SERVER_HANDOFF_REQUEST_TIMEOUT,
         updated_exe,
         release,
     )
@@ -1679,7 +1739,7 @@ fn maybe_offer_star_after_successful_update() {
 // ---------------------------------------------------------------------------
 
 /// Manual self-update command (`herdr update`).
-pub fn self_update() -> Result<Version, String> {
+pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
     if is_homebrew_managed_install() {
         return Err(format!(
             "self-update is disabled for Homebrew installs; run `{HOMEBREW_UPDATE_COMMAND}`"
@@ -1710,7 +1770,7 @@ pub fn self_update() -> Result<Version, String> {
 
     let running_server_plans = plan_running_server_updates(&release)?;
     let server_update_decisions =
-        confirm_running_server_update_action(running_server_plans, &release)?;
+        confirm_running_server_update_action(running_server_plans, &release, options)?;
 
     eprintln!("downloading v{}...", release.version);
     if let Err(e) =
@@ -2096,6 +2156,24 @@ mod tests {
     }
 
     #[test]
+    fn self_update_args_gate_live_handoff() {
+        assert_eq!(
+            parse_self_update_args(&[]).unwrap(),
+            SelfUpdateOptions {
+                live_handoff: false
+            }
+        );
+        assert_eq!(
+            parse_self_update_args(&["--handoff".to_string()]).unwrap(),
+            SelfUpdateOptions { live_handoff: true }
+        );
+        assert_eq!(
+            parse_self_update_args(&["--unknown".to_string()]).unwrap_err(),
+            "unknown update option: --unknown"
+        );
+    }
+
+    #[test]
     fn parse_live_handoff_before_update_response_defaults_yes_for_blank() {
         assert_eq!(parse_live_handoff_before_update_response(""), Some(true));
         assert_eq!(parse_live_handoff_before_update_response("\n"), Some(true));
@@ -2107,7 +2185,7 @@ mod tests {
     }
 
     #[test]
-    fn update_requires_live_handoff_when_target_protocol_differs_or_unknown() {
+    fn update_requires_server_restart_when_target_protocol_differs_or_unknown() {
         let server = crate::api::RuntimeStatus {
             version: Some("0.5.5".to_string()),
             protocol: Some(2),
@@ -2128,9 +2206,53 @@ mod tests {
             ..compatible_release.clone()
         };
 
-        assert!(!update_requires_live_handoff(&server, &compatible_release));
-        assert!(update_requires_live_handoff(&server, &incompatible_release));
-        assert!(update_requires_live_handoff(&server, &unknown_release));
+        assert!(!update_requires_server_restart(
+            &server,
+            &compatible_release
+        ));
+        assert!(update_requires_server_restart(
+            &server,
+            &incompatible_release
+        ));
+        assert!(update_requires_server_restart(&server, &unknown_release));
+    }
+
+    #[test]
+    fn plain_update_requires_restart_for_supported_servers_without_handoff() {
+        assert!(
+            !io::stdin().is_terminal(),
+            "this test relies on noninteractive test stdin"
+        );
+        let release = fake_release("9.8.7", Some(77));
+        let plan = RunningServerUpdatePlan {
+            target: RunningUpdateTarget {
+                name: Some("work".to_string()),
+                label: "work".to_string(),
+                stop_command: "herdr session stop work".to_string(),
+                attach_command: Some("herdr session attach work".to_string()),
+                socket_path: crate::session::api_socket_path_for(Some("work")),
+                client_socket_path: crate::session::client_socket_path_for(Some("work")),
+                must_be_running: true,
+            },
+            requires_server_restart: true,
+            server: crate::api::RuntimeStatus {
+                version: Some("0.6.2".to_string()),
+                protocol: Some(76),
+                capabilities: Some(crate::api::schema::ServerCapabilities { live_handoff: true }),
+            },
+        };
+
+        let err = confirm_running_server_update_action(
+            vec![plan],
+            &release,
+            SelfUpdateOptions {
+                live_handoff: false,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.contains("must restart"), "unexpected error: {err}");
+        assert!(!err.contains("live handoff"), "unexpected error: {err}");
     }
 
     #[test]
@@ -2289,7 +2411,7 @@ mod tests {
     }
 
     #[test]
-    fn noninteractive_update_requires_handoff_fails_before_install() {
+    fn noninteractive_plain_update_requiring_restart_fails_without_handoff() {
         let _guard = env_lock().lock().unwrap();
         assert!(
             !io::stdin().is_terminal(),
@@ -2318,21 +2440,21 @@ mod tests {
                 client_socket_path: crate::session::client_socket_path_for(Some("work")),
                 must_be_running: true,
             },
-            requires_live_handoff: true,
+            requires_server_restart: true,
             server,
         };
 
-        let err =
-            prompt_to_live_handoff_sessions_before_update(&[&plan], &release, true).unwrap_err();
+        let err = confirm_running_server_update_action(
+            vec![plan],
+            &release,
+            SelfUpdateOptions {
+                live_handoff: false,
+            },
+        )
+        .unwrap_err();
 
-        assert!(
-            err.contains("requires live server handoff"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            err.contains("run `herdr update` from an interactive terminal"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("must restart"), "unexpected error: {err}");
+        assert!(!err.contains("live handoff"), "unexpected error: {err}");
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
     }
