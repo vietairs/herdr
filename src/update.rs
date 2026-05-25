@@ -1963,7 +1963,15 @@ mod tests {
     }
 
     fn set_test_config_home(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("herdr-update-{name}-{}", std::process::id()));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let short_name: String = name.chars().take(4).collect();
+        let dir = PathBuf::from(format!(
+            "/tmp/hu-{short_name}-{}-{nanos}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         std::env::set_var("XDG_CONFIG_HOME", &dir);
