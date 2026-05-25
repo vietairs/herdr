@@ -1,8 +1,15 @@
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SocketFileIdentity {
+    dev: u64,
+    ino: u64,
+}
 
 pub(crate) fn prepare_socket_path(
     path: &Path,
@@ -37,6 +44,35 @@ pub(crate) fn prepare_socket_path(
     }
 
     Ok(())
+}
+
+pub(crate) fn socket_file_identity(path: &Path) -> io::Result<SocketFileIdentity> {
+    let metadata = fs::metadata(path)?;
+    Ok(SocketFileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
+}
+
+pub(crate) fn remove_socket_file_if_owned(
+    path: &Path,
+    identity: SocketFileIdentity,
+) -> io::Result<()> {
+    let current = match socket_file_identity(path) {
+        Ok(current) => current,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    if current != identity {
+        return Ok(());
+    }
+
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 pub(crate) fn restrict_socket_permissions(path: &Path, mode: u32) -> io::Result<()> {

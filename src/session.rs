@@ -100,7 +100,11 @@ pub fn local_attach_command() -> String {
 }
 
 pub fn local_stop_command() -> String {
-    match active_name() {
+    stop_command_for(active_name().as_deref())
+}
+
+pub fn stop_command_for(name: Option<&str>) -> String {
+    match name {
         Some(name) => format!("herdr session stop {name}"),
         None => "herdr server stop".to_string(),
     }

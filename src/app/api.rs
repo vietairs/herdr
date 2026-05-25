@@ -330,7 +330,9 @@ impl App {
         &mut self,
         request: crate::api::schema::Request,
     ) -> String {
-        use crate::api::schema::{Method, ResponseResult, SuccessResponse};
+        use crate::api::schema::{
+            ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
+        };
 
         let response = match request.method {
             Method::ServerStop(_) => {
@@ -339,6 +341,16 @@ impl App {
                     id: request.id,
                     result: ResponseResult::Ok {},
                 }
+            }
+            Method::ServerLiveHandoff(_) => {
+                let response = ErrorResponse {
+                    id: request.id,
+                    error: ErrorBody {
+                        code: "unsupported_in_app_mode".into(),
+                        message: "live handoff is only supported by the headless server".into(),
+                    },
+                };
+                return serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
             }
             Method::ServerReloadConfig(_) => {
                 let report = self.reload_config();

@@ -27,7 +27,7 @@ const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_NOTES_VERSION";
 const DEFAULT_FAKE_UPDATE_NOTES_VERSION: &str = "0.3.0";
 const SERVER_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
-const SERVER_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STAR_PROMPT_REPO: &str = "ogulcancelik/herdr";
 const STAR_PROMPT_STATE_FILE: &str = "github-star-prompt.json";
@@ -400,18 +400,6 @@ fn running_inside_herdr() -> bool {
     running_inside_herdr_env(env::var(crate::HERDR_ENV_VAR).ok().as_deref())
 }
 
-fn api_server_is_running_at(socket_path: &Path) -> bool {
-    if !socket_path.exists() {
-        return false;
-    }
-
-    UnixStream::connect(socket_path).is_ok()
-}
-
-fn api_server_is_running() -> bool {
-    api_server_is_running_at(&crate::api::socket_path())
-}
-
 fn client_protocol_server_is_running_at(socket_path: &Path) -> bool {
     if !socket_path.exists() {
         return false;
@@ -424,11 +412,6 @@ fn client_protocol_server_is_running() -> bool {
     client_protocol_server_is_running_at(&crate::server::socket_paths::client_socket_path())
 }
 
-fn read_running_server_info() -> Result<Option<crate::api::RuntimeStatus>, String> {
-    crate::api::read_runtime_status_at(&crate::api::socket_path(), SERVER_STOP_RESPONSE_TIMEOUT)
-        .map_err(|e| format!("failed to read running server status: {e}"))
-}
-
 fn protocol_label(protocol: Option<u32>) -> String {
     protocol
         .map(|value| value.to_string())
@@ -439,14 +422,21 @@ fn version_label(version: Option<&str>) -> &str {
     version.unwrap_or("unknown")
 }
 
-fn update_requires_server_stop(server: &crate::api::RuntimeStatus, release: &ReleaseInfo) -> bool {
+fn update_requires_live_handoff(server: &crate::api::RuntimeStatus, release: &ReleaseInfo) -> bool {
     match (server.protocol, release.target_protocol) {
         (Some(server_protocol), Some(target_protocol)) => server_protocol != target_protocol,
         _ => true,
     }
 }
 
-fn parse_stop_server_before_update_response(input: &str) -> Option<bool> {
+fn server_supports_live_handoff(server: &crate::api::RuntimeStatus) -> bool {
+    server
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.live_handoff)
+}
+
+fn parse_live_handoff_before_update_response(input: &str) -> Option<bool> {
     let trimmed = input.trim().to_ascii_lowercase();
     match trimmed.as_str() {
         "" | "y" | "yes" => Some(true),
@@ -455,53 +445,391 @@ fn parse_stop_server_before_update_response(input: &str) -> Option<bool> {
     }
 }
 
-fn prompt_to_stop_server_before_update(
-    server: &crate::api::RuntimeStatus,
-    release: &ReleaseInfo,
-    requires_stop: bool,
-) -> Result<bool, String> {
-    if !io::stdin().is_terminal() {
-        if requires_stop {
-            return Err(format!(
-                "a herdr server is running and updating to v{} requires stopping it; run `{}`, then run `herdr update` again",
-                release.version,
-                crate::session::local_stop_command()
-            ));
-        }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunningServerUpdatePlan {
+    target: RunningUpdateTarget,
+    server: crate::api::RuntimeStatus,
+    requires_live_handoff: bool,
+}
 
-        eprintln!(
-            "a herdr server is running. updating the binary will not affect that server until it restarts."
-        );
-        return Ok(false);
+impl RunningServerUpdatePlan {
+    fn label(&self) -> &str {
+        &self.target.label
     }
 
-    eprintln!("a herdr server is currently running:");
+    fn socket_path(&self) -> &Path {
+        &self.target.socket_path
+    }
+
+    fn stop_command(&self) -> String {
+        self.target.stop_command.clone()
+    }
+
+    fn attach_command(&self) -> Option<String> {
+        self.target.attach_command.clone()
+    }
+
+    fn target_noun(&self) -> &'static str {
+        if self.target.attach_command.is_some() {
+            "session"
+        } else {
+            "server"
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunningServerUpdateDecision {
+    plan: RunningServerUpdatePlan,
+    action: RunningServerUpdateAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunningServerUpdateAction {
+    None,
+    LiveHandoff,
+    StopOldServer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunningServerUpdateOutcome {
+    RestartDeferred,
+    Stopped,
+    LiveHandoffComplete,
+    FailedHandoffOldServerKept,
+    FailedHandoffOldServerStopped,
+    FailedHandoffNoServer,
+    FailedHandoffUnknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunningSessionUpdateOutcome {
+    session_label: String,
+    stop_command: String,
+    attach_command: Option<String>,
+    outcome: RunningServerUpdateOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FailedHandoffServerState {
+    UpdatedServerRunning,
+    OldServerRunning(crate::api::RuntimeStatus),
+    NoServerResponding,
+    Unknown(String),
+}
+
+fn plan_running_server_updates(
+    release: &ReleaseInfo,
+) -> Result<Vec<RunningServerUpdatePlan>, String> {
+    let targets = running_update_targets()?;
+    let mut plans = Vec::new();
+
+    for target in targets {
+        let server = match crate::api::read_runtime_status_at(
+            &target.socket_path,
+            SERVER_STOP_RESPONSE_TIMEOUT,
+        )
+        .map_err(|err| {
+            format!(
+                "failed to read status for herdr target {} at {}: {err}. stop it with `{}` and run `herdr update` again",
+                target.label,
+                target.socket_path.display(),
+                target.stop_command
+            )
+        })? {
+            Some(server) => server,
+            None if target.must_be_running => {
+                return Err(format!(
+                        "herdr target {} looked running, but its status API did not respond at {}. stop it with `{}` and run `herdr update` again",
+                    target.label,
+                    target.socket_path.display(),
+                    target.stop_command
+                ));
+            }
+            None if client_protocol_server_is_running_at(&target.client_socket_path) => {
+                return Err(format!(
+                    "herdr target {} has a client socket, but its status API did not respond at {}. stop it with `{}` and run `herdr update` again",
+                    target.label,
+                    target.socket_path.display(),
+                    target.stop_command
+                ));
+            }
+            None => continue,
+        };
+
+        plans.push(RunningServerUpdatePlan {
+            requires_live_handoff: update_requires_live_handoff(&server, release),
+            server,
+            target,
+        });
+    }
+
+    if plans.is_empty() && target_client_protocol_server_is_running()? {
+        return Err(format!(
+            "a herdr server is listening, but its status API is unavailable; try `{}`, or stop the old server process manually, then run `herdr update` again",
+            crate::session::local_stop_command()
+        ));
+    }
+
+    Ok(plans)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunningUpdateTarget {
+    name: Option<String>,
+    label: String,
+    stop_command: String,
+    attach_command: Option<String>,
+    socket_path: PathBuf,
+    client_socket_path: PathBuf,
+    must_be_running: bool,
+}
+
+fn running_update_targets() -> Result<Vec<RunningUpdateTarget>, String> {
+    if crate::session::explicit_session_requested() {
+        return Ok(vec![RunningUpdateTarget {
+            name: crate::session::active_name(),
+            label: crate::session::active_name()
+                .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string()),
+            stop_command: crate::session::local_stop_command(),
+            attach_command: Some(crate::session::local_attach_command()),
+            socket_path: crate::api::socket_path(),
+            client_socket_path: crate::server::socket_paths::client_socket_path(),
+            must_be_running: false,
+        }]);
+    }
+
+    if let Some(socket_path) = std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR) {
+        let socket_path = PathBuf::from(socket_path);
+        return Ok(vec![RunningUpdateTarget {
+            name: None,
+            label: socket_path.display().to_string(),
+            stop_command: format!(
+                "{}={} herdr server stop",
+                crate::api::SOCKET_PATH_ENV_VAR,
+                socket_path.display()
+            ),
+            attach_command: None,
+            client_socket_path: crate::server::socket_paths::client_socket_path_from_overrides(
+                Some(&socket_path.to_string_lossy()),
+                None,
+            ),
+            socket_path,
+            must_be_running: false,
+        }]);
+    }
+
+    let sessions = crate::session::list_sessions()
+        .map_err(|err| format!("failed to list herdr sessions: {err}"))?;
+    Ok(sessions
+        .into_iter()
+        .map(|session| RunningUpdateTarget {
+            name: if session.default {
+                None
+            } else {
+                Some(session.name.clone())
+            },
+            stop_command: crate::session::stop_command_for(if session.default {
+                None
+            } else {
+                Some(&session.name)
+            }),
+            attach_command: Some(if session.default {
+                "herdr".to_string()
+            } else {
+                format!("herdr session attach {}", session.name)
+            }),
+            label: session.name.clone(),
+            client_socket_path: crate::session::client_socket_path_for(if session.default {
+                None
+            } else {
+                Some(&session.name)
+            }),
+            socket_path: PathBuf::from(session.socket_path),
+            must_be_running: session.running,
+        })
+        .collect())
+}
+
+fn target_client_protocol_server_is_running() -> Result<bool, String> {
+    if crate::session::explicit_session_requested()
+        || std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some()
+    {
+        return Ok(client_protocol_server_is_running());
+    }
+
+    let sessions = crate::session::list_sessions()
+        .map_err(|err| format!("failed to list herdr sessions: {err}"))?;
+    Ok(sessions.into_iter().any(|session| {
+        let client_socket = crate::session::client_socket_path_for(if session.default {
+            None
+        } else {
+            Some(&session.name)
+        });
+        client_protocol_server_is_running_at(&client_socket)
+    }))
+}
+
+fn prompt_to_stop_old_servers_before_update(
+    plans: &[RunningServerUpdatePlan],
+    release: &ReleaseInfo,
+) -> Result<bool, String> {
+    if !io::stdin().is_terminal() {
+        return Err(
+            "one or more herdr targets are running and cannot perform live handoff for this update; run `herdr update` from an interactive terminal, or stop those targets and run `herdr update` again"
+                .to_string(),
+        );
+    }
+
     eprintln!(
-        "  server: v{} protocol {}",
-        version_label(server.version.as_deref()),
-        protocol_label(server.protocol)
+        "these running herdr targets are too old to preserve panes during this update to v{}:",
+        release.version
     );
+    for plan in plans {
+        eprintln!(
+            "  {}: v{} protocol {}",
+            plan.label(),
+            version_label(plan.server.version.as_deref()),
+            protocol_label(plan.server.protocol)
+        );
+    }
+    eprintln!(
+        "herdr can leave them running, or stop them after installing the update. stopping them will exit their pane processes."
+    );
+
+    loop {
+        eprint!("stop these old targets after updating? [y/N] ");
+        io::stderr()
+            .flush()
+            .map_err(|e| format!("failed to flush prompt: {e}"))?;
+
+        let mut input = String::new();
+        let read = io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| format!("failed to read prompt response: {e}"))?;
+        if read == 0 {
+            return Ok(false);
+        }
+
+        match input.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => return Ok(true),
+            "" | "n" | "no" => return Ok(false),
+            _ => eprintln!("please answer y or n"),
+        }
+    }
+}
+
+fn confirm_running_server_update_action(
+    plans: Vec<RunningServerUpdatePlan>,
+    release: &ReleaseInfo,
+) -> Result<Vec<RunningServerUpdateDecision>, String> {
+    if plans.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    print_running_session_update_summary(&plans, release);
+
+    let handoff_supported: Vec<&RunningServerUpdatePlan> = plans
+        .iter()
+        .filter(|plan| server_supports_live_handoff(&plan.server))
+        .collect();
+    let handoff_unsupported_requiring_update: Vec<&RunningServerUpdatePlan> = plans
+        .iter()
+        .filter(|plan| !server_supports_live_handoff(&plan.server) && plan.requires_live_handoff)
+        .collect();
+
+    let live_handoff = if handoff_supported.is_empty() {
+        false
+    } else {
+        prompt_to_live_handoff_sessions_before_update(
+            &handoff_supported,
+            release,
+            plans.iter().any(|plan| plan.requires_live_handoff),
+        )?
+    };
+
+    let stop_unsupported = if handoff_unsupported_requiring_update.is_empty() {
+        false
+    } else {
+        let owned: Vec<RunningServerUpdatePlan> = handoff_unsupported_requiring_update
+            .iter()
+            .map(|plan| (*plan).clone())
+            .collect();
+        prompt_to_stop_old_servers_before_update(&owned, release)?
+    };
+
+    let mut decisions = Vec::new();
+    for plan in plans {
+        let action = if server_supports_live_handoff(&plan.server) && live_handoff {
+            RunningServerUpdateAction::LiveHandoff
+        } else if !server_supports_live_handoff(&plan.server)
+            && plan.requires_live_handoff
+            && stop_unsupported
+        {
+            RunningServerUpdateAction::StopOldServer
+        } else {
+            RunningServerUpdateAction::None
+        };
+        decisions.push(RunningServerUpdateDecision { plan, action });
+    }
+
+    Ok(decisions)
+}
+
+fn print_running_session_update_summary(plans: &[RunningServerUpdatePlan], release: &ReleaseInfo) {
+    eprintln!("running herdr targets:");
+    for plan in plans {
+        let capability = if server_supports_live_handoff(&plan.server) {
+            "handoff supported"
+        } else {
+            "too old for handoff"
+        };
+        eprintln!(
+            "  {}: v{} protocol {} ({})",
+            plan.label(),
+            version_label(plan.server.version.as_deref()),
+            protocol_label(plan.server.protocol),
+            capability
+        );
+    }
     eprintln!(
         "  update: v{} protocol {}",
         release.version,
         protocol_label(release.target_protocol)
     );
     eprintln!();
+}
 
-    if requires_stop {
+fn prompt_to_live_handoff_sessions_before_update(
+    plans: &[&RunningServerUpdatePlan],
+    release: &ReleaseInfo,
+    requires_live_handoff: bool,
+) -> Result<bool, String> {
+    if !io::stdin().is_terminal() {
+        if requires_live_handoff {
+            return Err(format!(
+                "one or more herdr targets are running and updating to v{} requires live server handoff; run `herdr update` from an interactive terminal, or stop those targets and run `herdr update` again",
+                release.version
+            ));
+        }
         eprintln!(
-            "this update changes the herdr client/server protocol. the running server must be stopped before the new client can attach."
+            "herdr targets are running. updating the binary will not affect them until they restart."
         );
-        eprintln!("stopping the server will end the current herdr session and its panes.");
-    } else {
-        eprintln!("updating the binary will not affect the running server until it restarts.");
+        return Ok(false);
     }
 
+    eprintln!(
+        "herdr can hand off {} running target{} to the new server so pane processes keep running.",
+        plans.len(),
+        if plans.len() == 1 { "" } else { "s" }
+    );
+    eprintln!("connected clients will disconnect during handoff and can attach again afterward.");
+
     loop {
-        let prompt = if requires_stop {
-            "stop the server and continue updating? [Y/n] "
+        let prompt = if requires_live_handoff {
+            "update and live-handoff supported targets to the new server? [Y/n] "
         } else {
-            "stop the server before updating? [Y/n] "
+            "live-handoff supported running targets after updating? [Y/n] "
         };
         eprint!("{prompt}");
         io::stderr()
@@ -516,7 +844,7 @@ fn prompt_to_stop_server_before_update(
             return Ok(false);
         }
 
-        if let Some(answer) = parse_stop_server_before_update_response(&input) {
+        if let Some(answer) = parse_live_handoff_before_update_response(&input) {
             return Ok(answer);
         }
 
@@ -524,107 +852,288 @@ fn prompt_to_stop_server_before_update(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RunningServerUpdatePlan {
-    server: crate::api::RuntimeStatus,
-    requires_stop: bool,
+fn live_handoff_running_server_for_update(
+    plan: &RunningServerUpdatePlan,
+    release: &ReleaseInfo,
+    updated_exe: &Path,
+) -> Result<(), String> {
+    eprintln!(
+        "asking {} {} to hand off live panes to the updated server...",
+        plan.target_noun(),
+        plan.label()
+    );
+    live_handoff_server_via_api_for_update_at(plan.socket_path(), updated_exe, release)?;
+    wait_for_server_handoff_at(plan.socket_path(), SERVER_HANDOFF_CONFIRM_TIMEOUT, release)?;
+    eprintln!(
+        "live handoff complete for {} {}; pane processes should still be running.",
+        plan.target_noun(),
+        plan.label()
+    );
+    Ok(())
 }
 
-fn plan_running_server_update(
+fn runtime_matches_release(status: &crate::api::RuntimeStatus, release: &ReleaseInfo) -> bool {
+    let protocol_matches = release
+        .target_protocol
+        .is_none_or(|protocol| status.protocol == Some(protocol));
+    let version_matches = status.version.as_deref() == Some(&release.version.to_string());
+    protocol_matches && version_matches
+}
+
+fn classify_failed_live_handoff_state_at(
+    socket_path: &Path,
     release: &ReleaseInfo,
-) -> Result<Option<RunningServerUpdatePlan>, String> {
-    let Some(server) = read_running_server_info()? else {
-        if client_protocol_server_is_running() {
-            return Err(format!(
-                "a herdr server is listening, but its status API is unavailable; try `{}`, or stop the old server process manually, then run `herdr update` again",
-                crate::session::local_stop_command()
-            ));
+) -> FailedHandoffServerState {
+    match crate::api::read_runtime_status_at(socket_path, SERVER_STOP_RESPONSE_TIMEOUT) {
+        Ok(Some(status)) if runtime_matches_release(&status, release) => {
+            FailedHandoffServerState::UpdatedServerRunning
         }
-        return Ok(None);
-    };
-
-    let requires_stop = update_requires_server_stop(&server, release);
-    Ok(Some(RunningServerUpdatePlan {
-        server,
-        requires_stop,
-    }))
+        Ok(Some(status)) => FailedHandoffServerState::OldServerRunning(status),
+        Ok(None) => FailedHandoffServerState::NoServerResponding,
+        Err(err) => FailedHandoffServerState::Unknown(err.to_string()),
+    }
 }
 
-fn stop_running_server_for_update(
-    plan: Option<&RunningServerUpdatePlan>,
+fn prompt_to_stop_old_server_after_failed_handoff(
+    plan: &RunningServerUpdatePlan,
     release: &ReleaseInfo,
+    status: &crate::api::RuntimeStatus,
 ) -> Result<bool, String> {
-    let Some(plan) = plan else {
-        return Ok(false);
-    };
+    eprintln!(
+        "live handoff failed, but {} {} is still running with your panes.",
+        plan.target_noun(),
+        plan.label()
+    );
+    eprintln!(
+        "  server: v{} protocol {}",
+        version_label(status.version.as_deref()),
+        protocol_label(status.protocol)
+    );
+    eprintln!(
+        "  installed: v{} protocol {}",
+        release.version,
+        protocol_label(release.target_protocol)
+    );
+    eprintln!(
+        "you can keep using the old server, or stop it now so the next `herdr` start uses v{}.",
+        release.version
+    );
+    eprintln!("stopping the old server will exit its pane processes.");
 
-    let stop_server =
-        prompt_to_stop_server_before_update(&plan.server, release, plan.requires_stop)?;
-    if !stop_server {
-        if plan.requires_stop {
-            return Err(format!(
-                "update cancelled; stop the running herdr server with `{}`, then run `herdr update` again",
-                crate::session::local_stop_command()
-            ));
-        }
+    if !io::stdin().is_terminal() {
+        eprintln!(
+            "not stopping the old server from a non-interactive update; run `{}` when you are ready.",
+            plan.stop_command()
+        );
         return Ok(false);
     }
 
-    stop_server_via_api()?;
-    wait_for_server_shutdown(SERVER_SHUTDOWN_CONFIRM_TIMEOUT)?;
-    eprintln!("stopped the running herdr server.");
-    Ok(true)
+    loop {
+        eprint!("stop the old server now? [y/N] ");
+        io::stderr()
+            .flush()
+            .map_err(|e| format!("failed to flush prompt: {e}"))?;
+
+        let mut input = String::new();
+        let read = io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| format!("failed to read prompt response: {e}"))?;
+        if read == 0 {
+            return Ok(false);
+        }
+
+        match input.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => return Ok(true),
+            "" | "n" | "no" => return Ok(false),
+            _ => eprintln!("please answer y or n"),
+        }
+    }
+}
+
+fn recover_failed_live_handoff_for_update(
+    plan: &RunningServerUpdatePlan,
+    release: &ReleaseInfo,
+    error: &str,
+) -> Result<RunningServerUpdateOutcome, String> {
+    eprintln!(
+        "live handoff failed for {} {}: {error}",
+        plan.target_noun(),
+        plan.label()
+    );
+
+    match classify_failed_live_handoff_state_at(plan.socket_path(), release) {
+        FailedHandoffServerState::UpdatedServerRunning => {
+            eprintln!(
+                "the updated server is running for {} {}.",
+                plan.target_noun(),
+                plan.label()
+            );
+            Ok(RunningServerUpdateOutcome::LiveHandoffComplete)
+        }
+        FailedHandoffServerState::OldServerRunning(status) => {
+            if prompt_to_stop_old_server_after_failed_handoff(plan, release, &status)? {
+                stop_running_server_for_update(plan)?;
+                Ok(RunningServerUpdateOutcome::FailedHandoffOldServerStopped)
+            } else {
+                Ok(RunningServerUpdateOutcome::FailedHandoffOldServerKept)
+            }
+        }
+        FailedHandoffServerState::NoServerResponding => {
+            if let Some(command) = plan.attach_command() {
+                eprintln!(
+                    "no herdr server is responding for session {}. the binary was updated; run `{command}` to start v{}.",
+                    plan.label(),
+                    release.version
+                );
+            } else {
+                eprintln!(
+                    "no herdr server is responding at {}. the binary was updated; restart with the same socket override to use v{}.",
+                    plan.socket_path().display(),
+                    release.version
+                );
+            }
+            Ok(RunningServerUpdateOutcome::FailedHandoffNoServer)
+        }
+        FailedHandoffServerState::Unknown(status_error) => {
+            eprintln!(
+                "herdr could not determine server state for {} {} after the failed handoff: {status_error}",
+                plan.target_noun(),
+                plan.label()
+            );
+            eprintln!("{}", reconnect_or_stop_guidance(plan));
+            Ok(RunningServerUpdateOutcome::FailedHandoffUnknown)
+        }
+    }
+}
+
+fn reconnect_or_stop_guidance(plan: &RunningServerUpdatePlan) -> String {
+    if let Some(command) = plan.attach_command() {
+        format!(
+            "if `{command}` does not reconnect cleanly, stop the old server with `{}` and run `{command}` again.",
+            plan.stop_command()
+        )
+    } else {
+        format!(
+            "if reconnecting with the same socket override does not work, stop the old server with `{}`.",
+            plan.stop_command()
+        )
+    }
 }
 
 fn stop_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
-    use crate::api::schema::{EmptyParams, Method, Request};
+    use crate::api::schema::{EmptyParams, Method};
+
+    send_server_update_method_at(
+        socket_path,
+        timeout,
+        "update:server:stop",
+        Method::ServerStop(EmptyParams::default()),
+        "server stop",
+    )
+}
+
+fn send_server_update_method_at(
+    socket_path: &Path,
+    timeout: Duration,
+    request_id: &str,
+    method: crate::api::schema::Method,
+    error_prefix: &str,
+) -> Result<(), String> {
+    use crate::api::schema::Request;
 
     let request = Request {
-        id: "update:server:stop".into(),
-        method: Method::ServerStop(EmptyParams::default()),
+        id: request_id.into(),
+        method,
     };
 
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|e| format!("failed to connect to running server: {e}"))?;
     stream
         .set_write_timeout(Some(timeout))
-        .map_err(|e| format!("failed to set server stop write timeout: {e}"))?;
+        .map_err(|e| format!("failed to set {error_prefix} write timeout: {e}"))?;
     stream
         .set_read_timeout(Some(timeout))
-        .map_err(|e| format!("failed to set server stop read timeout: {e}"))?;
+        .map_err(|e| format!("failed to set {error_prefix} read timeout: {e}"))?;
     stream
         .write_all(
             serde_json::to_string(&request)
                 .map_err(|e| e.to_string())?
                 .as_bytes(),
         )
-        .map_err(|e| format!("failed to send server stop request: {e}"))?;
+        .map_err(|e| format!("failed to send {error_prefix} request: {e}"))?;
     stream
         .write_all(b"\n")
-        .map_err(|e| format!("failed to finish server stop request: {e}"))?;
+        .map_err(|e| format!("failed to finish {error_prefix} request: {e}"))?;
     stream
         .flush()
-        .map_err(|e| format!("failed to flush server stop request: {e}"))?;
+        .map_err(|e| format!("failed to flush {error_prefix} request: {e}"))?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let read = reader
         .read_line(&mut line)
-        .map_err(|e| format!("failed to read server stop response: {e}"))?;
+        .map_err(|e| format!("failed to read {error_prefix} response: {e}"))?;
     if read == 0 || line.trim().is_empty() {
-        return Err("empty server stop response".into());
+        return Err(format!("empty {error_prefix} response"));
     }
     let response: serde_json::Value =
         serde_json::from_str(&line).map_err(|e| format!("invalid server response: {e}"))?;
     if let Some(error) = response.get("error") {
-        return Err(format!("server stop failed: {error}"));
+        return Err(format!("{error_prefix} failed: {error}"));
     }
 
     Ok(())
 }
 
-fn stop_server_via_api() -> Result<(), String> {
-    stop_server_via_api_at(&crate::api::socket_path(), SERVER_STOP_RESPONSE_TIMEOUT)
+#[cfg(test)]
+fn live_handoff_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
+    use crate::api::schema::{Method, ServerLiveHandoffParams};
+
+    let params = ServerLiveHandoffParams::default();
+
+    send_server_update_method_at(
+        socket_path,
+        timeout,
+        "update:server:live-handoff",
+        Method::ServerLiveHandoff(params),
+        "server live handoff",
+    )
+}
+
+fn live_handoff_server_via_api_for_release_at(
+    socket_path: &Path,
+    timeout: Duration,
+    updated_exe: &Path,
+    release: &ReleaseInfo,
+) -> Result<(), String> {
+    use crate::api::schema::{Method, ServerLiveHandoffParams};
+
+    let params = ServerLiveHandoffParams {
+        import_exe: Some(updated_exe.display().to_string()),
+        expected_protocol: release.target_protocol,
+        expected_version: Some(release.version.to_string()),
+    };
+
+    send_server_update_method_at(
+        socket_path,
+        timeout,
+        "update:server:live-handoff",
+        Method::ServerLiveHandoff(params),
+        "server live handoff",
+    )
+}
+
+fn live_handoff_server_via_api_for_update_at(
+    socket_path: &Path,
+    updated_exe: &Path,
+    release: &ReleaseInfo,
+) -> Result<(), String> {
+    live_handoff_server_via_api_for_release_at(
+        socket_path,
+        SERVER_HANDOFF_CONFIRM_TIMEOUT,
+        updated_exe,
+        release,
+    )
 }
 
 fn server_shutdown_confirmed_at(socket_path: &Path) -> Result<bool, String> {
@@ -668,8 +1177,173 @@ fn wait_for_server_shutdown_at(socket_path: &Path, timeout: Duration) -> Result<
     }
 }
 
-fn wait_for_server_shutdown(timeout: Duration) -> Result<(), String> {
-    wait_for_server_shutdown_at(&crate::api::socket_path(), timeout)
+fn stop_running_server_for_update(plan: &RunningServerUpdatePlan) -> Result<(), String> {
+    eprintln!("stopping herdr {} {}...", plan.target_noun(), plan.label());
+    stop_server_via_api_at(plan.socket_path(), SERVER_STOP_RESPONSE_TIMEOUT)?;
+    wait_for_server_shutdown_at(plan.socket_path(), SERVER_HANDOFF_CONFIRM_TIMEOUT)?;
+    Ok(())
+}
+
+fn wait_for_server_handoff_at(
+    socket_path: &Path,
+    timeout: Duration,
+    release: &ReleaseInfo,
+) -> Result<(), String> {
+    wait_for_running_server_protocol_at(
+        socket_path,
+        timeout,
+        release.target_protocol,
+        Some(&release.version.to_string()),
+    )
+}
+
+fn wait_for_running_server_protocol_at(
+    socket_path: &Path,
+    timeout: Duration,
+    expected_protocol: Option<u32>,
+    expected_version: Option<&str>,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) =
+            crate::api::read_runtime_status_at(socket_path, SERVER_STOP_RESPONSE_TIMEOUT)
+                .map_err(|e| format!("failed to read server status after handoff: {e}"))?
+        {
+            let protocol_matches =
+                expected_protocol.is_none_or(|protocol| status.protocol == Some(protocol));
+            let version_matches =
+                expected_version.is_none_or(|version| status.version.as_deref() == Some(version));
+            if protocol_matches && version_matches {
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "live handoff was requested, but no compatible server responded on {} after {} seconds",
+                socket_path.display(),
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(SERVER_SHUTDOWN_POLL_INTERVAL);
+    }
+}
+
+fn apply_running_session_update_decisions(
+    release: &ReleaseInfo,
+    updated_exe: &Path,
+    decisions: Vec<RunningServerUpdateDecision>,
+) -> Result<Vec<RunningSessionUpdateOutcome>, String> {
+    let mut outcomes = Vec::new();
+
+    for decision in decisions {
+        let outcome = match decision.action {
+            RunningServerUpdateAction::None => RunningServerUpdateOutcome::RestartDeferred,
+            RunningServerUpdateAction::StopOldServer => {
+                stop_running_server_for_update(&decision.plan)?;
+                RunningServerUpdateOutcome::Stopped
+            }
+            RunningServerUpdateAction::LiveHandoff => {
+                match live_handoff_running_server_for_update(&decision.plan, release, updated_exe) {
+                    Ok(()) => RunningServerUpdateOutcome::LiveHandoffComplete,
+                    Err(err) => {
+                        recover_failed_live_handoff_for_update(&decision.plan, release, &err)?
+                    }
+                }
+            }
+        };
+
+        let stop_command = decision.plan.stop_command();
+        outcomes.push(RunningSessionUpdateOutcome {
+            session_label: decision.plan.label().to_string(),
+            stop_command,
+            attach_command: decision.plan.attach_command(),
+            outcome,
+        });
+    }
+
+    Ok(outcomes)
+}
+
+fn print_running_session_update_outcomes(
+    outcomes: &[RunningSessionUpdateOutcome],
+    release: &ReleaseInfo,
+) {
+    if outcomes.is_empty() {
+        eprintln!("run herdr again.");
+        return;
+    }
+
+    for outcome in outcomes {
+        match outcome.outcome {
+            RunningServerUpdateOutcome::LiveHandoffComplete => {
+                if let Some(command) = &outcome.attach_command {
+                    eprintln!(
+                        "session {} was replaced; reconnect clients with `{command}`.",
+                        outcome.session_label
+                    );
+                } else {
+                    eprintln!(
+                        "server {} was replaced; reconnect using the same socket override.",
+                        outcome.session_label
+                    );
+                }
+            }
+            RunningServerUpdateOutcome::RestartDeferred => {
+                if outcome.attach_command.is_some() {
+                    eprintln!(
+                        "session {} will use v{} after it restarts.",
+                        outcome.session_label, release.version
+                    );
+                } else {
+                    eprintln!(
+                        "server {} will use v{} after it restarts.",
+                        outcome.session_label, release.version
+                    );
+                }
+            }
+            RunningServerUpdateOutcome::Stopped
+            | RunningServerUpdateOutcome::FailedHandoffOldServerStopped
+            | RunningServerUpdateOutcome::FailedHandoffNoServer => {
+                if let Some(command) = &outcome.attach_command {
+                    eprintln!(
+                        "session {} is stopped; run `{command}` again.",
+                        outcome.session_label
+                    );
+                } else {
+                    eprintln!(
+                        "server {} is stopped; restart it with the same socket override.",
+                        outcome.session_label
+                    );
+                }
+            }
+            RunningServerUpdateOutcome::FailedHandoffOldServerKept => {
+                if outcome.attach_command.is_some() {
+                    eprintln!(
+                        "session {} is still running with your panes; stop it later with `{}` to use v{}.",
+                        outcome.session_label, outcome.stop_command, release.version
+                    );
+                } else {
+                    eprintln!(
+                        "server {} is still running with your panes; stop it later with `{}` to use v{}.",
+                        outcome.session_label, outcome.stop_command, release.version
+                    );
+                }
+            }
+            RunningServerUpdateOutcome::FailedHandoffUnknown => {
+                if let Some(command) = &outcome.attach_command {
+                    eprintln!(
+                        "session {} state is unclear; run `{command}`, or stop the old server with `{}` if reconnect fails.",
+                        outcome.session_label, outcome.stop_command
+                    );
+                } else {
+                    eprintln!(
+                        "server {} state is unclear; reconnect with the same socket override, or stop it with `{}` if reconnect fails.",
+                        outcome.session_label, outcome.stop_command
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,7 +1708,9 @@ pub fn self_update() -> Result<Version, String> {
         }
     };
 
-    let running_server_plan = plan_running_server_update(&release)?;
+    let running_server_plans = plan_running_server_updates(&release)?;
+    let server_update_decisions =
+        confirm_running_server_update_action(running_server_plans, &release)?;
 
     eprintln!("downloading v{}...", release.version);
     if let Err(e) =
@@ -1044,18 +1720,13 @@ pub fn self_update() -> Result<Version, String> {
     }
     let downloaded_update = download_update(&release)?;
     let updated_exe = downloaded_update.current_exe.clone();
-    let stopped_server = stop_running_server_for_update(running_server_plan.as_ref(), &release)?;
     install_downloaded_update(downloaded_update)?;
+    let server_update_outcomes =
+        apply_running_session_update_decisions(&release, &updated_exe, server_update_decisions)?;
     eprintln!("updated to v{}", release.version);
     print_outdated_integration_notice_with_updated_binary(&updated_exe);
 
-    if stopped_server {
-        eprintln!("run herdr again to start the updated server.");
-    } else if api_server_is_running() {
-        eprintln!("the running herdr server will use the new version after it restarts.");
-    } else {
-        eprintln!("run herdr again.");
-    }
+    print_running_session_update_outcomes(&server_update_outcomes, &release);
 
     maybe_offer_star_after_successful_update();
 
@@ -1259,6 +1930,46 @@ mod tests {
         (running, handle)
     }
 
+    fn spawn_status_server_once(
+        path: &Path,
+        version: &str,
+        protocol: u32,
+    ) -> thread::JoinHandle<()> {
+        let listener = UnixListener::bind(path).unwrap();
+        let version = version.to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("\"method\":\"ping\""));
+            let response = format!(
+                r#"{{"id":"runtime:status","result":{{"type":"pong","version":"{version}","protocol":{protocol},"capabilities":{{"live_handoff":true}}}}}}"#
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(b"\n").unwrap();
+            stream.flush().unwrap();
+        })
+    }
+
+    fn fake_release(version: &str, target_protocol: Option<u32>) -> ReleaseInfo {
+        ReleaseInfo {
+            version: Version::parse(version).unwrap(),
+            target_protocol,
+            download_url: "https://example.com/herdr".to_string(),
+            notes_body: "### Changed\n- One".to_string(),
+        }
+    }
+
+    fn set_test_config_home(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("herdr-update-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        dir
+    }
+
     #[test]
     fn parse_version_basic() {
         assert_eq!(
@@ -1348,6 +2059,7 @@ mod tests {
 
     #[test]
     fn fake_release_notes_default_to_real_large_changelog_section() {
+        let _guard = env_lock().lock().unwrap();
         std::env::remove_var(FAKE_UPDATE_NOTES_VERSION_ENV);
 
         let body = fake_release_notes_body("9.4.9");
@@ -1357,6 +2069,7 @@ mod tests {
 
     #[test]
     fn fake_release_notes_fallback_include_version_and_context() {
+        let _guard = env_lock().lock().unwrap();
         std::env::set_var(FAKE_UPDATE_NOTES_VERSION_ENV, "does-not-exist");
 
         let body = fake_release_notes_body("9.4.9");
@@ -1375,21 +2088,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_stop_server_before_update_response_defaults_yes_for_blank() {
-        assert_eq!(parse_stop_server_before_update_response(""), Some(true));
-        assert_eq!(parse_stop_server_before_update_response("\n"), Some(true));
-        assert_eq!(parse_stop_server_before_update_response("y"), Some(true));
-        assert_eq!(parse_stop_server_before_update_response("yes"), Some(true));
-        assert_eq!(parse_stop_server_before_update_response("n"), Some(false));
-        assert_eq!(parse_stop_server_before_update_response("no"), Some(false));
-        assert_eq!(parse_stop_server_before_update_response("later"), None);
+    fn parse_live_handoff_before_update_response_defaults_yes_for_blank() {
+        assert_eq!(parse_live_handoff_before_update_response(""), Some(true));
+        assert_eq!(parse_live_handoff_before_update_response("\n"), Some(true));
+        assert_eq!(parse_live_handoff_before_update_response("y"), Some(true));
+        assert_eq!(parse_live_handoff_before_update_response("yes"), Some(true));
+        assert_eq!(parse_live_handoff_before_update_response("n"), Some(false));
+        assert_eq!(parse_live_handoff_before_update_response("no"), Some(false));
+        assert_eq!(parse_live_handoff_before_update_response("later"), None);
     }
 
     #[test]
-    fn update_requires_server_stop_when_target_protocol_differs_or_unknown() {
+    fn update_requires_live_handoff_when_target_protocol_differs_or_unknown() {
         let server = crate::api::RuntimeStatus {
             version: Some("0.5.5".to_string()),
             protocol: Some(2),
+            capabilities: None,
         };
         let compatible_release = ReleaseInfo {
             version: Version::parse("0.5.6").unwrap(),
@@ -1406,13 +2120,168 @@ mod tests {
             ..compatible_release.clone()
         };
 
-        assert!(!update_requires_server_stop(&server, &compatible_release));
-        assert!(update_requires_server_stop(&server, &incompatible_release));
-        assert!(update_requires_server_stop(&server, &unknown_release));
+        assert!(!update_requires_live_handoff(&server, &compatible_release));
+        assert!(update_requires_live_handoff(&server, &incompatible_release));
+        assert!(update_requires_live_handoff(&server, &unknown_release));
     }
 
     #[test]
-    fn noninteractive_update_requires_stop_names_session_stop_command() {
+    fn plain_update_targets_all_running_sessions() {
+        let _guard = env_lock().lock().unwrap();
+        let config_home = set_test_config_home("all-sessions");
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
+
+        let default_socket = crate::session::api_socket_path_for(None);
+        let work_socket = crate::session::api_socket_path_for(Some("work"));
+        fs::create_dir_all(default_socket.parent().unwrap()).unwrap();
+        fs::create_dir_all(work_socket.parent().unwrap()).unwrap();
+        let default_listener = UnixListener::bind(&default_socket).unwrap();
+        let work_listener = UnixListener::bind(&work_socket).unwrap();
+
+        let mut targets = running_update_targets().unwrap();
+        targets.sort_by(|left, right| left.label.cmp(&right.label));
+
+        drop(default_listener);
+        drop(work_listener);
+        let _ = fs::remove_dir_all(config_home);
+        std::env::remove_var("XDG_CONFIG_HOME");
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].label, crate::session::DEFAULT_SESSION_NAME);
+        assert_eq!(targets[0].name, None);
+        assert_eq!(targets[1].label, "work");
+        assert_eq!(targets[1].name.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn explicit_session_update_targets_only_that_session() {
+        let _guard = env_lock().lock().unwrap();
+        let config_home = set_test_config_home("explicit-session");
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/ignored-herdr.sock");
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
+        let args = vec![
+            "herdr".to_string(),
+            "--session".to_string(),
+            "work".to_string(),
+            "update".to_string(),
+        ];
+        let _ = crate::session::configure_from_args(&args).unwrap();
+
+        let targets = running_update_targets().unwrap();
+
+        let expected_socket = crate::session::api_socket_path_for(Some("work"));
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        crate::session::clear_explicit_session_for_test();
+        let _ = fs::remove_dir_all(config_home);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].label, "work");
+        assert_eq!(targets[0].name.as_deref(), Some("work"));
+        assert_eq!(targets[0].socket_path, expected_socket);
+    }
+
+    #[test]
+    fn socket_override_update_targets_socket_not_env_session() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, "/tmp/custom-herdr.sock");
+        std::env::set_var(crate::session::SESSION_ENV_VAR, "work");
+        crate::session::clear_explicit_session_for_test();
+
+        let targets = running_update_targets().unwrap();
+
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, None);
+        assert_eq!(
+            targets[0].socket_path,
+            PathBuf::from("/tmp/custom-herdr.sock")
+        );
+        assert!(targets[0]
+            .stop_command
+            .contains(crate::api::SOCKET_PATH_ENV_VAR));
+    }
+
+    #[test]
+    fn plain_update_errors_when_named_session_has_client_socket_without_status_api() {
+        let _guard = env_lock().lock().unwrap();
+        let config_home = set_test_config_home("client-only-session");
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
+
+        let work_client_socket = crate::session::client_socket_path_for(Some("work"));
+        fs::create_dir_all(work_client_socket.parent().unwrap()).unwrap();
+        let work_client_listener = UnixListener::bind(&work_client_socket).unwrap();
+        let release = fake_release("9.8.7", Some(77));
+
+        let err = plan_running_server_updates(&release).unwrap_err();
+
+        drop(work_client_listener);
+        let _ = fs::remove_dir_all(config_home);
+        std::env::remove_var("XDG_CONFIG_HOME");
+
+        assert!(
+            err.contains("work") && err.contains("status API did not respond"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.contains("herdr session stop work"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn failed_handoff_classification_detects_updated_server() {
+        let socket_path = unique_test_socket_path("handoff-updated-status");
+        let handle = spawn_status_server_once(&socket_path, "9.8.7", 77);
+        let release = fake_release("9.8.7", Some(77));
+
+        let state = classify_failed_live_handoff_state_at(&socket_path, &release);
+
+        let _ = handle.join();
+        let _ = fs::remove_file(&socket_path);
+        assert_eq!(state, FailedHandoffServerState::UpdatedServerRunning);
+    }
+
+    #[test]
+    fn failed_handoff_classification_detects_old_server() {
+        let socket_path = unique_test_socket_path("handoff-old-status");
+        let handle = spawn_status_server_once(&socket_path, "0.6.2", 76);
+        let release = fake_release("9.8.7", Some(77));
+
+        let state = classify_failed_live_handoff_state_at(&socket_path, &release);
+
+        let _ = handle.join();
+        let _ = fs::remove_file(&socket_path);
+        match state {
+            FailedHandoffServerState::OldServerRunning(status) => {
+                assert_eq!(status.version.as_deref(), Some("0.6.2"));
+                assert_eq!(status.protocol, Some(76));
+            }
+            other => panic!("unexpected state: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_handoff_classification_detects_missing_server() {
+        let socket_path = unique_test_socket_path("handoff-missing-status");
+        let release = fake_release("9.8.7", Some(77));
+
+        let state = classify_failed_live_handoff_state_at(&socket_path, &release);
+
+        assert_eq!(state, FailedHandoffServerState::NoServerResponding);
+    }
+
+    #[test]
+    fn noninteractive_update_requires_handoff_fails_before_install() {
         let _guard = env_lock().lock().unwrap();
         assert!(
             !io::stdin().is_terminal(),
@@ -1423,6 +2292,7 @@ mod tests {
         let server = crate::api::RuntimeStatus {
             version: Some("0.5.5".to_string()),
             protocol: Some(2),
+            capabilities: None,
         };
         let release = ReleaseInfo {
             version: Version::parse("0.5.6").unwrap(),
@@ -1430,15 +2300,29 @@ mod tests {
             download_url: "https://example.com/herdr".to_string(),
             notes_body: "### Changed\n- One".to_string(),
         };
+        let plan = RunningServerUpdatePlan {
+            target: RunningUpdateTarget {
+                name: Some("work".to_string()),
+                label: "work".to_string(),
+                stop_command: "herdr session stop work".to_string(),
+                attach_command: Some("herdr session attach work".to_string()),
+                socket_path: crate::session::api_socket_path_for(Some("work")),
+                client_socket_path: crate::session::client_socket_path_for(Some("work")),
+                must_be_running: true,
+            },
+            requires_live_handoff: true,
+            server,
+        };
 
-        let err = prompt_to_stop_server_before_update(&server, &release, true).unwrap_err();
+        let err =
+            prompt_to_live_handoff_sessions_before_update(&[&plan], &release, true).unwrap_err();
 
         assert!(
-            err.contains("run `herdr session stop work`"),
+            err.contains("requires live server handoff"),
             "unexpected error: {err}"
         );
         assert!(
-            err.contains("then run `herdr update` again"),
+            err.contains("run `herdr update` from an interactive terminal"),
             "unexpected error: {err}"
         );
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
@@ -1491,6 +2375,73 @@ mod tests {
         assert!(
             result.is_ok(),
             "expected stop request to succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn live_handoff_server_via_api_sends_handoff_request() {
+        let socket_path = unique_test_socket_path("handoff-ok");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            assert!(request.contains("server.live_handoff"));
+            stream
+                .write_all(b"{\"id\":\"update:server:live-handoff\",\"result\":{}}\n")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let result = live_handoff_server_via_api_at(&socket_path, Duration::from_millis(200));
+        let _ = handle.join();
+        let _ = fs::remove_file(&socket_path);
+        assert!(
+            result.is_ok(),
+            "expected handoff request to succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn update_live_handoff_request_names_import_binary_and_expected_release() {
+        let socket_path = unique_test_socket_path("handoff-update-ok");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(value["method"], "server.live_handoff");
+            assert_eq!(value["params"]["import_exe"], "/tmp/herdr-new");
+            assert_eq!(value["params"]["expected_protocol"], 77);
+            assert_eq!(value["params"]["expected_version"], "9.8.7");
+            stream
+                .write_all(b"{\"id\":\"update:server:live-handoff\",\"result\":{}}\n")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+        let release = ReleaseInfo {
+            version: Version::parse("9.8.7").unwrap(),
+            target_protocol: Some(77),
+            download_url: "https://example.com/herdr".to_string(),
+            notes_body: "### Changed\n- One".to_string(),
+        };
+
+        let result = live_handoff_server_via_api_for_release_at(
+            &socket_path,
+            Duration::from_millis(200),
+            Path::new("/tmp/herdr-new"),
+            &release,
+        );
+        let _ = handle.join();
+        let _ = fs::remove_file(&socket_path);
+        assert!(
+            result.is_ok(),
+            "expected handoff request to succeed: {result:?}"
         );
     }
 

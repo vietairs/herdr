@@ -8,6 +8,7 @@ use crate::api::schema::{Method, Request, ResponseResult};
 pub struct RuntimeStatus {
     pub version: Option<String>,
     pub protocol: Option<u32>,
+    pub capabilities: Option<crate::api::schema::ServerCapabilities>,
 }
 
 pub fn read_runtime_status_at(
@@ -43,9 +44,14 @@ pub fn read_runtime_status_at(
         Err(err) => return Err(io::Error::other(err)),
     };
     match response.result {
-        ResponseResult::Pong { version, protocol } => Ok(Some(RuntimeStatus {
+        ResponseResult::Pong {
+            version,
+            protocol,
+            capabilities,
+        } => Ok(Some(RuntimeStatus {
             version: Some(version),
             protocol: Some(protocol),
+            capabilities,
         })),
         result => Err(io::Error::other(format!(
             "server status request returned unexpected result: {result:?}"

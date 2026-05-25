@@ -15,7 +15,6 @@
 //!   and pane spawn failure during restore
 
 use std::collections::HashMap;
-use std::fs;
 use std::io;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -35,11 +34,14 @@ use crate::api;
 use crate::app;
 use crate::config;
 use crate::events::AppEvent;
+use crate::ipc::{remove_socket_file_if_owned, socket_file_identity, SocketFileIdentity};
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
     MAX_GRAPHICS_FRAME_SIZE,
 };
-use crate::server::client_accept::accept_pending_client_connections;
+use crate::server::client_accept::{
+    accept_pending_client_connections, reject_pending_client_connections,
+};
 use crate::server::client_transport::ServerEvent;
 use crate::server::clients::{
     events_include_interaction, latest_app_client, render_targets, terminal_attach_client_ids,
@@ -58,6 +60,8 @@ use crate::server::terminal_attach::paste_payload_for_runtime;
 use crate::protocol::RenderEncoding;
 #[cfg(test)]
 use crate::server::client_transport::ClientWriter;
+#[cfg(test)]
+use std::fs;
 
 // ---------------------------------------------------------------------------
 // Loop event enum for the headless server event loop
@@ -100,8 +104,11 @@ const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
     app: app::App,
+    api_tx: Option<api::ApiRequestSender>,
+    api_server: Option<api::ServerHandle>,
     client_listener: UnixListener,
     client_socket_path: PathBuf,
+    client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
     next_client_id: u64,
     /// The client currently driving the shared pane runtime size, theme, and input keybindings.
@@ -121,6 +128,10 @@ pub struct HeadlessServer {
     effective_size: (u16, u16),
     /// Flag set when shutdown is initiated.
     shutting_down: bool,
+    /// Flag set while exporting live PTYs to a replacement server.
+    handoff_in_progress: bool,
+    /// Imported panes get one app-safe resize nudge after the first client attaches.
+    pending_handoff_repaint_nudge: bool,
     /// Flag set by Ctrl+C or `server stop` signal.
     should_quit: Arc<AtomicBool>,
     /// Channel for receiving server events from client connection threads.
@@ -209,12 +220,18 @@ impl HeadlessServer {
     /// 1. Prepares the client socket path (cleans up stale sockets)
     /// 2. Binds the client socket listener
     /// 3. Returns the server ready to run
-    pub fn new(app: app::App, config_diagnostics: &[String]) -> io::Result<Self> {
+    pub fn new(
+        app: app::App,
+        config_diagnostics: &[String],
+        api_tx: Option<api::ApiRequestSender>,
+        api_server: Option<api::ServerHandle>,
+    ) -> io::Result<Self> {
         let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
 
         let listener = UnixListener::bind(&client_path)?;
         restrict_socket_permissions(&client_path)?;
+        let client_socket_identity = socket_file_identity(&client_path)?;
         info!(path = %client_path.display(), "client protocol socket listening");
 
         // Set non-blocking on the listener so we can poll it from the event loop.
@@ -230,8 +247,11 @@ impl HeadlessServer {
 
         Ok(Self {
             app,
+            api_tx,
+            api_server,
             client_listener: listener,
             client_socket_path: client_path,
+            client_socket_identity,
             clients: HashMap::new(),
             next_client_id: 1,
             foreground_client_id: None,
@@ -242,6 +262,8 @@ impl HeadlessServer {
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
+            handoff_in_progress: false,
+            pending_handoff_repaint_nudge: false,
             should_quit,
             server_event_rx,
             server_event_tx,
@@ -539,6 +561,217 @@ impl HeadlessServer {
         }
     }
 
+    #[cfg(unix)]
+    fn perform_live_handoff(
+        &mut self,
+        params: crate::api::schema::ServerLiveHandoffParams,
+    ) -> io::Result<()> {
+        info!("starting live handoff");
+        let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
+        let socket_path = crate::server::handoff::handoff_socket_path();
+        let token = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let listener = match crate::server::handoff::bind_listener(&socket_path) {
+            Ok(listener) => listener,
+            Err(err) => {
+                self.handoff_in_progress = false;
+                return Err(err);
+            }
+        };
+
+        let mut pane_by_terminal = HashMap::new();
+        for ws in &self.app.state.workspaces {
+            for tab in &ws.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    pane_by_terminal.insert(pane.attached_terminal_id.clone(), pane_id.raw());
+                }
+            }
+        }
+        if pane_by_terminal.len() > crate::server::handoff::MAX_FDS_PER_HANDOFF {
+            let _ = std::fs::remove_file(&socket_path);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "live handoff supports at most {} panes in one update; close panes or restart herdr normally",
+                    crate::server::handoff::MAX_FDS_PER_HANDOFF
+                ),
+            ));
+        }
+
+        self.handoff_in_progress = true;
+        self.disconnect_all_clients_for_handoff();
+        let _ = reject_pending_client_connections(&self.client_listener);
+
+        let mut paused_terminal_ids = Vec::new();
+        for terminal_id in pane_by_terminal.keys() {
+            if let Some(runtime) = self.app.terminal_runtimes.get(terminal_id) {
+                if let Err(err) = runtime.pause_handoff_reader(Duration::from_secs(2)) {
+                    self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+                    return Err(err);
+                }
+                paused_terminal_ids.push(terminal_id.clone());
+            }
+        }
+
+        let snapshot = crate::persist::capture(
+            &self.app.state.workspaces,
+            &self.app.state.terminals,
+            &self.app.terminal_runtimes,
+            self.app.state.active,
+            self.app.state.selected,
+            self.app.state.agent_panel_scope,
+            self.app.state.sidebar_width,
+            self.app.state.sidebar_section_split,
+            self.app.state.collapsed_space_keys.clone(),
+        );
+
+        let mut panes = Vec::new();
+        for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
+            let Some(pane_id) = pane_by_terminal.get(terminal_id).copied() else {
+                continue;
+            };
+            let mut handoff_pane = runtime.handoff_pane(pane_id);
+            let has_agent_session = self
+                .app
+                .state
+                .terminals
+                .get(terminal_id)
+                .is_some_and(|terminal| terminal.persisted_agent_session.is_some());
+            if !has_agent_session {
+                handoff_pane.initial_history_ansi = runtime.handoff_history_ansi();
+            }
+            panes.push(handoff_pane);
+        }
+
+        let manifest = crate::server::handoff::manifest_for(
+            snapshot,
+            panes,
+            params.expected_protocol,
+            params.expected_version,
+        );
+        let child_pid = match crate::server::handoff::spawn_handoff_import(
+            import_exe.as_deref(),
+            &socket_path,
+            &token,
+        ) {
+            Ok(child_pid) => child_pid,
+            Err(err) => {
+                self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+                return Err(err);
+            }
+        };
+        info!(pid = child_pid, socket = %socket_path.display(), "spawned handoff import server");
+
+        let mut fds = Vec::new();
+        let duplicate_result = (|| {
+            for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
+                if !pane_by_terminal.contains_key(terminal_id) {
+                    continue;
+                }
+                fds.push(runtime.duplicate_handoff_fd()?);
+            }
+            Ok::<(), io::Error>(())
+        })();
+        if let Err(err) = duplicate_result {
+            for fd in fds {
+                let _ = unsafe { libc::close(fd) };
+            }
+            self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+            return Err(err);
+        }
+
+        let mut stream = match crate::server::handoff::accept_and_validate_on(
+            listener,
+            &socket_path,
+            &token,
+            &manifest,
+        ) {
+            Ok(stream) => stream,
+            Err(err) => {
+                for fd in fds {
+                    let _ = unsafe { libc::close(fd) };
+                }
+                self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+                return Err(err);
+            }
+        };
+
+        let send_result = crate::server::handoff::send_fds_and_wait_restored(&mut stream, &fds);
+        for fd in fds {
+            let _ = unsafe { libc::close(fd) };
+        }
+        if let Err(err) = send_result {
+            self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+            return Err(err);
+        }
+
+        if let Some(api_server) = &self.api_server {
+            let _ = api_server.remove_socket_file_if_owned();
+        } else {
+            let _ = std::fs::remove_file(crate::api::socket_path());
+        }
+        let _ = remove_socket_file_if_owned(&self.client_socket_path, self.client_socket_identity);
+        if let Err(err) = crate::server::handoff::wait_ready(&mut stream) {
+            match self.wait_then_restore_public_sockets_after_failed_handoff() {
+                Ok(()) => {
+                    self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+                }
+                Err(restore_err) => {
+                    self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+                    return Err(io::Error::other(format!(
+                        "handoff replacement server did not become ready: {err}; old server could not restore public sockets: {restore_err}"
+                    )));
+                }
+            }
+            return Err(io::Error::other(format!(
+                "handoff replacement server did not become ready: {err}"
+            )));
+        }
+        if let Err(err) = crate::server::handoff::report_committed(&mut stream) {
+            match self.wait_then_restore_public_sockets_after_failed_handoff() {
+                Ok(()) => {
+                    self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+                }
+                Err(restore_err) => {
+                    self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+                    return Err(io::Error::other(format!(
+                        "handoff replacement server was ready, but commit failed: {err}; old server could not restore public sockets: {restore_err}"
+                    )));
+                }
+            }
+            return Err(err);
+        }
+
+        for (terminal_id, runtime) in self.app.terminal_runtimes.drain_for_handoff() {
+            if !pane_by_terminal.contains_key(&terminal_id) {
+                continue;
+            }
+            debug!(terminal = %terminal_id, "preserving pane runtime for handoff");
+            runtime.preserve_for_handoff();
+        }
+        crate::server::handoff::wait_owned_ack(&mut stream);
+
+        self.shutting_down = true;
+        self.app.state.should_quit = true;
+        self.app.no_session = true;
+        info!("live handoff completed; old server exiting");
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn perform_live_handoff(
+        &mut self,
+        _params: crate::api::schema::ServerLiveHandoffParams,
+    ) -> io::Result<()> {
+        Err(io::Error::other("live handoff is only supported on Unix"))
+    }
+
     fn sync_visible_server_config_diagnostic(&mut self, uses_local_keybindings: bool) {
         let visible = if uses_local_keybindings {
             &self.server_config_diagnostic_without_keybindings
@@ -551,6 +784,64 @@ impl HeadlessServer {
             self.app.state.config_diagnostic = visible.clone();
         }
     }
+
+    #[cfg(unix)]
+    fn restore_public_sockets_after_failed_handoff(&mut self) -> io::Result<()> {
+        let api_tx = self
+            .api_tx
+            .clone()
+            .ok_or_else(|| io::Error::other("cannot restore api socket without api sender"))?;
+        let api_server = api::start_server(api_tx, self.app.event_hub.clone())?;
+
+        let client_path = client_socket_path();
+        prepare_socket_path(&client_path)?;
+        let listener = UnixListener::bind(&client_path)?;
+        restrict_socket_permissions(&client_path)?;
+        let client_socket_identity = socket_file_identity(&client_path)?;
+        listener.set_nonblocking(true)?;
+
+        self.api_server = Some(api_server);
+        self.client_listener = listener;
+        self.client_socket_path = client_path;
+        self.client_socket_identity = client_socket_identity;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn wait_then_restore_public_sockets_after_failed_handoff(&mut self) -> io::Result<()> {
+        let timeout = crate::server::handoff::COMMIT_TIMEOUT + Duration::from_secs(2);
+        wait_for_old_public_sockets_to_close(timeout)?;
+        self.restore_public_sockets_after_failed_handoff()
+    }
+
+    #[cfg(unix)]
+    fn rollback_handoff_before_commit(
+        &mut self,
+        socket_path: &Path,
+        paused_terminal_ids: &[crate::terminal::TerminalId],
+    ) {
+        for terminal_id in paused_terminal_ids {
+            if let Some(runtime) = self.app.terminal_runtimes.get(terminal_id) {
+                runtime.set_handoff_reader_paused(false);
+            }
+        }
+        self.handoff_in_progress = false;
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[cfg(unix)]
+    fn nudge_handoff_panes_on_first_client_attach(&mut self) {
+        if !self.pending_handoff_repaint_nudge {
+            return;
+        }
+        self.pending_handoff_repaint_nudge = false;
+        self.app
+            .terminal_runtimes
+            .nudge_child_redraw_after_handoff();
+    }
+
+    #[cfg(not(unix))]
+    fn nudge_handoff_panes_on_first_client_attach(&mut self) {}
 
     fn reload_server_config(&mut self, notify_success: bool) -> crate::config::ConfigReloadReport {
         let server_keybindings = self.server_keybindings.clone();
@@ -706,6 +997,9 @@ impl HeadlessServer {
 
     /// Accepts pending client connections from the non-blocking listener.
     fn accept_client_connections(&mut self) -> io::Result<()> {
+        if self.handoff_in_progress {
+            return reject_pending_client_connections(&self.client_listener);
+        }
         accept_pending_client_connections(
             &self.client_listener,
             &mut self.next_client_id,
@@ -1236,6 +1530,28 @@ impl HeadlessServer {
         }
     }
 
+    fn disconnect_all_clients_for_handoff(&mut self) {
+        let client_ids = self.clients.keys().copied().collect::<Vec<_>>();
+        for client_id in client_ids {
+            self.send_client_graphics_cleanup(client_id);
+            self.send_to_client(
+                client_id,
+                ServerMessage::ServerShutdown {
+                    reason: Some(
+                        "live update in progress; reconnect after handoff completes".to_owned(),
+                    ),
+                },
+            );
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.writer = None;
+            }
+            let _ = self.remove_client(client_id);
+        }
+        self.foreground_client_id = None;
+        self.sync_foreground_client_state();
+        self.resize_shared_runtime_to_effective_size();
+    }
+
     fn attach_terminal_client(
         &mut self,
         client_id: u64,
@@ -1310,6 +1626,10 @@ impl HeadlessServer {
 
     /// Handles a server event. Returns true if the event requires a re-render.
     fn handle_server_event(&mut self, ev: ServerEvent) -> bool {
+        if self.handoff_in_progress && Self::ignore_client_event_during_handoff(&ev) {
+            return false;
+        }
+
         match ev {
             ServerEvent::ClientConnected {
                 client_id,
@@ -1321,6 +1641,19 @@ impl HeadlessServer {
                 writer,
                 render_encoding,
             } => {
+                if self.handoff_in_progress {
+                    if let Ok(message) =
+                        Self::frame_server_message(&ServerMessage::ServerShutdown {
+                            reason: Some(
+                                "live update in progress; reconnect after handoff completes"
+                                    .to_owned(),
+                            ),
+                        })
+                    {
+                        let _ = writer.control.send(message);
+                    }
+                    return false;
+                }
                 info!(
                     client_id,
                     cols,
@@ -1351,6 +1684,7 @@ impl HeadlessServer {
                 self.foreground_client_id = Some(client_id);
                 self.sync_foreground_client_state();
                 self.resize_shared_runtime_to_effective_size();
+                self.nudge_handoff_panes_on_first_client_attach();
                 true
             }
             ServerEvent::ClientAttachTerminal {
@@ -1370,6 +1704,14 @@ impl HeadlessServer {
                 client_id, source, direction, lines, column, row, modifiers,
             ),
             ServerEvent::ClientInput { client_id, data } => {
+                if self.handoff_in_progress {
+                    debug!(
+                        client_id,
+                        len = data.len(),
+                        "ignored client input during handoff"
+                    );
+                    return false;
+                }
                 debug!(client_id, len = data.len(), "client input received");
                 if let Some(ClientConnection {
                     mode: ClientConnectionMode::TerminalAttach { terminal_id },
@@ -1548,6 +1890,16 @@ impl HeadlessServer {
         }
     }
 
+    fn ignore_client_event_during_handoff(ev: &ServerEvent) -> bool {
+        !matches!(
+            ev,
+            ServerEvent::ClientConnected { .. }
+                | ServerEvent::ClientDisconnected { .. }
+                | ServerEvent::ClientWriterDrained { .. }
+                | ServerEvent::QuitSignal
+        )
+    }
+
     /// Drains API requests with shutdown awareness.
     ///
     /// During shutdown, remaining requests get a `server_unavailable` error.
@@ -1581,6 +1933,25 @@ impl HeadlessServer {
             });
             let _ = msg.respond_to.send(response);
             return false;
+        }
+
+        if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
+            let response = match self.perform_live_handoff(params.clone()) {
+                Ok(()) => serde_json::to_string(&api::schema::SuccessResponse {
+                    id: msg.request.id,
+                    result: api::schema::ResponseResult::Ok {},
+                }),
+                Err(err) => serde_json::to_string(&api::schema::ErrorResponse {
+                    id: msg.request.id,
+                    error: api::schema::ErrorBody {
+                        code: "handoff_failed".into(),
+                        message: err.to_string(),
+                    },
+                }),
+            }
+            .unwrap_or_else(|_| "{}".to_string());
+            let _ = msg.respond_to.send(response);
+            return true;
         }
 
         let changed = api::request_changes_ui(&msg.request);
@@ -2153,7 +2524,9 @@ impl HeadlessServer {
 
     /// Removes socket files created by the server.
     fn cleanup_sockets(&self) -> io::Result<()> {
-        if let Err(err) = fs::remove_file(&self.client_socket_path) {
+        if let Err(err) =
+            remove_socket_file_if_owned(&self.client_socket_path, self.client_socket_identity)
+        {
             if err.kind() != io::ErrorKind::NotFound {
                 warn!(
                     path = %self.client_socket_path.display(),
@@ -2224,12 +2597,24 @@ fn is_keybinding_config_diagnostic(diagnostic: &str) -> bool {
 pub fn run_server() -> io::Result<()> {
     init_logging();
 
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(2).map(String::as_str) == Some("--handoff-import") {
+        let socket_path = args
+            .get(3)
+            .map(PathBuf::from)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing handoff socket"))?;
+        let token = args
+            .get(4)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing handoff token"))?;
+        return run_handoff_import_server(&socket_path, token);
+    }
+
     let loaded_config = config::Config::load();
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
 
     // Start the JSON API socket server.
-    let _api_server = match api::start_server(api_tx, event_hub.clone()) {
+    let _api_server = match api::start_server(api_tx.clone(), event_hub.clone()) {
         Ok(server) => server,
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
             eprintln!("error: herdr server is already running");
@@ -2263,7 +2648,12 @@ pub fn run_server() -> io::Result<()> {
         app.local_terminal_notifications = false;
 
         // Create the headless server.
-        let mut server = match HeadlessServer::new(app, &loaded_config.diagnostics) {
+        let mut server = match HeadlessServer::new(
+            app,
+            &loaded_config.diagnostics,
+            Some(api_tx.clone()),
+            Some(_api_server),
+        ) {
             Ok(server) => server,
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
                 eprintln!("error: herdr server is already running");
@@ -2286,6 +2676,106 @@ pub fn run_server() -> io::Result<()> {
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("server");
     result
+}
+
+#[cfg(unix)]
+fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> {
+    let loaded_config = config::Config::load();
+    let mut received = crate::server::handoff::receive(socket_path, token)?;
+    crate::server::handoff::log_import_result(received.manifest.panes.len());
+
+    let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+    let event_hub = api::EventHub::default();
+
+    let mut imports = HashMap::new();
+    for (pane, fd) in received.manifest.panes.iter().zip(received.fds) {
+        imports.insert(
+            pane.pane_id,
+            crate::persist::ImportedPaneRuntime {
+                master_fd: fd,
+                child_pid: pane.child_pid,
+                rows: pane.rows,
+                cols: pane.cols,
+                cell_width_px: pane.cell_width_px,
+                cell_height_px: pane.cell_height_px,
+                initial_history_ansi: pane.initial_history_ansi.clone(),
+            },
+        );
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(io::Error::other)?;
+
+    let result = rt.block_on(async {
+        let mut app = app::App::new_from_handoff(
+            &loaded_config.config,
+            config::config_diagnostic_summary(&loaded_config.diagnostics),
+            api_rx,
+            event_hub.clone(),
+            &received.manifest.snapshot,
+            &mut imports,
+        )?;
+        app.state.local_sound_playback = false;
+        app.local_terminal_notifications = false;
+        crate::server::handoff::report_restored(&mut received.stream)?;
+        if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
+            return Err(io::Error::other(
+                "test handoff import failure after restored",
+            ));
+        }
+        wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
+
+        let api_server = api::start_server(api_tx.clone(), event_hub.clone())?;
+        let mut server = HeadlessServer::new(
+            app,
+            &loaded_config.diagnostics,
+            Some(api_tx.clone()),
+            Some(api_server),
+        )?;
+        crate::server::handoff::report_ready(&mut received.stream)?;
+        crate::server::handoff::wait_committed(&mut received.stream)?;
+        server.app.assume_handoff_ownership();
+        server.app.unpause_handoff_readers();
+        server.pending_handoff_repaint_nudge = true;
+        if let Err(err) = crate::server::handoff::report_owned(&mut received.stream) {
+            warn!(err = %err, "failed to report handoff ownership; continuing as owner");
+        }
+        info!("handoff import server started");
+        print_ready_message(&api::socket_path(), &client_socket_path());
+        server.run().await
+    });
+
+    rt.shutdown_timeout(Duration::from_millis(100));
+    crate::logging::shutdown("server");
+    result
+}
+
+#[cfg(unix)]
+fn wait_for_old_public_sockets_to_close(timeout: Duration) -> io::Result<()> {
+    use std::os::unix::net::UnixStream;
+
+    let deadline = Instant::now() + timeout;
+    let api_socket = api::socket_path();
+    let client_socket = client_socket_path();
+    while Instant::now() < deadline {
+        let api_open = api_socket.exists() && UnixStream::connect(&api_socket).is_ok();
+        let client_open = client_socket.exists() && UnixStream::connect(&client_socket).is_ok();
+        if !api_open && !client_open {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "old server sockets did not close before handoff import bind",
+    ))
+}
+
+#[cfg(not(unix))]
+fn run_handoff_import_server(_socket_path: &Path, _token: &str) -> io::Result<()> {
+    Err(io::Error::other("live handoff is only supported on Unix"))
 }
 
 fn print_ready_message(api_socket: &Path, client_socket: &Path) {
@@ -2336,6 +2826,8 @@ mod tests {
         let socket_path = dir.join("client.sock");
         let _ = fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path).expect("bind test listener");
+        let client_socket_identity =
+            socket_file_identity(&socket_path).expect("test listener socket identity");
         listener
             .set_nonblocking(true)
             .expect("set listener nonblocking");
@@ -2344,8 +2836,11 @@ mod tests {
 
         HeadlessServer {
             app,
+            api_tx: None,
+            api_server: None,
             client_listener: listener,
             client_socket_path: socket_path,
+            client_socket_identity,
             clients: HashMap::new(),
             next_client_id: 1,
             foreground_client_id: None,
@@ -2356,6 +2851,8 @@ mod tests {
             next_activity_stamp: 1,
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
+            handoff_in_progress: false,
+            pending_handoff_repaint_nudge: false,
             should_quit: Arc::new(AtomicBool::new(false)),
             server_event_rx,
             server_event_tx,
