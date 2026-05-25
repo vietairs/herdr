@@ -31,7 +31,7 @@ herdr server stop
 
 When Herdr starts again, it restores the saved workspaces, tabs, panes, cwd, layout, and focus.
 
-Pane screen history is off by default because pane output can include secrets, tokens, prompts, and command output. Enable it from Settings > Experiments > pane screen history or with `[experimental] pane_history = true`. Herdr stores saved pane history in `session-history.json` next to `session.json`; treat the Herdr config/session directory like terminal history.
+Pane screen history is off by default because pane output can include secrets, tokens, prompts, and command output. Enable it from Settings > Experiments > pane screen history or with `[experimental] pane_history = true`. Herdr stores saved pane history in `session-history.json` next to `session.json`; treat the Herdr config/session directory like terminal history. When native agent session restore is enabled and a pane has a resumable agent session reference, Herdr resumes the agent session instead of replaying saved pane history for that pane.
 
 ## Named sessions
 
