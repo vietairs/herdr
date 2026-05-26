@@ -102,6 +102,12 @@ async fn publish_state_changed_event(
 }
 
 const AGENT_MISS_CONFIRMATION_ATTEMPTS: u8 = 6;
+const PROCESS_RECHECK_IDENTIFIED: std::time::Duration = std::time::Duration::from_secs(5);
+const PROCESS_RECHECK_UNIDENTIFIED: std::time::Duration = std::time::Duration::from_secs(30);
+const PROCESS_ACQUISITION_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
+const PROCESS_ACQUISITION_FAST_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
+const PROCESS_ACQUISITION_FAST_RECHECK: std::time::Duration = std::time::Duration::from_millis(500);
+const PROCESS_ACQUISITION_SLOW_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy)]
 struct AgentDetectionPresence {
@@ -142,6 +148,99 @@ fn foreground_shell_agent_action(
         ForegroundShellAgentAction::ClearAgent
     } else {
         ForegroundShellAgentAction::ReportProcessExit
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcessProbeInput {
+    current_agent: Option<Agent>,
+    suppressed_agent: Option<Agent>,
+    foreground_pgid: Option<u32>,
+    last_foreground_pgid: Option<u32>,
+    has_process_probe: bool,
+    acquisition_age: Option<std::time::Duration>,
+    pending_foreground_shell_clear: bool,
+    pending_restore_probe: bool,
+    elapsed_since_process_check: std::time::Duration,
+}
+
+fn foreground_group_changed(
+    foreground_pgid: Option<u32>,
+    last_foreground_pgid: Option<u32>,
+) -> bool {
+    foreground_pgid != last_foreground_pgid
+        && (foreground_pgid.is_some() || last_foreground_pgid.is_some())
+}
+
+fn should_probe_foreground_job(input: ProcessProbeInput) -> bool {
+    if input.pending_foreground_shell_clear || input.pending_restore_probe {
+        return true;
+    }
+
+    let foreground_group_changed =
+        foreground_group_changed(input.foreground_pgid, input.last_foreground_pgid);
+
+    if input.suppressed_agent.is_some() {
+        return !input.has_process_probe || foreground_group_changed;
+    }
+
+    if let Some(acquisition_age) = input.acquisition_age {
+        let acquisition_interval = if acquisition_age <= PROCESS_ACQUISITION_FAST_WINDOW {
+            PROCESS_ACQUISITION_FAST_RECHECK
+        } else {
+            PROCESS_ACQUISITION_SLOW_RECHECK
+        };
+        if acquisition_age <= PROCESS_ACQUISITION_WINDOW
+            && input.elapsed_since_process_check >= acquisition_interval
+        {
+            return true;
+        }
+    }
+
+    if input.current_agent.is_none() {
+        return !input.has_process_probe
+            || foreground_group_changed
+            || input.elapsed_since_process_check >= PROCESS_RECHECK_UNIDENTIFIED;
+    }
+
+    foreground_group_changed || input.elapsed_since_process_check >= PROCESS_RECHECK_IDENTIFIED
+}
+
+#[derive(Debug, Clone)]
+struct ProcessProbeResult {
+    process_group_id: Option<u32>,
+    foreground_is_pane_shell: bool,
+    agent: Option<Agent>,
+    process_name: Option<String>,
+}
+
+fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessProbeResult {
+    if let Some(job) = foreground_pgid.and_then(crate::detect::foreground_group_leader_job) {
+        if let Some((agent, process_name)) = crate::detect::identify_agent_in_job(&job) {
+            return ProcessProbeResult {
+                process_group_id: Some(job.process_group_id),
+                foreground_is_pane_shell: job.processes.iter().any(|p| p.pid == pid),
+                agent: Some(agent),
+                process_name: Some(process_name),
+            };
+        }
+    }
+
+    if let Some(job) = crate::detect::foreground_job(pid) {
+        let identified = crate::detect::identify_agent_in_job(&job);
+        return ProcessProbeResult {
+            process_group_id: Some(job.process_group_id),
+            foreground_is_pane_shell: job.processes.iter().any(|p| p.pid == pid),
+            agent: identified.as_ref().map(|(agent, _)| *agent),
+            process_name: identified.map(|(_, process_name)| process_name),
+        };
+    }
+
+    ProcessProbeResult {
+        process_group_id: foreground_pgid,
+        foreground_is_pane_shell: false,
+        agent: None,
+        process_name: None,
     }
 }
 
@@ -189,6 +288,11 @@ fn spawn_basic_detection_task(
         let mut last_visible_blocker = false;
         let mut last_visible_idle = false;
         let mut last_visible_working = false;
+        let mut last_process_check = std::time::Instant::now();
+        let mut last_foreground_pgid = None;
+        let mut has_process_probe = false;
+        let mut acquisition_started_at = None;
+        let mut release_was_active = false;
 
         loop {
             tokio::select! {
@@ -199,18 +303,67 @@ fn spawn_basic_detection_task(
                     last_visible_blocker = false;
                     last_visible_idle = false;
                     last_visible_working = false;
+                    last_process_check = std::time::Instant::now();
+                    last_foreground_pgid = None;
+                    has_process_probe = false;
+                    acquisition_started_at = None;
+                    release_was_active = false;
                 }
             }
 
             let now = std::time::Instant::now();
+            let suppressed_agent = active_pending_release(&pending_release_for_task, now);
+            if suppressed_agent.is_none() && release_was_active {
+                has_process_probe = false;
+                acquisition_started_at = None;
+            }
+            release_was_active = suppressed_agent.is_some();
             let pid = child_pid.load(Ordering::Acquire);
             let mut agent_changed = false;
             let mut agent = agent_presence.current_agent();
+            let content = terminal.detection_text();
 
-            if pid > 0 {
-                let new_agent = crate::detect::foreground_job(pid).and_then(|job| {
-                    crate::detect::identify_agent_in_job(&job).map(|(agent, _)| agent)
+            let foreground_pgid = (pid > 0)
+                .then(|| crate::detect::foreground_process_group_id(pid))
+                .flatten();
+            let process_group_changed =
+                foreground_group_changed(foreground_pgid, last_foreground_pgid);
+            let should_check_process = pid > 0
+                && should_probe_foreground_job(ProcessProbeInput {
+                    current_agent: agent_presence.current_agent(),
+                    suppressed_agent,
+                    foreground_pgid,
+                    last_foreground_pgid,
+                    has_process_probe,
+                    acquisition_age: acquisition_started_at
+                        .map(|started| now.duration_since(started)),
+                    pending_foreground_shell_clear: false,
+                    pending_restore_probe: false,
+                    elapsed_since_process_check: now.duration_since(last_process_check),
                 });
+
+            if should_check_process {
+                last_process_check = now;
+                let had_process_probe = has_process_probe;
+                has_process_probe = true;
+                let probe = probe_foreground_process(pid, foreground_pgid);
+                let mut new_agent = probe.agent;
+                if let Some(suppressed_agent) = suppressed_agent {
+                    if new_agent == Some(suppressed_agent) {
+                        new_agent = None;
+                    } else if let Ok(mut pending_release) = pending_release_for_task.lock() {
+                        *pending_release = None;
+                    }
+                }
+                if new_agent.is_none() {
+                    last_foreground_pgid = probe.process_group_id.or(foreground_pgid);
+                    if had_process_probe && process_group_changed {
+                        acquisition_started_at = Some(now);
+                    }
+                } else {
+                    last_foreground_pgid = probe.process_group_id.or(foreground_pgid);
+                    acquisition_started_at = None;
+                }
                 let previous_agent = agent_presence.current_agent();
                 if agent_presence.observe_process_probe(new_agent) {
                     agent = agent_presence.current_agent();
@@ -218,7 +371,6 @@ fn spawn_basic_detection_task(
                 }
             }
 
-            let content = terminal.detection_text();
             let detection = crate::detect::detect_agent(agent, &content);
             let new_state = detection.state;
             let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
@@ -258,8 +410,6 @@ fn spawn_basic_detection_task(
                 )
                 .await;
             }
-
-            let _ = active_pending_release(&pending_release_for_task, now);
         }
     });
 
@@ -1293,7 +1443,6 @@ impl PaneRuntime {
             const TICK_UNIDENTIFIED: Duration = Duration::from_millis(500);
             const TICK_IDENTIFIED: Duration = Duration::from_millis(300);
             const TICK_PENDING_RELEASE: Duration = Duration::from_millis(50);
-            const PROCESS_RECHECK: Duration = Duration::from_secs(5);
 
             let child_pid = child_pid.clone();
             let terminal = terminal.clone();
@@ -1315,8 +1464,11 @@ impl PaneRuntime {
                 };
                 let mut last_process_check = Instant::now();
                 let mut last_foreground_pgid = None;
+                let mut has_process_probe = false;
+                let mut acquisition_started_at = None;
                 let mut pending_foreground_shell_clear = false;
                 let mut foreground_shell_exit_reported = false;
+                let mut release_was_active = false;
                 let mut pending_restore_probe = initial_state.detected_agent.is_some();
                 let mut last_claude_working_at = None;
                 let mut last_visible_blocker = false;
@@ -1342,8 +1494,11 @@ impl PaneRuntime {
                             agent_presence = AgentDetectionPresence::from_agent(None);
                             state = AgentState::Unknown;
                             last_foreground_pgid = None;
+                            has_process_probe = false;
+                            acquisition_started_at = None;
                             pending_foreground_shell_clear = false;
                             foreground_shell_exit_reported = false;
+                            release_was_active = false;
                             pending_restore_probe = false;
                             last_claude_working_at = None;
                             last_visible_blocker = false;
@@ -1354,44 +1509,44 @@ impl PaneRuntime {
 
                     let now = Instant::now();
                     let suppressed_agent = active_pending_release(&pending_release_for_task, now);
+                    if suppressed_agent.is_none() && release_was_active {
+                        has_process_probe = false;
+                        acquisition_started_at = None;
+                    }
+                    release_was_active = suppressed_agent.is_some();
                     let pid = child_pid.load(Ordering::Acquire);
-                    let foreground_pgid = (pid > 0 && agent_presence.current_agent().is_some())
+                    let content = terminal.detection_text();
+                    let foreground_pgid = (pid > 0)
                         .then(|| detect::foreground_process_group_id(pid))
                         .flatten();
-                    let foreground_group_changed = foreground_pgid.is_some()
-                        && last_foreground_pgid.is_some()
-                        && foreground_pgid != last_foreground_pgid;
-                    let should_check_process = suppressed_agent.is_some()
-                        || agent_presence.current_agent().is_none()
-                        || foreground_group_changed
-                        || pending_foreground_shell_clear
-                        || pending_restore_probe
-                        || now.duration_since(last_process_check) >= PROCESS_RECHECK;
+                    let process_group_changed =
+                        foreground_group_changed(foreground_pgid, last_foreground_pgid);
+                    let should_check_process = pid > 0
+                        && should_probe_foreground_job(ProcessProbeInput {
+                            current_agent: agent_presence.current_agent(),
+                            suppressed_agent,
+                            foreground_pgid,
+                            last_foreground_pgid,
+                            has_process_probe,
+                            acquisition_age: acquisition_started_at
+                                .map(|started| now.duration_since(started)),
+                            pending_foreground_shell_clear,
+                            pending_restore_probe,
+                            elapsed_since_process_check: now.duration_since(last_process_check),
+                        });
 
                     let mut agent_changed = false;
                     let mut agent = agent_presence.current_agent();
                     if should_check_process {
                         last_process_check = now;
+                        let had_process_probe = has_process_probe;
+                        has_process_probe = true;
                         if pid > 0 {
-                            let mut process_name = None;
-                            let mut process_group_id = None;
-                            let mut foreground_is_pane_shell = false;
-                            let mut new_agent = None;
-
-                            if let Some(job) = detect::foreground_job(pid) {
-                                process_group_id = Some(job.process_group_id);
-                                last_foreground_pgid = Some(job.process_group_id);
-                                foreground_is_pane_shell =
-                                    job.processes.iter().any(|p| p.pid == pid);
-                                let identified = detect::identify_agent_in_job(&job);
-                                process_name = identified
-                                    .as_ref()
-                                    .map(|(_, process_name)| process_name.clone());
-                                new_agent = identified.as_ref().map(|(agent, _)| *agent);
-                            } else if foreground_pgid.is_some() {
-                                process_group_id = foreground_pgid;
-                                last_foreground_pgid = foreground_pgid;
-                            }
+                            let probe = probe_foreground_process(pid, foreground_pgid);
+                            let process_name = probe.process_name;
+                            let process_group_id = probe.process_group_id;
+                            let foreground_is_pane_shell = probe.foreground_is_pane_shell;
+                            let mut new_agent = probe.agent;
 
                             if let Some(suppressed_agent) = suppressed_agent {
                                 if new_agent == Some(suppressed_agent) {
@@ -1427,10 +1582,16 @@ impl PaneRuntime {
                             };
                             if new_agent.is_some() {
                                 last_foreground_pgid = process_group_id;
+                                acquisition_started_at = None;
                                 pending_restore_probe = false;
                             } else if agent_presence.current_agent().is_none() {
-                                last_foreground_pgid = None;
+                                last_foreground_pgid = process_group_id.or(foreground_pgid);
+                                if had_process_probe && process_group_changed {
+                                    acquisition_started_at = Some(now);
+                                }
                                 pending_restore_probe = false;
+                            } else {
+                                last_foreground_pgid = process_group_id.or(foreground_pgid);
                             }
                             if changed {
                                 agent = agent_presence.current_agent();
@@ -1466,7 +1627,6 @@ impl PaneRuntime {
                         }
                     }
 
-                    let content = terminal.detection_text();
                     let process_exited = pending_foreground_shell_clear
                         && agent.is_some()
                         && !foreground_shell_exit_reported;
@@ -2325,6 +2485,206 @@ mod tests {
             Some(Agent::OpenCode),
             true
         ));
+    }
+
+    fn process_probe_input() -> ProcessProbeInput {
+        ProcessProbeInput {
+            current_agent: None,
+            suppressed_agent: None,
+            foreground_pgid: Some(42),
+            last_foreground_pgid: Some(42),
+            has_process_probe: true,
+            acquisition_age: None,
+            pending_foreground_shell_clear: false,
+            pending_restore_probe: false,
+            elapsed_since_process_check: std::time::Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn unchanged_unidentified_foreground_group_skips_full_process_probe() {
+        assert!(!should_probe_foreground_job(process_probe_input()));
+    }
+
+    #[test]
+    fn unidentified_foreground_group_change_runs_full_process_probe() {
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            foreground_pgid: Some(43),
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn unidentified_pane_gets_initial_and_safety_process_probes() {
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            has_process_probe: false,
+            ..process_probe_input()
+        }));
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            elapsed_since_process_check: PROCESS_RECHECK_UNIDENTIFIED,
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn unidentified_pane_without_foreground_group_uses_safety_process_probe() {
+        assert!(!should_probe_foreground_job(ProcessProbeInput {
+            foreground_pgid: None,
+            last_foreground_pgid: None,
+            ..process_probe_input()
+        }));
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            foreground_pgid: None,
+            last_foreground_pgid: None,
+            elapsed_since_process_check: PROCESS_RECHECK_UNIDENTIFIED,
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn unidentified_pane_probes_when_foreground_group_disappears() {
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            foreground_pgid: None,
+            last_foreground_pgid: Some(42),
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn pending_shell_clear_and_restore_force_process_probes() {
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: Some(Agent::Codex),
+            pending_foreground_shell_clear: true,
+            ..process_probe_input()
+        }));
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: Some(Agent::Codex),
+            pending_restore_probe: true,
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn pending_release_forces_initial_process_probe() {
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: Some(Agent::Codex),
+            suppressed_agent: Some(Agent::Codex),
+            has_process_probe: false,
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn pending_release_forces_process_probe_after_runtime_identity_clears() {
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: None,
+            suppressed_agent: Some(Agent::Codex),
+            has_process_probe: false,
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn pending_release_skips_repeated_probe_when_foreground_group_is_stable() {
+        assert!(!should_probe_foreground_job(ProcessProbeInput {
+            current_agent: None,
+            suppressed_agent: Some(Agent::Codex),
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn pending_release_probes_when_foreground_group_changes() {
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: None,
+            suppressed_agent: Some(Agent::Codex),
+            foreground_pgid: Some(43),
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn acquisition_window_catches_delayed_same_group_wrapper_startup() {
+        assert!(!should_probe_foreground_job(ProcessProbeInput {
+            current_agent: None,
+            acquisition_age: Some(std::time::Duration::from_millis(1250)),
+            elapsed_since_process_check: PROCESS_ACQUISITION_FAST_RECHECK
+                - std::time::Duration::from_millis(1),
+            ..process_probe_input()
+        }));
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: None,
+            acquisition_age: Some(std::time::Duration::from_millis(1250)),
+            elapsed_since_process_check: PROCESS_ACQUISITION_FAST_RECHECK,
+            ..process_probe_input()
+        }));
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: None,
+            acquisition_age: Some(std::time::Duration::from_secs(5)),
+            elapsed_since_process_check: PROCESS_ACQUISITION_SLOW_RECHECK,
+            ..process_probe_input()
+        }));
+        assert!(!should_probe_foreground_job(ProcessProbeInput {
+            current_agent: None,
+            acquisition_age: Some(PROCESS_ACQUISITION_WINDOW + std::time::Duration::from_millis(1),),
+            elapsed_since_process_check: PROCESS_ACQUISITION_SLOW_RECHECK,
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn release_expiry_can_force_reacquire_probe_by_resetting_probe_state() {
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: None,
+            has_process_probe: false,
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn identified_agent_uses_shorter_safety_process_probe() {
+        assert!(!should_probe_foreground_job(ProcessProbeInput {
+            current_agent: Some(Agent::Codex),
+            elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED
+                - std::time::Duration::from_millis(1),
+            ..process_probe_input()
+        }));
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: Some(Agent::Codex),
+            elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED,
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn identified_agent_probes_when_foreground_group_disappears() {
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: Some(Agent::Codex),
+            foreground_pgid: None,
+            last_foreground_pgid: Some(42),
+            elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED
+                - std::time::Duration::from_millis(1),
+            ..process_probe_input()
+        }));
+    }
+
+    #[test]
+    fn stable_missing_foreground_group_uses_safety_process_probe() {
+        assert!(!should_probe_foreground_job(ProcessProbeInput {
+            current_agent: Some(Agent::Codex),
+            foreground_pgid: None,
+            last_foreground_pgid: None,
+            elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED
+                - std::time::Duration::from_millis(1),
+            ..process_probe_input()
+        }));
+        assert!(should_probe_foreground_job(ProcessProbeInput {
+            current_agent: Some(Agent::Codex),
+            foreground_pgid: None,
+            last_foreground_pgid: None,
+            elapsed_since_process_check: PROCESS_RECHECK_IDENTIFIED,
+            ..process_probe_input()
+        }));
     }
 
     #[test]

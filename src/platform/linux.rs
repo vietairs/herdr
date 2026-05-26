@@ -54,6 +54,25 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     })
 }
 
+pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {
+    let (pgrp, name) = process_pgrp_and_comm(process_group_id)?;
+    if pgrp as u32 != process_group_id {
+        return None;
+    }
+
+    let argv = process_argv(process_group_id);
+    Some(ForegroundJob {
+        process_group_id,
+        processes: vec![ForegroundProcess {
+            pid: process_group_id,
+            name,
+            argv0: None,
+            cmdline: argv.as_ref().map(|parts| parts.join(" ")),
+            argv,
+        }],
+    })
+}
+
 pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
     // /proc/<pid>/stat format: "pid (comm) state ppid pgrp session tty_nr tpgid ..."
     // The (comm) field can contain spaces and parens, so we find the last ')' first.

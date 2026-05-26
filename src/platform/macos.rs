@@ -52,6 +52,26 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     })
 }
 
+pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {
+    let info = process_bsdinfo(process_group_id)?;
+    if info.pbi_pgid != process_group_id {
+        return None;
+    }
+
+    let name = comm_from_bsdinfo(&info)?;
+    let argv = process_argv(process_group_id);
+    Some(ForegroundJob {
+        process_group_id,
+        processes: vec![ForegroundProcess {
+            pid: process_group_id,
+            name,
+            argv0: process_argv0_name(process_group_id),
+            cmdline: argv.as_ref().map(|parts| parts.join(" ")),
+            argv,
+        }],
+    })
+}
+
 fn process_group_pids(process_group_id: u32) -> Vec<u32> {
     let mut capacity = 16usize;
 
