@@ -288,7 +288,7 @@
   --logo-opacity: 0.72;
 }
 
-*, 
+*,
 *::before,
 *::after {
     box-sizing: border-box;
@@ -437,6 +437,39 @@ samp {
 .footer a,
 .inline-links a {
     transition: color 0.15s ease;
+}
+
+.nav-tools {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.nav-icon-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.1rem;
+    height: 2.1rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    color: var(--muted);
+    transition:
+        color 120ms ease,
+        border-color 120ms ease,
+        background 120ms ease;
+}
+
+.nav-icon-link:hover {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+    background: var(--accent-soft);
+}
+
+.nav-icon-link svg {
+    width: 1rem;
+    height: 1rem;
+    fill: currentColor;
 }
 
 .nav-cta {
@@ -2113,6 +2146,40 @@ td:last-child {
     flex-wrap: wrap;
     gap: 1rem;
     justify-content: flex-end;
+}
+
+.footer .footer-social {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    justify-content: flex-end;
+}
+
+.footer-social a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    color: var(--muted);
+    transition:
+        color 120ms ease,
+        border-color 120ms ease,
+        background 120ms ease;
+}
+
+.footer-social a:hover {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+    background: var(--accent-soft);
+}
+
+.footer-social svg {
+    width: 1rem;
+    height: 1rem;
+    fill: currentColor;
 }
 
 .compare-hero {
