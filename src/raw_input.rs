@@ -216,6 +216,14 @@ pub(crate) fn flush_incomplete_input_bytes(buffer: &mut Vec<u8>) -> Option<Vec<u
         return None;
     }
 
+    if starts_with_incomplete_default_color_response(buffer) {
+        tracing::trace!(
+            len = buffer.len(),
+            "waiting for host color response terminator"
+        );
+        return None;
+    }
+
     if buffer.as_slice() == [ESC] {
         tracing::warn!(
             bytes = ?buffer,
@@ -332,6 +340,11 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
     let text = std::str::from_utf8(&buffer[..consumed]).ok()?;
     let key = parse_terminal_key_sequence(text)?;
     Some((RawInputEvent::Key(key), consumed))
+}
+
+fn starts_with_incomplete_default_color_response(buffer: &[u8]) -> bool {
+    find_osc_terminator(buffer).is_none()
+        && matches!(buffer.get(..5), Some(b"\x1b]10;" | b"\x1b]11;"))
 }
 
 fn first_complete_utf8_char_len(buffer: &[u8]) -> Option<usize> {
@@ -1284,5 +1297,85 @@ mod tests {
         assert_eq!(ranges[0].start, 0);
         assert_eq!(ranges[0].len, input.len());
         assert!(matches!(&ranges[0].event, RawInputEvent::Mouse(_)));
+    }
+
+    #[test]
+    fn parses_ghostty_default_background_response() {
+        let events = parse_raw_input_bytes_sync(b"\x1b]11;rgb:2828/2a2a/3636\x07");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            RawInputEvent::HostDefaultColor {
+                kind: DefaultColorKind::Background,
+                color: RgbColor {
+                    r: 0x28,
+                    g: 0x2a,
+                    b: 0x36
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn drain_complete_input_bytes_keeps_split_default_background_response_buffered() {
+        let mut buffer = b"\x1b]11;rgb:2828".to_vec();
+
+        let chunks = drain_complete_input_bytes(&mut buffer);
+
+        assert!(chunks.is_empty());
+        assert_eq!(buffer, b"\x1b]11;rgb:2828");
+    }
+
+    #[test]
+    fn flush_incomplete_input_bytes_keeps_split_default_background_response_buffered() {
+        let mut buffer = b"\x1b]11;rgb:2828".to_vec();
+
+        let flushed = flush_incomplete_input_bytes(&mut buffer);
+
+        assert!(flushed.is_none());
+        assert_eq!(buffer, b"\x1b]11;rgb:2828");
+    }
+
+    #[test]
+    fn flush_incomplete_input_bytes_keeps_default_background_response_split_after_command() {
+        let mut buffer = b"\x1b]11;".to_vec();
+
+        let flushed = flush_incomplete_input_bytes(&mut buffer);
+
+        assert!(flushed.is_none());
+        assert_eq!(buffer, b"\x1b]11;");
+    }
+
+    #[test]
+    fn flush_incomplete_input_bytes_keeps_default_background_response_split_inside_st() {
+        let mut buffer = b"\x1b]11;rgb:2828/2a2a/3636\x1b".to_vec();
+
+        let flushed = flush_incomplete_input_bytes(&mut buffer);
+
+        assert!(flushed.is_none());
+        assert_eq!(buffer, b"\x1b]11;rgb:2828/2a2a/3636\x1b");
+    }
+
+    #[test]
+    fn non_osc_default_color_text_remains_key_input() {
+        let events = parse_raw_input_bytes_sync(b"11;rgb:2828/2a2a/3636\x07");
+
+        assert_eq!(events.len(), 22);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('1'),
+            KeyModifiers::empty(),
+        );
+    }
+
+    #[test]
+    fn flush_incomplete_input_bytes_does_not_hold_non_osc_default_color_text() {
+        let mut buffer = b"11;rgb:2828".to_vec();
+
+        let flushed = flush_incomplete_input_bytes(&mut buffer);
+
+        assert_eq!(flushed, None);
+        assert!(buffer.is_empty());
     }
 }
