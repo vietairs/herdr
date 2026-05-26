@@ -975,6 +975,8 @@ pub enum EventData {
         workspace_id: String,
         agent_status: AgentStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_agent: Option<String>,

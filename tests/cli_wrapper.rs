@@ -2190,6 +2190,7 @@ fn pane_run_read_and_wait_commands_work() {
     );
     assert!(create.status.success());
 
+    let started = Instant::now();
     let waited = run_cli(
         &socket_path,
         &[
@@ -2206,10 +2207,15 @@ fn pane_run_read_and_wait_commands_work() {
             "5000",
         ],
     );
+    let elapsed = started.elapsed();
     assert!(
         waited.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&waited.stderr)
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "already-matching wait took {elapsed:?}"
     );
     let waited_json: serde_json::Value = serde_json::from_slice(&waited.stdout).unwrap();
     assert_eq!(waited_json["result"]["type"], "output_matched");
@@ -2653,6 +2659,63 @@ fn wait_agent_status_exits_when_idle_status_matches() {
             "idle",
             "--timeout",
             "5000",
+        ],
+    );
+    assert!(
+        waited.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&waited.stderr)
+    );
+    let waited_json: serde_json::Value = serde_json::from_slice(&waited.stdout).unwrap();
+    assert_eq!(waited_json["event"], "pane.agent_status_changed");
+    assert_eq!(waited_json["data"]["agent_status"], "idle");
+    assert_eq!(waited_json["data"]["agent"], "pi");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn wait_agent_status_exits_immediately_when_status_already_matches() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_cli_immediate_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pane_id = format!("{workspace_id}-1");
+
+    let reported = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_cli_immediate_2","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"idle"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(reported["result"]["type"], "ok");
+
+    let waited = run_cli(
+        &socket_path,
+        &[
+            "wait",
+            "agent-status",
+            "1-1",
+            "--status",
+            "idle",
+            "--timeout",
+            "1000",
         ],
     );
     assert!(

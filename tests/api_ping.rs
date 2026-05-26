@@ -1979,12 +1979,16 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
 
     let set_event = reader.read_json_line(Duration::from_secs(2));
     assert_eq!(set_event["event"], "pane.agent_status_changed");
+    assert_eq!(set_event["data"]["pane_id"], pane_id);
     assert_eq!(set_event["data"]["agent_status"], "working");
+    assert_eq!(set_event["data"]["agent"], "pi");
     assert_eq!(set_event["data"]["custom_status"], "short lived");
 
     let expiry_event = reader.read_json_line(Duration::from_secs(3));
     assert_eq!(expiry_event["event"], "pane.agent_status_changed");
+    assert_eq!(expiry_event["data"]["pane_id"], pane_id);
     assert_eq!(expiry_event["data"]["agent_status"], "working");
+    assert_eq!(expiry_event["data"]["agent"], "pi");
     assert!(expiry_event["data"]["custom_status"].is_null());
 
     cleanup_spawned_herdr(child, base);

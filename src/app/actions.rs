@@ -93,10 +93,12 @@ pub struct PaneStateUpdate {
     pub previous_agent_label: Option<String>,
     pub previous_known_agent: Option<Agent>,
     pub previous_state: AgentState,
+    pub previous_seen: bool,
     pub previous_presentation: crate::terminal::EffectivePresentation,
     pub agent_label: Option<String>,
     pub known_agent: Option<Agent>,
     pub state: AgentState,
+    pub seen: bool,
     pub presentation: crate::terminal::EffectivePresentation,
 }
 
@@ -702,24 +704,27 @@ impl AppState {
         pane_terminals
             .into_iter()
             .filter_map(|(ws_idx, pane_id, terminal_id)| {
+                let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
                 let mutation = self
                     .terminals
                     .get_mut(&terminal_id)?
                     .expire_agent_metadata_at(scheduled_deadline, now)?;
                 let change = mutation.effective_state_change?;
+                let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
                 let update = PaneStateUpdate {
                     pane_id,
                     ws_idx,
                     previous_agent_label: change.previous_agent_label.clone(),
                     previous_known_agent: change.previous_known_agent,
                     previous_state: change.previous_state,
+                    previous_seen,
                     previous_presentation: change.previous_presentation.clone(),
                     agent_label: change.agent_label.clone(),
                     known_agent: change.known_agent,
                     state: change.state,
+                    seen,
                     presentation: change.presentation.clone(),
                 };
-                self.apply_pane_state_change(ws_idx, pane_id, &change);
                 Some(update)
             })
             .collect()
@@ -2059,6 +2064,7 @@ impl AppState {
             .pane_state(pane_id)?
             .attached_terminal_id
             .clone();
+        let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
         let mutation = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             update(terminal)?
@@ -2067,19 +2073,21 @@ impl AppState {
             self.mark_session_dirty();
         }
         let change = mutation.effective_state_change?;
+        let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
         let update = PaneStateUpdate {
             pane_id,
             ws_idx,
             previous_agent_label: change.previous_agent_label.clone(),
             previous_known_agent: change.previous_known_agent,
             previous_state: change.previous_state,
+            previous_seen,
             previous_presentation: change.previous_presentation.clone(),
             agent_label: change.agent_label.clone(),
             known_agent: change.known_agent,
             state: change.state,
+            seen,
             presentation: change.presentation.clone(),
         };
-        self.apply_pane_state_change(ws_idx, pane_id, &change);
         Some(update)
     }
 
@@ -2088,23 +2096,21 @@ impl AppState {
         ws_idx: usize,
         pane_id: PaneId,
         change: &EffectiveStateChange,
-    ) {
+    ) -> Option<bool> {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let suppress_active_tab_notifications =
             active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
-        let Some(pane) = self.workspaces[ws_idx]
+        let pane = self.workspaces[ws_idx]
             .tabs
             .iter_mut()
-            .find_map(|tab| tab.panes.get_mut(&pane_id))
-        else {
-            return;
-        };
+            .find_map(|tab| tab.panes.get_mut(&pane_id))?;
 
         if change.state != AgentState::Idle {
             pane.seen = true;
         } else if is_background_completion_transition(change.previous_state, change.state) {
             pane.seen = suppress_active_tab_notifications;
         }
+        let seen = pane.seen;
 
         if self.local_sound_playback && self.sound.allows(change.known_agent) {
             if let Some(sound) = notification_sound_for_state_change(
@@ -2145,6 +2151,8 @@ impl AppState {
                 });
             }
         }
+
+        Some(seen)
     }
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {
