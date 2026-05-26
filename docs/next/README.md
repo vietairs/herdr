@@ -243,6 +243,8 @@ resize mode: `h`/`l` resize width, `j`/`k` resize height, `esc` exit.
 
 session navigator opens a searchable workspace, tab, and pane tree. use `/` for text search, `b`/`w`/`i`/`d` for blocked, working, idle, and done filters, `a` or backspace to clear a state filter, and enter to switch to the highlighted row.
 
+last-pane is available but unset by default. bind `last_pane` in `[keys]` if you want tmux-style back-and-forth navigation to the last focused pane across workspaces and tabs; for example, `last_pane = "prefix+tab"`.
+
 custom command keybindings can launch detached shell helpers or temporary panes:
 
 ```toml

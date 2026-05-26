@@ -285,6 +285,7 @@ impl App {
         let Some(ws_idx) = self.state.active else {
             return Err(std::io::Error::other("no active workspace"));
         };
+        let previous_focus_target = self.state.current_pane_focus_target();
         let (rows, cols) = self.state.estimate_pane_size();
         let new_rows = rows.max(4);
         let new_cols = cols.max(10);
@@ -323,6 +324,13 @@ impl App {
         self.state
             .terminals
             .insert(new_pane.terminal.id.clone(), new_pane.terminal);
+        let new_focus_target = crate::app::state::PaneFocusTarget {
+            workspace_id: ws.id.clone(),
+            pane_id: new_pane_id,
+        };
+        if previous_focus_target.as_ref() != Some(&new_focus_target) {
+            self.state.previous_pane_focus = previous_focus_target;
+        }
         ws.active_tab_mut()
             .expect("workspace must have an active tab")
             .layout
@@ -499,6 +507,7 @@ pub(crate) enum NavigateAction {
     ToggleSidebar,
     CyclePaneNext,
     CyclePanePrevious,
+    LastPane,
     Help,
     Settings,
     ReloadConfig,
@@ -589,6 +598,7 @@ fn action_for_key(
         (&kb.focus_pane_down, NavigateAction::FocusPaneDown),
         (&kb.focus_pane_up, NavigateAction::FocusPaneUp),
         (&kb.focus_pane_right, NavigateAction::FocusPaneRight),
+        (&kb.last_pane, NavigateAction::LastPane),
         (&kb.cycle_pane_next, NavigateAction::CyclePaneNext),
         (&kb.cycle_pane_previous, NavigateAction::CyclePanePrevious),
         (&kb.split_vertical, NavigateAction::SplitVertical),
@@ -792,6 +802,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::CyclePanePrevious => {
             state.cycle_pane(true);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::LastPane => {
+            state.last_pane();
             leave_navigate_mode(state);
         }
         NavigateAction::Help => super::modal::open_keybind_help(state),
@@ -1454,6 +1468,40 @@ navigate_pane_right = "ctrl+l"
     }
 
     #[test]
+    fn terminal_direct_last_pane_shortcut_maps_to_navigation_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.last_pane = crate::config::ActionKeybinds::direct("alt+l");
+
+        let action = terminal_direct_navigation_action(
+            &state,
+            TerminalKey::new(KeyCode::Char('l'), KeyModifiers::ALT),
+        );
+
+        assert_eq!(action, Some(NavigateAction::LastPane));
+    }
+
+    #[test]
+    fn prefix_tab_override_can_map_to_last_pane() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+last_pane = "prefix+tab"
+"#,
+        )
+        .unwrap();
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds = config.keybinds();
+
+        let pane_action = action_for_key(
+            &state,
+            TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()),
+            BindingDispatch::Prefix,
+        );
+
+        assert_eq!(pane_action, Some(NavigateAction::LastPane));
+    }
+
+    #[test]
     fn terminal_direct_indexed_tab_shortcut_maps_to_navigation_action() {
         let mut state = state_with_workspaces(&["test"]);
         let config: Config = toml::from_str("[keys]\nswitch_tab = \"ctrl+3\"\n").unwrap();
@@ -1747,6 +1795,7 @@ navigate_pane_right = "ctrl+l"
             app.render_dirty.clone(),
         )
         .expect("workspace should spawn");
+        let root_pane = workspace.tabs[0].root_pane;
         app.state.workspaces = vec![workspace];
         app.terminal_runtimes.insert(terminal.id.clone(), runtime);
         app.state.terminals.insert(terminal.id.clone(), terminal);
@@ -1774,6 +1823,19 @@ navigate_pane_right = "ctrl+l"
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
         assert_eq!(app.terminal_runtimes.len(), 2);
         assert!(app.state.workspaces[0].tabs[0].zoomed);
+        let overlay_pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        assert_ne!(overlay_pane, root_pane);
+
+        app.state.last_pane();
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root_pane));
+
+        app.state.last_pane();
+
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(overlay_pane)
+        );
 
         let _ = wait_for_file(&output_path);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);

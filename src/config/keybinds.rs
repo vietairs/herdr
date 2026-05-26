@@ -288,6 +288,7 @@ pub struct Keybinds {
     pub focus_pane_right: ActionKeybinds,
     pub cycle_pane_next: ActionKeybinds,
     pub cycle_pane_previous: ActionKeybinds,
+    pub last_pane: ActionKeybinds,
     pub split_vertical: ActionKeybinds,
     pub split_horizontal: ActionKeybinds,
     pub close_pane: ActionKeybinds,
@@ -463,6 +464,7 @@ impl Config {
             focus_pane_down: action!("keys.focus_pane_down", &self.keys.focus_pane_down),
             focus_pane_up: action!("keys.focus_pane_up", &self.keys.focus_pane_up),
             focus_pane_right: action!("keys.focus_pane_right", &self.keys.focus_pane_right),
+            last_pane: action!("keys.last_pane", &self.keys.last_pane),
             cycle_pane_next: action!("keys.cycle_pane_next", &self.keys.cycle_pane_next),
             cycle_pane_previous: action!(
                 "keys.cycle_pane_previous",
@@ -1262,6 +1264,12 @@ next_tab = "prefix+n"
         let kb = Config::default().keybinds();
         assert!(kb.open_worktree.bindings.is_empty());
         assert!(kb.remove_worktree.bindings.is_empty());
+    }
+
+    #[test]
+    fn back_and_forth_keybinds_are_unset_by_default() {
+        let kb = Config::default().keybinds();
+        assert!(kb.last_pane.bindings.is_empty());
     }
 
     #[test]

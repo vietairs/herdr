@@ -1028,6 +1028,12 @@ pub enum SidebarWidthSource {
     Manual,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaneFocusTarget {
+    pub workspace_id: String,
+    pub pane_id: PaneId,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -1037,6 +1043,7 @@ pub struct AppState {
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
     pub workspaces: Vec<Workspace>,
     pub active: Option<usize>,
+    pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
     pub selected: usize,
     pub mode: Mode,
     pub should_quit: bool,
@@ -1337,6 +1344,7 @@ impl AppState {
             direct_attach_resize_locks: std::collections::HashSet::new(),
             workspaces: Vec::new(),
             active: None,
+            previous_pane_focus: None,
             selected: 0,
             mode: Mode::Navigate,
             should_quit: false,

@@ -392,6 +392,7 @@ impl App {
             direct_attach_resize_locks: std::collections::HashSet::new(),
             workspaces,
             active,
+            previous_pane_focus: None,
             selected,
             mode,
             should_quit: false,
@@ -2550,6 +2551,9 @@ mod tests {
             .cwd = split_cwd.clone();
         app.state.active = Some(0);
         app.state.selected = 0;
+        app.state
+            .focus_pane_in_workspace(0, background_previous_focus);
+        app.state.focus_pane_in_workspace(0, active_pane);
 
         let target_pane_id = app.pane_info(0, target_pane).unwrap().pane_id;
         let target_tab_id = app.public_tab_id(0, background_tab).unwrap();
@@ -2591,6 +2595,14 @@ mod tests {
                 .layout
                 .pane_count(),
             3
+        );
+        app.state.last_pane();
+        assert_eq!(app.state.workspaces[0].active_tab, background_tab);
+        assert_eq!(
+            app.state.workspaces[0].tabs[background_tab]
+                .layout
+                .focused(),
+            background_previous_focus
         );
 
         let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
@@ -2647,6 +2659,44 @@ mod tests {
         match original_shell {
             Some(value) => std::env::set_var("SHELL", value),
             None => std::env::remove_var("SHELL"),
+        }
+    }
+
+    #[tokio::test]
+    async fn focused_agent_start_records_previous_pane() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("agent-start-focus");
+        let root = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_agent_start_focus".into(),
+            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                name: "worker".into(),
+                cwd: None,
+                workspace_id: None,
+                tab_id: None,
+                split: Some(crate::api::schema::SplitDirection::Right),
+                focus: true,
+                argv: vec!["/usr/bin/true".into()],
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "agent_started");
+        assert_ne!(app.state.workspaces[0].focused_pane_id(), Some(root));
+
+        app.state.last_pane();
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
         }
     }
 
@@ -2982,6 +3032,45 @@ mod tests {
             Mode::Terminal,
             "q should leave navigate mode"
         );
+    }
+
+    #[test]
+    fn route_client_input_prefix_tab_dispatches_global_last_pane() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+last_pane = "prefix+tab"
+"#,
+        )
+        .unwrap();
+        let mut app = test_app();
+        let mut first = Workspace::test_new("one");
+        let first_second_tab = first.test_add_tab(Some("logs"));
+        let first_second_root = first.tabs[first_second_tab].root_pane;
+        let second = Workspace::test_new("two");
+        let second_root = second.tabs[0].root_pane;
+        app.state.workspaces = vec![first, second];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.keybinds = config.keybinds();
+        app.state.mode = Mode::Terminal;
+        app.state.switch_workspace_tab(0, first_second_tab);
+        app.state.switch_workspace_tab(1, 0);
+
+        app.route_client_input(vec![0x02, b'\t']);
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.workspaces[0].active_tab, first_second_tab);
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(first_second_root)
+        );
+
+        app.route_client_input(vec![0x02, b'\t']);
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(second_root));
     }
 
     #[tokio::test]

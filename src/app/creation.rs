@@ -115,7 +115,7 @@ impl App {
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         if focus {
-            ws.switch_tab(idx);
+            self.state.switch_workspace_tab(ws_idx, idx);
             self.state.mode = Mode::Terminal;
         }
         let workspace_id = self.state.workspaces[ws_idx].id.clone();

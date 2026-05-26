@@ -138,6 +138,7 @@ pub(super) fn keybind_help_groups(
             keybind_label(&kb.cycle_pane_previous),
             "cycle pane previous",
         ),
+        (keybind_label(&kb.last_pane), "last pane"),
     ];
     groups.push(("panes", panes));
 

@@ -367,7 +367,11 @@ impl AppState {
             follow_cwd,
         ));
 
-        if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
+        let previous_focus = self.current_pane_focus_target();
+        if let Some(ws_idx) = self.active {
+            let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+                return;
+            };
             if let Ok(new_pane) = ws.split_focused(
                 direction,
                 new_rows,
@@ -381,7 +385,7 @@ impl AppState {
                 terminal_runtimes.insert(new_pane.terminal.id.clone(), new_pane.runtime);
                 self.terminals
                     .insert(new_pane.terminal.id.clone(), new_pane.terminal);
-                ws.layout.focus_pane(new_id);
+                self.record_pane_focus_change(previous_focus, ws_idx, new_id);
                 self.mark_session_dirty();
                 self.mode = Mode::Terminal;
             }

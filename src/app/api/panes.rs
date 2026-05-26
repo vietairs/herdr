@@ -34,6 +34,7 @@ impl App {
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
+        let previous_focus = self.state.current_pane_focus_target();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return pane_not_found(id, &params.target_pane_id);
         };
@@ -57,8 +58,9 @@ impl App {
             None => return pane_not_found(id, &params.target_pane_id),
         };
         if params.focus {
-            self.state.switch_workspace(ws_idx);
-            self.state.switch_tab(target_tab_idx);
+            self.state.switch_workspace_tab(ws_idx, target_tab_idx);
+            self.state
+                .record_pane_focus_change(previous_focus, ws_idx, new_pane.pane_id);
             self.state.mode = Mode::Terminal;
         }
         self.terminal_runtimes

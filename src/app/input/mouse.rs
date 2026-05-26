@@ -455,12 +455,10 @@ impl AppState {
                             return None;
                         }
 
-                        if let Some((ws_idx, tab_idx, pane_id)) =
+                        if let Some((ws_idx, _tab_idx, pane_id)) =
                             self.collapsed_agent_detail_target_at(mouse.row)
                         {
-                            self.switch_workspace(ws_idx);
-                            self.switch_tab(tab_idx);
-                            self.focus_pane(pane_id);
+                            self.focus_pane_in_workspace(ws_idx, pane_id);
                             self.mode = Mode::Terminal;
                         }
                         return None;
@@ -550,11 +548,10 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, tab_idx, pane_id)) = self.agent_detail_target_at(mouse.row)
+                    if let Some((ws_idx, _tab_idx, pane_id)) =
+                        self.agent_detail_target_at(mouse.row)
                     {
-                        self.switch_workspace(ws_idx);
-                        self.switch_tab(tab_idx);
-                        self.focus_pane(pane_id);
+                        self.focus_pane_in_workspace(ws_idx, pane_id);
                         self.mode = Mode::Terminal;
                         return None;
                     }
@@ -1027,12 +1024,10 @@ impl AppState {
             }
             Some(crate::ui::MobileSwitcherTarget::Agent {
                 ws_idx,
-                tab_idx,
+                tab_idx: _,
                 pane_id,
             }) => {
-                self.switch_workspace(ws_idx);
-                self.switch_tab(tab_idx);
-                self.focus_pane(pane_id);
+                self.focus_pane_in_workspace(ws_idx, pane_id);
                 self.mode = Mode::Terminal;
             }
             Some(crate::ui::MobileSwitcherTarget::Menu(action_idx)) => {
@@ -1264,11 +1259,8 @@ impl AppState {
     }
 
     pub(super) fn focus_pane(&mut self, pane_id: crate::layout::PaneId) {
-        if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
-            if ws.layout.focused() != pane_id {
-                ws.layout.focus_pane(pane_id);
-                self.mark_session_dirty();
-            }
+        if let Some(ws_idx) = self.active {
+            self.focus_pane_in_workspace(ws_idx, pane_id);
         }
     }
 
@@ -1290,13 +1282,11 @@ impl AppState {
         else {
             return;
         };
-        let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(target.pane_id) else {
+        let Some(_tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(target.pane_id) else {
             return;
         };
 
-        self.switch_workspace(ws_idx);
-        self.switch_tab(tab_idx);
-        self.focus_pane(target.pane_id);
+        self.focus_pane_in_workspace(ws_idx, target.pane_id);
         self.toast = None;
         self.mode = Mode::Terminal;
     }
@@ -1738,6 +1728,14 @@ mod tests {
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target_pane));
         assert!(app.state.toast.is_none());
         assert_eq!(app.state.mode, Mode::Terminal);
+
+        app.state.last_pane();
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(app.state.workspaces[0].tabs[0].root_pane)
+        );
     }
 
     #[test]
