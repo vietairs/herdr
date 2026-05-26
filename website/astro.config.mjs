@@ -54,10 +54,6 @@ export default defineConfig({
       title: 'herdr',
       description: 'Terminal-native agent runtime and multiplexer.',
       favicon: '/assets/favicon.png?v=14',
-      logo: {
-        src: './public/assets/logo.svg',
-        alt: 'herdr',
-      },
       social: [
         {
           icon: 'github',

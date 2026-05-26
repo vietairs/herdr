@@ -8,7 +8,7 @@
             name="description"
             content="Terminal-native agent runtime and multiplexer. Run AI coding agents in real panes, detach and reattach, SSH in, see state, and orchestrate through the CLI/socket API."
         />
-        <meta name="theme-color" content="#f7f3ea" />
+        <meta name="theme-color" content="#f0eee9" />
         <link rel="canonical" href="https://herdr.dev/" />
 
         <meta property="og:type" content="website" />
@@ -48,13 +48,22 @@
             type="font/woff2"
             crossorigin
         />
-        <link rel="stylesheet" href="/css/style.css?v=19" />
+        <script>
+            (function () {
+                var saved = localStorage.getItem("herdr-palette");
+                var system = window.matchMedia("(prefers-color-scheme: dark)").matches
+                    ? "tokyo-night"
+                    : "tokyo-night-day";
+                document.documentElement.setAttribute("data-palette", saved || system);
+            })();
+        </script>
+        <link rel="stylesheet" href="/css/style.css?v=20" />
     </head>
     <body>
         <header class="site-header">
             <nav class="nav" aria-label="Primary navigation">
                 <a class="brand" href="/" aria-label="Herdr home">
-                    <img class="brand-logo" src="/assets/logo.svg" alt="" />
+                    <span class="brand-logo" aria-hidden="true"></span>
                     <span>herdr</span>
                 </a>
                 <div class="nav-links">
@@ -64,14 +73,16 @@
                     <a href="/docs/socket-api/">API</a>
                     <a href="https://github.com/ogulcancelik/herdr">GitHub</a>
                 </div>
-                <a class="nav-cta" href="/docs/install/">Install</a>
+                <div class="nav-tools">
+                    <a class="nav-cta" href="/docs/install/">Install</a>
+                </div>
             </nav>
         </header>
 
         <main>
             <section class="hero" id="hero">
-                <div class="hero-pasture" aria-hidden="true"></div>
-                <div class="hero-copy">
+                <div class="hero-left">
+                    <div class="hero-copy">
                     <p class="eyebrow">
                         <span class="status-dot dot-done"></span>
                         Terminal-native agent runtime
@@ -133,7 +144,9 @@
                         binary · no Electron
                     </p>
                 </div>
+                </div>
 
+                <div class="hero-right">
                 <figure class="hero-product-shot">
                     <div
                         class="herdr-ui-mock"
@@ -158,7 +171,7 @@
                             <div class="mock-sidebar-row"><span>new</span><span>menu</span></div>
                             <div class="mock-agent-title"><span>agents</span><span>all</span></div>
                             <div class="mock-agent"><span>✓</span><div><strong>doc</strong><small>idle · pi</small></div></div>
-                            <div class="mock-agent working"><span>⠴</span><div><strong>custom-row</strong><small>working · pi</small></div></div>
+                            <div class="mock-agent working"><span class="braille-spinner"></span><div><strong>custom-row</strong><small>working · pi</small></div></div>
                             <div class="mock-agent blocked"><span>◉</span><div><strong>llm-proxy</strong><small>blocked · claude</small></div></div>
                             <div class="mock-agent done"><span>●</span><div><strong>qmp</strong><small>done · codex</small></div></div>
                         </aside>
@@ -202,20 +215,7 @@
                         The whole herd in one terminal.
                     </figcaption>
                 </figure>
-            </section>
-
-            <section class="demo-section" aria-label="Herdr demo">
-                <video
-                    class="demo-video"
-                    autoplay
-                    muted
-                    loop
-                    playsinline
-                    preload="auto"
-                    poster="/assets/hero-session.png"
-                >
-                    <source src="/assets/demo-v2.mp4" type="video/mp4" />
-                </video>
+                </div>
             </section>
 
             <section class="logo-cloud" aria-labelledby="logo-cloud-title">
@@ -425,12 +425,33 @@
                         <li>Stay keyboard-first, or disable mouse input entirely.</li>
                     </ul>
                 </div>
-                <figure class="screenshot-card">
-                    <img
-                        src="/assets/terminal-panes.png"
-                        alt="Herdr showing real terminal panes side by side"
-                        loading="lazy"
-                    />
+                <figure class="feature-mock" role="img" aria-label="Herdr showing split terminal panes">
+                    <div class="mock-panes feature-mock-panes">
+                        <div class="mock-pane focused">
+                            <div class="mock-prompt"><span>~/Projects/herdr</span> <em>master</em></div>
+                            <div><b>❯</b> <span class="cmd">just</span> <span class="str">test</span></div>
+                            <div class="dim">cargo nextest run</div>
+                            <div><span class="time">02:14:22</span> <span class="green">PASS</span> app::state::tests</div>
+                            <div><span class="time">02:14:23</span> <span class="green">PASS</span> platform::pty::tests</div>
+                            <div><span class="time">02:14:24</span> <span class="green">PASS</span> protocol::wire::tests</div>
+                            <br />
+                            <div><span class="green">3 passed</span> · 0 failed · 0.8s</div>
+                            <div class="mock-prompt"><span>~/Projects/herdr</span> <em>master</em></div>
+                            <div><b>❯</b> <span class="cursor"></span></div>
+                        </div>
+                        <div class="mock-pane">
+                            <div class="mock-prompt"><span>~/Projects/herdr</span> <em>master</em></div>
+                            <div><b>❯</b> <span class="cmd">git</span> <span class="str">status</span></div>
+                            <div class="dim">On branch master</div>
+                            <div>Your branch is up to date.</div>
+                            <br />
+                            <div class="dim">Changes not staged:</div>
+                            <div><span class="red">M</span> src/app/state.rs</div>
+                            <div><span class="green">??</span> docs/next/</div>
+                            <br />
+                            <div class="dim">2 files changed, 14 insertions</div>
+                        </div>
+                    </div>
                 </figure>
             </section>
 
@@ -588,30 +609,52 @@ $ herdr</code></pre>
                     <h2>Keep the herd in sight.</h2>
                 </div>
                 <div class="awareness-grid">
-                    <article class="awareness-card">
-                        <img
-                            src="/assets/sidebar-workspaces-v2.png"
-                            alt="Herdr workspace sidebar state"
-                            loading="lazy"
-                        />
-                        <h3>Workspace rollups</h3>
-                        <p>
-                            Each workspace rolls up to its most urgent agent
-                            state, so the whole session is scannable.
-                        </p>
-                    </article>
-                    <article class="awareness-card">
-                        <img
-                            src="/assets/sidebar-agents-v2.png"
-                            alt="Herdr agent sidebar state"
-                            loading="lazy"
-                        />
-                        <h3>Agent list</h3>
-                        <p>
-                            See which agents are blocked, working, done, idle, or
-                            unknown without opening every pane.
-                        </p>
-                    </article>
+                        <article class="awareness-card">
+                            <figure class="awareness-mock" role="img" aria-label="Herdr workspace sidebar showing state rollups">
+                                <div class="mock-sidebar">
+                                    <div class="mock-sidebar-title">spaces</div>
+                                    <div class="mock-space active">
+                                        <span class="mock-dot dot-done"></span>
+                                        <div><strong>herdr</strong><small>master</small></div>
+                                    </div>
+                                    <div class="mock-space">
+                                        <span class="mock-dot dot-working"></span>
+                                        <div><strong>llm-proxy</strong><small>master</small></div>
+                                    </div>
+                                    <div class="mock-space">
+                                        <span class="mock-dot dot-blocked"></span>
+                                        <div><strong>docs-site</strong><small>docs/palette</small></div>
+                                    </div>
+                                    <div class="mock-space">
+                                        <span class="mock-dot dot-idle"></span>
+                                        <div><strong>qmp</strong><small>autoresearch/…</small></div>
+                                    </div>
+                                    <div class="mock-sidebar-spacer"></div>
+                                </div>
+                            </figure>
+                            <h3>Workspace rollups</h3>
+                            <p>
+                                Each workspace rolls up to its most urgent agent
+                                state, so the whole session is scannable.
+                            </p>
+                        </article>
+                        <article class="awareness-card">
+                            <figure class="awareness-mock" role="img" aria-label="Herdr agent list showing states">
+                                <div class="mock-sidebar">
+                                    <div class="mock-agent-title"><span>agents</span><span>all</span></div>
+                                    <div class="mock-agent"><span>✓</span><div><strong>doc</strong><small>idle · pi</small></div></div>
+                                    <div class="mock-agent working"><span class="braille-spinner"></span><div><strong>custom-row</strong><small>working · pi</small></div></div>
+                                    <div class="mock-agent blocked"><span>◉</span><div><strong>llm-proxy</strong><small>blocked · claude</small></div></div>
+                                    <div class="mock-agent done"><span>●</span><div><strong>qmp</strong><small>done · codex</small></div></div>
+                                    <div class="mock-sidebar-spacer"></div>
+                                </div>
+                            </figure>
+                            <h3>Agent list</h3>
+                            <p>
+                                See which agents are blocked, working, done, idle, or
+                                unknown without opening every pane.
+                            </p>
+                        </article>
                 </div>
                 <div class="state-legend">
                     <span><i class="status-dot dot-blocked"></i>blocked</span>
@@ -627,15 +670,21 @@ $ herdr</code></pre>
                     <p class="section-kicker">Integrations</p>
                     <h2>Bring your existing agents into the herd.</h2>
                 </div>
-                <div class="integration-grid">
-                    <span>Pi</span>
-                    <span>Claude Code</span>
-                    <span>Codex</span>
-                    <span>OpenCode</span>
-                    <span>Droid</span>
-                    <span>Amp</span>
-                    <span>Grok CLI</span>
-                    <span>Gemini CLI</span>
+                <div class="agent-grid" aria-label="Supported agents">
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/pi.svg')"></span><span>Pi</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/claude.svg')"></span><span>Claude Code</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/codex-mask.svg')"></span><span>Codex</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/droid.png')"></span><span>Droid</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/amp.svg')"></span><span>Amp</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/opencode.svg')"></span><span>OpenCode</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/grok.svg')"></span><span>Grok CLI</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/hermes.svg')"></span><span>Hermes</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/cursor.svg')"></span><span>Cursor</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/antigravity.svg')"></span><span>Antigravity</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/kimi.svg')"></span><span>Kimi</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/kiro-mask.svg')"></span><span>Kiro</span></div>
+                    <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/github-copilot.svg')"></span><span>Copilot</span></div>
+                    <div class="agent-card agent-more"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/herdr-mask.svg')"></span><span>more soon</span></div>
                 </div>
                 <p class="integration-note">
                     Any terminal agent works in Herdr. Use the Herdr API to add
@@ -665,7 +714,7 @@ $ herdr</code></pre>
 
         <footer class="footer">
             <a class="brand" href="/" aria-label="Herdr home">
-                <img class="brand-logo" src="/assets/logo.svg" alt="" />
+                <span class="brand-logo" aria-hidden="true"></span>
                 <span>herdr</span>
             </a>
             <div>
@@ -686,7 +735,175 @@ $ herdr</code></pre>
             <button type="button" id="copy-logo-url">Copy SVG URL</button>
         </div>
 
+        <div class="theme-hint" id="theme-hint" title="Press / or t to switch theme">
+            <span class="theme-hint-dot"></span>
+            <span class="theme-hint-label" id="theme-hint-label">light</span>
+            <span class="theme-hint-key">[/]</span>
+        </div>
+
+        <div class="theme-overlay" id="theme-overlay" hidden>
+            <div class="theme-overlay-panel" role="dialog" aria-label="Theme switcher" aria-modal="true">
+                <div class="theme-overlay-title">settings</div>
+                <div class="theme-overlay-tabs">
+                    <span class="active">theme</span>
+                </div>
+                <div class="theme-overlay-list" id="theme-overlay-list" role="listbox" aria-label="Themes">
+                    <div class="theme-sep"><span>dark</span></div>
+                    <button type="button" role="option" data-value="catppuccin">catppuccin</button>
+                    <button type="button" role="option" data-value="terminal">terminal</button>
+                    <button type="button" role="option" data-value="tokyo-night">tokyo night</button>
+                    <button type="button" role="option" data-value="dracula">dracula</button>
+                    <button type="button" role="option" data-value="nord">nord</button>
+                    <button type="button" role="option" data-value="gruvbox">gruvbox</button>
+                    <button type="button" role="option" data-value="one-dark">one dark</button>
+                    <button type="button" role="option" data-value="solarized">solarized</button>
+                    <button type="button" role="option" data-value="kanagawa">kanagawa</button>
+                    <button type="button" role="option" data-value="rose-pine">rose pine</button>
+                    <button type="button" role="option" data-value="vesper">vesper</button>
+                    <div class="theme-sep"><span>light</span></div>
+                    <button type="button" role="option" data-value="catppuccin-latte">catppuccin latte</button>
+                    <button type="button" role="option" data-value="tokyo-night-day">tokyo day</button>
+                    <button type="button" role="option" data-value="gruvbox-light">gruvbox light</button>
+                    <button type="button" role="option" data-value="one-light">one light</button>
+                    <button type="button" role="option" data-value="solarized-light">solarized light</button>
+                    <button type="button" role="option" data-value="kanagawa-lotus">kanagawa lotus</button>
+                    <button type="button" role="option" data-value="rose-pine-dawn">rose pine dawn</button>
+                </div>
+                <div class="theme-overlay-footer">
+                    <span class="theme-overlay-hints"><span class="key">↑↓</span> select</span>
+                    <span class="theme-overlay-actions"><span class="theme-apply-btn">↵ apply</span><button class="theme-close-btn" type="button" id="theme-close-btn">esc close</button></span>
+                </div>
+            </div>
+        </div>
+
         <script>
+            (function () {
+                var overlay = document.getElementById("theme-overlay");
+                var list = document.getElementById("theme-overlay-list");
+                var hintLabel = document.getElementById("theme-hint-label");
+                if (!overlay || !list) return;
+
+                var options = Array.prototype.slice.call(list.querySelectorAll("[role='option']"));
+                var media = window.matchMedia("(prefers-color-scheme: dark)");
+                var saved = localStorage.getItem("herdr-palette") || "";
+                var committed = saved || defaultPalette();
+
+                function defaultPalette() {
+                    return media.matches ? "tokyo-night" : "tokyo-night-day";
+                }
+
+                function setPalette(value) {
+                    document.documentElement.setAttribute("data-palette", value || defaultPalette());
+                }
+
+                function updateUI(value) {
+                    var activeValue = value || defaultPalette();
+                    options.forEach(function (opt) {
+                        var selected = opt.dataset.value === activeValue;
+                        opt.setAttribute("aria-selected", String(selected));
+                    });
+                    var active = options.find(function (o) { return o.dataset.value === activeValue; });
+                    if (hintLabel && active) hintLabel.textContent = active.textContent.trim();
+                }
+
+                function openOverlay() {
+                    overlay.hidden = false;
+                    document.body.style.overflow = "hidden";
+                    committed = localStorage.getItem("herdr-palette") || defaultPalette();
+                    updateUI(committed);
+                    var active = list.querySelector("[aria-selected='true']") || options[0];
+                    if (active) active.focus();
+                }
+
+                function closeOverlay() {
+                    overlay.hidden = true;
+                    document.body.style.overflow = "";
+                }
+
+                function toggleOverlay() {
+                    if (overlay.hidden) openOverlay();
+                    else closeOverlay();
+                }
+
+                function preview(index) {
+                    if (index < 0 || index >= options.length) return;
+                    setPalette(options[index].dataset.value);
+                    updateUI(options[index].dataset.value);
+                    options[index].focus();
+                }
+
+                function commit(value) {
+                    setPalette(value);
+                    localStorage.setItem("herdr-palette", value);
+                    updateUI(value);
+                    closeOverlay();
+                }
+
+                function revert() {
+                    setPalette(committed);
+                    updateUI(committed);
+                    closeOverlay();
+                }
+
+                media.addEventListener("change", function () {
+                    if (!localStorage.getItem("herdr-palette")) {
+                        setPalette("");
+                        updateUI("");
+                    }
+                });
+
+                options.forEach(function (opt, idx) {
+                    opt.addEventListener("click", function () {
+                        commit(opt.dataset.value);
+                    });
+                    opt.addEventListener("mouseenter", function () {
+                        preview(idx);
+                    });
+                });
+
+                document.addEventListener("keydown", function (e) {
+                    if ((e.key === "t" || e.key === "/") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                        var tag = document.activeElement && document.activeElement.tagName;
+                        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+                        e.preventDefault();
+                        toggleOverlay();
+                        return;
+                    }
+                    if (overlay.hidden) return;
+                    var current = document.activeElement;
+                    var idx = options.indexOf(current);
+                    if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        var nextIdx = idx >= 0 ? Math.min(options.length - 1, idx + 1) : 0;
+                        preview(nextIdx);
+                    } else if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        var prevIdx = idx >= 0 ? Math.max(0, idx - 1) : options.length - 1;
+                        preview(prevIdx);
+                    } else if (e.key === "Enter" && idx >= 0) {
+                        e.preventDefault();
+                        commit(options[idx].dataset.value);
+                    } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        revert();
+                    }
+                });
+
+                var themeHint = document.getElementById("theme-hint");
+                if (localStorage.getItem("herdr-theme-hint-seen") === "1") {
+                    themeHint.classList.add("is-seen");
+                }
+                themeHint.addEventListener("mouseenter", function () {
+                    localStorage.setItem("herdr-theme-hint-seen", "1");
+                    themeHint.classList.add("is-seen");
+                }, { once: true });
+                themeHint.addEventListener("click", toggleOverlay);
+                document.getElementById("theme-close-btn").addEventListener("click", revert);
+
+                setPalette(saved);
+                updateUI(saved);
+            })();
+
             (function () {
                 var menu = document.getElementById("logo-menu");
                 var copyButton = document.getElementById("copy-logo-url");
@@ -770,135 +987,6 @@ $ herdr</code></pre>
             })();
 
             (function () {
-                var hero = document.getElementById("hero");
-                var pasture = hero && hero.querySelector(".hero-pasture");
-                var reduceMotion = window.matchMedia(
-                    "(prefers-reduced-motion: reduce)",
-                ).matches;
-
-                if (hero && pasture && !reduceMotion) {
-                    var sheepRight = [
-                        ["    ,ww", "   wWWWWWWW)", "   `WWWWWW'", "    /I  I\\"],
-                        ["    ,ww", "   wWWWWWWW)", "   `WWWWWW'", "    I\\ /I "],
-                    ];
-                    var sheepLeft = [
-                        ["  ww,", "(WWWWWWWw", " 'WWWWWW`", "  /I  I\\"],
-                        ["  ww,", "(WWWWWWWw", " 'WWWWWW`", "  I\\ /I "],
-                    ];
-                    var colors = [
-                        "31,111,104",
-                        "37,99,235",
-                        "21,26,33",
-                        "154,106,0",
-                    ];
-
-                    var heroWidth = hero.offsetWidth;
-                    var heroHeight = hero.offsetHeight;
-                    var heroRect = hero.getBoundingClientRect();
-                    var mouseX = -9999;
-                    var mouseY = -9999;
-                    var flock = [];
-                    var count = window.matchMedia("(max-width: 900px)").matches
-                        ? 8
-                        : 16;
-
-                    document.addEventListener("mousemove", function (event) {
-                        mouseX = event.clientX - heroRect.left;
-                        mouseY = event.clientY - heroRect.top;
-                    });
-                    document.addEventListener("mouseleave", function () {
-                        mouseX = -9999;
-                        mouseY = -9999;
-                    });
-                    window.addEventListener("resize", function () {
-                        heroWidth = hero.offsetWidth;
-                        heroHeight = hero.offsetHeight;
-                        heroRect = hero.getBoundingClientRect();
-                    });
-                    window.addEventListener("scroll", function () {
-                        heroRect = hero.getBoundingClientRect();
-                    });
-
-                    for (var i = 0; i < count; i += 1) {
-                        var sheep = document.createElement("pre");
-                        sheep.className = "sheep-el";
-                        var color = colors[i % colors.length];
-                        var opacity = 0.045 + Math.random() * 0.045;
-                        var size = 8.5 + Math.random() * 4.5;
-                        sheep.style.cssText =
-                            "font-size:" +
-                            size +
-                            "px;color:rgba(" +
-                            color +
-                            "," +
-                            opacity +
-                            ")";
-                        pasture.appendChild(sheep);
-
-                        flock.push({
-                            el: sheep,
-                            x: Math.random() * heroWidth,
-                            y: 24 + Math.random() * Math.max(heroHeight - 64, 120),
-                            dir: Math.random() > 0.5 ? 1 : -1,
-                            speed: 0.08 + Math.random() * 0.2,
-                            frame: 0,
-                            frameTime: 0,
-                            frameInterval: 420 + Math.random() * 320,
-                            shoveX: 0,
-                            shoveY: 0,
-                        });
-                    }
-
-                    var lastFrame = 0;
-                    function tick(timestamp) {
-                        var delta = Math.min(timestamp - lastFrame, 100);
-                        lastFrame = timestamp;
-
-                        for (var i = 0; i < flock.length; i += 1) {
-                            var sheep = flock[i];
-                            sheep.frameTime += delta;
-                            if (sheep.frameTime > sheep.frameInterval) {
-                                sheep.frameTime = 0;
-                                sheep.frame ^= 1;
-                            }
-
-                            var dx = sheep.x - mouseX;
-                            var dy = sheep.y - mouseY;
-                            var distance = Math.sqrt(dx * dx + dy * dy);
-                            if (distance < 150 && distance > 1) {
-                                var force = (1 - distance / 150) * 0.48;
-                                sheep.shoveX += (dx / distance) * force;
-                                sheep.shoveY += (dy / distance) * force;
-                            }
-
-                            sheep.x += sheep.shoveX;
-                            sheep.y += sheep.shoveY;
-                            sheep.shoveX *= 0.965;
-                            sheep.shoveY *= 0.965;
-                            sheep.x += sheep.dir * sheep.speed * (delta / 16);
-
-                            if (sheep.dir > 0 && sheep.x > heroWidth + 120) sheep.x = -120;
-                            if (sheep.dir < 0 && sheep.x < -120) sheep.x = heroWidth + 120;
-                            if (sheep.y < -48) sheep.y = heroHeight + 24;
-                            if (sheep.y > heroHeight + 48) sheep.y = -24;
-
-                            var frames = sheep.dir > 0 ? sheepRight : sheepLeft;
-                            sheep.el.textContent = frames[sheep.frame].join("\n");
-                            sheep.el.style.transform =
-                                "translate3d(" + sheep.x + "px," + sheep.y + "px,0)";
-                        }
-
-                        requestAnimationFrame(tick);
-                    }
-
-                    requestAnimationFrame(function (timestamp) {
-                        lastFrame = timestamp;
-                        tick(timestamp);
-                    });
-                }
-            })();
-
-            (function () {
                 var copyButton = document.getElementById("copy-btn");
                 var command = document.getElementById("install-cmd");
                 var methods = Array.prototype.slice.call(
@@ -935,6 +1023,22 @@ $ herdr</code></pre>
                         copyButton.textContent = "Select";
                     }
                 });
+            })();
+
+            (function () {
+                var frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+                var els = document.querySelectorAll(".braille-spinner");
+                if (!els.length) return;
+                var states = Array.prototype.map.call(els, function () { return 0; });
+                els.forEach(function (el, idx) {
+                    el.textContent = frames[0];
+                });
+                setInterval(function () {
+                    els.forEach(function (el, idx) {
+                        states[idx] = (states[idx] + 1) % frames.length;
+                        el.textContent = frames[states[idx]];
+                    });
+                }, 80);
             })();
         </script>
     </body>
