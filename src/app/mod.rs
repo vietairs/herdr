@@ -38,6 +38,7 @@ const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
 const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 const PANE_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 const PANE_COPY_HIGHLIGHT_DURATION: Duration = Duration::from_millis(500);
+const COPY_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -93,6 +94,7 @@ pub struct App {
     pub(crate) last_terminal_size: Option<(u16, u16)>,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
     pub(crate) toast_deadline: Option<Instant>,
+    pub(crate) copy_feedback_deadline: Option<Instant>,
     pub(crate) last_git_remote_status_refresh: Instant,
     pub(crate) git_refresh_in_flight: bool,
     pub(crate) last_sidebar_divider_click: Option<Instant>,
@@ -467,6 +469,7 @@ impl App {
             update_dismissed: false,
             config_diagnostic,
             toast: None,
+            copy_feedback: None,
             outer_terminal_focus: None,
             prefix_code,
             prefix_mods,
@@ -547,6 +550,7 @@ impl App {
         Self {
             config_diagnostic_deadline: None,
             toast_deadline: None,
+            copy_feedback_deadline: None,
             state,
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
@@ -1462,6 +1466,45 @@ mod tests {
         });
 
         assert!(app.render_dirty.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn clipboard_write_event_shows_feedback_toast() {
+        let mut app = test_app();
+
+        app.handle_internal_event(AppEvent::ClipboardWrite {
+            content: b"copied".to_vec(),
+        });
+
+        assert!(app.state.toast.is_none());
+        let feedback = app.state.copy_feedback.as_ref().expect("copy feedback");
+        assert_eq!(feedback.message, "copied to clipboard");
+        assert!(app.copy_feedback_deadline.is_some());
+    }
+
+    #[test]
+    fn clipboard_feedback_does_not_replace_notification_toast() {
+        let mut app = test_app();
+        app.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::NeedsAttention,
+            title: "pi needs attention".to_string(),
+            context: "background · 2".to_string(),
+            target: None,
+        });
+        let original_toast = app.state.toast.clone();
+
+        app.handle_internal_event(AppEvent::ClipboardWrite {
+            content: b"copied".to_vec(),
+        });
+
+        assert_eq!(app.state.toast, original_toast);
+        assert_eq!(
+            app.state
+                .copy_feedback
+                .as_ref()
+                .map(|feedback| feedback.message.as_str()),
+            Some("copied to clipboard")
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ impl App {
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         if let AppEvent::ClipboardWrite { content } = ev {
             crate::selection::write_osc52_bytes(&content);
+            self.show_clipboard_feedback();
             return;
         }
 
@@ -175,6 +176,13 @@ impl App {
 
         self.sync_toast_deadline(previous_toast);
         self.shutdown_detached_terminal_runtimes();
+    }
+
+    pub(crate) fn show_clipboard_feedback(&mut self) {
+        self.state.copy_feedback = Some(crate::app::state::CopyFeedback {
+            message: "copied to clipboard".to_string(),
+        });
+        self.copy_feedback_deadline = Some(Instant::now() + super::COPY_FEEDBACK_DURATION);
     }
 
     fn restore_overlay_after_exit(&mut self, overlay: OverlayPaneState) {

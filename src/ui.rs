@@ -50,7 +50,10 @@ pub(crate) use self::scrollbar::{
 };
 use self::settings::render_settings_overlay;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
-use self::status::{render_config_diagnostic, render_toast_notification, toast_notification_rect};
+use self::status::{
+    render_config_diagnostic, render_copy_feedback, render_toast_notification,
+    toast_notification_rect,
+};
 use self::tabs::render_tab_bar;
 pub(crate) use self::{
     dialogs::{
@@ -405,6 +408,7 @@ fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
     if let Some(message) = &app.config_diagnostic {
         render_config_diagnostic(frame, terminal_area, message, &app.palette);
     }
+    let mut copy_feedback_offset = u16::from(has_config_diagnostic);
     if let Some(toast) = &app.toast {
         if app.view.layout == ViewLayout::Mobile {
             render_mobile_toast_banner(
@@ -423,6 +427,20 @@ fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) 
                 &app.palette,
             );
         }
+        copy_feedback_offset =
+            copy_feedback_offset.saturating_add(if app.view.layout == ViewLayout::Mobile {
+                1
+            } else {
+                toast_notification_rect(terminal_area, toast, has_config_diagnostic).height
+            });
+    }
+    if let Some(feedback) = &app.copy_feedback {
+        let area = if app.view.layout == ViewLayout::Mobile {
+            frame.area()
+        } else {
+            terminal_area
+        };
+        render_copy_feedback(frame, area, feedback, copy_feedback_offset, &app.palette);
     }
 }
 

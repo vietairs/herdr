@@ -1150,8 +1150,8 @@ impl HeadlessServer {
                     let data = base64::engine::general_purpose::STANDARD.encode(content.as_slice());
                     self.send_to_client(client_id, ServerMessage::Clipboard { data });
                 }
-                // ClipboardWrite doesn't change visual state — no render needed.
-                false
+                self.app.show_clipboard_feedback();
+                true
             }
             AppEvent::StateChanged { pane_id, agent, .. } => {
                 // Capture toast before handling.
@@ -2423,6 +2423,16 @@ impl HeadlessServer {
         {
             self.app.toast_deadline = None;
             self.app.state.toast = None;
+            changed = true;
+        }
+
+        if self
+            .app
+            .copy_feedback_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.app.copy_feedback_deadline = None;
+            self.app.state.copy_feedback = None;
             changed = true;
         }
 
@@ -4544,7 +4554,16 @@ next_tab = ""
             content: b"test".to_vec(),
         });
 
-        assert!(!changed);
+        assert!(changed);
+        assert_eq!(
+            server
+                .app
+                .state
+                .copy_feedback
+                .as_ref()
+                .map(|feedback| feedback.message.as_str()),
+            Some("copied to clipboard")
+        );
         match read_server_message(
             foreground_control_rx
                 .recv_timeout(Duration::from_millis(100))

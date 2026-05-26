@@ -163,6 +163,15 @@ impl App {
         }
 
         if self
+            .copy_feedback_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.copy_feedback_deadline = None;
+            self.state.copy_feedback = None;
+            changed = true;
+        }
+
+        if self
             .next_animation_tick
             .is_some_and(|deadline| now >= deadline)
         {
@@ -431,6 +440,7 @@ impl App {
             include_resize_poll.then_some(self.next_resize_poll),
             self.config_diagnostic_deadline,
             self.toast_deadline,
+            self.copy_feedback_deadline,
             self.next_animation_tick,
             self.git_refresh_deadline(),
             self.next_auto_update_check,
