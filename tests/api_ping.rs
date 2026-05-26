@@ -141,16 +141,24 @@ impl JsonLineReader {
     }
 
     fn read_json_line(&mut self, timeout: Duration) -> serde_json::Value {
+        self.try_read_json_line(timeout)
+            .unwrap_or_else(|| panic!("timed out waiting for json line"))
+    }
+
+    fn try_read_json_line(&mut self, timeout: Duration) -> Option<serde_json::Value> {
         let deadline = Instant::now() + timeout;
         self.stream.set_nonblocking(true).unwrap();
 
         loop {
-            assert!(Instant::now() < deadline, "timed out waiting for json line");
+            if Instant::now() >= deadline {
+                self.stream.set_nonblocking(false).unwrap();
+                return None;
+            }
 
             if let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
                 let line = String::from_utf8(self.buf.drain(..=pos).collect()).unwrap();
                 self.stream.set_nonblocking(false).unwrap();
-                return serde_json::from_str(&line).unwrap();
+                return Some(serde_json::from_str(&line).unwrap());
             }
 
             let mut bytes = [0u8; 256];
@@ -1220,6 +1228,93 @@ fn pane_report_agent_updates_effective_state() {
     assert_eq!(pane["result"]["pane"]["agent"], "pi");
     assert_eq!(pane["result"]["pane"]["agent_status"], "working");
 
+    let metadata = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_metadata","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"herdr:pi","title":"Refactor auth","display_agent":"Pi auth","custom_status":"middleware","state_labels":{{"working":"deep in the mines"}}}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(metadata["result"]["type"], "ok");
+
+    let pane = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_metadata_get","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(pane["result"]["pane"]["agent"], "pi");
+    assert_eq!(pane["result"]["pane"]["agent_status"], "working");
+    assert_eq!(pane["result"]["pane"]["title"], "Refactor auth");
+    assert_eq!(pane["result"]["pane"]["display_agent"], "Pi auth");
+    assert_eq!(pane["result"]["pane"]["custom_status"], "middleware");
+    assert_eq!(
+        pane["result"]["pane"]["state_labels"]["working"],
+        "deep in the mines"
+    );
+
+    let agent = send_request(
+        &socket_path,
+        r#"{"id":"req_hook_metadata_agent","method":"agent.get","params":{"target":"pi"}}"#,
+    );
+    assert_eq!(agent["result"]["agent"]["agent"], "pi");
+    assert_eq!(agent["result"]["agent"]["title"], "Refactor auth");
+    assert_eq!(agent["result"]["agent"]["display_agent"], "Pi auth");
+    assert_eq!(agent["result"]["agent"]["custom_status"], "middleware");
+    assert_eq!(
+        agent["result"]["agent"]["state_labels"]["working"],
+        "deep in the mines"
+    );
+
+    let invalid_metadata = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_metadata_invalid","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","custom_status":"x","clear_custom_status":true}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(
+        invalid_metadata["error"]["code"],
+        "invalid_metadata_request"
+    );
+
+    let blank_source_metadata = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_metadata_blank_source","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"   ","custom_status":"x"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(
+        blank_source_metadata["error"]["code"],
+        "invalid_metadata_request"
+    );
+
+    let blank_title_clear_metadata = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_metadata_blank_title_clear","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","title":"   ","clear_title":true}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(
+        blank_title_clear_metadata["error"]["code"],
+        "invalid_metadata_request"
+    );
+
+    let blank_authority_source_metadata = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_metadata_blank_authority_source","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","applies_to_source":"   ","custom_status":"x"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(
+        blank_authority_source_metadata["error"]["code"],
+        "invalid_metadata_request"
+    );
+
     cleanup_spawned_herdr(child, base);
 }
 
@@ -1800,6 +1895,97 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
     assert_eq!(pane_after_focus["result"]["pane"]["agent_status"], "idle");
 
     fs::write(&stop_file, "stop").unwrap();
+
+    cleanup_spawned_herdr(child, base);
+}
+
+#[test]
+fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_meta_sub_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let pane_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .map(|workspace_id| format!("{}-1", workspace_id))
+        .unwrap();
+
+    let report_agent = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_meta_sub_2","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"working"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(report_agent["result"]["type"], "ok");
+
+    let mut done_reader = open_subscription(
+        &socket_path,
+        &format!(
+            r#"{{"id":"sub_meta_done","method":"events.subscribe","params":{{"subscriptions":[{{"type":"pane.agent_status_changed","pane_id":"{}","agent_status":"done"}}]}}}}"#,
+            pane_id,
+        ),
+    );
+    let ack = done_reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(ack["id"], "sub_meta_done");
+    assert_eq!(ack["result"]["type"], "subscription_started");
+
+    let metadata = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_meta_sub_3","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"herdr:pi","custom_status":"filtered out"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(metadata["result"]["type"], "ok");
+    assert!(
+        done_reader
+            .try_read_json_line(Duration::from_millis(500))
+            .is_none(),
+        "done-filtered subscription emitted for a working metadata-only change"
+    );
+
+    let mut reader = open_subscription(
+        &socket_path,
+        &format!(
+            r#"{{"id":"sub_meta_ttl","method":"events.subscribe","params":{{"subscriptions":[{{"type":"pane.agent_status_changed","pane_id":"{}"}}]}}}}"#,
+            pane_id,
+        ),
+    );
+    let ack = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(ack["id"], "sub_meta_ttl");
+    assert_eq!(ack["result"]["type"], "subscription_started");
+
+    let metadata = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_meta_sub_4","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"herdr:pi","custom_status":"short lived","ttl_ms":100}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(metadata["result"]["type"], "ok");
+
+    let set_event = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(set_event["event"], "pane.agent_status_changed");
+    assert_eq!(set_event["data"]["agent_status"], "working");
+    assert_eq!(set_event["data"]["custom_status"], "short lived");
+
+    let expiry_event = reader.read_json_line(Duration::from_secs(3));
+    assert_eq!(expiry_event["event"], "pane.agent_status_changed");
+    assert_eq!(expiry_event["data"]["agent_status"], "working");
+    assert!(expiry_event["data"]["custom_status"].is_null());
 
     cleanup_spawned_herdr(child, base);
 }

@@ -622,7 +622,15 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     if let Some(tab_label) = entry.primary_tab_label.as_deref() {
         parts.push(tab_label.to_string());
     }
-    parts.push(super::status::state_label(entry.state, entry.seen).to_string());
+    let status = entry
+        .state_labels
+        .get(super::sidebar::agent_panel_status_key(
+            entry.state,
+            entry.seen,
+        ))
+        .cloned()
+        .unwrap_or_else(|| super::status::state_label(entry.state, entry.seen).to_string());
+    parts.push(status);
     if let Some(agent_label) = entry.agent_label.as_deref() {
         parts.push(agent_label.to_string());
     }
@@ -940,6 +948,7 @@ mod tests {
             state: AgentState::Idle,
             seen: true,
             custom_status: None,
+            state_labels: std::collections::HashMap::new(),
         }
     }
 

@@ -102,6 +102,7 @@ pub struct App {
     pub(crate) next_resize_poll: Instant,
     pub(crate) next_animation_tick: Option<Instant>,
     pub(crate) next_auto_update_check: Option<Instant>,
+    pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -563,6 +564,7 @@ impl App {
             next_animation_tick: None,
             next_auto_update_check: auto_updates_enabled(no_session)
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
+            agent_metadata_deadline: None,
             session_save_deadline: None,
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,

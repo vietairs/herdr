@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 use crate::detect::{Agent, AgentState};
 use crate::terminal::TerminalId;
 
+#[path = "metadata.rs"]
+mod metadata;
+pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
+
 const CLAUDE_WORKING_HOLD: Duration = Duration::from_millis(1200);
 const STALE_HOOK_IDLE_GRACE: Duration = Duration::from_secs(2);
 
@@ -30,10 +34,11 @@ pub struct EffectiveStateChange {
     pub previous_agent_label: Option<String>,
     pub previous_known_agent: Option<Agent>,
     pub previous_state: AgentState,
+    pub previous_presentation: EffectivePresentation,
     pub agent_label: Option<String>,
     pub known_agent: Option<Agent>,
     pub state: AgentState,
-    pub custom_status: Option<String>,
+    pub presentation: EffectivePresentation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -58,10 +63,12 @@ pub struct TerminalState {
     fallback_observed_at: Option<Instant>,
     stale_hook_idle_since: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
+    pub agent_metadata: HashMap<String, AgentMetadata>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
     hook_report_sequences: HashMap<String, u64>,
+    metadata_report_sequences: HashMap<String, u64>,
     pub state: AgentState,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
@@ -80,10 +87,12 @@ impl TerminalState {
             fallback_observed_at: None,
             stale_hook_idle_since: None,
             hook_authority: None,
+            agent_metadata: HashMap::new(),
             persisted_agent_session: None,
             manual_label: None,
             agent_name: None,
             hook_report_sequences: HashMap::new(),
+            metadata_report_sequences: HashMap::new(),
             state: AgentState::Unknown,
             revision: 0,
             launch_argv: None,
@@ -155,6 +164,7 @@ impl TerminalState {
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_detected_agent = self.detected_agent;
         let previous_session = self.current_session_identity_for_persistence();
         self.detected_agent = agent;
@@ -199,6 +209,7 @@ impl TerminalState {
                 previous_agent_label,
                 previous_known_agent,
                 previous_state,
+                previous_presentation,
                 now,
             ),
             session_ref_changed: previous_session
@@ -281,6 +292,7 @@ impl TerminalState {
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
         if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
             return None;
@@ -302,6 +314,7 @@ impl TerminalState {
                 previous_agent_label,
                 previous_known_agent,
                 previous_state,
+                previous_presentation,
                 now,
             ),
             session_ref_changed: previous_session != current_session,
@@ -449,9 +462,11 @@ impl TerminalState {
             }
         }
 
+        let now = Instant::now();
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
         let should_clear = self
             .hook_authority
@@ -463,12 +478,12 @@ impl TerminalState {
         self.hook_authority = None;
         self.stale_hook_idle_since = None;
         self.persisted_agent_session = None;
-        let now = Instant::now();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
                 previous_known_agent,
                 previous_state,
+                previous_presentation,
                 now,
             ),
             session_ref_changed: previous_session.is_some(),
@@ -508,9 +523,11 @@ impl TerminalState {
             return None;
         }
 
+        let now = Instant::now();
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
@@ -521,12 +538,12 @@ impl TerminalState {
         self.hook_authority = None;
         self.stale_hook_idle_since = None;
         self.persisted_agent_session = None;
-        let now = Instant::now();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
                 previous_known_agent,
                 previous_state,
+                previous_presentation,
                 now,
             ),
             session_ref_changed: previous_session.is_some(),
@@ -545,18 +562,6 @@ impl TerminalState {
             return crate::detect::parse_agent_label(&authority.agent_label);
         }
         self.detected_agent
-    }
-
-    pub fn effective_custom_status(&self) -> Option<&str> {
-        if self.visible_blocker_overrides_hook()
-            || self.visible_idle_masks_hook_custom_status(self.state, Instant::now())
-        {
-            return None;
-        }
-
-        self.hook_authority
-            .as_ref()
-            .and_then(|authority| authority.custom_status.as_deref())
     }
 
     fn visible_blocker_overrides_hook(&self) -> bool {
@@ -635,11 +640,16 @@ impl TerminalState {
             || self.launch_argv.is_some()
     }
 
-    pub fn border_label(&self, show_agent_labels: bool) -> Option<&str> {
-        self.manual_label.as_deref().or_else(|| {
-            show_agent_labels
-                .then(|| self.effective_agent_label())
-                .flatten()
+    pub fn border_label(&self, show_agent_labels: bool) -> Option<String> {
+        self.effective_title().or_else(|| {
+            self.manual_label.clone().or_else(|| {
+                show_agent_labels
+                    .then(|| {
+                        self.effective_display_agent()
+                            .or_else(|| self.effective_agent_label().map(str::to_string))
+                    })
+                    .flatten()
+            })
         })
     }
 
@@ -648,6 +658,7 @@ impl TerminalState {
         previous_agent_label: Option<String>,
         previous_known_agent: Option<Agent>,
         previous_state: AgentState,
+        previous_presentation: EffectivePresentation,
         now: Instant,
     ) -> Option<EffectiveStateChange> {
         let state = if self
@@ -670,18 +681,13 @@ impl TerminalState {
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
 
-        let custom_status = if self.visible_blocker_overrides_hook()
-            || self.visible_idle_masks_hook_custom_status(state, now)
-        {
-            None
-        } else {
-            self.hook_authority
-                .as_ref()
-                .and_then(|authority| authority.custom_status.as_deref())
-                .map(str::to_string)
-        };
+        let presentation = self.effective_presentation_for_state_at(state, now);
+        self.clear_expiry_pending_for_hidden_metadata();
 
-        if previous_agent_label == agent_label && previous_state == state {
+        if previous_agent_label == agent_label
+            && previous_state == state
+            && previous_presentation == presentation
+        {
             return None;
         }
 
@@ -690,10 +696,11 @@ impl TerminalState {
             previous_agent_label,
             previous_known_agent,
             previous_state,
+            previous_presentation,
             agent_label,
             known_agent,
             state,
-            custom_status,
+            presentation,
         })
     }
 }
@@ -1052,7 +1059,10 @@ mod tests {
         assert!(waiting.effective_state_change.is_none());
         assert_eq!(terminal.fallback_state, AgentState::Idle);
         assert_eq!(terminal.state, AgentState::Working);
-        assert_eq!(terminal.effective_custom_status(), Some("thinking"));
+        assert_eq!(
+            terminal.effective_custom_status().as_deref(),
+            Some("thinking")
+        );
 
         let change = terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Claude),
@@ -1248,18 +1258,18 @@ mod tests {
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
 
         assert_eq!(terminal.border_label(false), None);
-        assert_eq!(terminal.border_label(true), Some("claude"));
+        assert_eq!(terminal.border_label(true).as_deref(), Some("claude"));
 
         terminal.set_manual_label(" reviewer ".into());
-        assert_eq!(terminal.border_label(false), Some("reviewer"));
-        assert_eq!(terminal.border_label(true), Some("reviewer"));
+        assert_eq!(terminal.border_label(false).as_deref(), Some("reviewer"));
+        assert_eq!(terminal.border_label(true).as_deref(), Some("reviewer"));
 
         terminal.set_manual_label("   ".into());
-        assert_eq!(terminal.border_label(true), Some("claude"));
+        assert_eq!(terminal.border_label(true).as_deref(), Some("claude"));
 
         terminal.set_manual_label("reviewer".into());
         terminal.clear_manual_label();
-        assert_eq!(terminal.border_label(true), Some("claude"));
+        assert_eq!(terminal.border_label(true).as_deref(), Some("claude"));
     }
 
     #[test]

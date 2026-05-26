@@ -49,6 +49,23 @@ pub enum AppEvent {
         seq: Option<u64>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
     },
+    /// Display-only agent metadata was reported for a pane.
+    HookMetadataReported {
+        pane_id: PaneId,
+        source: String,
+        agent_label: Option<String>,
+        applies_to_source: Option<String>,
+        title: Option<String>,
+        display_agent: Option<String>,
+        custom_status: Option<String>,
+        state_labels: std::collections::HashMap<String, String>,
+        clear_title: bool,
+        clear_display_agent: bool,
+        clear_custom_status: bool,
+        clear_state_labels: bool,
+        seq: Option<u64>,
+        ttl: Option<std::time::Duration>,
+    },
     /// Hook authority was explicitly cleared for a pane.
     HookAuthorityCleared {
         pane_id: PaneId,

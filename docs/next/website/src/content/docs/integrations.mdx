@@ -143,7 +143,21 @@ herdr pane report-agent 1-1 \
   --custom-status indexing
 ```
 
-Custom status is visual-only. Waits, notifications, and workspace rollups still use the semantic state.
+User hooks that run next to a Herdr-managed integration should use metadata instead of `report-agent`. Metadata changes presentation without taking over the integration's `idle`, `working`, `blocked`, or session restore authority. `--agent` guards the report so it only applies while that authoritative agent is active. `--applies-to-source` guards the report so it only applies while that lifecycle authority source is active. `--display-agent` changes the visible name.
+
+```bash
+herdr pane report-metadata "$HERDR_PANE_ID" \
+  --source user:claude-title \
+  --agent claude \
+  --applies-to-source herdr:claude \
+  --title "Refactor auth middleware" \
+  --display-agent "Claude: auth" \
+  --custom-status "refactor auth" \
+  --state-label working="deep in the mines" \
+  --ttl-ms 3600000
+```
+
+Custom status and state labels are visual-only. Waits, notifications, and workspace rollups still use the semantic state.
 
 ## Debug integration state
 

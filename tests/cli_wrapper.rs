@@ -693,6 +693,135 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
 }
 
 #[test]
+fn pane_report_metadata_sends_presentation_request() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        reader.read_line(&mut line).unwrap();
+        stream
+            .write_all(br#"{"id":"cli:request","result":{"type":"ok"}}"#)
+            .unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+        line
+    });
+
+    let run = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-metadata",
+            "1-1",
+            "--source",
+            "user:claude-title",
+            "--agent",
+            "claude",
+            "--applies-to-source",
+            "herdr:claude",
+            "--title",
+            "Refactor auth",
+            "--display-agent",
+            "Claude auth",
+            "--custom-status",
+            "middleware",
+            "--state-label",
+            "working=deep in the mines",
+            "--ttl-ms",
+            "3600000",
+        ],
+    );
+    assert!(
+        run.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let line = server.join().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(request["method"], "pane.report_metadata");
+    assert_eq!(request["params"]["pane_id"], "1-1");
+    assert_eq!(request["params"]["source"], "user:claude-title");
+    assert_eq!(request["params"]["agent"], "claude");
+    assert_eq!(request["params"]["applies_to_source"], "herdr:claude");
+    assert_eq!(request["params"]["title"], "Refactor auth");
+    assert_eq!(request["params"]["display_agent"], "Claude auth");
+    assert_eq!(request["params"]["custom_status"], "middleware");
+    assert_eq!(
+        request["params"]["state_labels"]["working"],
+        "deep in the mines"
+    );
+    assert_eq!(request["params"]["ttl_ms"], 3_600_000);
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn pane_report_metadata_rejects_blank_source_before_socket_request() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("missing.sock");
+
+    let run = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-metadata",
+            "1-1",
+            "--source",
+            "   ",
+            "--custom-status",
+            "middleware",
+        ],
+    );
+
+    assert_eq!(run.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("missing required --source"),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn pane_report_metadata_rejects_blank_applies_to_source_before_socket_request() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("missing.sock");
+
+    let run = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-metadata",
+            "1-1",
+            "--source",
+            "user:claude-title",
+            "--applies-to-source",
+            "   ",
+            "--custom-status",
+            "middleware",
+        ],
+    );
+
+    assert_eq!(run.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("missing value for --applies-to-source"),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn help_commands_exit_successfully() {
     let help_cases: &[&[&str]] = &[
         &["-h"],
@@ -1013,7 +1142,7 @@ fn integration_commands_run_locally_when_server_is_missing() {
         .unwrap();
     assert_eq!(integration_status.status.code(), Some(0));
     let status_stdout = String::from_utf8_lossy(&integration_status.stdout);
-    assert!(status_stdout.contains("pi: current (v2)"));
+    assert!(status_stdout.contains("pi: current (v3)"));
     assert!(status_stdout.contains("claude: not installed"));
 
     let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_herdr"))

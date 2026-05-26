@@ -282,7 +282,7 @@ pub(super) fn render_panes(
                     .and_then(|terminal| {
                         terminal.border_label(app.show_agent_labels_on_pane_borders)
                     })
-                    .and_then(|label| pane_border_title(label, info.rect.width))
+                    .and_then(|label| pane_border_title(&label, info.rect.width))
                 {
                     block = block.title(Line::from(Span::styled(title, border_style)));
                 }

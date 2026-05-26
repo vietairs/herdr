@@ -93,10 +93,11 @@ pub struct PaneStateUpdate {
     pub previous_agent_label: Option<String>,
     pub previous_known_agent: Option<Agent>,
     pub previous_state: AgentState,
+    pub previous_presentation: crate::terminal::EffectivePresentation,
     pub agent_label: Option<String>,
     pub known_agent: Option<Agent>,
     pub state: AgentState,
-    pub custom_status: Option<String>,
+    pub presentation: crate::terminal::EffectivePresentation,
 }
 
 // ---------------------------------------------------------------------------
@@ -333,23 +334,37 @@ impl AppState {
             let terminal = self.terminals.get(&pane.attached_terminal_id);
             let pane_number = ws.public_pane_number(pane_id).unwrap_or(0);
             let label = terminal
-                .and_then(|terminal| terminal.manual_label.as_deref())
-                .or_else(|| terminal.and_then(|terminal| terminal.agent_name.as_deref()))
-                .or_else(|| terminal.and_then(|terminal| terminal.effective_agent_label()))
-                .map(str::to_string)
+                .and_then(|terminal| terminal.effective_title())
+                .or_else(|| {
+                    terminal
+                        .and_then(|terminal| terminal.manual_label.as_deref().map(str::to_string))
+                })
+                .or_else(|| {
+                    terminal.and_then(|terminal| terminal.agent_name.as_deref().map(str::to_string))
+                })
+                .or_else(|| {
+                    terminal
+                        .and_then(|terminal| terminal.effective_agent_label().map(str::to_string))
+                })
                 .or_else(|| {
                     launch_label(terminal.and_then(|terminal| terminal.launch_argv.as_ref()))
                 })
                 .unwrap_or_else(|| format!("pane {pane_number}"));
-            let agent_label = terminal
-                .and_then(|terminal| terminal.agent_name.as_deref())
-                .or_else(|| terminal.and_then(|terminal| terminal.effective_agent_label()));
+            let display_agent = terminal.and_then(|terminal| terminal.effective_display_agent());
+            let agent_label = display_agent.as_deref().or_else(|| {
+                terminal
+                    .and_then(|terminal| terminal.agent_name.as_deref())
+                    .or_else(|| terminal.and_then(|terminal| terminal.effective_agent_label()))
+            });
             let custom_status = terminal.and_then(|terminal| terminal.effective_custom_status());
             let state = terminal
                 .map(|terminal| terminal.state)
                 .unwrap_or(AgentState::Unknown);
+            let status_label = terminal
+                .map(|terminal| terminal.effective_presentation().state_labels)
+                .and_then(|labels| labels.get(state_label_text(state, pane.seen)).cloned());
             let status = custom_status
-                .map(str::to_string)
+                .or(status_label)
                 .or_else(|| agent_label.map(|_| state_label_text(state, pane.seen).to_string()));
             let meta = match (agent_label, status.as_deref()) {
                 (Some(agent_label), Some(status)) => format!("{agent_label} · {status}"),
@@ -656,6 +671,60 @@ fn activity_summary_for_panes<'a>(
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    pub(crate) fn next_agent_metadata_expiry(&self) -> Option<std::time::Instant> {
+        self.terminals
+            .values()
+            .filter_map(|terminal| terminal.next_agent_metadata_expiry())
+            .min()
+    }
+
+    pub(crate) fn expire_agent_metadata_at(
+        &mut self,
+        scheduled_deadline: std::time::Instant,
+        now: std::time::Instant,
+    ) -> Vec<PaneStateUpdate> {
+        let pane_terminals: Vec<_> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, ws)| {
+                ws.tabs.iter().flat_map(move |tab| {
+                    tab.layout
+                        .pane_ids()
+                        .into_iter()
+                        .filter_map(move |pane_id| {
+                            ws.pane_state(pane_id)
+                                .map(|pane| (ws_idx, pane_id, pane.attached_terminal_id.clone()))
+                        })
+                })
+            })
+            .collect();
+        pane_terminals
+            .into_iter()
+            .filter_map(|(ws_idx, pane_id, terminal_id)| {
+                let mutation = self
+                    .terminals
+                    .get_mut(&terminal_id)?
+                    .expire_agent_metadata_at(scheduled_deadline, now)?;
+                let change = mutation.effective_state_change?;
+                let update = PaneStateUpdate {
+                    pane_id,
+                    ws_idx,
+                    previous_agent_label: change.previous_agent_label.clone(),
+                    previous_known_agent: change.previous_known_agent,
+                    previous_state: change.previous_state,
+                    previous_presentation: change.previous_presentation.clone(),
+                    agent_label: change.agent_label.clone(),
+                    known_agent: change.known_agent,
+                    state: change.state,
+                    presentation: change.presentation.clone(),
+                };
+                self.apply_pane_state_change(ws_idx, pane_id, &change);
+                Some(update)
+            })
+            .collect()
+    }
+
     pub(crate) fn pane_is_in_active_tab(&self, ws_idx: usize, pane_id: PaneId) -> bool {
         let Some(active_ws_idx) = self.active else {
             return false;
@@ -1844,6 +1913,41 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::HookMetadataReported {
+                pane_id,
+                source,
+                agent_label,
+                applies_to_source,
+                title,
+                display_agent,
+                custom_status,
+                state_labels,
+                clear_title,
+                clear_display_agent,
+                clear_custom_status,
+                clear_state_labels,
+                seq,
+                ttl,
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.set_agent_metadata(crate::terminal::AgentMetadataReport {
+                        source,
+                        agent_label,
+                        applies_to_source,
+                        title,
+                        display_agent,
+                        custom_status,
+                        state_labels,
+                        clear_title,
+                        clear_display_agent,
+                        clear_custom_status,
+                        clear_state_labels,
+                        ttl,
+                        seq,
+                    })
+                })
+                .into_iter()
+                .collect(),
             AppEvent::HookAuthorityCleared {
                 pane_id,
                 source,
@@ -1904,10 +2008,11 @@ impl AppState {
             previous_agent_label: change.previous_agent_label.clone(),
             previous_known_agent: change.previous_known_agent,
             previous_state: change.previous_state,
+            previous_presentation: change.previous_presentation.clone(),
             agent_label: change.agent_label.clone(),
             known_agent: change.known_agent,
             state: change.state,
-            custom_status: change.custom_status.clone(),
+            presentation: change.presentation.clone(),
         };
         self.apply_pane_state_change(ws_idx, pane_id, &change);
         Some(update)
