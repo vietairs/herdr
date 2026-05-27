@@ -52,6 +52,7 @@ pub enum Agent {
     Amp,
     Grok,
     Hermes,
+    Qodercli,
 }
 
 pub fn agent_label(agent: Agent) -> &'static str {
@@ -71,6 +72,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Amp => "amp",
         Agent::Grok => "grok",
         Agent::Hermes => "hermes",
+        Agent::Qodercli => "qodercli",
     }
 }
 
@@ -92,6 +94,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
+        "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
         _ => None,
     }
 }
@@ -117,6 +120,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
+        "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
         _ => None,
     }
 }
@@ -184,6 +188,7 @@ pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetectio
         Agent::Amp => detect_amp(screen_content),
         Agent::Grok => detect_grok(screen_content),
         Agent::Hermes => detect_hermes(screen_content),
+        Agent::Qodercli => detect_qodercli(screen_content),
     };
     AgentDetection {
         state,
@@ -626,6 +631,104 @@ fn has_kiro_tool_spinner(content: &str) -> bool {
         let rest = chars.as_str().trim_start();
         rest.chars().next().is_some_and(char::is_alphabetic)
     })
+}
+
+/// Qodercli detection.
+///
+/// Qodercli is a Node.js coding-agent CLI. It surfaces a confirmation prompt
+/// while awaiting tool approval and a braille spinner while working.
+fn detect_qodercli(content: &str) -> AgentState {
+    let lower = content.to_lowercase();
+
+    // Idle short-circuit: double-press confirmation hints render *over* the
+    // input prompt while the user briefly holds Ctrl+C / Esc. The pane is
+    // effectively idle there — without this, a stale spinner row above could
+    // still flip it to Working.
+    if has_qodercli_idle_override(&lower) {
+        return AgentState::Idle;
+    }
+
+    if has_qodercli_blocked_prompt(&lower) {
+        return AgentState::Blocked;
+    }
+
+    // Working: explicit "(esc to cancel, …)" hint or an active spinner row.
+    if has_qodercli_working_hint(&lower) || has_qodercli_spinner_row(content) {
+        return AgentState::Working;
+    }
+
+    AgentState::Idle
+}
+
+/// Idle override hints. Mirrors the `⌕ Search…` / `ctrl+r to toggle` shortcut
+/// in [`detect_claude`]: when these UI bits are visible the pane is sitting at
+/// a static prompt and should not be classified as Working or Blocked.
+///
+/// Covers qodercli's "press again" exit/rewind banners.
+fn has_qodercli_idle_override(lower_content: &str) -> bool {
+    lower_content.contains("press ctrl+c again to exit")
+        || lower_content.contains("press ctrl+d again to exit")
+        || lower_content.contains("press esc again to rewind")
+}
+
+/// Working hints qodercli prints alongside the spinner while the model is
+/// responding. The "(esc to cancel, …)" suffix is unique to qodercli's loading
+/// indicator and survives even when the spinner glyph is masked (e.g. by
+/// a hook icon).
+fn has_qodercli_working_hint(lower_content: &str) -> bool {
+    lower_content.contains("(esc to cancel,")
+}
+
+/// Strict spinner-row detection for qodercli.
+///
+/// Matches a line whose first non-whitespace glyph is a braille pattern
+/// (U+2800–U+28FF, the cli-spinners "dots" set qodercli renders), followed by
+/// a space and at least one alphabetic character on the same line. This avoids
+/// flagging the pane as Working when the scrollback merely contains a stale
+/// braille glyph from an earlier frame.
+fn has_qodercli_spinner_row(content: &str) -> bool {
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let mut chars = trimmed.chars();
+        let Some(first) = chars.next() else {
+            continue;
+        };
+        if !('\u{2800}'..='\u{28FF}').contains(&first) {
+            continue;
+        }
+        let rest: String = chars.collect();
+        if rest.starts_with(' ') && rest.chars().any(|c| c.is_alphabetic()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Blocked patterns specific to qodercli.
+///
+/// Mirrors the helper structure used by [`has_claude_blocked_prompt`] so the
+/// pattern surface stays a single, easy-to-extend list.
+///
+/// Covered states:
+/// * Tool-call confirmation banners ("Waiting for user confirmation",
+///   "Awaiting approval").
+/// * The "Permission Required / Allow once or always?" approval dialog.
+/// * The `ask-user` tool's interactive prompt. "Asking User" is the dialog's
+///   stable BaseTabDialog title and covers every form (single-select,
+///   multi-select, free-form input, review tab). The "Enter your response"
+///   placeholder and "Review your answers:" review heading are kept as
+///   defensive fallbacks in case the title row scrolls off-screen.
+/// * The interactive shell waiting hint emitted by qodercli when an agent
+///   spawns a shell that is now parked for user keystrokes.
+fn has_qodercli_blocked_prompt(lower_content: &str) -> bool {
+    lower_content.contains("waiting for user confirmation")
+        || lower_content.contains("awaiting approval")
+        || lower_content.contains("permission required")
+        || lower_content.contains("allow once or always?")
+        || lower_content.contains("asking user")
+        || lower_content.contains("enter your response")
+        || lower_content.contains("review your answers:")
+        || lower_content.contains("shell awaiting input")
 }
 
 // ---------------------------------------------------------------------------
@@ -2542,6 +2645,158 @@ mod tests {
     fn hermes_denied_message_is_idle() {
         let screen = "╭─ ⚕ Hermes ────────────────────────────────────────────────────────────────────────────╮\n    Command was blocked/denied by the safety layer. I did not retry.\n╰───────────────────────────────────────────────────────────────────────────────────────╯\n ⚕ gpt-5.5 │ 15.4K/272K │ [█░░░░░░░░░] 6% │ 2m │ ⏲ 11s\n─────────────────────────────────────────────────────────────────────────────────────────\n❯";
         assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
+    }
+
+    // ---- Qodercli ----
+
+    #[test]
+    fn qodercli_identified_by_process_name() {
+        assert_eq!(identify_agent("qodercli"), Some(Agent::Qodercli));
+        assert_eq!(identify_agent("qoderclicn"), Some(Agent::Qodercli));
+        assert_eq!(identify_agent("qoder"), Some(Agent::Qodercli));
+        assert_eq!(identify_agent("qodercn"), Some(Agent::Qodercli));
+    }
+
+    #[test]
+    fn qodercli_blocked_on_confirmation() {
+        assert_eq!(
+            detect_qodercli("Waiting for user confirmation..."),
+            AgentState::Blocked,
+        );
+    }
+
+    #[test]
+    fn qodercli_working_on_spinner() {
+        assert_eq!(detect_qodercli("\u{280B} Thinking..."), AgentState::Working);
+    }
+
+    #[test]
+    fn qodercli_idle_on_prompt() {
+        assert_eq!(detect_qodercli("> "), AgentState::Idle);
+    }
+
+    #[test]
+    fn qodercli_idle_when_only_stale_braille_glyph_in_scrollback() {
+        // A single stray braille character in a previous output line must not
+        // flip the pane to Working — only an actual spinner *row* should.
+        let screen = "\
+agent finished a previous task.\n\
+\u{280B}\n\
+> \n";
+        assert_eq!(detect_qodercli(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn qodercli_working_on_full_spinner_row() {
+        // Real spinner row: braille glyph + space + alphabetic phrase.
+        let screen = "\u{280B} Thinking...\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Working);
+    }
+
+    #[test]
+    fn qodercli_working_on_esc_to_cancel_hint() {
+        // The "(esc to cancel, …)" suffix is qodercli's explicit working
+        // marker. It must trigger Working even if a hook icon replaced the
+        // spinner glyph in this frame.
+        let screen = "Thinking... (esc to cancel, 5s)\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Working);
+    }
+
+    #[test]
+    fn qodercli_idle_when_text_mentions_working_in_prose() {
+        // The previous heuristic treated the bare word "working" as Working,
+        // which produced false positives for narrative output (commits, logs,
+        // Markdown). The pane should remain Idle until a real working signal
+        // appears.
+        let screen = "\
+fix: keep working set warm across reloads\n\
+\n\
+> \n";
+        assert_eq!(detect_qodercli(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn qodercli_idle_override_wins_over_spinner_row() {
+        // While the user is holding Ctrl+C, qodercli flashes a "press again"
+        // banner over the prompt. The pane is effectively idle there even if
+        // a stale spinner row is still in the buffer.
+        let screen = "\
+\u{280B} Thinking...\n\
+Press Ctrl+C again to exit.\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn qodercli_idle_override_wins_over_esc_rewind() {
+        let screen = "Press Esc again to rewind.\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_permission_required_dialog() {
+        // qodercli renders this dialog when a tool call needs user approval.
+        let screen = "\
+Permission Required\n\
+Caller: test\n\
+Command: mkdir -p /root/example\n\
+Allow once or always?\n\
+  \u{276F} 1. Allow Once - allow `mkdir` for one\n\
+    2. Always allow `mkdir` for future sessions\n\
+    3. Reject and tell qodercli something\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_permission_required_alone() {
+        // Even when the prompt copy gets truncated by the viewport, the title
+        // alone should be enough to flip the pane to blocked.
+        assert_eq!(detect_qodercli("Permission Required"), AgentState::Blocked,);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_askuser_enter_response_placeholder() {
+        // qodercli's ask-user tool renders an input box with this placeholder
+        // when waiting for the user to type a response.
+        let screen = "\
+What kind of project are you working on?\n\
+> \n\
+  Enter your response\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_askuser_review_tab() {
+        // The multi-question/multi-select review tab heading is unique to the
+        // ask-user dialog and means the agent is parked waiting on user input.
+        let screen = "\
+Review your answers:\n\
+\n\
+Project type \u{2192} Web app\n\
+Stack        \u{2192} (not answered)\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_interactive_shell_waiting() {
+        // When qodercli spawns an interactive shell, the loading row turns
+        // into a "Shell awaiting input" hint until the user takes focus.
+        let screen = "! Shell awaiting input (Tab to focus)\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn qodercli_blocked_on_askuser_single_choice_dialog() {
+        // Single-select ask-user has no "Enter your response" placeholder and
+        // no "Review your answers:" heading. The BaseTabDialog title
+        // "Asking User" is the only stable signal across every ask-user form.
+        let screen = "\
+Asking User\n\
+\n\
+Which framework should we use?\n\
+  React\n\
+  Vue\n\
+  Svelte\n";
+        assert_eq!(detect_qodercli(screen), AgentState::Blocked);
     }
 
     // ---- Helpers ----
