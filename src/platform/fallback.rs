@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use super::{ClipboardImage, ForegroundJob, Signal};
 
 /// Unsupported platform stub.
+pub fn raise_server_nofile_limit() {}
+
+/// Unsupported platform stub.
 pub fn foreground_job(_child_pid: u32) -> Option<ForegroundJob> {
     None
 }

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+- Fixed macOS server startup with large restored sessions by raising the server file descriptor soft limit, preventing new panes from failing with `dup of fd N failed` or `Too many open files` around 40 live panes. (#327)
+
+This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
+
 ## [0.6.3] - 2026-05-27
 
 ### Added

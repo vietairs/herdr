@@ -11,6 +11,53 @@ use super::{
 };
 
 const PROC_PGRP_ONLY: u32 = 2;
+const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
+
+pub fn raise_server_nofile_limit() {
+    match raise_nofile_limit(SERVER_NOFILE_LIMIT_TARGET) {
+        Ok(None) => {}
+        Ok(Some((previous, target))) => {
+            tracing::info!(previous, target, "raised server file descriptor soft limit")
+        }
+        Err(err) => tracing::warn!(err = %err, "failed to raise server file descriptor limit"),
+    }
+}
+
+fn raise_nofile_limit(
+    target: libc::rlim_t,
+) -> std::io::Result<Option<(libc::rlim_t, libc::rlim_t)>> {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut limit = unsafe { limit.assume_init() };
+    let Some(target) = target_nofile_soft_limit(limit.rlim_cur, limit.rlim_max, target) else {
+        return Ok(None);
+    };
+
+    let previous = limit.rlim_cur;
+    limit.rlim_cur = target;
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(Some((previous, target)))
+}
+
+fn target_nofile_soft_limit(
+    current: libc::rlim_t,
+    hard: libc::rlim_t,
+    target: libc::rlim_t,
+) -> Option<libc::rlim_t> {
+    let target = if hard == libc::RLIM_INFINITY {
+        target
+    } else {
+        target.min(hard)
+    };
+
+    (current < target).then_some(target)
+}
 
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -669,6 +716,27 @@ pub fn process_exists(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nofile_target_raises_low_soft_limit_to_cap_when_hard_is_unlimited() {
+        assert_eq!(
+            target_nofile_soft_limit(256, libc::RLIM_INFINITY, 8192),
+            Some(8192)
+        );
+    }
+
+    #[test]
+    fn nofile_target_respects_finite_hard_limit() {
+        assert_eq!(target_nofile_soft_limit(256, 4096, 8192), Some(4096));
+    }
+
+    #[test]
+    fn nofile_target_does_not_lower_existing_soft_limit() {
+        assert_eq!(
+            target_nofile_soft_limit(16_384, libc::RLIM_INFINITY, 8192),
+            None
+        );
+    }
 
     fn build_procargs2(exec_path: &str, argv: &[&str], env: &[&str]) -> Vec<u8> {
         let mut buf = Vec::new();

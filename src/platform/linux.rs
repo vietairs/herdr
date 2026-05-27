@@ -9,6 +9,8 @@ use super::{
     LimitedRead, Signal,
 };
 
+pub fn raise_server_nofile_limit() {}
+
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     let tpgid = foreground_process_group_id(child_pid)?;

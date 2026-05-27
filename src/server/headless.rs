@@ -2628,6 +2628,7 @@ fn is_keybinding_config_diagnostic(diagnostic: &str) -> bool {
 /// Run the headless server. This is the entry point called from main.rs.
 pub fn run_server() -> io::Result<()> {
     init_logging();
+    crate::platform::raise_server_nofile_limit();
 
     let args: Vec<String> = std::env::args().collect();
     if args.get(2).map(String::as_str) == Some("--handoff-import") {
