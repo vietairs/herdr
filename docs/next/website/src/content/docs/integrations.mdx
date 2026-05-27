@@ -1,6 +1,6 @@
 ---
 title: Integrations
-description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, OpenCode, and Hermes Agent.
+description: Install Herdr integrations for Pi, OMP, Claude Code, Codex, OpenCode, Hermes Agent, and Qoder CLI.
 ---
 
 Herdr detects supported agents automatically. Integrations make that detection more precise by reporting semantic state directly to Herdr.
@@ -18,6 +18,7 @@ herdr integration install claude
 herdr integration install codex
 herdr integration install opencode
 herdr integration install hermes
+herdr integration install qodercli
 ```
 
 ## Uninstall integrations
@@ -29,6 +30,7 @@ herdr integration uninstall claude
 herdr integration uninstall codex
 herdr integration uninstall opencode
 herdr integration uninstall hermes
+herdr integration uninstall qodercli
 ```
 
 ## How Herdr uses integrations
@@ -128,6 +130,20 @@ herdr integration install hermes
 Herdr writes `~/.hermes/plugins/herdr-agent-state/` and enables `herdr-agent-state` in `~/.hermes/config.yaml`. The Hermes config directory must already exist. Restart Hermes after installing so the plugin loads. Uninstall removes the plugin directory and removes `herdr-agent-state` from `plugins.enabled`.
 
 The plugin reports lifecycle, tool, approval state, and session id while Hermes runs inside a Herdr pane. Herdr can use the reported session id to resume the pane with `hermes --resume <id>`. Native screen heuristics remain available when the plugin is not installed.
+
+## Qoder CLI
+
+Install the Qoder CLI hook:
+
+```bash
+herdr integration install qodercli
+```
+
+The hook reports semantic state to Herdr when Qoder CLI emits lifecycle events.
+
+Herdr uses `~/.qoder` by default, or `QODER_CONFIG_DIR` when set. The Qoder config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
+
+Native screen heuristics remain available when the hook is not installed.
 
 ## Custom status labels
 
