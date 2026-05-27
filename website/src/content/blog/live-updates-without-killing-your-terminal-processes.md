@@ -4,7 +4,7 @@ description: Herdr can replace its server during an update while keeping pane pr
 date: 2026-05-27
 ---
 
-Live handoff shipped in Herdr 0.6.3 as an opt-in update path. See the [live handoff docs](/docs/session-state/#live-handoff) for the user-facing behavior.
+Live handoff shipped in Herdr 0.6.3 as an experimental, opt-in update path. See the [live handoff docs](/docs/session-state/#live-handoff) for the user-facing behavior.
 
 Terminal multiplexers are supposed to protect long-running work from interruption. You start a server, run shells and tools inside panes, detach clients, reconnect later, and the work keeps going.
 

@@ -92,7 +92,7 @@ herdr --remote workbox
 
 Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks `~/.local/bin/herdr`. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
 
-By default, remote attach uses the normal restart/stop flow if it needs to replace or restart a running remote server. To opt into live handoff for a supported running remote server, pass `--handoff`:
+By default, remote attach uses the normal restart/stop flow if it needs to replace or restart a running remote server. To opt into experimental live handoff for a supported running remote server, pass `--handoff`:
 
 ```bash
 herdr --remote workbox --handoff
