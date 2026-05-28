@@ -631,12 +631,12 @@ impl HeadlessServer {
             self.app.state.collapsed_space_keys.clone(),
         );
 
-        let mut panes = Vec::new();
+        let mut handoff_entries = Vec::new();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
             let Some(pane_id) = pane_by_terminal.get(terminal_id).copied() else {
                 continue;
             };
-            let mut handoff_pane = runtime.handoff_pane(pane_id);
+            let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
             let has_agent_session = self
                 .app
                 .state
@@ -644,11 +644,15 @@ impl HeadlessServer {
                 .get(terminal_id)
                 .is_some_and(|terminal| terminal.persisted_agent_session.is_some());
             if !has_agent_session {
-                handoff_pane.initial_history_ansi = runtime.handoff_history_ansi();
+                handoff_runtime.initial_history_ansi = runtime.handoff_history_ansi();
             }
-            panes.push(handoff_pane);
+            handoff_entries.push((terminal_id.clone(), handoff_runtime));
         }
 
+        let panes = handoff_entries
+            .iter()
+            .map(|(_, runtime)| runtime.clone())
+            .collect();
         let manifest = crate::server::handoff::manifest_for(
             snapshot,
             panes,
@@ -671,10 +675,10 @@ impl HeadlessServer {
 
         let mut fds = Vec::new();
         let duplicate_result = (|| {
-            for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
-                if !pane_by_terminal.contains_key(terminal_id) {
+            for (terminal_id, _) in &handoff_entries {
+                let Some(runtime) = self.app.terminal_runtimes.get(terminal_id) else {
                     continue;
-                }
+                };
                 fds.push(runtime.duplicate_handoff_fd()?);
             }
             Ok::<(), io::Error>(())
@@ -1356,6 +1360,7 @@ impl HeadlessServer {
                 true
             }
             AppEvent::PaneDied { pane_id } => {
+                let pane_id_val = *pane_id;
                 let terminal_id = self.app.state.workspaces.iter().find_map(|ws| {
                     ws.tabs.iter().find_map(|tab| {
                         tab.panes
@@ -1366,11 +1371,13 @@ impl HeadlessServer {
 
                 self.app.handle_internal_event(ev);
 
-                if let Some(terminal_id) = terminal_id {
-                    self.shutdown_terminal_attach_clients(
-                        &terminal_id,
-                        format!("terminal {terminal_id} exited"),
-                    );
+                if self.app.find_pane(pane_id_val).is_none() {
+                    if let Some(terminal_id) = terminal_id {
+                        self.shutdown_terminal_attach_clients(
+                            &terminal_id,
+                            format!("terminal {terminal_id} exited"),
+                        );
+                    }
                 }
 
                 true
@@ -2721,17 +2728,13 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
     let event_hub = api::EventHub::default();
 
     let mut imports = HashMap::new();
-    for (pane, fd) in received.manifest.panes.iter().zip(received.fds) {
+    for (pane, fd) in received.manifest.panes.into_iter().zip(received.fds) {
+        let pane_id = pane.pane_id;
         imports.insert(
-            pane.pane_id,
-            crate::persist::ImportedPaneRuntime {
+            pane_id,
+            crate::handoff_runtime::ImportedHandoffRuntime {
                 master_fd: fd,
-                child_pid: pane.child_pid,
-                rows: pane.rows,
-                cols: pane.cols,
-                cell_width_px: pane.cell_width_px,
-                cell_height_px: pane.cell_height_px,
-                initial_history_ansi: pane.initial_history_ansi.clone(),
+                state: pane,
             },
         );
     }

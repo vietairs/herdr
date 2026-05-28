@@ -38,20 +38,7 @@ pub(crate) struct HandoffManifest {
     pub expected_version: Option<String>,
     pub expected_protocol: Option<u32>,
     pub snapshot: crate::persist::SessionSnapshot,
-    pub panes: Vec<HandoffPane>,
-}
-
-#[cfg(unix)]
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct HandoffPane {
-    pub pane_id: u32,
-    pub child_pid: u32,
-    pub rows: u16,
-    pub cols: u16,
-    pub cell_width_px: u32,
-    pub cell_height_px: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub initial_history_ansi: Option<String>,
+    pub panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
 }
 
 #[cfg(unix)]
@@ -307,7 +294,7 @@ pub(crate) fn report_owned(stream: &mut UnixStream) -> io::Result<()> {
 #[cfg(unix)]
 pub(crate) fn manifest_for(
     snapshot: crate::persist::SessionSnapshot,
-    panes: Vec<HandoffPane>,
+    panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
     expected_protocol: Option<u32>,
     expected_version: Option<String>,
 ) -> HandoffManifest {

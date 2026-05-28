@@ -72,6 +72,7 @@ pub struct TerminalState {
     pub state: AgentState,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
+    pub respawn_shell_on_exit: bool,
 }
 
 impl TerminalState {
@@ -96,11 +97,17 @@ impl TerminalState {
             state: AgentState::Unknown,
             revision: 0,
             launch_argv: None,
+            respawn_shell_on_exit: false,
         }
     }
 
     pub fn with_launch_argv(mut self, argv: Vec<String>) -> Self {
         self.launch_argv = Some(argv);
+        self
+    }
+
+    pub fn with_respawn_shell_on_exit(mut self) -> Self {
+        self.respawn_shell_on_exit = true;
         self
     }
 

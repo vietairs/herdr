@@ -5,6 +5,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::{layout::Rect, Frame};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 use unicode_width::UnicodeWidthStr;
@@ -17,6 +18,7 @@ use super::{
         ghostty_mouse_event_from_button_kind, ghostty_mouse_event_from_wheel_kind,
         ghostty_prefers_herdr_text_encoding,
     },
+    kitty_keyboard::KittyKeyboardTracker,
     osc::{
         contains_scrollback_clear_sequence, current_transient_default_color_owner,
         maybe_filter_primary_screen_scrollback_clear, restore_host_terminal_theme_if_needed,
@@ -27,6 +29,10 @@ use super::{
 
 const DEFAULT_DETECTION_ROWS: usize = 24;
 const KITTY_GRAPHICS_REDRAW_SETTLE: Duration = Duration::from_millis(20);
+const MODE_MOUSE_X10: u16 = 9;
+const MODE_MOUSE_PRESS_RELEASE: u16 = 1000;
+const MODE_MOUSE_BUTTON_MOTION: u16 = 1002;
+const MODE_MOUSE_ANY_MOTION: u16 = 1003;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollMetrics {
@@ -57,7 +63,7 @@ fn decscusr_cursor_shape(style: crate::ghostty::CursorVisualStyle, blinking: boo
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputState {
     pub alternate_screen: bool,
     pub application_cursor: bool,
@@ -66,6 +72,8 @@ pub struct InputState {
     pub mouse_protocol_mode: crate::input::MouseProtocolMode,
     pub mouse_protocol_encoding: crate::input::MouseProtocolEncoding,
     pub mouse_alternate_scroll: bool,
+    #[serde(default)]
+    pub modify_other_keys: bool,
 }
 
 impl InputState {
@@ -89,6 +97,7 @@ pub(crate) struct GhosttyPaneTerminal {
 pub(crate) struct GhosttyPaneCore {
     pub terminal: crate::ghostty::Terminal,
     pub render_state: crate::ghostty::RenderState,
+    pub kitty_keyboard: KittyKeyboardTracker,
     pub initial_default_foreground: Option<crate::ghostty::RgbColor>,
     pub initial_default_background: Option<crate::ghostty::RgbColor>,
     pub host_terminal_theme: crate::terminal_theme::TerminalTheme,
@@ -224,6 +233,12 @@ impl PaneTerminal {
         self.ghostty.keyboard_protocol().unwrap_or(fallback)
     }
 
+    pub fn kitty_keyboard_state_ansi(&self) -> Option<String> {
+        self.ghostty
+            .kitty_keyboard_state_ansi()
+            .filter(|ansi| !ansi.is_empty())
+    }
+
     pub fn encode_terminal_key(
         &self,
         key: crate::input::TerminalKey,
@@ -281,6 +296,7 @@ impl GhosttyPaneTerminal {
             core: Mutex::new(GhosttyPaneCore {
                 terminal,
                 render_state,
+                kitty_keyboard: KittyKeyboardTracker::default(),
                 initial_default_foreground,
                 initial_default_background,
                 host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
@@ -395,6 +411,7 @@ impl GhosttyPaneTerminal {
             );
         }
 
+        core.kitty_keyboard.observe(filtered_bytes.as_ref());
         core.terminal.write(filtered_bytes.as_ref());
         core.default_color_event_tracker
             .observe(filtered_bytes.as_ref());
@@ -427,6 +444,98 @@ impl GhosttyPaneTerminal {
         let Ok(mut core) = self.core.lock() else {
             return;
         };
+        core.terminal.write(ansi.as_bytes());
+        if let Ok(mut key_encoder) = self.key_encoder.lock() {
+            key_encoder.set_from_terminal(&core.terminal);
+        }
+    }
+
+    pub fn seed_handoff_input_state(&self, input_state: InputState) {
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+
+        if input_state.alternate_screen {
+            core.terminal.write(b"\x1b[?1049h");
+        }
+        let _ = core.terminal.mode_set(
+            crate::ghostty::MODE_APPLICATION_CURSOR_KEYS,
+            input_state.application_cursor,
+        );
+        let _ = core.terminal.mode_set(
+            crate::ghostty::MODE_BRACKETED_PASTE,
+            input_state.bracketed_paste,
+        );
+        let _ = core.terminal.mode_set(
+            crate::ghostty::MODE_FOCUS_EVENT,
+            input_state.focus_reporting,
+        );
+        let _ = core.terminal.mode_set(
+            crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL,
+            input_state.mouse_alternate_scroll,
+        );
+
+        for mode in [
+            MODE_MOUSE_X10,
+            MODE_MOUSE_PRESS_RELEASE,
+            MODE_MOUSE_BUTTON_MOTION,
+            MODE_MOUSE_ANY_MOTION,
+        ] {
+            let _ = core.terminal.mode_set(mode, false);
+        }
+        let mouse_mode = match input_state.mouse_protocol_mode {
+            crate::input::MouseProtocolMode::None => None,
+            crate::input::MouseProtocolMode::Press => Some(MODE_MOUSE_X10),
+            crate::input::MouseProtocolMode::PressRelease => Some(MODE_MOUSE_PRESS_RELEASE),
+            crate::input::MouseProtocolMode::ButtonMotion => Some(MODE_MOUSE_BUTTON_MOTION),
+            crate::input::MouseProtocolMode::AnyMotion => Some(MODE_MOUSE_ANY_MOTION),
+        };
+        if let Some(mode) = mouse_mode {
+            let _ = core.terminal.mode_set(mode, true);
+        }
+
+        let _ = core
+            .terminal
+            .mode_set(crate::ghostty::MODE_MOUSE_UTF8, false);
+        let _ = core
+            .terminal
+            .mode_set(crate::ghostty::MODE_MOUSE_SGR, false);
+        match input_state.mouse_protocol_encoding {
+            crate::input::MouseProtocolEncoding::Default => {}
+            crate::input::MouseProtocolEncoding::Utf8 => {
+                let _ = core
+                    .terminal
+                    .mode_set(crate::ghostty::MODE_MOUSE_UTF8, true);
+            }
+            crate::input::MouseProtocolEncoding::Sgr => {
+                let _ = core.terminal.mode_set(crate::ghostty::MODE_MOUSE_SGR, true);
+            }
+        }
+
+        if input_state.modify_other_keys {
+            core.terminal.write(b"\x1b[>4;2m");
+        }
+
+        if let Ok(mut key_encoder) = self.key_encoder.lock() {
+            key_encoder.set_from_terminal(&core.terminal);
+        }
+    }
+
+    pub fn seed_keyboard_protocol_flags(&self, flags: u16) {
+        if flags == 0 {
+            return;
+        }
+        self.seed_keyboard_protocol_ansi(&format!("\x1b[>{flags}u"));
+    }
+
+    pub fn seed_keyboard_protocol_ansi(&self, ansi: &str) {
+        if ansi.is_empty() {
+            return;
+        }
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+        core.kitty_keyboard.observe(ansi.as_bytes());
         core.terminal.write(ansi.as_bytes());
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             key_encoder.set_from_terminal(&core.terminal);
@@ -491,6 +600,11 @@ impl GhosttyPaneTerminal {
         ))
     }
 
+    pub fn kitty_keyboard_state_ansi(&self) -> Option<String> {
+        let core = self.core.lock().ok()?;
+        core.kitty_keyboard.replay_ansi()
+    }
+
     pub fn input_state(&self) -> Option<InputState> {
         let Ok(core) = self.core.lock() else {
             return None;
@@ -521,13 +635,13 @@ impl GhosttyPaneTerminal {
             .terminal
             .mode_get(crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL)
             .ok()?;
-        let mouse_protocol_mode = if core.terminal.mode_get(1003).ok()? {
+        let mouse_protocol_mode = if core.terminal.mode_get(MODE_MOUSE_ANY_MOTION).ok()? {
             crate::input::MouseProtocolMode::AnyMotion
-        } else if core.terminal.mode_get(1002).ok()? {
+        } else if core.terminal.mode_get(MODE_MOUSE_BUTTON_MOTION).ok()? {
             crate::input::MouseProtocolMode::ButtonMotion
-        } else if core.terminal.mode_get(1000).ok()? {
+        } else if core.terminal.mode_get(MODE_MOUSE_PRESS_RELEASE).ok()? {
             crate::input::MouseProtocolMode::PressRelease
-        } else if core.terminal.mode_get(9).ok()? {
+        } else if core.terminal.mode_get(MODE_MOUSE_X10).ok()? {
             crate::input::MouseProtocolMode::Press
         } else {
             crate::input::MouseProtocolMode::None
@@ -547,6 +661,11 @@ impl GhosttyPaneTerminal {
             mouse_protocol_mode,
             mouse_protocol_encoding,
             mouse_alternate_scroll,
+            modify_other_keys: core
+                .terminal
+                .keyboard_state_ansi()
+                .ok()
+                .is_some_and(|ansi| !ansi.is_empty()),
         })
     }
 
@@ -1520,6 +1639,51 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_seed_handoff_input_state_restores_input_modes() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        pane.seed_handoff_input_state(InputState {
+            alternate_screen: true,
+            application_cursor: true,
+            bracketed_paste: true,
+            focus_reporting: true,
+            mouse_protocol_mode: crate::input::MouseProtocolMode::ButtonMotion,
+            mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Sgr,
+            mouse_alternate_scroll: true,
+            modify_other_keys: true,
+        });
+
+        assert_eq!(
+            pane.input_state(),
+            Some(InputState {
+                alternate_screen: true,
+                application_cursor: true,
+                bracketed_paste: true,
+                focus_reporting: true,
+                mouse_protocol_mode: crate::input::MouseProtocolMode::ButtonMotion,
+                mouse_protocol_encoding: crate::input::MouseProtocolEncoding::Sgr,
+                mouse_alternate_scroll: true,
+                modify_other_keys: true,
+            })
+        );
+
+        let encoded = pane.encode_terminal_key(
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::empty(),
+            ),
+            crate::input::KeyboardProtocol::Legacy,
+        );
+        assert_eq!(encoded, b"\x1bOA");
+
+        let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
+        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+        assert_eq!(encoded, b"\x1b[27;2;13~");
+    }
+
+    #[test]
     fn ghostty_key_encoder_updates_after_terminal_mode_changes() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
@@ -1582,6 +1746,50 @@ mod tests {
             Some(crate::input::KeyboardProtocol::Kitty { flags: 5 })
         );
         assert_eq!(encoded, b"\x1b[13;2u");
+    }
+
+    #[test]
+    fn ghostty_seed_keyboard_protocol_flags_restores_shift_enter_encoding() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        pane.seed_keyboard_protocol_flags(5);
+
+        let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
+        let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
+
+        assert_eq!(
+            pane.keyboard_protocol(),
+            Some(crate::input::KeyboardProtocol::Kitty { flags: 5 })
+        );
+        assert_eq!(encoded, b"\x1b[13;2u");
+    }
+
+    #[test]
+    fn ghostty_keyboard_protocol_state_replays_nested_stack() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[>1u\x1b[>5u", &tx);
+
+        let ansi = pane.kitty_keyboard_state_ansi().unwrap();
+
+        let (restored_tx, _restored_rx) = mpsc::channel(4);
+        let restored_terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let restored = GhosttyPaneTerminal::new(restored_terminal, restored_tx).unwrap();
+        restored.seed_keyboard_protocol_ansi(&ansi);
+        assert_eq!(
+            restored.keyboard_protocol(),
+            Some(crate::input::KeyboardProtocol::Kitty { flags: 5 })
+        );
+
+        let (pop_tx, _pop_rx) = mpsc::channel(4);
+        restored.process_pty_bytes(pane_id, 0, b"\x1b[<u", &pop_tx);
+        assert_eq!(
+            restored.keyboard_protocol(),
+            Some(crate::input::KeyboardProtocol::Kitty { flags: 1 })
+        );
     }
 
     #[test]

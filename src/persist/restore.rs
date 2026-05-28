@@ -22,17 +22,6 @@ use super::{
     WorkspaceSnapshot,
 };
 
-#[cfg(unix)]
-pub struct ImportedPaneRuntime {
-    pub master_fd: std::os::fd::RawFd,
-    pub child_pid: u32,
-    pub rows: u16,
-    pub cols: u16,
-    pub cell_width_px: u32,
-    pub cell_height_px: u32,
-    pub initial_history_ansi: Option<String>,
-}
-
 struct AgentRestoreState<'a> {
     enabled: bool,
     resumed_sessions: &'a mut HashSet<String>,
@@ -105,7 +94,7 @@ pub fn restore_handoff(
     snapshot: &SessionSnapshot,
     scrollback_limit_bytes: usize,
     default_shell: &str,
-    imports: &mut HashMap<u32, ImportedPaneRuntime>,
+    imports: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
@@ -126,6 +115,44 @@ pub fn restore_handoff(
 }
 
 #[cfg(unix)]
+pub fn handoff_pane_aliases(
+    snapshot: &SessionSnapshot,
+    workspaces: &[Workspace],
+) -> HashMap<u32, PaneId> {
+    let mut aliases = HashMap::new();
+    for (ws_snap, workspace) in snapshot.workspaces.iter().zip(workspaces) {
+        for (tab_snap, tab) in ws_snap.tabs.iter().zip(&workspace.tabs) {
+            let old_ids = collect_snapshot_pane_ids(&tab_snap.layout);
+            let new_ids = tab.layout.pane_ids();
+            for (old_id, new_id) in old_ids.into_iter().zip(new_ids) {
+                if old_id != new_id.raw() {
+                    aliases.insert(old_id, new_id);
+                }
+            }
+        }
+    }
+    aliases
+}
+
+#[cfg(unix)]
+fn collect_snapshot_pane_ids(node: &LayoutSnapshot) -> Vec<u32> {
+    let mut ids = Vec::new();
+    collect_snapshot_ids_inner(node, &mut ids);
+    ids
+}
+
+#[cfg(unix)]
+fn collect_snapshot_ids_inner(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
+    match node {
+        LayoutSnapshot::Pane(id) => ids.push(*id),
+        LayoutSnapshot::Split { first, second, .. } => {
+            collect_snapshot_ids_inner(first, ids);
+            collect_snapshot_ids_inner(second, ids);
+        }
+    }
+}
+
+#[cfg(unix)]
 fn restore_with_imports_strict(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
@@ -134,7 +161,7 @@ fn restore_with_imports_strict(
     scrollback_limit_bytes: usize,
     default_shell: &str,
     resume_agents_on_restore: bool,
-    imported_panes: &mut HashMap<u32, ImportedPaneRuntime>,
+    imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
@@ -174,7 +201,7 @@ fn restore_with_imports(
     scrollback_limit_bytes: usize,
     default_shell: &str,
     resume_agents_on_restore: bool,
-    imported_panes: &mut HashMap<u32, ImportedPaneRuntime>,
+    imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
@@ -203,7 +230,7 @@ fn restore_with_imports_and_failures(
     scrollback_limit_bytes: usize,
     default_shell: &str,
     resume_agents_on_restore: bool,
-    imported_panes: &mut HashMap<u32, ImportedPaneRuntime>,
+    imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
@@ -250,7 +277,7 @@ fn restore_workspace(
     cols: u16,
     runtime_context: &RestoreRuntimeContext<'_>,
     resumed_agent_sessions: &mut HashSet<String>,
-    imported_panes: &mut HashMap<u32, ImportedPaneRuntime>,
+    imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
 ) -> RestoreFailures<Option<RestoredWorkspace>> {
     let mut tabs = Vec::new();
     let mut terminals = Vec::new();
@@ -331,7 +358,7 @@ fn restore_tab(
     cols: u16,
     runtime_context: &RestoreRuntimeContext<'_>,
     resumed_agent_sessions: &mut HashSet<String>,
-    imported_panes: &mut HashMap<u32, ImportedPaneRuntime>,
+    imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
 ) -> RestoreFailures<Option<RestoredTab>> {
     let (node, id_map) = restore_node_remapped(&snap.layout);
     let reverse_id_map: HashMap<PaneId, u32> = id_map
@@ -370,6 +397,7 @@ fn restore_tab(
 
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
+        let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
@@ -390,15 +418,9 @@ fn restore_tab(
         let was_imported = imported_runtime.is_some();
         let runtime_result = if let Some(imported) = imported_runtime {
             TerminalRuntime::from_handoff_fd(
-                crate::pane::PaneRuntimeImport {
-                    pane_id: *id,
+                crate::handoff_runtime::ImportedHandoffRuntime {
                     master_fd: imported.master_fd,
-                    child_pid: imported.child_pid,
-                    rows: imported.rows,
-                    cols: imported.cols,
-                    cell_width_px: imported.cell_width_px,
-                    cell_height_px: imported.cell_height_px,
-                    initial_history_ansi: imported.initial_history_ansi,
+                    state: imported.state.with_pane_id(*id),
                 },
                 runtime_context.scrollback_limit_bytes,
                 crate::terminal_theme::TerminalTheme::default(),
@@ -443,6 +465,11 @@ fn restore_tab(
             Ok(runtime) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
+                if was_imported {
+                    if let Some(argv) = saved_launch_argv {
+                        terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
+                    }
+                }
                 if let Some(label) = saved_label {
                     terminal.set_manual_label(label);
                 }
@@ -974,6 +1001,7 @@ mod tests {
                                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                                 value: "opencode-session".into(),
                             }),
+                            launch_argv: None,
                         },
                     )]),
                     zoomed: false,
@@ -1100,6 +1128,7 @@ mod tests {
                 label: None,
                 agent_name: None,
                 agent_session: None,
+                launch_argv: None,
             },
         );
         let history = SessionHistorySnapshot {

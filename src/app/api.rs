@@ -12,6 +12,12 @@ mod worktrees;
 use super::{api_helpers::pane_agent_status, App, Mode, OverlayPaneState, ToastKind};
 use crate::events::AppEvent;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeExitAction {
+    RespawnShell,
+    ClosePane,
+}
+
 impl App {
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         if let AppEvent::ClipboardWrite { content } = ev {
@@ -41,6 +47,17 @@ impl App {
         if let AppEvent::WorktreeRemoveFinished(result) = ev {
             self.handle_worktree_remove_finished(result);
             return;
+        }
+
+        if let AppEvent::PaneDied { pane_id } = &ev {
+            if self.runtime_exit_action(*pane_id) == RuntimeExitAction::RespawnShell
+                && self.respawn_shell_for_launch_pane(*pane_id)
+            {
+                self.overlay_panes.remove(pane_id);
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+                return;
+            }
         }
 
         let overlay_state = if let AppEvent::PaneDied { pane_id } = &ev {
@@ -208,6 +225,71 @@ impl App {
         if self.state.active == Some(overlay.ws_idx) {
             self.state.mode = Mode::Terminal;
         }
+    }
+
+    fn runtime_exit_action(&self, pane_id: crate::layout::PaneId) -> RuntimeExitAction {
+        let Some((_, pane_state)) = self.find_pane(pane_id) else {
+            return RuntimeExitAction::ClosePane;
+        };
+        let Some(terminal) = self.state.terminals.get(&pane_state.attached_terminal_id) else {
+            return RuntimeExitAction::ClosePane;
+        };
+
+        if terminal.respawn_shell_on_exit {
+            RuntimeExitAction::RespawnShell
+        } else {
+            RuntimeExitAction::ClosePane
+        }
+    }
+
+    fn respawn_shell_for_launch_pane(&mut self, pane_id: crate::layout::PaneId) -> bool {
+        let Some((ws_idx, pane_state)) = self.find_pane(pane_id) else {
+            return false;
+        };
+        let terminal_id = pane_state.attached_terminal_id.clone();
+        let Some(terminal) = self.state.terminals.get(&terminal_id) else {
+            return false;
+        };
+
+        let cwd = terminal.cwd.clone();
+        let (rows, cols) = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .map(|runtime| runtime.current_size())
+            .unwrap_or_else(|| self.state.estimate_pane_size());
+        let runtime = match crate::terminal::TerminalRuntime::spawn(
+            pane_id,
+            rows,
+            cols,
+            cwd,
+            self.state.pane_scrollback_limit_bytes,
+            self.state.host_terminal_theme,
+            &self.state.default_shell,
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+        ) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                tracing::warn!(
+                    pane = pane_id.raw(),
+                    terminal = %terminal_id,
+                    err = %err,
+                    "failed to respawn shell after launch command exited"
+                );
+                return false;
+            }
+        };
+
+        self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+            terminal.launch_argv = None;
+            terminal.respawn_shell_on_exit = false;
+            terminal.clear_agent_name();
+        }
+        self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        self.schedule_session_save();
+        true
     }
 
     pub(crate) fn emit_pane_state_update(&self, update: &crate::app::actions::PaneStateUpdate) {

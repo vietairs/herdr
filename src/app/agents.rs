@@ -332,6 +332,8 @@ impl App {
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);
         let ws_idx = self.state.workspaces.len() - 1;
+        self.state
+            .remove_alias_shadowed_by_new_pane(self.state.workspaces[ws_idx].tabs[0].root_pane);
         if focus || self.state.active.is_none() {
             self.state.switch_workspace(ws_idx);
             self.state.mode = Mode::Terminal;
@@ -379,6 +381,8 @@ impl App {
             .map_err(|err| AgentStartError::SpawnFailed(err.to_string()))?;
         self.terminal_runtimes
             .insert(result.1.terminal.id.clone(), result.1.runtime);
+        self.state
+            .remove_alias_shadowed_by_new_pane(result.1.pane_id);
         self.state
             .terminals
             .insert(result.1.terminal.id.clone(), result.1.terminal);

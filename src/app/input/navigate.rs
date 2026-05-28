@@ -348,6 +348,7 @@ impl App {
                 temp_files,
             },
         );
+        self.state.remove_alias_shadowed_by_new_pane(new_pane_id);
         self.state.mode = Mode::Terminal;
         Ok(())
     }
