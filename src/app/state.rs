@@ -638,6 +638,7 @@ pub enum Mode {
     ProductAnnouncement,
     Navigate,
     Prefix,
+    Copy,
     Terminal,
     RenameWorkspace,
     RenameTab,
@@ -701,6 +702,14 @@ pub(crate) struct NavigatorState {
     pub search_focused: bool,
     pub state_filter: Option<NavigatorStateFilter>,
     pub expanded_workspaces: std::collections::HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CopyModeState {
+    pub pane_id: PaneId,
+    pub cursor_row: u16,
+    pub cursor_col: u16,
+    pub selecting: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1089,6 +1098,7 @@ pub struct AppState {
     pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
+    pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
     pub tab_scroll: usize,
@@ -1390,6 +1400,7 @@ impl AppState {
             product_announcement: None,
             keybind_help: KeybindHelpState { scroll: 0 },
             navigator: NavigatorState::default(),
+            copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
             tab_scroll: 0,

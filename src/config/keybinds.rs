@@ -282,6 +282,7 @@ pub struct Keybinds {
     pub close_tab: ActionKeybinds,
     pub rename_pane: ActionKeybinds,
     pub edit_scrollback: ActionKeybinds,
+    pub copy_mode: ActionKeybinds,
     pub focus_pane_left: ActionKeybinds,
     pub focus_pane_down: ActionKeybinds,
     pub focus_pane_up: ActionKeybinds,
@@ -460,6 +461,7 @@ impl Config {
             close_tab: action!("keys.close_tab", &self.keys.close_tab),
             rename_pane: action!("keys.rename_pane", &self.keys.rename_pane),
             edit_scrollback: action!("keys.edit_scrollback", &self.keys.edit_scrollback),
+            copy_mode: action!("keys.copy_mode", &self.keys.copy_mode),
             focus_pane_left: action!("keys.focus_pane_left", &self.keys.focus_pane_left),
             focus_pane_down: action!("keys.focus_pane_down", &self.keys.focus_pane_down),
             focus_pane_up: action!("keys.focus_pane_up", &self.keys.focus_pane_up),
@@ -1264,6 +1266,18 @@ next_tab = "prefix+n"
         let kb = Config::default().keybinds();
         assert!(kb.open_worktree.bindings.is_empty());
         assert!(kb.remove_worktree.bindings.is_empty());
+    }
+
+    #[test]
+    fn copy_mode_uses_tmux_prefix_bracket_by_default() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.copy_mode),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('['),
+                KeyModifiers::empty()
+            ))]
+        );
     }
 
     #[test]
