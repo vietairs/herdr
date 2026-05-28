@@ -684,7 +684,7 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::RenameWorkspace => {
             if let Some(ws_idx) = workspace_action_target(state, context) {
-                super::modal::open_rename_workspace(state, ws_idx);
+                super::modal::open_rename_workspace(state, terminal_runtimes, ws_idx);
             }
         }
         NavigateAction::CloseWorkspace => {
@@ -963,7 +963,9 @@ mod tests {
 
     use super::super::{state_with_workspaces, unique_temp_path, wait_for_file};
     use super::*;
-    use crate::{app::App, config::Config, input::TerminalKey, workspace::Workspace};
+    use crate::{
+        app::App, config::Config, input::TerminalKey, terminal::TerminalState, workspace::Workspace,
+    };
 
     fn mark_worktree_space_member(state: &mut AppState, ws_idx: usize, key: &str) {
         state.workspaces[ws_idx].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
@@ -999,6 +1001,31 @@ mod tests {
 
         assert_eq!(state.mode, Mode::RenameWorkspace);
         assert_eq!(state.name_input, "test");
+    }
+
+    #[test]
+    fn rename_workspace_prefills_live_terminal_cwd_label() {
+        let mut state = state_with_workspaces(&["stale"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state.workspaces[0].custom_name = None;
+        state.workspaces[0].identity_cwd = "/__herdr_original__".into();
+        state.terminals.insert(
+            terminal_id.clone(),
+            TerminalState::new(terminal_id, "/__herdr_projects__".into()),
+        );
+        state.keybinds.rename_workspace = crate::config::ActionKeybinds::prefix("g");
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::RenameWorkspace);
+        assert_eq!(state.name_input, "__herdr_projects__");
+        assert_eq!(state.workspaces[0].display_name(), "__herdr_original__");
     }
 
     #[test]

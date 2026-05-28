@@ -280,10 +280,15 @@ pub(crate) fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
-pub(super) fn open_rename_workspace(state: &mut AppState, ws_idx: usize) {
+pub(super) fn open_rename_workspace(
+    state: &mut AppState,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ws_idx: usize,
+) {
     state.selected = ws_idx;
     state.rename_pane_target = None;
-    state.name_input = state.workspaces[ws_idx].display_name();
+    state.name_input =
+        state.workspaces[ws_idx].display_name_from(&state.terminals, terminal_runtimes);
     state.name_input_replace_on_type = false;
     state.mode = Mode::RenameWorkspace;
 }
@@ -660,7 +665,7 @@ pub(super) fn apply_context_menu_action(
             ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
             Some("Rename"),
         ) => {
-            open_rename_workspace(state, ws_idx);
+            open_rename_workspace(state, terminal_runtimes, ws_idx);
         }
         (
             ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
