@@ -10,6 +10,7 @@ pub const DEFAULT_SESSION_NAME: &str = "default";
 const MAX_SESSION_NAME_LEN: usize = 64;
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const STOP_WAIT_POLL: Duration = Duration::from_millis(25);
+const MIN_SOCKET_TIMEOUT: Duration = Duration::from_millis(1);
 
 static EXPLICIT_SESSION_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -255,10 +256,9 @@ fn send_stop_request(
     request: &serde_json::Value,
     deadline: Instant,
 ) -> Result<Option<serde_json::Value>, String> {
-    let write_timeout = time_until(deadline);
-    if write_timeout.is_zero() {
+    let Some(write_timeout) = socket_timeout_until(deadline) else {
         return Ok(None);
-    }
+    };
     stream
         .set_write_timeout(Some(write_timeout))
         .map_err(|err| err.to_string())?;
@@ -283,10 +283,9 @@ fn send_stop_request_inner(
     stream.write_all(b"\n")?;
     stream.flush()?;
 
-    let read_timeout = time_until(deadline);
-    if read_timeout.is_zero() {
+    let Some(read_timeout) = socket_timeout_until(deadline) else {
         return Ok(None);
-    }
+    };
     stream.set_read_timeout(Some(read_timeout))?;
 
     let mut line = String::new();
@@ -325,6 +324,17 @@ fn wait_until_stopped_until(socket_path: &Path, deadline: Instant) -> bool {
 
 fn time_until(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
+}
+
+fn socket_timeout_until(deadline: Instant) -> Option<Duration> {
+    socket_timeout_from_remaining(time_until(deadline))
+}
+
+fn socket_timeout_from_remaining(remaining: Duration) -> Option<Duration> {
+    if remaining.is_zero() {
+        return None;
+    }
+    Some(remaining.max(MIN_SOCKET_TIMEOUT))
 }
 
 pub fn validate_name(name: &str) -> Result<(), String> {
@@ -392,6 +402,19 @@ mod tests {
             let err = std::io::Error::from(kind);
             assert!(stop_request_error_allows_wait(&err), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn socket_timeouts_are_never_zero_duration() {
+        assert_eq!(socket_timeout_from_remaining(Duration::ZERO), None);
+        assert_eq!(
+            socket_timeout_from_remaining(Duration::from_nanos(1)),
+            Some(MIN_SOCKET_TIMEOUT)
+        );
+        assert_eq!(
+            socket_timeout_from_remaining(Duration::from_millis(10)),
+            Some(Duration::from_millis(10))
+        );
     }
 
     #[test]
