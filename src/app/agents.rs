@@ -417,6 +417,7 @@ impl App {
             agent_status: pane.agent_status,
             custom_status: pane.custom_status,
             state_labels: pane.state_labels,
+            agent_session: pane.agent_session,
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,
             pane_id: pane.pane_id,

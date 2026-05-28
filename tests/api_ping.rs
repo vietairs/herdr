@@ -1209,11 +1209,13 @@ fn pane_report_agent_updates_effective_state() {
         thread::sleep(Duration::from_millis(100));
     }
 
+    let session_path = base.join("pi-session.jsonl");
     let hook = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_hook_5","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"working","message":"thinking"}}}}"#,
-            pane_id
+            r#"{{"id":"req_hook_5","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"working","message":"thinking","agent_session_path":"{}"}}}}"#,
+            pane_id,
+            session_path.display()
         ),
     );
     assert_eq!(hook["result"]["type"], "ok");
@@ -1227,6 +1229,16 @@ fn pane_report_agent_updates_effective_state() {
     );
     assert_eq!(pane["result"]["pane"]["agent"], "pi");
     assert_eq!(pane["result"]["pane"]["agent_status"], "working");
+    assert_eq!(
+        pane["result"]["pane"]["agent_session"]["source"],
+        "herdr:pi"
+    );
+    assert_eq!(pane["result"]["pane"]["agent_session"]["agent"], "pi");
+    assert_eq!(pane["result"]["pane"]["agent_session"]["kind"], "path");
+    assert_eq!(
+        pane["result"]["pane"]["agent_session"]["value"],
+        session_path.display().to_string()
+    );
 
     let metadata = send_request(
         &socket_path,
@@ -1259,6 +1271,16 @@ fn pane_report_agent_updates_effective_state() {
         r#"{"id":"req_hook_metadata_agent","method":"agent.get","params":{"target":"pi"}}"#,
     );
     assert_eq!(agent["result"]["agent"]["agent"], "pi");
+    assert_eq!(
+        agent["result"]["agent"]["agent_session"]["source"],
+        "herdr:pi"
+    );
+    assert_eq!(agent["result"]["agent"]["agent_session"]["agent"], "pi");
+    assert_eq!(agent["result"]["agent"]["agent_session"]["kind"], "path");
+    assert_eq!(
+        agent["result"]["agent"]["agent_session"]["value"],
+        session_path.display().to_string()
+    );
     assert_eq!(agent["result"]["agent"]["title"], "Refactor auth");
     assert_eq!(agent["result"]["agent"]["display_agent"], "Pi auth");
     assert_eq!(agent["result"]["agent"]["custom_status"], "middleware");
