@@ -5,6 +5,9 @@
 ### Added
 - Added pane copy mode at `prefix+[` with keyboard navigation, visual selection, and clipboard yank support. (#231)
 
+### Fixed
+- WSL clipboard writes now prefer OSC 52 before WSLg clipboard tools, so mouse selection and double-click copy populate Windows clipboard history in Windows Terminal. (#333)
+
 ## [0.6.4] - 2026-05-27
 
 ### Fixed
