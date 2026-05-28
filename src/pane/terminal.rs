@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -87,11 +87,13 @@ pub(crate) struct ProcessBytesResult {
     pub request_render: bool,
     pub render_delay: Option<Duration>,
     pub clipboard_writes: Vec<Vec<u8>>,
+    pub terminal_responses: Vec<Bytes>,
 }
 
 pub(crate) struct GhosttyPaneTerminal {
     pub core: Mutex<GhosttyPaneCore>,
     key_encoder: Mutex<crate::ghostty::KeyEncoder>,
+    pending_pty_responses: Arc<Mutex<Vec<Bytes>>>,
 }
 
 pub(crate) struct GhosttyPaneCore {
@@ -273,11 +275,15 @@ impl PaneTerminal {
 impl GhosttyPaneTerminal {
     pub fn new(
         mut terminal: crate::ghostty::Terminal,
-        response_writer: mpsc::Sender<Bytes>,
+        _response_writer: mpsc::Sender<Bytes>,
     ) -> std::io::Result<Self> {
+        let pending_pty_responses = Arc::new(Mutex::new(Vec::new()));
+        let callback_responses = pending_pty_responses.clone();
         terminal
             .set_write_pty_callback(move |bytes| {
-                let _ = response_writer.try_send(Bytes::copy_from_slice(bytes));
+                if let Ok(mut responses) = callback_responses.lock() {
+                    responses.push(Bytes::copy_from_slice(bytes));
+                }
             })
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
@@ -308,6 +314,7 @@ impl GhosttyPaneTerminal {
                 osc52_forwarder: Osc52Forwarder::default(),
             }),
             key_encoder: Mutex::new(key_encoder),
+            pending_pty_responses,
         })
     }
 
@@ -362,7 +369,7 @@ impl GhosttyPaneTerminal {
         pane_id: PaneId,
         shell_pid: u32,
         bytes: &[u8],
-        response_writer: &mpsc::Sender<Bytes>,
+        _response_writer: &mpsc::Sender<Bytes>,
     ) -> ProcessBytesResult {
         let Ok(mut core) = self.core.lock() else {
             error!(pane = pane_id.raw(), "ghostty core lock poisoned in reader");
@@ -370,6 +377,7 @@ impl GhosttyPaneTerminal {
                 request_render: false,
                 render_delay: None,
                 clipboard_writes: Vec::new(),
+                terminal_responses: Vec::new(),
             };
         };
 
@@ -412,10 +420,12 @@ impl GhosttyPaneTerminal {
         }
 
         core.kitty_keyboard.observe(filtered_bytes.as_ref());
-        core.terminal.write(filtered_bytes.as_ref());
+        let mut terminal_responses = Vec::new();
         core.default_color_event_tracker
             .observe(filtered_bytes.as_ref());
-        respond_to_default_color_events(&mut core, response_writer);
+        respond_to_default_color_events(&mut core, &mut terminal_responses);
+        core.terminal.write(filtered_bytes.as_ref());
+        terminal_responses.extend(self.drain_pending_pty_responses());
 
         let has_kitty_graphics_sequence = crate::kitty_graphics::is_enabled()
             && contains_kitty_graphics_sequence(filtered_bytes.as_ref());
@@ -434,7 +444,15 @@ impl GhosttyPaneTerminal {
             render_delay: (!synchronized_output && has_kitty_graphics_sequence)
                 .then_some(KITTY_GRAPHICS_REDRAW_SETTLE),
             clipboard_writes,
+            terminal_responses,
         }
+    }
+
+    fn drain_pending_pty_responses(&self) -> Vec<Bytes> {
+        self.pending_pty_responses
+            .lock()
+            .map(|mut responses| std::mem::take(&mut *responses))
+            .unwrap_or_default()
     }
 
     pub fn seed_history_ansi(&self, ansi: &str) {
@@ -1278,13 +1296,13 @@ fn ghostty_cell_style(
 
 fn respond_to_default_color_events(
     core: &mut GhosttyPaneCore,
-    response_writer: &mpsc::Sender<Bytes>,
+    terminal_responses: &mut Vec<Bytes>,
 ) {
     for event in core.default_color_event_tracker.drain_pending() {
         match event {
             DefaultColorEvent::Query(query) => {
                 if let Some(response) = default_color_query_response(query, core) {
-                    let _ = response_writer.try_send(response);
+                    terminal_responses.push(response);
                 }
             }
             DefaultColorEvent::Set(query) => mark_child_default_color_changed(core, query, true),
@@ -2260,7 +2278,71 @@ mod tests {
     }
 
     #[test]
-    fn process_pty_bytes_responds_to_default_color_queries() {
+    fn process_pty_bytes_returns_libghostty_query_responses_without_queuing_input() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b[6n", &tx);
+
+        assert_eq!(result.terminal_responses.len(), 1);
+        assert!(String::from_utf8_lossy(&result.terminal_responses[0]).contains('R'));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn process_pty_bytes_orders_default_color_reply_before_following_device_attribute_reply() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        pane.apply_host_terminal_theme(crate::terminal_theme::TerminalTheme {
+            foreground: None,
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0x00,
+                g: 0x2b,
+                b: 0x36,
+            }),
+        });
+
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07\x1b[c", &tx);
+
+        assert_eq!(result.terminal_responses.len(), 2);
+        assert_eq!(
+            result.terminal_responses[0],
+            Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x1b\\")
+        );
+        assert!(String::from_utf8_lossy(&result.terminal_responses[1]).contains('c'));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn process_pty_bytes_returns_default_color_query_responses_without_queuing_input() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        pane.apply_host_terminal_theme(crate::terminal_theme::TerminalTheme {
+            foreground: None,
+            background: Some(crate::terminal_theme::RgbColor {
+                r: 0x00,
+                g: 0x2b,
+                b: 0x36,
+            }),
+        });
+
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11;?\x07", &tx);
+
+        assert_eq!(
+            result.terminal_responses,
+            vec![Bytes::from_static(b"\x1b]11;rgb:0000/2b2b/3636\x1b\\")]
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn process_pty_bytes_returns_default_color_query_responses_in_order() {
         let (tx, mut rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
@@ -2278,21 +2360,20 @@ mod tests {
             }),
         });
 
-        pane.process_pty_bytes(pane_id, 0, b"\x1b]10;?\x07\x1b]11;?\x07", &tx);
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]10;?\x07\x1b]11;?\x07", &tx);
 
         assert_eq!(
-            rx.try_recv().unwrap().as_ref(),
-            b"\x1b]10;rgb:6565/7b7b/8383\x1b\\"
-        );
-        assert_eq!(
-            rx.try_recv().unwrap().as_ref(),
-            b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\"
+            result.terminal_responses,
+            vec![
+                Bytes::from_static(b"\x1b]10;rgb:6565/7b7b/8383\x1b\\"),
+                Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\"),
+            ]
         );
         assert!(rx.try_recv().is_err());
     }
 
     #[test]
-    fn process_pty_bytes_responds_to_split_default_color_query() {
+    fn process_pty_bytes_returns_split_default_color_query_response() {
         let (tx, mut rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
@@ -2306,21 +2387,23 @@ mod tests {
             }),
         });
 
-        pane.process_pty_bytes(pane_id, 0, b"\x1b]11", &tx);
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]11", &tx);
+        assert!(result.terminal_responses.is_empty());
         assert!(rx.try_recv().is_err());
-        pane.process_pty_bytes(pane_id, 0, b";?\x1b", &tx);
+        let result = pane.process_pty_bytes(pane_id, 0, b";?\x1b", &tx);
+        assert!(result.terminal_responses.is_empty());
         assert!(rx.try_recv().is_err());
-        pane.process_pty_bytes(pane_id, 0, b"\\", &tx);
+        let result = pane.process_pty_bytes(pane_id, 0, b"\\", &tx);
 
         assert_eq!(
-            rx.try_recv().unwrap().as_ref(),
-            b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\"
+            result.terminal_responses,
+            vec![Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\")]
         );
         assert!(rx.try_recv().is_err());
     }
 
     #[test]
-    fn process_pty_bytes_stops_replying_after_child_default_color_set() {
+    fn process_pty_bytes_tracks_default_color_set_and_reset_before_replying() {
         let (tx, mut rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
@@ -2334,13 +2417,15 @@ mod tests {
             }),
         });
 
-        pane.process_pty_bytes(pane_id, 0, b"\x1b]11;rgb:11/22/33\x07\x1b]11;?\x07", &tx);
+        let result =
+            pane.process_pty_bytes(pane_id, 0, b"\x1b]11;rgb:11/22/33\x07\x1b]11;?\x07", &tx);
+        assert!(result.terminal_responses.is_empty());
         assert!(rx.try_recv().is_err());
 
-        pane.process_pty_bytes(pane_id, 0, b"\x1b]111\x07\x1b]11;?\x07", &tx);
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b]111\x07\x1b]11;?\x07", &tx);
         assert_eq!(
-            rx.try_recv().unwrap().as_ref(),
-            b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\"
+            result.terminal_responses,
+            vec![Bytes::from_static(b"\x1b]11;rgb:fdfd/f6f6/e3e3\x1b\\")]
         );
         assert!(rx.try_recv().is_err());
     }

@@ -735,6 +735,21 @@ fn write_all_nonblocking(
 }
 
 #[cfg(unix)]
+fn write_pty_bytes_locked(
+    writer: &mut std::fs::File,
+    fd: std::os::fd::RawFd,
+    bytes: &[u8],
+    io_stop: &AtomicBool,
+    pty_write_lock: &Mutex<()>,
+) -> std::io::Result<()> {
+    let _guard = pty_write_lock
+        .lock()
+        .map_err(|_| std::io::Error::other("pty write lock poisoned"))?;
+    write_all_nonblocking(writer, fd, bytes, io_stop)?;
+    writer.flush()
+}
+
+#[cfg(unix)]
 fn resize_pty_fd(
     fd: std::os::fd::RawFd,
     rows: u16,
@@ -1082,11 +1097,13 @@ impl PaneRuntime {
         set_nonblocking(master_fd.as_raw_fd())?;
         let reader = file_from_duplicated_fd(master_fd.as_raw_fd())?;
         let writer = file_from_duplicated_fd(master_fd.as_raw_fd())?;
+        let terminal_response_writer = file_from_duplicated_fd(master_fd.as_raw_fd())?;
         let force_resize_fd = duplicate_cloexec_fd(master_fd.as_raw_fd())?;
         let resize_fd = unsafe {
             std::os::fd::OwnedFd::from_raw_fd(duplicate_cloexec_fd(master_fd.as_raw_fd())?)
         };
         let io_stop = Arc::new(AtomicBool::new(false));
+        let pty_write_lock = Arc::new(Mutex::new(()));
         let reader_paused = Arc::new(AtomicBool::new(true));
         let reader_pause_ack = Arc::new(AtomicBool::new(false));
 
@@ -1121,6 +1138,8 @@ impl PaneRuntime {
 
             let mut reader = reader;
             let reader_fd = reader.as_raw_fd();
+            let mut terminal_response_writer = terminal_response_writer;
+            let terminal_response_fd = terminal_response_writer.as_raw_fd();
             let terminal = terminal.clone();
             let response_writer = input_tx.clone();
             let render_notify = render_notify.clone();
@@ -1128,6 +1147,7 @@ impl PaneRuntime {
             let child_pid = child_pid.clone();
             let events = events.clone();
             let io_stop = io_stop.clone();
+            let pty_write_lock = pty_write_lock.clone();
             let reader_paused = reader_paused.clone();
             let reader_pause_ack = reader_pause_ack.clone();
             let rt = tokio::runtime::Handle::current();
@@ -1166,6 +1186,18 @@ impl PaneRuntime {
                                 &buf[..n],
                                 &response_writer,
                             );
+                            for response in result.terminal_responses {
+                                if let Err(err) = write_pty_bytes_locked(
+                                    &mut terminal_response_writer,
+                                    terminal_response_fd,
+                                    &response,
+                                    &io_stop,
+                                    &pty_write_lock,
+                                ) {
+                                    warn!(pane = pane_id.raw(), err = %err, "handoff terminal response write failed");
+                                    break;
+                                }
+                            }
                             if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                                 render_notify.notify_one();
                             }
@@ -1198,19 +1230,21 @@ impl PaneRuntime {
             let mut writer = writer;
             let writer_fd = writer.as_raw_fd();
             let io_stop = io_stop.clone();
+            let pty_write_lock = pty_write_lock.clone();
             tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Handle::current();
                 while let Some(bytes) = rt.block_on(input_rx.recv()) {
                     if io_stop.load(Ordering::Acquire) {
                         break;
                     }
-                    if let Err(e) = write_all_nonblocking(&mut writer, writer_fd, &bytes, &io_stop)
-                    {
+                    if let Err(e) = write_pty_bytes_locked(
+                        &mut writer,
+                        writer_fd,
+                        &bytes,
+                        &io_stop,
+                        &pty_write_lock,
+                    ) {
                         warn!(pane = pane_id.raw(), err = %e, "handoff pty write failed");
-                        break;
-                    }
-                    if let Err(e) = writer.flush() {
-                        warn!(pane = pane_id.raw(), err = %e, "handoff pty flush failed");
                         break;
                     }
                 }
@@ -1321,9 +1355,11 @@ impl PaneRuntime {
         set_nonblocking(master_fd)?;
         let reader = file_from_duplicated_fd(master_fd)?;
         let writer = file_from_duplicated_fd(master_fd)?;
+        let terminal_response_writer = file_from_duplicated_fd(master_fd)?;
         let force_resize_fd = duplicate_cloexec_fd(master_fd)?;
         let resize_fd = duplicate_cloexec_fd(master_fd)?;
         let io_stop = Arc::new(AtomicBool::new(false));
+        let pty_write_lock = Arc::new(Mutex::new(()));
         let reader_paused = Arc::new(AtomicBool::new(false));
         let reader_pause_ack = Arc::new(AtomicBool::new(false));
         let (reader_stopped_tx, reader_stopped_rx) = std::sync::mpsc::channel();
@@ -1367,6 +1403,8 @@ impl PaneRuntime {
 
             let mut reader = reader;
             let reader_fd = reader.as_raw_fd();
+            let mut terminal_response_writer = terminal_response_writer;
+            let terminal_response_fd = terminal_response_writer.as_raw_fd();
             let terminal = terminal.clone();
             let response_writer = input_tx.clone();
             let render_notify = render_notify.clone();
@@ -1374,6 +1412,7 @@ impl PaneRuntime {
             let child_pid = child_pid.clone();
             let events = events.clone();
             let io_stop = io_stop.clone();
+            let pty_write_lock = pty_write_lock.clone();
             let reader_paused = reader_paused.clone();
             let reader_pause_ack = reader_pause_ack.clone();
             let rt = tokio::runtime::Handle::current();
@@ -1412,6 +1451,18 @@ impl PaneRuntime {
                                 &buf[..n],
                                 &response_writer,
                             );
+                            for response in result.terminal_responses {
+                                if let Err(err) = write_pty_bytes_locked(
+                                    &mut terminal_response_writer,
+                                    terminal_response_fd,
+                                    &response,
+                                    &io_stop,
+                                    &pty_write_lock,
+                                ) {
+                                    warn!(pane = pane_id.raw(), err = %err, "terminal response write failed");
+                                    break;
+                                }
+                            }
                             if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                                 render_notify.notify_one();
                             }
@@ -1720,19 +1771,21 @@ impl PaneRuntime {
             let mut writer = writer;
             let writer_fd = writer.as_raw_fd();
             let io_stop = io_stop.clone();
+            let pty_write_lock = pty_write_lock.clone();
             tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Handle::current();
                 while let Some(bytes) = rt.block_on(input_rx.recv()) {
                     if io_stop.load(Ordering::Acquire) {
                         break;
                     }
-                    if let Err(e) = write_all_nonblocking(&mut writer, writer_fd, &bytes, &io_stop)
-                    {
+                    if let Err(e) = write_pty_bytes_locked(
+                        &mut writer,
+                        writer_fd,
+                        &bytes,
+                        &io_stop,
+                        &pty_write_lock,
+                    ) {
                         warn!(pane = pane_id.raw(), err = %e, "pty write failed");
-                        break;
-                    }
-                    if let Err(e) = writer.flush() {
-                        warn!(pane = pane_id.raw(), err = %e, "pty flush failed");
                         break;
                     }
                 }
