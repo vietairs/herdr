@@ -82,7 +82,12 @@ pub(super) fn render_release_notes_overlay(app: &AppState, frame: &mut Frame, ar
             .add_modifier(Modifier::BOLD),
     );
 
-    let sections = release_notes_sections(stack.content, notes.preview);
+    let sections = release_notes_sections(
+        stack.content,
+        notes.preview,
+        &app.update_install_command,
+        &app.palette,
+    );
     let metrics = crate::pane::ScrollMetrics {
         offset_from_bottom: app.release_notes_max_scroll().saturating_sub(notes.scroll) as usize,
         max_offset_from_bottom: app.release_notes_max_scroll() as usize,
@@ -389,9 +394,17 @@ pub(crate) struct ReleaseNotesSections {
     pub notes_body: Rect,
 }
 
-pub(crate) fn release_notes_sections(area: Rect, preview: bool) -> ReleaseNotesSections {
+pub(crate) fn release_notes_sections(
+    area: Rect,
+    preview: bool,
+    install_command: &str,
+    p: &Palette,
+) -> ReleaseNotesSections {
     if preview && area.height >= 6 {
-        let rows = Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).areas::<2>(area);
+        let preview_height = release_notes_preview_panel_height(area.width, install_command, p)
+            .min(area.height.saturating_sub(1));
+        let rows = Layout::vertical([Constraint::Length(preview_height), Constraint::Min(0)])
+            .areas::<2>(area);
         ReleaseNotesSections {
             instructions: Some(rows[0]),
             notes_body: rows[1],
@@ -402,6 +415,14 @@ pub(crate) fn release_notes_sections(area: Rect, preview: bool) -> ReleaseNotesS
             notes_body: area,
         }
     }
+}
+
+fn release_notes_preview_panel_height(area_width: u16, install_command: &str, p: &Palette) -> u16 {
+    let text_width = area_width.saturating_sub(2).max(1);
+    let text_height = Paragraph::new(release_notes_preview_lines("", install_command, p))
+        .wrap(Wrap { trim: false })
+        .line_count(text_width) as u16;
+    text_height.saturating_add(3)
 }
 
 pub(super) fn release_notes_preview_lines<'a>(
@@ -439,11 +460,15 @@ fn render_release_notes_preview_panel(
     install_command: &str,
     p: &Palette,
 ) {
+    let preview_lines = release_notes_preview_lines(_version, install_command, p);
+    let text_height = Paragraph::new(preview_lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(area.width.saturating_sub(2).max(1)) as u16;
     let rows = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(text_height),
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Min(0),
     ])
     .areas::<4>(area);
 
@@ -454,8 +479,7 @@ fn render_release_notes_preview_panel(
         rows[0].height,
     );
     frame.render_widget(
-        Paragraph::new(release_notes_preview_lines(_version, install_command, p))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(preview_lines).wrap(Wrap { trim: false }),
         text_area,
     );
 
@@ -483,7 +507,170 @@ pub(crate) fn product_announcement_display_lines<'a>(
     release_notes_lines(announcement.body.as_str(), p)
 }
 
+pub(crate) fn release_notes_wrapped_line_count(lines: &[(usize, Line<'_>)], width: u16) -> usize {
+    Paragraph::new(
+        lines
+            .iter()
+            .map(|(_, line)| line.clone())
+            .collect::<Vec<_>>(),
+    )
+    .wrap(Wrap { trim: false })
+    .line_count(width.max(1))
+}
+
 pub(crate) fn release_notes_close_button_rect(area: Rect) -> Rect {
     let width = action_button_width(Some("esc"), "close");
     Rect::new(area.x + area.width.saturating_sub(width), area.y, width, 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::Palette;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer, area: Rect) -> String {
+        (area.y..area.y + area.height)
+            .map(|row| {
+                (area.x..area.x + area.width)
+                    .map(|x| buffer[(x, row)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn release_notes_inline_code_spans_are_styled_without_backticks() {
+        let palette = Palette::catppuccin();
+        let lines = release_notes_lines("- `herdr pane run ...` now works", &palette);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_text(&lines[0].1), " • herdr pane run ... now works");
+        assert_eq!(lines[0].1.spans[1].content.as_ref(), "herdr pane run ...");
+        assert_eq!(lines[0].1.spans[1].style.fg, Some(palette.accent));
+        assert_eq!(lines[0].1.spans[1].style.bg, Some(palette.surface0));
+    }
+
+    #[test]
+    fn release_notes_config_inline_code_uses_nonbreaking_spaces() {
+        let palette = Palette::catppuccin();
+        let lines = release_notes_lines("- After: `new_tab = \"prefix+c\"`", &palette);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0].1.spans[2].content.as_ref(),
+            "new_tab\u{00a0}=\u{00a0}\"prefix+c\""
+        );
+        assert_eq!(
+            line_text(&lines[0].1).replace('\u{00a0}', " "),
+            " • After: new_tab = \"prefix+c\""
+        );
+    }
+
+    #[test]
+    fn release_notes_preview_lines_show_update_steps() {
+        let palette = Palette::catppuccin();
+        let lines = release_notes_preview_lines("0.5.0", "herdr update", &palette);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(line_text(&lines[0]), "● update ready");
+        assert_eq!(
+            line_text(&lines[1]),
+            "detach from this session, then run herdr update in your shell"
+        );
+        assert_eq!(lines[0].spans[0].style.fg, Some(palette.accent));
+        assert_eq!(lines[0].spans[1].style.fg, Some(palette.text));
+    }
+
+    #[test]
+    fn release_notes_preview_section_expands_for_wrapped_install_command() {
+        let palette = Palette::catppuccin();
+        let area = Rect::new(0, 0, 40, 12);
+        let sections =
+            release_notes_sections(area, true, "brew update && brew upgrade herdr", &palette);
+
+        let instructions = sections
+            .instructions
+            .expect("preview should reserve an instructions panel");
+        assert_eq!(instructions.height, 7);
+        assert_eq!(sections.notes_body.y, 7);
+        assert_eq!(sections.notes_body.height, 5);
+    }
+
+    #[test]
+    fn release_notes_preview_section_keeps_short_install_command_compact() {
+        let palette = Palette::catppuccin();
+        let area = Rect::new(0, 0, 80, 12);
+        let sections = release_notes_sections(area, true, "herdr update", &palette);
+
+        let instructions = sections
+            .instructions
+            .expect("preview should reserve an instructions panel");
+        assert_eq!(instructions.height, 5);
+        assert_eq!(sections.notes_body.y, 5);
+        assert_eq!(sections.notes_body.height, 7);
+    }
+
+    #[test]
+    fn release_notes_preview_panel_renders_wrapped_install_command_suffix() {
+        let palette = Palette::catppuccin();
+        let area = Rect::new(0, 0, 40, 7);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_release_notes_preview_panel(
+                    frame,
+                    area,
+                    "0.6.4",
+                    "brew update && brew upgrade herdr",
+                    &palette,
+                );
+            })
+            .unwrap();
+
+        let rendered = buffer_text(terminal.backend().buffer(), area);
+        assert!(rendered.contains("your shell"), "{rendered}");
+    }
+
+    #[test]
+    fn release_notes_fenced_code_blocks_render_as_preformatted_lines() {
+        let palette = Palette::catppuccin();
+        let lines = release_notes_lines(
+            "### Fixed\n```bash\njust check\n- not a bullet\n```\n- after",
+            &palette,
+        );
+
+        assert_eq!(lines.len(), 4);
+        assert_eq!(line_text(&lines[0].1), " FIXED");
+        assert_eq!(line_text(&lines[1].1), "▏ just check");
+        assert_eq!(line_text(&lines[2].1), "▏ - not a bullet");
+        assert_eq!(line_text(&lines[3].1), " • after");
+        assert_eq!(lines[1].1.spans[0].style.fg, Some(palette.accent));
+        assert_eq!(lines[1].1.spans[0].style.bg, Some(palette.surface1));
+        assert_eq!(lines[1].1.spans[1].style.bg, Some(palette.surface1));
+        assert_eq!(lines[1].1.spans[2].style.bg, Some(palette.surface1));
+    }
+
+    #[test]
+    fn release_notes_fenced_code_blocks_preserve_blank_lines() {
+        let palette = Palette::catppuccin();
+        let lines = release_notes_lines("```\nfirst\n\nsecond\n```", &palette);
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(line_text(&lines[0].1), "▏ first");
+        assert_eq!(line_text(&lines[1].1), "▏ ");
+        assert_eq!(line_text(&lines[2].1), "▏ second");
+    }
 }

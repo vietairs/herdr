@@ -385,7 +385,15 @@ impl AppState {
             .release_notes
             .as_ref()
             .is_some_and(|notes| notes.preview);
-        Some(crate::ui::release_notes_sections(body, preview).notes_body)
+        Some(
+            crate::ui::release_notes_sections(
+                body,
+                preview,
+                &self.update_install_command,
+                &self.palette,
+            )
+            .notes_body,
+        )
     }
 
     fn release_notes_scroll_metrics(&self) -> Option<crate::pane::ScrollMetrics> {
@@ -394,17 +402,14 @@ impl AppState {
         let viewport_rows = body.height.max(1) as usize;
         let lines = crate::ui::release_notes_display_lines(notes, &self.palette);
 
-        let rows_for_width = |wrap_width: usize| {
-            lines
-                .iter()
-                .map(|(width, _)| width.max(&1).div_ceil(wrap_width.max(1)))
-                .sum::<usize>()
+        let rows_for_width = |wrap_width: u16| {
+            crate::ui::release_notes_wrapped_line_count(&lines, wrap_width.max(1))
         };
 
-        let full_width = body.width.max(1) as usize;
+        let full_width = body.width.max(1);
         let mut total_rows = rows_for_width(full_width);
         let wrap_width = if total_rows > viewport_rows && full_width > 1 {
-            body.width.saturating_sub(1).max(1) as usize
+            body.width.saturating_sub(1).max(1)
         } else {
             full_width
         };
@@ -496,17 +501,14 @@ impl AppState {
         let viewport_rows = body.height.max(1) as usize;
         let lines = crate::ui::product_announcement_display_lines(announcement, &self.palette);
 
-        let rows_for_width = |wrap_width: usize| {
-            lines
-                .iter()
-                .map(|(width, _)| width.max(&1).div_ceil(wrap_width.max(1)))
-                .sum::<usize>()
+        let rows_for_width = |wrap_width: u16| {
+            crate::ui::release_notes_wrapped_line_count(&lines, wrap_width.max(1))
         };
 
-        let full_width = body.width.max(1) as usize;
+        let full_width = body.width.max(1);
         let mut total_rows = rows_for_width(full_width);
         let wrap_width = if total_rows > viewport_rows && full_width > 1 {
-            body.width.saturating_sub(1).max(1) as usize
+            body.width.saturating_sub(1).max(1)
         } else {
             full_width
         };
