@@ -1628,6 +1628,25 @@ fn gh_auth_succeeds() -> bool {
     command_succeeds("gh", &["auth", "status", "--hostname", "github.com"])
 }
 
+fn gh_viewer_login() -> Option<String> {
+    let mut command = Command::new("gh");
+    command
+        .args(["api", "user", "--jq", ".login"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let Ok(Some(output)) = command_output_with_timeout(&mut command, GH_COMMAND_TIMEOUT) else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+
+    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!login.is_empty()).then_some(login)
+}
+
 fn gh_viewer_star_status() -> GithubStarStatus {
     let mut command = Command::new("gh");
     command
@@ -1666,9 +1685,14 @@ fn parse_star_prompt_response(input: &str) -> Option<bool> {
     }
 }
 
-fn prompt_to_star_repository() -> io::Result<bool> {
+fn star_prompt_message(viewer_login: &str) -> String {
+    format!("If herdr has been useful, star it using gh account {viewer_login}? [Y/n] ")
+}
+
+fn prompt_to_star_repository(viewer_login: &str) -> io::Result<bool> {
+    let prompt = star_prompt_message(viewer_login);
     loop {
-        eprint!("If herdr has been useful, would you like to star it? [Y/n] ");
+        eprint!("{prompt}");
         io::stderr().flush()?;
 
         let mut input = String::new();
@@ -1732,13 +1756,17 @@ fn maybe_offer_star_after_successful_update() {
         GithubStarStatus::Unknown => return,
     }
 
+    let Some(viewer_login) = gh_viewer_login() else {
+        return;
+    };
+
     record_star_prompt_shown(&mut state);
     if let Err(err) = save_star_prompt_state_to_path(&path, &state) {
         tracing::warn!(err = %err, "failed to save GitHub star prompt state");
         return;
     }
 
-    match prompt_to_star_repository() {
+    match prompt_to_star_repository(&viewer_login) {
         Ok(true) => {
             if star_repository_with_gh() {
                 state.known_starred = true;
@@ -2764,6 +2792,14 @@ mod tests {
         assert_eq!(parse_star_prompt_response("n"), Some(false));
         assert_eq!(parse_star_prompt_response("no"), Some(false));
         assert_eq!(parse_star_prompt_response("later"), None);
+    }
+
+    #[test]
+    fn star_prompt_mentions_gh_account_when_known() {
+        assert_eq!(
+            star_prompt_message("ogulcancelik"),
+            "If herdr has been useful, star it using gh account ogulcancelik? [Y/n] "
+        );
     }
 
     #[test]
