@@ -1218,6 +1218,7 @@ impl HeadlessServer {
                         } else {
                             toast_message_from_state_change(
                                 &self.app.state,
+                                &self.app.terminal_runtimes,
                                 pane_id_val,
                                 suppress_active_tab_notifications,
                                 prev_state,
@@ -1302,6 +1303,7 @@ impl HeadlessServer {
                         } else {
                             toast_message_from_state_change(
                                 &self.app.state,
+                                &self.app.terminal_runtimes,
                                 pane_id_val,
                                 suppress_active_tab_notifications,
                                 prev_state,
@@ -2115,12 +2117,17 @@ impl HeadlessServer {
                             crate::app::state::ToastKind::Finished => "finished",
                             crate::app::state::ToastKind::UpdateInstalled => "updated",
                         };
+                        let workspace_label = self.app.state.workspaces[*ws_idx].display_name_from(
+                            &self.app.state.terminals,
+                            &self.app.terminal_runtimes,
+                        );
                         let msg_text = format!(
                             "{} {}: {}",
                             agent_label,
                             event_text,
                             crate::app::actions::notification_context(
                                 &self.app.state.workspaces[*ws_idx],
+                                &workspace_label,
                                 *ws_idx,
                                 *pane_id,
                             )
@@ -2491,7 +2498,10 @@ impl HeadlessServer {
             .agent_metadata_deadline
             .filter(|deadline| now >= *deadline)
         {
+            let previous_toast = self.app.state.toast.clone();
             for update in self.app.state.expire_agent_metadata_at(deadline, now) {
+                self.app
+                    .refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
                 self.app.emit_pane_state_update(&update);
             }
             self.app.sync_agent_metadata_deadline();

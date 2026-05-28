@@ -73,10 +73,11 @@ fn toast_agent_label(agent_label: &str) -> &str {
 
 pub fn notification_context(
     ws: &crate::workspace::Workspace,
+    workspace_label: &str,
     ws_idx: usize,
     pane_id: PaneId,
 ) -> String {
-    let mut context = format!("{} · {}", ws.display_name(), ws_idx + 1);
+    let mut context = format!("{} · {}", workspace_label, ws_idx + 1);
     if ws.tabs.len() > 1 {
         if let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) {
             let tab = &ws.tabs[tab_idx];
@@ -2139,7 +2140,13 @@ impl AppState {
                     ToastKind::Finished => "finished",
                     ToastKind::UpdateInstalled => "updated",
                 };
-                let context = notification_context(&self.workspaces[ws_idx], ws_idx, pane_id);
+                let workspace_label = self.workspaces[ws_idx].display_name();
+                let context = notification_context(
+                    &self.workspaces[ws_idx],
+                    &workspace_label,
+                    ws_idx,
+                    pane_id,
+                );
                 self.toast = Some(ToastNotification {
                     kind,
                     title: format!("{} {}", toast_agent_label(agent_label), event_text),
@@ -2242,6 +2249,17 @@ mod tests {
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: true,
         });
+    }
+
+    #[test]
+    fn notification_context_formats_resolved_workspace_label() {
+        let state = app_with_workspaces(&["stale"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+
+        assert_eq!(
+            notification_context(&state.workspaces[0], "__herdr_projects__", 0, root),
+            "__herdr_projects__ · 1"
+        );
     }
 
     fn selected_word(row: &str, col: u16) -> Option<String> {
