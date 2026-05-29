@@ -3363,6 +3363,23 @@ last_pane = "prefix+tab"
         );
     }
 
+    #[tokio::test]
+    async fn route_client_input_does_not_forward_incomplete_osc_introducer_to_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_input(b"\x1b]".to_vec());
+
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn parse_raw_input_bytes_with_ranges_tracks_offsets() {
         // Verify that the range-aware parser correctly tracks byte offsets

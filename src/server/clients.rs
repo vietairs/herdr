@@ -33,6 +33,8 @@ pub(crate) struct ClientConnection {
     pub(crate) host_terminal_theme: crate::terminal_theme::TerminalTheme,
     /// Last reported focus state for this client's outer terminal.
     pub(crate) outer_terminal_focus: Option<bool>,
+    /// Stateful parser for app-client input split across transport reads.
+    pub(crate) raw_input: crate::raw_input::RawInputFramer,
     /// Monotonic activity stamp used to choose the fallback foreground client.
     pub(crate) last_activity: u64,
     /// Render baseline for the negotiated client encoding.
@@ -93,6 +95,7 @@ impl ClientConnection {
             cell_size,
             host_terminal_theme,
             outer_terminal_focus,
+            raw_input: crate::raw_input::RawInputFramer::default(),
             last_activity,
             render_state: ClientRenderState::new(render_encoding),
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
