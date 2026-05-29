@@ -129,8 +129,14 @@ herdr pane report-agent <pane_id> \
   --state idle|working|blocked|unknown \
   [--message TEXT] \
   [--custom-status TEXT] \
-  [--seq N]
+  [--seq N] \
+  [--agent-session-id ID] \
+  [--agent-session-path PATH]
 ```
+
+`pane get`, `pane list`, `agent get`, and `agent list` include a read-only `agent_session` object when an official integration has reported a native session reference. If no native session reference is stored, the field is omitted.
+
+Those commands include `foreground_cwd` when Herdr can resolve the cwd of the foreground process controlling the pane. The existing `cwd` field remains the pane/workspace cwd used for labels and follow-cwd behavior.
 
 Report display-only pane metadata without taking over semantic state:
 
