@@ -1,5 +1,6 @@
 use std::cell::Cell;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
     Arc, Mutex,
@@ -637,6 +638,96 @@ fn pane_shell_from(configured_shell: &str, env_shell: Option<String>) -> String 
         .unwrap_or_else(|| "/bin/sh".into())
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct PaneShellConfig<'a> {
+    pub(crate) default_shell: &'a str,
+    pub(crate) mode: crate::config::ShellModeConfig,
+}
+
+impl<'a> PaneShellConfig<'a> {
+    pub(crate) fn new(default_shell: &'a str, mode: crate::config::ShellModeConfig) -> Self {
+        Self {
+            default_shell,
+            mode,
+        }
+    }
+}
+
+fn shell_mode_uses_login_shell(
+    mode: crate::config::ShellModeConfig,
+    target_is_macos: bool,
+) -> bool {
+    match mode {
+        crate::config::ShellModeConfig::Auto => target_is_macos,
+        crate::config::ShellModeConfig::Login => true,
+        crate::config::ShellModeConfig::NonLogin => false,
+    }
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn resolve_shell_for_login_mode(shell: &str) -> io::Result<String> {
+    if shell.contains(std::path::MAIN_SEPARATOR) {
+        let path = Path::new(shell);
+        return is_executable_file(path)
+            .then(|| shell.to_string())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("login shell {shell:?} is not executable"),
+                )
+            });
+    }
+
+    std::env::var_os("PATH")
+        .and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(shell))
+                .find(|candidate| is_executable_file(candidate))
+        })
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("login shell {shell:?} was not found on PATH"),
+            )
+        })
+}
+
+fn pane_shell_command_builder_for_target(
+    shell_config: PaneShellConfig<'_>,
+    target_is_macos: bool,
+) -> io::Result<CommandBuilder> {
+    let shell = pane_shell(shell_config.default_shell);
+    if shell_mode_uses_login_shell(shell_config.mode, target_is_macos) {
+        let mut cmd = CommandBuilder::new_default_prog();
+        cmd.env("SHELL", resolve_shell_for_login_mode(&shell)?);
+        Ok(cmd)
+    } else {
+        Ok(CommandBuilder::new(&shell))
+    }
+}
+
+fn pane_shell_command_builder(shell_config: PaneShellConfig<'_>) -> io::Result<CommandBuilder> {
+    pane_shell_command_builder_for_target(shell_config, cfg!(target_os = "macos"))
+}
+
 #[cfg(unix)]
 fn duplicate_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
     let duplicated = unsafe { libc::dup(fd) };
@@ -909,7 +1000,7 @@ impl PaneRuntime {
         cwd: std::path::PathBuf,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: PaneShellConfig<'_>,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
@@ -921,7 +1012,7 @@ impl PaneRuntime {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
-            default_shell,
+            shell_config,
             None,
             events,
             render_notify,
@@ -936,14 +1027,13 @@ impl PaneRuntime {
         cwd: std::path::PathBuf,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: PaneShellConfig<'_>,
         initial_history_ansi: Option<&str>,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
-        let shell = pane_shell(default_shell);
-        let mut cmd = CommandBuilder::new(&shell);
+        let mut cmd = pane_shell_command_builder(shell_config)?;
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
         apply_pane_terminal_env(&mut cmd);
@@ -2291,6 +2381,135 @@ mod tests {
     fn pane_shell_ignores_empty_values() {
         assert_eq!(pane_shell_from("   ", Some("  ".to_string())), "/bin/sh");
         assert_eq!(pane_shell_from("", None), "/bin/sh");
+    }
+
+    #[test]
+    fn shell_mode_auto_uses_login_shell_only_on_macos() {
+        assert!(shell_mode_uses_login_shell(
+            crate::config::ShellModeConfig::Auto,
+            true
+        ));
+        assert!(!shell_mode_uses_login_shell(
+            crate::config::ShellModeConfig::Auto,
+            false
+        ));
+        assert!(shell_mode_uses_login_shell(
+            crate::config::ShellModeConfig::Login,
+            false
+        ));
+        assert!(!shell_mode_uses_login_shell(
+            crate::config::ShellModeConfig::NonLogin,
+            true
+        ));
+    }
+
+    #[test]
+    fn login_shell_builder_uses_default_prog_with_resolved_shell_env() {
+        let cmd = pane_shell_command_builder_for_target(
+            PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::Login),
+            false,
+        )
+        .unwrap();
+        assert!(cmd.is_default_prog());
+        assert_eq!(
+            cmd.get_env("SHELL").and_then(std::ffi::OsStr::to_str),
+            Some("/bin/sh")
+        );
+    }
+
+    #[test]
+    fn auto_shell_builder_uses_login_shell_on_macos_target() {
+        let cmd = pane_shell_command_builder_for_target(
+            PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::Auto),
+            true,
+        )
+        .unwrap();
+        assert!(cmd.is_default_prog());
+        assert_eq!(
+            cmd.get_env("SHELL").and_then(std::ffi::OsStr::to_str),
+            Some("/bin/sh")
+        );
+    }
+
+    #[test]
+    fn auto_shell_builder_keeps_direct_shell_on_non_macos_target() {
+        let cmd = pane_shell_command_builder_for_target(
+            PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::Auto),
+            false,
+        )
+        .unwrap();
+        assert!(!cmd.is_default_prog());
+        assert_eq!(cmd.get_argv(), &[std::ffi::OsString::from("/bin/sh")]);
+    }
+
+    #[test]
+    fn login_shell_builder_rejects_missing_shell_instead_of_falling_back() {
+        let err = pane_shell_command_builder_for_target(
+            PaneShellConfig::new(
+                "/__herdr_missing_shell__",
+                crate::config::ShellModeConfig::Login,
+            ),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn login_shell_builder_resolves_bare_shell_names_from_path() {
+        let _lock = crate::integration::integration_env_lock();
+        let base = std::env::temp_dir().join(format!(
+            "herdr-login-shell-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let shell = bin.join("fake-shell");
+        std::fs::write(&shell, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", &bin);
+
+        let cmd = pane_shell_command_builder_for_target(
+            PaneShellConfig::new("fake-shell", crate::config::ShellModeConfig::Login),
+            false,
+        )
+        .unwrap();
+
+        assert!(cmd.is_default_prog());
+        assert_eq!(
+            cmd.get_env("SHELL").and_then(std::ffi::OsStr::to_str),
+            shell.to_str()
+        );
+        match original_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn login_shell_resolution_preserves_shell_paths() {
+        assert_eq!(resolve_shell_for_login_mode("/bin/sh").unwrap(), "/bin/sh");
+    }
+
+    #[test]
+    fn non_login_shell_builder_execs_resolved_shell_directly() {
+        let cmd = pane_shell_command_builder(PaneShellConfig::new(
+            "/bin/sh",
+            crate::config::ShellModeConfig::NonLogin,
+        ))
+        .unwrap();
+        assert!(!cmd.is_default_prog());
+        assert_eq!(cmd.get_argv(), &[std::ffi::OsString::from("/bin/sh")]);
     }
 
     #[test]

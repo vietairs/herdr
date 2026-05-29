@@ -50,7 +50,7 @@ impl App {
             split_cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
-            &default_shell,
+            crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
             params.focus,
         ) {
             Some(Ok(result)) => result,

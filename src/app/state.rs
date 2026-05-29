@@ -1157,6 +1157,7 @@ pub struct AppState {
     pub cjk_ime_cursor_shape: u8,
     pub kitty_graphics_enabled: bool,
     pub default_shell: String,
+    pub shell_mode: crate::config::ShellModeConfig,
     pub new_terminal_cwd: NewTerminalCwdConfig,
     pub pane_scrollback_limit_bytes: usize,
     #[allow(dead_code)] // kept for backward compat; palette.accent is the source of truth
@@ -1461,6 +1462,7 @@ impl AppState {
             cjk_ime_cursor_shape: 2, // steady_block
             kitty_graphics_enabled: false,
             default_shell: String::new(),
+            shell_mode: crate::config::ShellModeConfig::Auto,
             new_terminal_cwd: NewTerminalCwdConfig::Follow,
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,
             accent: Color::Cyan,

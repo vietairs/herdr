@@ -103,7 +103,7 @@ impl Workspace {
         cols: u16,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: crate::pane::PaneShellConfig<'_>,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
@@ -114,7 +114,7 @@ impl Workspace {
             cols,
             scrollback_limit_bytes,
             host_terminal_theme,
-            default_shell,
+            shell_config,
             events,
             render_notify,
             render_dirty,
@@ -139,7 +139,7 @@ impl Workspace {
             cols,
             scrollback_limit_bytes,
             host_terminal_theme,
-            "",
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
             events,
             render_notify,
             render_dirty,
@@ -154,7 +154,7 @@ impl Workspace {
         cols: u16,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: crate::pane::PaneShellConfig<'_>,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
@@ -181,7 +181,7 @@ impl Workspace {
                 cols,
                 scrollback_limit_bytes,
                 host_terminal_theme,
-                default_shell,
+                shell_config,
                 events,
                 render_notify,
                 render_dirty,
@@ -244,7 +244,7 @@ impl Workspace {
         cwd: PathBuf,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: crate::pane::PaneShellConfig<'_>,
     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
         self.create_tab_with_runtime(
             rows,
@@ -252,7 +252,7 @@ impl Workspace {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
-            default_shell,
+            shell_config,
             None,
         )
     }
@@ -264,7 +264,7 @@ impl Workspace {
         cwd: PathBuf,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: crate::pane::PaneShellConfig<'_>,
         argv: Option<&[String]>,
     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
         let number = self.tabs.len() + 1;
@@ -302,7 +302,7 @@ impl Workspace {
                 cols,
                 scrollback_limit_bytes,
                 host_terminal_theme,
-                default_shell,
+                shell_config,
                 events,
                 render_notify,
                 render_dirty,
@@ -368,7 +368,7 @@ impl Workspace {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: crate::pane::PaneShellConfig<'_>,
     ) -> std::io::Result<crate::workspace::tab::NewPane> {
         let new_pane = self
             .active_tab_mut()
@@ -380,7 +380,7 @@ impl Workspace {
                 cwd,
                 scrollback_limit_bytes,
                 host_terminal_theme,
-                default_shell,
+                shell_config,
             )?;
         self.register_new_pane(new_pane.pane_id);
         Ok(new_pane)
@@ -395,7 +395,7 @@ impl Workspace {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: crate::pane::PaneShellConfig<'_>,
         focus_new_pane: bool,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         self.split_pane_with_runtime(
@@ -406,7 +406,7 @@ impl Workspace {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
-            default_shell,
+            shell_config,
             focus_new_pane,
             None,
         )
@@ -433,7 +433,7 @@ impl Workspace {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
-            "",
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
             focus_new_pane,
             Some(argv),
         )
@@ -449,7 +449,7 @@ impl Workspace {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        default_shell: &str,
+        shell_config: crate::pane::PaneShellConfig<'_>,
         focus_new_pane: bool,
         argv: Option<&[String]>,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
@@ -475,7 +475,7 @@ impl Workspace {
                 cwd,
                 scrollback_limit_bytes,
                 host_terminal_theme,
-                default_shell,
+                shell_config,
             )
         } {
             Ok(new_pane) => new_pane,

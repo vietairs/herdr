@@ -417,7 +417,7 @@ impl AppState {
                 cwd,
                 self.pane_scrollback_limit_bytes,
                 self.host_terminal_theme,
-                &self.default_shell,
+                crate::pane::PaneShellConfig::new(&self.default_shell, self.shell_mode),
             ) {
                 let new_id = new_pane.pane_id;
                 terminal_runtimes.insert(new_pane.terminal.id.clone(), new_pane.runtime);
