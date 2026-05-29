@@ -641,6 +641,22 @@ impl TerminalState {
         self.agent_name = None;
     }
 
+    pub fn clear_agent_runtime_identity_after_respawn(&mut self) {
+        self.detected_agent = None;
+        self.fallback_state = AgentState::Unknown;
+        self.fallback_visible_blocker = false;
+        self.fallback_visible_idle = false;
+        self.fallback_visible_working = false;
+        self.fallback_observed_at = None;
+        self.stale_hook_idle_since = None;
+        self.hook_authority = None;
+        self.persisted_agent_session = None;
+        self.agent_metadata.clear();
+        self.launch_argv = None;
+        self.respawn_shell_on_exit = false;
+        self.clear_agent_name();
+    }
+
     pub fn is_agent_terminal(&self) -> bool {
         self.agent_name.is_some()
             || self.effective_agent_label().is_some()

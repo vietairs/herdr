@@ -330,9 +330,7 @@ impl App {
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
-            terminal.launch_argv = None;
-            terminal.respawn_shell_on_exit = false;
-            terminal.clear_agent_name();
+            terminal.clear_agent_runtime_identity_after_respawn();
         }
         self.state.focus_pane_in_workspace(ws_idx, pane_id);
         self.schedule_session_save();
@@ -688,6 +686,55 @@ mod tests {
             runtime.shutdown();
         }
         let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[tokio::test]
+    async fn pane_died_respawns_shell_and_clears_restored_agent_session() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("restored");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal should exist");
+        terminal.respawn_shell_on_exit = true;
+        terminal.set_agent_name("codex".into());
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-session")
+                .expect("test session id should be valid"),
+        });
+
+        app.handle_internal_event(AppEvent::PaneDied { pane_id });
+
+        assert!(
+            app.find_pane(pane_id).is_some(),
+            "respawnable agent pane should stay attached after the agent process exits"
+        );
+        let terminal = app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal should survive respawn");
+        assert!(!terminal.respawn_shell_on_exit);
+        assert!(terminal.persisted_agent_session.is_none());
+        assert!(terminal.agent_name.is_none());
+
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 
     #[test]
