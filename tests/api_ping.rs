@@ -72,6 +72,7 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
     panic!("socket did not appear at {}", path.display());
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_path(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -102,6 +103,7 @@ fn spawn_herdr_with_path(
     )
 }
 
+#[cfg(target_os = "linux")]
 fn spawn_herdr_with_shell(
     config_home: &Path,
     runtime_dir: &Path,
