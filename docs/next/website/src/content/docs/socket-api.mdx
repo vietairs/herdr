@@ -178,6 +178,8 @@ Official integrations can also report a native session reference. `pane.get`, `p
 
 If no native session reference is stored, the field is omitted.
 
+`pane.get`, `pane.list`, `agent.get`, and `agent.list` also expose `foreground_cwd` when Herdr can resolve the cwd of the process currently controlling the pane PTY. The existing `cwd` field remains the pane/workspace cwd used for labels, follow-cwd behavior, and restored session state.
+
 Use `pane.report_metadata` when a user hook wants to customize presentation without taking over lifecycle state from a Herdr integration.
 
 ```json

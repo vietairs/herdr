@@ -124,6 +124,29 @@ fn should_clear_agent_for_foreground_shell(
     previous_agent.is_some() && new_agent.is_none() && foreground_is_pane_shell
 }
 
+fn usable_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    crate::platform::process_cwd(pid).filter(|cwd| cwd.is_absolute() && cwd.is_dir())
+}
+
+fn foreground_member_cwd_different_from_shell(
+    shell_pid: u32,
+    shell_cwd: Option<&std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let job = crate::detect::foreground_job(shell_pid)?;
+    for process in job.processes {
+        if process.pid == shell_pid {
+            continue;
+        }
+        let Some(cwd) = usable_process_cwd(process.pid) else {
+            continue;
+        };
+        if shell_cwd != Some(&cwd) {
+            return Some(cwd);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ForegroundShellAgentAction {
     ObserveProbe,
@@ -2110,6 +2133,32 @@ impl PaneRuntime {
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid.load(Ordering::Relaxed);
         crate::platform::process_cwd(pid)
+    }
+
+    /// Get the current working directory of the process group controlling the pane PTY.
+    pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
+        #[cfg(unix)]
+        {
+            let pid = self.child_pid.load(Ordering::Acquire);
+            let shell_cwd = usable_process_cwd(pid);
+            let foreground_pgid = self
+                .master_fd()
+                .and_then(crate::platform::foreground_process_group_id_for_tty_fd)
+                .or_else(|| crate::platform::foreground_process_group_id(pid));
+            let leader_cwd = foreground_pgid.and_then(usable_process_cwd);
+
+            if leader_cwd.as_ref() == shell_cwd.as_ref() {
+                foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()).or(leader_cwd)
+            } else {
+                leader_cwd
+                    .or_else(|| foreground_member_cwd_different_from_shell(pid, shell_cwd.as_ref()))
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 }
 

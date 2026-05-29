@@ -4,6 +4,7 @@
 
 ### Added
 - Added pane copy mode at `prefix+[` with keyboard navigation, visual selection, and clipboard yank support. (#231)
+- Added `foreground_cwd` to pane and agent API/CLI responses so integrations can inspect the active foreground process directory without changing the existing pane/workspace `cwd` semantics. (#345)
 
 ### Fixed
 - WSL clipboard writes now prefer OSC 52 before WSLg clipboard tools, so mouse selection and double-click copy populate Windows clipboard history in Windows Terminal. (#333)

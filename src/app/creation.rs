@@ -288,6 +288,9 @@ impl App {
             cwd: ws.tabs[tab_idx]
                 .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
                 .map(|cwd| cwd.display().to_string()),
+            foreground_cwd: ws.tabs[tab_idx]
+                .foreground_cwd_for_pane(pane_id, &self.terminal_runtimes)
+                .map(|cwd| cwd.display().to_string()),
             label: terminal.manual_label.clone(),
             agent: terminal.effective_agent_label().map(str::to_string),
             title: presentation.title,

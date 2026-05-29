@@ -373,6 +373,10 @@ impl TerminalRuntime {
         self.0.cwd()
     }
 
+    pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
+        self.0.foreground_cwd()
+    }
+
     pub(crate) fn current_size(&self) -> (u16, u16) {
         self.0.current_size()
     }
