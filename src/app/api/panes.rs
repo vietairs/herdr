@@ -22,6 +22,10 @@ use super::super::api_helpers::{
 };
 use super::responses::{encode_error, encode_success};
 
+const METADATA_SOURCE_MAX_CHARS: usize = 80;
+const METADATA_TTL_MIN_MS: u64 = 1;
+const METADATA_TTL_MAX_MS: u64 = 86_400_000;
+
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
         let target = if let Some(target_pane_id) = params.target_pane_id.as_deref() {
@@ -1184,29 +1188,26 @@ impl App {
             },
             None => None,
         };
-        let Some(source) = normalize_optional_text(Some(params.source)) else {
-            return encode_error(id, "invalid_metadata_request", "missing metadata source");
+        let source = match normalize_metadata_source(params.source) {
+            Ok(source) => source,
+            Err(message) => return encode_error(id, "invalid_metadata_source", message),
         };
         let raw_title_set = params.title.is_some();
         let raw_display_agent_set = params.display_agent.is_some();
         let raw_custom_status_set = params.custom_status.is_some();
         let raw_state_labels_set = !params.state_labels.is_empty();
-        let ttl = params.ttl_ms.map(std::time::Duration::from_millis);
+        let ttl = match normalize_metadata_ttl(params.ttl_ms) {
+            Ok(ttl) => ttl,
+            Err(message) => return encode_error(id, "invalid_metadata_ttl", message),
+        };
         let title = normalize_presentation_text(params.title);
         let display_agent = normalize_presentation_text(params.display_agent);
         let custom_status = normalize_custom_status(params.custom_status);
         let applies_to_source = match params.applies_to_source {
-            Some(applies_to_source) => {
-                let Some(applies_to_source) = normalize_optional_text(Some(applies_to_source))
-                else {
-                    return encode_error(
-                        id,
-                        "invalid_metadata_request",
-                        "missing metadata authority source",
-                    );
-                };
-                Some(applies_to_source)
-            }
+            Some(applies_to_source) => match normalize_metadata_source(applies_to_source) {
+                Ok(applies_to_source) => Some(applies_to_source),
+                Err(message) => return encode_error(id, "invalid_metadata_source", message),
+            },
             None => None,
         };
         let state_labels = match normalize_state_labels(params.state_labels) {
@@ -1432,9 +1433,39 @@ impl App {
     }
 }
 
-fn normalize_optional_text(value: Option<String>) -> Option<String> {
-    let value = value?.trim().to_string();
-    (!value.is_empty()).then_some(value)
+fn normalize_metadata_source(value: String) -> Result<String, &'static str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("metadata source must not be empty");
+    }
+    if value.chars().count() > METADATA_SOURCE_MAX_CHARS {
+        return Err("metadata source must be 80 characters or fewer");
+    }
+    if !value.chars().all(metadata_source_char_is_valid) {
+        return Err(
+            "metadata source may contain only ASCII letters, digits, colon, dot, underscore, and hyphen",
+        );
+    }
+    Ok(value.to_string())
+}
+
+fn metadata_source_char_is_valid(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, ':' | '.' | '_' | '-')
+}
+
+fn normalize_metadata_ttl(
+    ttl_ms: Option<u64>,
+) -> Result<Option<std::time::Duration>, &'static str> {
+    let Some(ttl_ms) = ttl_ms else {
+        return Ok(None);
+    };
+    if ttl_ms < METADATA_TTL_MIN_MS {
+        return Err("metadata ttl_ms must be at least 1");
+    }
+    if ttl_ms > METADATA_TTL_MAX_MS {
+        return Err("metadata ttl_ms must be 86400000 or less");
+    }
+    Ok(Some(std::time::Duration::from_millis(ttl_ms)))
 }
 
 fn normalize_presentation_text(value: Option<String>) -> Option<String> {
@@ -1659,10 +1690,50 @@ fn invalid_agent(id: String) -> String {
 mod tests {
     use super::*;
     use crate::{
-        api::schema::{SplitDirection, SuccessResponse},
+        api::schema::{ErrorResponse, SplitDirection, SuccessResponse},
         config::Config,
         workspace::Workspace,
     };
+
+    fn app_with_test_workspace() -> (App, String) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("metadata")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        (app, public_pane_id)
+    }
+
+    fn metadata_params(pane_id: String) -> PaneReportMetadataParams {
+        PaneReportMetadataParams {
+            pane_id,
+            source: "user:metadata.test-1".into(),
+            agent: None,
+            applies_to_source: None,
+            title: None,
+            display_agent: None,
+            custom_status: Some("activity".into()),
+            state_labels: std::collections::HashMap::new(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_custom_status: false,
+            clear_state_labels: false,
+            seq: None,
+            ttl_ms: None,
+        }
+    }
+
+    fn metadata_error_code(response: &str) -> String {
+        let response: ErrorResponse = serde_json::from_str(response).unwrap();
+        response.error.code
+    }
 
     fn app_with_linked_worktree() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2824,5 +2895,65 @@ mod tests {
         assert_eq!(focus.source_pane_id, root_public.clone());
         assert_eq!(focus.focused_pane_id, Some(root_public));
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+    }
+
+    #[test]
+    fn pane_report_metadata_accepts_documented_source_chars_and_max_ttl() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let mut params = metadata_params(pane_id);
+        params.ttl_ms = Some(METADATA_TTL_MAX_MS);
+
+        let response = app.handle_pane_report_metadata("req".into(), params);
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+    }
+
+    #[test]
+    fn pane_report_metadata_rejects_invalid_source_shape() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        for source in ["", "user metadata", "user/metadata", "user:\u{7f}metadata"] {
+            let mut params = metadata_params(pane_id.clone());
+            params.source = source.into();
+
+            let response = app.handle_pane_report_metadata("req".into(), params);
+
+            assert_eq!(metadata_error_code(&response), "invalid_metadata_source");
+        }
+    }
+
+    #[test]
+    fn pane_report_metadata_rejects_long_source() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let mut params = metadata_params(pane_id);
+        params.source = "a".repeat(METADATA_SOURCE_MAX_CHARS + 1);
+
+        let response = app.handle_pane_report_metadata("req".into(), params);
+
+        assert_eq!(metadata_error_code(&response), "invalid_metadata_source");
+    }
+
+    #[test]
+    fn pane_report_metadata_rejects_invalid_applies_to_source() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let mut params = metadata_params(pane_id);
+        params.applies_to_source = Some("herdr source".into());
+
+        let response = app.handle_pane_report_metadata("req".into(), params);
+
+        assert_eq!(metadata_error_code(&response), "invalid_metadata_source");
+    }
+
+    #[test]
+    fn pane_report_metadata_rejects_ttl_outside_supported_range() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        for ttl_ms in [0, METADATA_TTL_MAX_MS + 1] {
+            let mut params = metadata_params(pane_id.clone());
+            params.ttl_ms = Some(ttl_ms);
+
+            let response = app.handle_pane_report_metadata("req".into(), params);
+
+            assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
+        }
     }
 }
