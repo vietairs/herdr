@@ -21,14 +21,29 @@ enum RuntimeExitAction {
 impl App {
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         if let AppEvent::ClipboardWrite { content } = ev {
+            #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
+            #[cfg(test)]
+            let _ = content;
             self.show_clipboard_feedback();
             return;
         }
 
-        if let AppEvent::GitStatusRefreshed { results } = ev {
+        if let AppEvent::GitStatusRefreshed {
+            results,
+            cache_updates,
+        } = ev
+        {
             self.git_refresh_in_flight = false;
-            self.last_git_remote_status_refresh = Instant::now();
+            for (key, entry) in cache_updates {
+                self.git_status_cache.insert(key, entry);
+            }
+            if self.git_refresh_due_after_in_flight {
+                self.mark_git_status_refresh_due(Instant::now());
+                self.git_refresh_due_after_in_flight = false;
+            } else {
+                self.last_git_remote_status_refresh = Instant::now();
+            }
             if self
                 .state
                 .apply_workspace_git_statuses(&self.terminal_runtimes, results)

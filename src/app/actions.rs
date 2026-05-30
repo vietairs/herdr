@@ -2044,8 +2044,12 @@ impl AppState {
             // Intercepted in App::handle_internal_event before reaching this
             // dispatch; never touches AppState.
             AppEvent::ClipboardWrite { .. } => Vec::new(),
-            AppEvent::GitStatusRefreshed { results } => {
+            AppEvent::GitStatusRefreshed {
+                results,
+                cache_updates,
+            } => {
                 let _ = results;
+                let _ = cache_updates;
                 Vec::new()
             }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
