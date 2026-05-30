@@ -755,8 +755,7 @@ fn live_handoff_accepts_old_pane_id_from_child_env() {
             "params": {"pane_id": pane_id, "text": format!("printf '%s' \"$HERDR_PANE_ID\" > {}", pane_id_marker.display()), "keys": ["Enter"]}
         }),
     ));
-    support::wait_for_file(&pane_id_marker, Duration::from_secs(5));
-    let old_pane_id = fs::read_to_string(&pane_id_marker).unwrap();
+    let old_pane_id = wait_for_file_contains(&pane_id_marker, "p_", Duration::from_secs(5));
     assert!(
         old_pane_id.starts_with("p_"),
         "unexpected pane id from env: {old_pane_id:?}"
