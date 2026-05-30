@@ -5,6 +5,10 @@ test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
+# Run one nextest filter, e.g. `just test-one codex_stale_working`
+test-one filter:
+    cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
+
 # Run fast local lint checks
 lint:
     cargo fmt --check
