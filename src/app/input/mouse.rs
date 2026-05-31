@@ -145,14 +145,13 @@ impl AppState {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     if let Some(open) = &mut self.worktree_open {
-                        open.selected = open.selected.saturating_sub(1);
+                        open.select_previous_filtered();
                     }
                     return None;
                 }
                 MouseEventKind::ScrollDown => {
                     if let Some(open) = &mut self.worktree_open {
-                        open.selected =
-                            (open.selected + 1).min(open.entries.len().saturating_sub(1));
+                        open.select_next_filtered();
                     }
                     return None;
                 }
@@ -237,21 +236,28 @@ impl AppState {
                             self.screen_rect(),
                             open.entries.len(),
                         ) {
-                            let max_rows = inner.height.saturating_sub(4) as usize;
-                            let start = crate::ui::open_existing_worktree_visible_start(
-                                open.selected,
-                                max_rows,
-                            );
+                            let filtered = open.filtered_indices();
+                            let max_rows =
+                                crate::ui::open_existing_worktree_max_visible_rows(inner);
+                            let start =
+                                crate::ui::open_existing_worktree_visible_start(open, max_rows);
+                            if mouse.row == inner.y.saturating_add(1)
+                                && mouse.column >= inner.x
+                                && mouse.column < inner.x.saturating_add(inner.width)
+                            {
+                                if let Some(open) = &mut self.worktree_open {
+                                    open.search_focused = true;
+                                }
+                                return None;
+                            }
                             let row_idx = if rect_contains(inner, mouse.column, mouse.row) {
                                 mouse
                                     .row
-                                    .checked_sub(inner.y.saturating_add(2))
+                                    .checked_sub(inner.y.saturating_add(3))
                                     .map(usize::from)
+                                    .map(|row| row / 2)
                                     .filter(|row| *row < max_rows)
-                                    .and_then(|row| {
-                                        let entry_idx = start + row;
-                                        (entry_idx < open.entries.len()).then_some(entry_idx)
-                                    })
+                                    .and_then(|row| filtered.get(start + row).copied())
                             } else {
                                 None
                             };
@@ -1657,6 +1663,8 @@ mod tests {
                 },
             ],
             selected: 0,
+            query: String::new(),
+            search_focused: false,
             error: None,
         }
     }
@@ -1810,7 +1818,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             inner.x + 1,
-            inner.y + 3,
+            inner.y + 5,
         ));
 
         assert_eq!(app.state.worktree_open.as_ref().unwrap().selected, 1);

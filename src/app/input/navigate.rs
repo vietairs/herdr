@@ -761,8 +761,9 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::CloseTab => {
-            state.close_tab();
-            leave_navigate_mode(state);
+            if !state.close_tab() {
+                leave_navigate_mode(state);
+            }
         }
         NavigateAction::RenamePane => {
             if let Some(pane_id) = state
@@ -786,8 +787,9 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::ClosePane => {
-            state.close_pane();
-            leave_navigate_mode(state);
+            if !state.close_pane() {
+                leave_navigate_mode(state);
+            }
         }
         NavigateAction::EditScrollback => {}
         NavigateAction::CopyMode => state.enter_copy_mode(terminal_runtimes),
@@ -1754,6 +1756,22 @@ last_pane = "prefix+tab"
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "main");
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn prefix_close_pane_last_parent_group_pane_opens_confirmation() {
+        let mut state = state_with_workspaces(&["main", "issue"]);
+        mark_worktree_space_member(&mut state, 0, "repo-key");
+        mark_worktree_space_member(&mut state, 1, "repo-key");
+        state.selected = 1;
+        state.active = Some(0);
+        state.mode = Mode::Navigate;
+
+        execute_navigate_action(&mut state, NavigateAction::ClosePane);
+
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.workspaces.len(), 2);
     }
 
     #[tokio::test]
