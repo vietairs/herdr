@@ -76,13 +76,12 @@ Default release flow:
 
 ```bash
 just check
-just release-prepare 0.x.y
-just release-publish 0.x.y
+just release 0.x.y
 ```
 
-`just release-prepare 0.x.y` prepares the changelog entry, bumps `Cargo.toml`, updates `Cargo.lock`, refreshes `nix/package.nix` `cargoHash`, runs tests, and commits the release. `just release-publish 0.x.y` verifies the prepared clean tree, rechecks the committed `cargoHash` without patching, pushes the release commit to `origin/master` if needed, then tags and pushes the tag. `just release 0.x.y` runs both steps. GitHub Actions builds the binaries after the tag is pushed, creates the GitHub release, uploads all four binary assets, then updates `website/latest.json` on `master` automatically.
+`just release 0.x.y` prepares the changelog entry, bumps `Cargo.toml`, updates `Cargo.lock`, runs tests, commits the release, pushes `master`, tags, and pushes the tag. GitHub Actions builds the binaries after the tag is pushed, creates the GitHub release, uploads all four binary assets, then updates `website/latest.json` on `master` automatically.
 
-If the release will change `Cargo.lock` or the package version, refresh `nix/package.nix` after the release version bump and before tagging. `just release-prepare` runs `just refresh-nix-cargo-hash`, which forces `cargoHash = lib.fakeHash`, captures the `got:` hash from Nix, writes it back to `nix/package.nix`, and reruns the Nix flake checks. A stale hash fails both the `Nix` workflow and the release workflow's `flake-check` job with a fixed-output derivation mismatch.
+`nix/package.nix` imports `Cargo.lock` directly with `cargoLock.lockFile`, so release version bumps do not require a separate Nix cargo hash update. If Cargo git dependencies are added later, add the required `cargoLock.outputHashes` entries as part of that dependency change.
 
 The release workflow must publish these four assets:
 

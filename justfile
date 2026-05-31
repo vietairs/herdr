@@ -20,7 +20,7 @@ ci: lint
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
-    python3 -m unittest scripts.test_changelog scripts.test_nix_cargo_hash scripts.test_vendor_libghostty_vt
+    python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
 # Install repo-local git hooks
@@ -75,20 +75,17 @@ release-docs-check:
         fi; \
     done
 
-# Refresh nix/package.nix cargoHash after Cargo.toml or Cargo.lock changes
-refresh-nix-cargo-hash:
-    python3 scripts/nix_cargo_hash.py refresh
-
-# Check nix/package.nix cargoHash without patching
-check-nix-cargo-hash:
-    python3 scripts/nix_cargo_hash.py check
-
 # Prepare the release commit without tagging or pushing (usage: just release-prepare 0.1.1)
 release-prepare version:
+    @printf '%s\n' '{{version}}' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { \
+        echo "error: version must look like 0.6.6 without a v prefix"; \
+        exit 1; \
+    }
     @if [ -n "$(git status --porcelain)" ]; then \
         echo "error: commit your changes first"; \
         exit 1; \
     fi
+    @git fetch origin master --tags
     @if git rev-parse "v{{version}}" >/dev/null 2>&1; then \
         echo "error: tag v{{version}} already exists"; \
         exit 1; \
@@ -98,14 +95,17 @@ release-prepare version:
     cp CHANGELOG.md docs/next/CHANGELOG.md
     sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
     cargo update -p herdr --offline
-    just refresh-nix-cargo-hash
     just check
-    git add CHANGELOG.md docs/next/CHANGELOG.md Cargo.toml Cargo.lock nix/package.nix
+    git add CHANGELOG.md docs/next/CHANGELOG.md Cargo.toml Cargo.lock
     git diff --cached --quiet || git commit -m "release: v{{version}}"
     @echo "v{{version}} release commit prepared. Review it, then run: just release-publish {{version}}"
 
 # Tag and push an already-prepared release commit (usage: just release-publish 0.1.1)
 release-publish version:
+    @printf '%s\n' '{{version}}' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { \
+        echo "error: version must look like 0.6.6 without a v prefix"; \
+        exit 1; \
+    }
     @if [ -n "$(git status --porcelain)" ]; then \
         echo "error: working tree must be clean before publishing"; \
         exit 1; \
@@ -128,7 +128,6 @@ release-publish version:
     just release-docs-check
     python3 scripts/changelog.py extract --version {{version}} --output /tmp/herdr-release-notes-check.md
     rm -f /tmp/herdr-release-notes-check.md
-    just check-nix-cargo-hash
     @local_head="$(git rev-parse HEAD)"; \
     remote_head="$(git rev-parse origin/master)"; \
     if ! git merge-base --is-ancestor "$remote_head" "$local_head"; then \
