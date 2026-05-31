@@ -49,11 +49,20 @@ pub(super) fn has_visible_working(content: &str) -> bool {
 }
 
 fn has_codex_visible_working_without_prompt(content: &str) -> bool {
-    content
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .is_some_and(codex_live_working_line)
+    let mut recent_lines = content.lines().rev().filter(|line| !line.trim().is_empty());
+    let Some(last_line) = recent_lines.next() else {
+        return false;
+    };
+
+    if codex_live_working_line(last_line) {
+        return true;
+    }
+
+    codex_status_detail_line(last_line)
+        && recent_lines
+            .take(4)
+            .find(|line| codex_block_marker_line(line))
+            .is_some_and(codex_live_working_line)
 }
 
 fn has_codex_strong_blocked_prompt(lower_content: &str) -> bool {
@@ -113,10 +122,12 @@ fn codex_working_status_line(line: &str) -> bool {
     }
 
     let trimmed = line.trim_start();
+    let lower = trimmed.to_lowercase();
     trimmed.starts_with('•')
         && (trimmed.contains("Working (")
             || trimmed.contains("Waiting for background terminal (")
-            || trimmed.contains("Reviewing approval request (")
+            || lower.contains("reviewing approval request (")
+            || (lower.contains("reviewing ") && lower.contains(" approval requests ("))
             || trimmed.contains("Booting MCP server:"))
 }
 
@@ -144,6 +155,10 @@ fn codex_prompt_line(line: &str) -> bool {
 
 fn codex_block_marker_line(line: &str) -> bool {
     line.starts_with('•') || line.starts_with('■') || line.starts_with('✗') || line.starts_with('✓')
+}
+
+fn codex_status_detail_line(line: &str) -> bool {
+    line.trim_start().starts_with('└')
 }
 
 fn codex_queued_input_header_line(line: &str) -> bool {

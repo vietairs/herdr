@@ -1212,6 +1212,30 @@ mod tests {
     }
 
     #[test]
+    fn codex_reviewing_approval_request_without_prompt_is_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Running git push --force-with-lease origin codex/ci-flake-diagnostics\n\n• Reviewing approval request (2m 53s • esc to interrupt)\n  └ /bin/zsh -lc 'git push --force-with-lease origin codex/ci-flake-diagnostics'",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_reviewing_multiple_approval_requests_is_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Reviewing 2 approval requests (0s • esc to interrupt)\n\n\n› Summarize recent commits\n\n  ~/Projects/herdr · master",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
     fn codex_booting_mcp_server_is_visible_working() {
         let detection = detect_agent(
             Some(Agent::Codex),

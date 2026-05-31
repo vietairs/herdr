@@ -1263,6 +1263,50 @@ mod tests {
     }
 
     #[test]
+    fn refreshed_visible_working_overrides_newer_hook_blocked() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now,
+        );
+        terminal.set_hook_authority_with_custom_status_at(
+            "herdr:codex".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            Some("permission".into()),
+            None,
+            None,
+            now + CLAUDE_WORKING_HOLD + Duration::from_millis(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Blocked);
+
+        let change = terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now + CLAUDE_WORKING_HOLD + Duration::from_millis(800),
+        );
+
+        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(terminal.effective_custom_status(), None);
+        assert_eq!(
+            change.effective_state_change.unwrap().previous_state,
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
     fn visible_idle_waits_before_overriding_claude_hook_blocked() {
         let now = Instant::now();
         let mut terminal = test_terminal();
