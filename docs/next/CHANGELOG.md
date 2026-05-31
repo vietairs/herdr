@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.6.6] - 2026-05-31
+
 ### Added
 - Custom command keybindings now accept an optional `description` field to provide user-defined descriptions shown in the keybind help panel instead of the default `'custom command'` label. (#362)
 
