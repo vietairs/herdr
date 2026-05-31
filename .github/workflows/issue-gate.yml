@@ -31,9 +31,9 @@ jobs:
               '### Environment',
             ];
             const requiredEnvironmentFields = [
-              /^\s*-\s*Herdr version:\s*\S.*$/m,
-              /^\s*-\s*Operating system:\s*\S.*$/m,
-              /^\s*-\s*Terminal:\s*\S.*$/m,
+              /^\s*(?:-\s*)?Herdr version:[^\S\r\n]*\S.*$/m,
+              /^\s*(?:-\s*)?Operating system:[^\S\r\n]*\S.*$/m,
+              /^\s*(?:-\s*)?Terminal:[^\S\r\n]*\S.*$/m,
             ];
 
             function escapeRegExp(value) {
@@ -112,20 +112,40 @@ jobs:
               return;
             }
 
+            if (hasBugConfirmation && hasBugTemplate && hasRequiredContent && !hasEnvironmentFields) {
+              const message = [
+                `hi @${author}, thanks for opening this.`,
+                '',
+                'this bug report is missing required environment details. please edit the issue and fill in herdr version, operating system, and terminal.',
+                '',
+                'shell and relevant config are optional, but they help when they affect the bug.',
+              ].join('\n');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: message,
+              });
+
+              console.log(`#${issue.number} is missing required environment details; leaving issue open for correction`);
+              return;
+            }
+
             const message = [
-              `Hi @${author}, thanks for opening this.`,
+              `hi @${author}, thanks for opening this.`,
               '',
-              'This issue does not appear to use the full bug report template. Herdr issues are only for reproducible bugs and maintainer-created or maintainer-converted work items.',
+              'this issue does not appear to use the full bug report template. herdr issues are only for reproducible bugs and maintainer-created or maintainer-converted work items.',
               '',
-              'Bug reports must include the reproducible-bug confirmation, current behavior, expected behavior, reproduction, impact, and environment fields with Herdr version, operating system, and terminal.',
+              'bug reports must include the reproducible-bug confirmation, current behavior, expected behavior, reproduction, impact, and environment fields with herdr version, operating system, and terminal.',
               '',
-              'Feature requests, ideas, questions, contribution proposals, and direction checks belong in Discussions:',
+              'feature requests, ideas, questions, contribution proposals, and direction checks belong in discussions:',
               `https://github.com/${context.repo.owner}/${context.repo.repo}/discussions`,
               '',
-              'Please read the contributing guidelines before opening issues or PRs:',
+              'please read the contributing guidelines before opening issues or prs:',
               `https://github.com/${context.repo.owner}/${context.repo.repo}/blob/${context.payload.repository.default_branch}/CONTRIBUTING.md`,
               '',
-              'Closing this so the issue tracker stays limited to actionable bug reports.',
+              'closing this so the issue tracker stays limited to actionable bug reports.',
             ].join('\n');
 
             await github.rest.issues.createComment({
