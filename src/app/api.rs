@@ -152,10 +152,8 @@ impl App {
             };
 
             if let Some((version, install_command)) = update_ready {
-                let _ = notify(
-                    &format!("v{version} available"),
-                    Some(&format!("detach, then run `{install_command}`")),
-                );
+                let instruction = crate::update::update_install_instruction(&install_command);
+                let _ = notify(&format!("v{version} available"), Some(&instruction));
             } else {
                 for update in &pane_updates {
                     let is_active_tab = self

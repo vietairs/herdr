@@ -1932,7 +1932,7 @@ impl AppState {
                     self.toast = Some(ToastNotification {
                         kind: ToastKind::UpdateInstalled,
                         title: format!("v{version} available"),
-                        context: format!("detach, then run `{install_command}`"),
+                        context: crate::update::update_install_instruction(&install_command),
                         target: None,
                     });
                 }
@@ -2795,7 +2795,10 @@ mod tests {
         assert!(state.latest_release_notes_available);
         let toast = state.toast.as_ref().expect("update toast");
         assert_eq!(toast.title, "v0.5.0 available");
-        assert_eq!(toast.context, "detach, then run `herdr update`");
+        assert_eq!(
+            toast.context,
+            "detach, run `herdr update`, then follow its restart guidance"
+        );
     }
 
     fn mark_agent(state: &mut AppState, ws_idx: usize, tab_idx: usize, pane_id: PaneId) {
@@ -3756,7 +3759,10 @@ mod tests {
         let toast = state.toast.as_ref().expect("update toast");
         assert_eq!(toast.kind, ToastKind::UpdateInstalled);
         assert_eq!(toast.title, "v0.5.0 available");
-        assert_eq!(toast.context, "detach, then run `herdr update`");
+        assert_eq!(
+            toast.context,
+            "detach, run `herdr update`, then follow its restart guidance"
+        );
     }
 
     #[test]
@@ -3776,7 +3782,7 @@ mod tests {
         let toast = state.toast.as_ref().expect("update toast");
         assert_eq!(
             toast.context,
-            "detach, then run `brew update && brew upgrade herdr`"
+            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
         );
     }
 

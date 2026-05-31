@@ -1359,7 +1359,8 @@ impl HeadlessServer {
                                 .map(|toast| format!("{}: {}", toast.title, toast.context))
                         } else {
                             Some(format!(
-                                "v{version} available: detach, then run `{install_command}`"
+                                "v{version} available: {}",
+                                crate::update::update_install_instruction(&install_command)
                             ))
                         }
                     } else {
@@ -5062,7 +5063,10 @@ next_tab = ""
         ) {
             ServerMessage::Notify { kind, message } => {
                 assert_eq!(kind, protocol::NotifyKind::SystemToast);
-                assert_eq!(message, "v9.9.9 available: detach, then run `herdr update`");
+                assert_eq!(
+                    message,
+                    "v9.9.9 available: detach, run `herdr update`, then follow its restart guidance"
+                );
             }
             other => panic!("expected system toast notify, got {other:?}"),
         }

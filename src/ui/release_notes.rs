@@ -425,17 +425,14 @@ fn release_notes_preview_panel_height(area_width: u16, install_command: &str, p:
     text_height.saturating_add(3)
 }
 
-pub(super) fn release_notes_preview_lines<'a>(
+pub(super) fn release_notes_preview_lines(
     _version: &str,
-    install_command: &'a str,
+    install_command: &str,
     p: &Palette,
-) -> Vec<Line<'a>> {
+) -> Vec<Line<'static>> {
     let title_style = Style::default().fg(p.text).add_modifier(Modifier::BOLD);
     let text_style = Style::default().fg(p.text);
-    let code_style = Style::default()
-        .fg(p.accent)
-        .bg(p.surface0)
-        .add_modifier(Modifier::BOLD);
+    let instruction = crate::update::update_install_instruction(install_command);
 
     vec![
         Line::from(vec![
@@ -445,11 +442,7 @@ pub(super) fn release_notes_preview_lines<'a>(
             ),
             Span::styled(" update ready", title_style),
         ]),
-        Line::from(vec![
-            Span::styled("detach from this session, then run ", text_style),
-            Span::styled(install_command, code_style),
-            Span::styled(" in your shell", text_style),
-        ]),
+        Line::from(vec![Span::styled(instruction, text_style)]),
     ]
 }
 
@@ -586,7 +579,7 @@ mod tests {
         assert_eq!(line_text(&lines[0]), "● update ready");
         assert_eq!(
             line_text(&lines[1]),
-            "detach from this session, then run herdr update in your shell"
+            "detach, run `herdr update`, then follow its restart guidance"
         );
         assert_eq!(lines[0].spans[0].style.fg, Some(palette.accent));
         assert_eq!(lines[0].spans[1].style.fg, Some(palette.text));
@@ -641,7 +634,7 @@ mod tests {
             .unwrap();
 
         let rendered = buffer_text(terminal.backend().buffer(), area);
-        assert!(rendered.contains("your shell"), "{rendered}");
+        assert!(rendered.contains("Herdr session"), "{rendered}");
     }
 
     #[test]
