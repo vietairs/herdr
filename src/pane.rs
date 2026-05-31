@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
@@ -7,14 +7,20 @@ use std::sync::{
 };
 
 use bytes::Bytes;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::CommandBuilder;
+#[cfg(test)]
+use portable_pty::{native_pty_system, PtySize};
 use ratatui::{layout::Rect, Frame};
-use tokio::sync::{mpsc, watch, Notify};
+#[cfg(test)]
+use tokio::sync::watch;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
+#[cfg(unix)]
+use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 
 mod input;
 mod kitty_keyboard;
@@ -539,23 +545,137 @@ impl AgentDetectionPresence {
 pub struct PaneRuntime {
     pane_id: PaneId,
     terminal: Arc<PaneTerminal>,
-    sender: mpsc::Sender<Bytes>,
-    resize_tx: watch::Sender<(u16, u16, u32, u32)>,
+    io: PaneRuntimeIo,
     current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
-    pty_master: Option<Box<dyn MasterPty + Send>>,
-    raw_master_fd: Option<std::os::fd::RawFd>,
-    force_resize_fd: Option<std::os::fd::RawFd>,
-    io_stop: Arc<AtomicBool>,
-    reader_paused: Arc<AtomicBool>,
-    reader_pause_ack: Arc<AtomicBool>,
-    reader_stopped_rx: Option<std::sync::mpsc::Receiver<()>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
     // Task handles for deterministic shutdown
     detect_handle: tokio::task::AbortHandle,
+}
+
+enum PaneRuntimeIo {
+    #[cfg(unix)]
+    Actor(PtyIoActorHandle),
+    #[cfg(test)]
+    TestChannel {
+        sender: mpsc::Sender<Bytes>,
+        resize_tx: watch::Sender<(u16, u16, u32, u32)>,
+    },
+}
+
+impl PaneRuntimeIo {
+    fn shutdown(&self) {
+        match self {
+            #[cfg(unix)]
+            PaneRuntimeIo::Actor(actor) => actor.shutdown(),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => {}
+        }
+    }
+
+    #[cfg(unix)]
+    fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.duplicate_for_handoff(),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => {
+                Err(std::io::Error::other("test runtime has no PTY master fd"))
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn foreground_process_group_id(&self) -> Option<u32> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => Ok(()),
+        }
+    }
+
+    #[cfg(unix)]
+    fn set_handoff_paused(&self, paused: bool) -> std::io::Result<()> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => {
+                if paused {
+                    actor.begin_handoff(std::time::Duration::from_secs(1))
+                } else {
+                    actor.rollback_handoff()
+                }
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => Ok(()),
+        }
+    }
+
+    #[cfg(unix)]
+    fn release_after_commit(&self) -> std::io::Result<()> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.release_after_commit(),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => Ok(()),
+        }
+    }
+
+    fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
+        match self {
+            #[cfg(unix)]
+            PaneRuntimeIo::Actor(actor) => {
+                actor.resize(rows, cols, cell_width_px, cell_height_px);
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { resize_tx, .. } => {
+                let _ = resize_tx.send((rows, cols, cell_width_px, cell_height_px));
+            }
+        }
+    }
+
+    fn nudge_child_redraw_after_handoff(
+        &self,
+        rows: u16,
+        cols: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) {
+        match self {
+            #[cfg(unix)]
+            PaneRuntimeIo::Actor(actor) => {
+                actor.nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => {}
+        }
+    }
+
+    async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
+        match self {
+            #[cfg(unix)]
+            PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
+        }
+    }
+
+    fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        match self {
+            #[cfg(unix)]
+            PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,18 +688,11 @@ pub enum WheelRouting {
 impl Drop for PaneRuntime {
     fn drop(&mut self) {
         // Abort detection task immediately and terminate the owned session.
-        // Reader/writer/resize tasks shut down naturally via channel close
-        // and PTY EOF when the rest of PaneRuntime is dropped.
+        // The PTY actor shuts down before the process/session policy runs.
         self.detect_handle.abort();
-        self.io_stop.store(true, Ordering::Release);
+        self.io.shutdown();
         if !self.preserve_processes_on_drop {
             shutdown_pane_processes(self.pane_id, self.child_pid.load(Ordering::Acquire));
-        }
-        if let Some(fd) = self.raw_master_fd.take() {
-            let _ = unsafe { libc::close(fd) };
-        }
-        if let Some(fd) = self.force_resize_fd.take() {
-            let _ = unsafe { libc::close(fd) };
         }
     }
 }
@@ -768,175 +881,7 @@ fn pane_shell_command_builder(shell_config: PaneShellConfig<'_>) -> io::Result<C
     pane_shell_command_builder_for_target(shell_config, cfg!(target_os = "macos"))
 }
 
-#[cfg(unix)]
-fn duplicate_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
-    let duplicated = unsafe { libc::dup(fd) };
-    if duplicated < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(duplicated)
-}
-
-#[cfg(unix)]
-fn set_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn duplicate_cloexec_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
-    let duplicated = duplicate_fd(fd)?;
-    if let Err(err) = set_cloexec(duplicated) {
-        let _ = unsafe { libc::close(duplicated) };
-        return Err(err);
-    }
-    Ok(duplicated)
-}
-
-#[cfg(unix)]
-fn file_from_duplicated_fd(fd: std::os::fd::RawFd) -> std::io::Result<std::fs::File> {
-    use std::os::fd::FromRawFd;
-
-    let duplicated = duplicate_cloexec_fd(fd)?;
-    Ok(unsafe { std::fs::File::from_raw_fd(duplicated) })
-}
-
-#[cfg(unix)]
-fn poll_read_ready(fd: std::os::fd::RawFd, timeout_ms: i32) -> std::io::Result<bool> {
-    let mut poll_fd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    loop {
-        let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
-        if result < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-        return Ok(result > 0 && (poll_fd.revents & (libc::POLLIN | libc::POLLHUP)) != 0);
-    }
-}
-
-#[cfg(unix)]
-fn poll_write_ready(fd: std::os::fd::RawFd, timeout_ms: i32) -> std::io::Result<bool> {
-    let mut poll_fd = libc::pollfd {
-        fd,
-        events: libc::POLLOUT,
-        revents: 0,
-    };
-    loop {
-        let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
-        if result < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-        return Ok(result > 0 && (poll_fd.revents & (libc::POLLOUT | libc::POLLHUP)) != 0);
-    }
-}
-
-#[cfg(unix)]
-fn write_all_nonblocking(
-    writer: &mut std::fs::File,
-    fd: std::os::fd::RawFd,
-    mut bytes: &[u8],
-    io_stop: &AtomicBool,
-) -> std::io::Result<()> {
-    while !bytes.is_empty() {
-        if io_stop.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        match writer.write(bytes) {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "pty write returned zero bytes",
-                ));
-            }
-            Ok(written) => bytes = &bytes[written..],
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                let _ = poll_write_ready(fd, 50)?;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn write_pty_bytes_locked(
-    writer: &mut std::fs::File,
-    fd: std::os::fd::RawFd,
-    bytes: &[u8],
-    io_stop: &AtomicBool,
-    pty_write_lock: &Mutex<()>,
-) -> std::io::Result<()> {
-    let _guard = pty_write_lock
-        .lock()
-        .map_err(|_| std::io::Error::other("pty write lock poisoned"))?;
-    write_all_nonblocking(writer, fd, bytes, io_stop)?;
-    writer.flush()
-}
-
-#[cfg(unix)]
-fn resize_pty_fd(
-    fd: std::os::fd::RawFd,
-    rows: u16,
-    cols: u16,
-    cell_width_px: u32,
-    cell_height_px: u32,
-) -> std::io::Result<()> {
-    let size = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: (cols as u32)
-            .saturating_mul(cell_width_px)
-            .min(u16::MAX as u32) as u16,
-        ws_ypixel: (rows as u32)
-            .saturating_mul(cell_height_px)
-            .min(u16::MAX as u32) as u16,
-    };
-    if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &size) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 impl PaneRuntime {
-    #[cfg(unix)]
-    fn master_fd(&self) -> Option<std::os::fd::RawFd> {
-        self.raw_master_fd.or_else(|| {
-            self.pty_master
-                .as_ref()
-                .and_then(|master| master.as_raw_fd())
-        })
-    }
-
     pub fn shutdown(self) {
         self.detect_handle.abort();
         shutdown_pane_processes(self.pane_id, self.child_pid.load(Ordering::Acquire));
@@ -944,17 +889,17 @@ impl PaneRuntime {
 
     #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
-        let master_fd = self
-            .master_fd()
-            .ok_or_else(|| std::io::Error::other("runtime has no PTY master fd"))?;
-        duplicate_cloexec_fd(master_fd)
+        self.io.duplicate_handoff_fd()
     }
 
     #[cfg(unix)]
     pub fn preserve_for_handoff(mut self) {
-        self.io_stop.store(true, Ordering::Release);
-        if let Some(reader_stopped_rx) = self.reader_stopped_rx.take() {
-            let _ = reader_stopped_rx.recv_timeout(std::time::Duration::from_millis(500));
+        if let Err(err) = self.io.release_after_commit() {
+            warn!(
+                pane = self.pane_id.raw(),
+                err = %err,
+                "failed to release PTY actor after handoff commit; dropping runtime will still close the actor handle"
+            );
         }
         self.detect_handle.abort();
         self.preserve_processes_on_drop = true;
@@ -967,28 +912,19 @@ impl PaneRuntime {
 
     #[cfg(unix)]
     pub fn set_handoff_reader_paused(&self, paused: bool) {
-        self.reader_paused.store(paused, Ordering::Release);
-        if !paused {
-            self.reader_pause_ack.store(false, Ordering::Release);
+        if let Err(err) = self.io.set_handoff_paused(paused) {
+            warn!(
+                pane = self.pane_id.raw(),
+                err = %err,
+                paused,
+                "failed to update PTY actor handoff pause state"
+            );
         }
     }
 
     #[cfg(unix)]
     pub fn pause_handoff_reader(&self, timeout: std::time::Duration) -> std::io::Result<()> {
-        self.reader_pause_ack.store(false, Ordering::Release);
-        self.reader_paused.store(true, Ordering::Release);
-        let deadline = std::time::Instant::now() + timeout;
-        while std::time::Instant::now() < deadline {
-            if self.reader_pause_ack.load(Ordering::Acquire) || self.io_stop.load(Ordering::Acquire)
-            {
-                return Ok(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "timed out waiting for pane reader to pause for handoff",
-        ))
+        self.io.begin_handoff(timeout)
     }
 
     #[cfg(unix)]
@@ -1243,24 +1179,11 @@ impl PaneRuntime {
             initial_history_ansi,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
-        use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+        use std::os::fd::FromRawFd;
 
         let master_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_fd) };
-        set_cloexec(master_fd.as_raw_fd())?;
-        set_nonblocking(master_fd.as_raw_fd())?;
-        let reader = file_from_duplicated_fd(master_fd.as_raw_fd())?;
-        let writer = file_from_duplicated_fd(master_fd.as_raw_fd())?;
-        let terminal_response_writer = file_from_duplicated_fd(master_fd.as_raw_fd())?;
-        let force_resize_fd = duplicate_cloexec_fd(master_fd.as_raw_fd())?;
-        let resize_fd = unsafe {
-            std::os::fd::OwnedFd::from_raw_fd(duplicate_cloexec_fd(master_fd.as_raw_fd())?)
-        };
-        let io_stop = Arc::new(AtomicBool::new(false));
-        let pty_write_lock = Arc::new(Mutex::new(()));
-        let reader_paused = Arc::new(AtomicBool::new(true));
-        let reader_pause_ack = Arc::new(AtomicBool::new(false));
 
-        let (input_tx, mut input_rx) = mpsc::channel::<Bytes>(32);
+        let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
         let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         if crate::kitty_graphics::is_enabled() {
@@ -1268,7 +1191,7 @@ impl PaneRuntime {
                 .enable_kitty_graphics()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
-        let pane_terminal = GhosttyPaneTerminal::new(terminal, input_tx.clone())?;
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
         if let Some(input_state) = input_state {
             pane_terminal.seed_handoff_input_state(input_state);
@@ -1284,154 +1207,59 @@ impl PaneRuntime {
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let child_pid = Arc::new(AtomicU32::new(child_pid));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
-        let (reader_stopped_tx, reader_stopped_rx) = std::sync::mpsc::channel();
 
-        {
-            use std::os::fd::AsRawFd;
-
-            let mut reader = reader;
-            let reader_fd = reader.as_raw_fd();
-            let mut terminal_response_writer = terminal_response_writer;
-            let terminal_response_fd = terminal_response_writer.as_raw_fd();
+        let io = {
             let terminal = terminal.clone();
-            let response_writer = input_tx.clone();
+            let response_writer = response_tx.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let child_pid = child_pid.clone();
-            let events = events.clone();
-            let io_stop = io_stop.clone();
-            let pty_write_lock = pty_write_lock.clone();
-            let reader_paused = reader_paused.clone();
-            let reader_pause_ack = reader_pause_ack.clone();
+            let read_events = events.clone();
             let rt = tokio::runtime::Handle::current();
-            tokio::task::spawn_blocking(move || {
-                let mut buf = [0u8; 8192];
-                loop {
-                    if io_stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    if reader_paused.load(Ordering::Acquire) {
-                        reader_pause_ack.store(true, Ordering::Release);
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                        continue;
-                    }
-                    reader_pause_ack.store(false, Ordering::Release);
-                    match poll_read_ready(reader_fd, 50) {
-                        Ok(true) => {}
-                        Ok(false) => continue,
-                        Err(e) => {
-                            debug!(pane = pane_id.raw(), err = %e, "handoff pty reader poll failed");
-                            break;
+            let delay_rt = rt.clone();
+            let on_read = Box::new(move |bytes: &[u8]| {
+                let shell_pid = child_pid.load(Ordering::Acquire);
+                let result =
+                    terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
+                if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
+                    render_notify.notify_one();
+                }
+                if let Some(delay) = result.render_delay {
+                    let render_notify = render_notify.clone();
+                    let render_dirty = render_dirty.clone();
+                    delay_rt.spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        if !render_dirty.swap(true, Ordering::AcqRel) {
+                            render_notify.notify_one();
                         }
-                    }
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                        Err(e) => {
-                            debug!(pane = pane_id.raw(), err = %e, "handoff pty reader closed");
-                            break;
-                        }
-                        Ok(n) => {
-                            let shell_pid = child_pid.load(Ordering::Acquire);
-                            let result = terminal.process_pty_bytes(
-                                pane_id,
-                                shell_pid,
-                                &buf[..n],
-                                &response_writer,
-                            );
-                            for response in result.terminal_responses {
-                                if let Err(err) = write_pty_bytes_locked(
-                                    &mut terminal_response_writer,
-                                    terminal_response_fd,
-                                    &response,
-                                    &io_stop,
-                                    &pty_write_lock,
-                                ) {
-                                    warn!(pane = pane_id.raw(), err = %err, "handoff terminal response write failed");
-                                    break;
-                                }
-                            }
-                            if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
-                                render_notify.notify_one();
-                            }
-                            if let Some(delay) = result.render_delay {
-                                let render_notify = render_notify.clone();
-                                let render_dirty = render_dirty.clone();
-                                rt.spawn(async move {
-                                    tokio::time::sleep(delay).await;
-                                    if !render_dirty.swap(true, Ordering::AcqRel) {
-                                        render_notify.notify_one();
-                                    }
-                                });
-                            }
-                            for content in result.clipboard_writes {
-                                let _ =
-                                    rt.block_on(events.send(AppEvent::ClipboardWrite { content }));
-                            }
-                        }
+                    });
+                }
+                for content in result.clipboard_writes {
+                    if let Err(err) = read_events.try_send(AppEvent::ClipboardWrite { content }) {
+                        warn!(
+                            pane = pane_id.raw(),
+                            err = %err,
+                            "failed to queue OSC 52 clipboard write"
+                        );
                     }
                 }
-                let _ = reader_stopped_tx.send(());
-                let _ = rt.block_on(events.send(AppEvent::PaneDied { pane_id }));
-                debug!(pane = pane_id.raw(), "handoff reader task exiting");
-            });
-        }
-
-        {
-            use std::os::fd::AsRawFd;
-
-            let mut writer = writer;
-            let writer_fd = writer.as_raw_fd();
-            let io_stop = io_stop.clone();
-            let pty_write_lock = pty_write_lock.clone();
-            tokio::task::spawn_blocking(move || {
-                let rt = tokio::runtime::Handle::current();
-                while let Some(bytes) = rt.block_on(input_rx.recv()) {
-                    if io_stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    if let Err(e) = write_pty_bytes_locked(
-                        &mut writer,
-                        writer_fd,
-                        &bytes,
-                        &io_stop,
-                        &pty_write_lock,
-                    ) {
-                        warn!(pane = pane_id.raw(), err = %e, "handoff pty write failed");
-                        break;
-                    }
+                PtyReadResult {
+                    terminal_responses: result.terminal_responses,
                 }
-                debug!(pane = pane_id.raw(), "handoff writer task exiting");
             });
-        }
-
-        let (resize_tx, mut resize_rx) =
-            watch::channel::<(u16, u16, u32, u32)>((rows, cols, cell_width_px, cell_height_px));
-        {
-            let io_stop = io_stop.clone();
-            let resize_fd = resize_fd.into_raw_fd();
-            tokio::task::spawn_blocking(move || {
-                let rt = tokio::runtime::Handle::current();
-                let mut last_size = (rows, cols, cell_width_px, cell_height_px);
-                while rt.block_on(resize_rx.changed()).is_ok() {
-                    if io_stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let (rows, cols, cell_width_px, cell_height_px) =
-                        *resize_rx.borrow_and_update();
-                    if (rows, cols, cell_width_px, cell_height_px) == last_size {
-                        continue;
-                    }
-                    last_size = (rows, cols, cell_width_px, cell_height_px);
-                    if let Err(e) =
-                        resize_pty_fd(resize_fd, rows, cols, cell_width_px, cell_height_px)
-                    {
-                        warn!(pane = pane_id.raw(), err = %e, rows, cols, "handoff pty resize failed");
-                    }
-                }
-                let _ = unsafe { libc::close(resize_fd) };
+            let exit_events = events.clone();
+            let on_reader_exit = Box::new(move || {
+                let _ = rt.block_on(exit_events.send(AppEvent::PaneDied { pane_id }));
+                debug!(pane = pane_id.raw(), "handoff PTY actor exiting");
             });
-        }
+            PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
+                pane_id: pane_id.raw(),
+                master_fd,
+                initially_quiesced: true,
+                on_read,
+                on_reader_exit: Some(on_reader_exit),
+            })?)
+        };
 
         let (detect_handle, detect_reset_notify, pending_release) =
             spawn_basic_detection_task(pane_id, child_pid.clone(), terminal.clone(), events);
@@ -1439,17 +1267,9 @@ impl PaneRuntime {
         Ok(Self {
             pane_id,
             terminal,
-            sender: input_tx,
-            resize_tx,
+            io,
             current_size: Cell::new((rows, cols, cell_width_px, cell_height_px)),
             child_pid,
-            pty_master: None,
-            raw_master_fd: Some(master_fd.into_raw_fd()),
-            force_resize_fd: Some(force_resize_fd),
-            io_stop,
-            reader_paused,
-            reader_pause_ack,
-            reader_stopped_rx: Some(reader_stopped_rx),
             kitty_keyboard_flags,
             detect_reset_notify,
             pending_release,
@@ -1471,21 +1291,9 @@ impl PaneRuntime {
         spawn_error_message: &'static str,
         initial_state: SpawnInitialState<'_>,
     ) -> std::io::Result<Self> {
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        // --- Writer channel ---
-        let (input_tx, mut input_rx) = mpsc::channel::<Bytes>(32);
-
         crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
+        let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
         let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         if crate::kitty_graphics::is_enabled() {
@@ -1493,7 +1301,7 @@ impl PaneRuntime {
                 .enable_kitty_graphics()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
-        let pane_terminal = GhosttyPaneTerminal::new(terminal, input_tx.clone())?;
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
         if let Some(ansi) = initial_state.history_ansi {
             pane_terminal.seed_history_ansi(ansi);
@@ -1501,47 +1309,27 @@ impl PaneRuntime {
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
 
-        let master_fd = pair
-            .master
-            .as_raw_fd()
-            .ok_or_else(|| std::io::Error::other("pty master fd is unavailable"))?;
-        set_nonblocking(master_fd)?;
-        let reader = file_from_duplicated_fd(master_fd)?;
-        let writer = file_from_duplicated_fd(master_fd)?;
-        let terminal_response_writer = file_from_duplicated_fd(master_fd)?;
-        let force_resize_fd = duplicate_cloexec_fd(master_fd)?;
-        let resize_fd = duplicate_cloexec_fd(master_fd)?;
-        let io_stop = Arc::new(AtomicBool::new(false));
-        let pty_write_lock = Arc::new(Mutex::new(()));
-        let reader_paused = Arc::new(AtomicBool::new(false));
-        let reader_pause_ack = Arc::new(AtomicBool::new(false));
-        let (reader_stopped_tx, reader_stopped_rx) = std::sync::mpsc::channel();
+        let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)
+            .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
 
         // --- Child watcher task ---
         let child_pid = Arc::new(AtomicU32::new(0));
         {
             let child_pid = child_pid.clone();
-            let slave = pair.slave;
             let events = events.clone();
             let rt = tokio::runtime::Handle::current();
+            let mut child = spawned.child;
+            if let Some(pid) = child.process_id() {
+                child_pid.store(pid, Ordering::Release);
+                crate::logging::pane_spawned(pane_id.raw(), pid);
+            }
             tokio::task::spawn_blocking(move || {
-                match slave.spawn_command(cmd) {
-                    Ok(mut child) => {
-                        if let Some(pid) = child.process_id() {
-                            child_pid.store(pid, Ordering::Release);
-                            crate::logging::pane_spawned(pane_id.raw(), pid);
-                        }
-                        match child.wait() {
-                            Ok(status) => {
-                                let status_text = format!("{status:?}");
-                                crate::logging::pane_exited(pane_id.raw(), &status_text);
-                            }
-                            Err(e) => {
-                                crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string())
-                            }
-                        }
+                match child.wait() {
+                    Ok(status) => {
+                        let status_text = format!("{status:?}");
+                        crate::logging::pane_exited(pane_id.raw(), &status_text);
                     }
-                    Err(e) => error!(pane = pane_id.raw(), err = %e, "{spawn_error_message}"),
+                    Err(e) => crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string()),
                 }
                 // Use blocking send — PaneDied is critical, must not be dropped
                 if let Err(e) = rt.block_on(events.send(AppEvent::PaneDied { pane_id })) {
@@ -1550,103 +1338,52 @@ impl PaneRuntime {
             });
         }
 
-        // --- Reader task: PTY → terminal backend + screen snapshot + terminal query responses ---
-        {
-            use std::os::fd::AsRawFd;
-
-            let mut reader = reader;
-            let reader_fd = reader.as_raw_fd();
-            let mut terminal_response_writer = terminal_response_writer;
-            let terminal_response_fd = terminal_response_writer.as_raw_fd();
+        let io = {
             let terminal = terminal.clone();
-            let response_writer = input_tx.clone();
+            let response_writer = response_tx.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let child_pid = child_pid.clone();
             let events = events.clone();
-            let io_stop = io_stop.clone();
-            let pty_write_lock = pty_write_lock.clone();
-            let reader_paused = reader_paused.clone();
-            let reader_pause_ack = reader_pause_ack.clone();
             let rt = tokio::runtime::Handle::current();
-            tokio::task::spawn_blocking(move || {
-                let mut buf = [0u8; 8192];
-                loop {
-                    if io_stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    if reader_paused.load(Ordering::Acquire) {
-                        reader_pause_ack.store(true, Ordering::Release);
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                        continue;
-                    }
-                    reader_pause_ack.store(false, Ordering::Release);
-                    match poll_read_ready(reader_fd, 50) {
-                        Ok(true) => {}
-                        Ok(false) => continue,
-                        Err(e) => {
-                            debug!(pane = pane_id.raw(), err = %e, "pty reader poll failed");
-                            break;
+            let on_read = Box::new(move |bytes: &[u8]| {
+                let shell_pid = child_pid.load(Ordering::Acquire);
+                let result =
+                    terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
+                if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
+                    render_notify.notify_one();
+                }
+                if let Some(delay) = result.render_delay {
+                    let render_notify = render_notify.clone();
+                    let render_dirty = render_dirty.clone();
+                    rt.spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        if !render_dirty.swap(true, Ordering::AcqRel) {
+                            render_notify.notify_one();
                         }
-                    }
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                        Err(e) => {
-                            debug!(pane = pane_id.raw(), err = %e, "pty reader closed");
-                            break;
-                        }
-                        Ok(n) => {
-                            let shell_pid = child_pid.load(Ordering::Acquire);
-                            let result = terminal.process_pty_bytes(
-                                pane_id,
-                                shell_pid,
-                                &buf[..n],
-                                &response_writer,
-                            );
-                            for response in result.terminal_responses {
-                                if let Err(err) = write_pty_bytes_locked(
-                                    &mut terminal_response_writer,
-                                    terminal_response_fd,
-                                    &response,
-                                    &io_stop,
-                                    &pty_write_lock,
-                                ) {
-                                    warn!(pane = pane_id.raw(), err = %err, "terminal response write failed");
-                                    break;
-                                }
-                            }
-                            if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
-                                render_notify.notify_one();
-                            }
-                            if let Some(delay) = result.render_delay {
-                                let render_notify = render_notify.clone();
-                                let render_dirty = render_dirty.clone();
-                                rt.spawn(async move {
-                                    tokio::time::sleep(delay).await;
-                                    if !render_dirty.swap(true, Ordering::AcqRel) {
-                                        render_notify.notify_one();
-                                    }
-                                });
-                            }
-                            for content in result.clipboard_writes {
-                                if let Err(err) =
-                                    rt.block_on(events.send(AppEvent::ClipboardWrite { content }))
-                                {
-                                    warn!(
-                                        pane = pane_id.raw(),
-                                        err = %err,
-                                        "failed to send OSC 52 clipboard write"
-                                    );
-                                }
-                            }
-                        }
+                    });
+                }
+                for content in result.clipboard_writes {
+                    if let Err(err) = events.try_send(AppEvent::ClipboardWrite { content }) {
+                        warn!(
+                            pane = pane_id.raw(),
+                            err = %err,
+                            "failed to send OSC 52 clipboard write"
+                        );
                     }
                 }
-                let _ = reader_stopped_tx.send(());
-                debug!(pane = pane_id.raw(), "reader task exiting");
+                PtyReadResult {
+                    terminal_responses: result.terminal_responses,
+                }
             });
-        }
+            PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
+                pane_id: pane_id.raw(),
+                master_fd: spawned.master_fd,
+                initially_quiesced: false,
+                on_read,
+                on_reader_exit: None,
+            })?)
+        };
 
         // --- Detection task ---
         let (detect_handle, detect_reset_notify, pending_release) = {
@@ -1934,76 +1671,12 @@ impl PaneRuntime {
             (handle.abort_handle(), detect_reset_notify, pending_release)
         };
 
-        // --- Writer task: channel → PTY ---
-        {
-            use std::os::fd::AsRawFd;
-
-            let mut writer = writer;
-            let writer_fd = writer.as_raw_fd();
-            let io_stop = io_stop.clone();
-            let pty_write_lock = pty_write_lock.clone();
-            tokio::task::spawn_blocking(move || {
-                let rt = tokio::runtime::Handle::current();
-                while let Some(bytes) = rt.block_on(input_rx.recv()) {
-                    if io_stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    if let Err(e) = write_pty_bytes_locked(
-                        &mut writer,
-                        writer_fd,
-                        &bytes,
-                        &io_stop,
-                        &pty_write_lock,
-                    ) {
-                        warn!(pane = pane_id.raw(), err = %e, "pty write failed");
-                        break;
-                    }
-                }
-                debug!(pane = pane_id.raw(), "writer task exiting");
-            });
-        }
-
-        // --- Resize task ---
-        let (resize_tx, mut resize_rx) = watch::channel::<(u16, u16, u32, u32)>((rows, cols, 0, 0));
-        {
-            let io_stop = io_stop.clone();
-            tokio::task::spawn_blocking(move || {
-                let rt = tokio::runtime::Handle::current();
-                let mut last_size = (rows, cols, 0, 0);
-                while rt.block_on(resize_rx.changed()).is_ok() {
-                    if io_stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let (rows, cols, cell_width_px, cell_height_px) =
-                        *resize_rx.borrow_and_update();
-                    if (rows, cols, cell_width_px, cell_height_px) == last_size {
-                        continue;
-                    }
-                    last_size = (rows, cols, cell_width_px, cell_height_px);
-                    if let Err(e) =
-                        resize_pty_fd(resize_fd, rows, cols, cell_width_px, cell_height_px)
-                    {
-                        warn!(pane = pane_id.raw(), err = %e, rows, cols, "pty resize failed");
-                    }
-                }
-                let _ = unsafe { libc::close(resize_fd) };
-            });
-        }
-
         Ok(Self {
             pane_id,
             terminal,
-            sender: input_tx,
-            resize_tx,
+            io,
             current_size: Cell::new((rows, cols, 0, 0)),
             child_pid,
-            pty_master: Some(pair.master),
-            raw_master_fd: None,
-            force_resize_fd: Some(force_resize_fd),
-            io_stop,
-            reader_paused,
-            reader_pause_ack,
-            reader_stopped_rx: Some(reader_stopped_rx),
             kitty_keyboard_flags,
             detect_reset_notify,
             pending_release,
@@ -2038,37 +1711,13 @@ impl PaneRuntime {
         self.current_size.set(size);
         self.terminal
             .resize(rows, cols, cell_width_px, cell_height_px);
-        let _ = self.resize_tx.send(size);
+        self.io.resize(rows, cols, cell_width_px, cell_height_px);
     }
 
     pub fn nudge_child_redraw_after_handoff(&self) {
-        let Some(fd) = self.force_resize_fd else {
-            return;
-        };
         let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
-        let nudge = if rows > 2 {
-            (rows - 1, cols, cell_width_px, cell_height_px)
-        } else {
-            (
-                rows,
-                cols.saturating_sub(1).max(4),
-                cell_width_px,
-                cell_height_px,
-            )
-        };
-        if nudge == (rows, cols, cell_width_px, cell_height_px) {
-            return;
-        }
-
-        let Ok(fd) = duplicate_cloexec_fd(fd) else {
-            return;
-        };
-        std::thread::spawn(move || {
-            let _ = resize_pty_fd(fd, nudge.0, nudge.1, nudge.2, nudge.3);
-            std::thread::sleep(std::time::Duration::from_millis(30));
-            let _ = resize_pty_fd(fd, rows, cols, cell_width_px, cell_height_px);
-            let _ = unsafe { libc::close(fd) };
-        });
+        self.io
+            .nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
     }
 
     /// Scroll up by N lines (into scrollback history).
@@ -2180,11 +1829,11 @@ impl PaneRuntime {
     }
 
     pub async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
-        self.sender.send(bytes).await
+        self.io.send_bytes(bytes).await
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-        self.sender.try_send(bytes)
+        self.io.try_send_bytes(bytes)
     }
 
     pub async fn send_paste(&self, text: String) -> Result<(), mpsc::error::SendError<Bytes>> {
@@ -2289,8 +1938,8 @@ impl PaneRuntime {
             let pid = self.child_pid.load(Ordering::Acquire);
             let shell_cwd = usable_process_cwd(pid);
             let foreground_pgid = self
-                .master_fd()
-                .and_then(crate::platform::foreground_process_group_id_for_tty_fd)
+                .io
+                .foreground_process_group_id()
                 .or_else(|| crate::platform::foreground_process_group_id(pid));
             let leader_cwd = foreground_pgid.and_then(usable_process_cwd);
 
@@ -2355,17 +2004,12 @@ impl PaneRuntime {
                 terminal: Arc::new(PaneTerminal::new(
                     GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
                 )),
-                sender: tx,
-                resize_tx,
+                io: PaneRuntimeIo::TestChannel {
+                    sender: tx,
+                    resize_tx,
+                },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
-                pty_master: None,
-                raw_master_fd: None,
-                force_resize_fd: None,
-                io_stop: Arc::new(AtomicBool::new(false)),
-                reader_paused: Arc::new(AtomicBool::new(false)),
-                reader_pause_ack: Arc::new(AtomicBool::new(false)),
-                reader_stopped_rx: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
@@ -2774,17 +2418,12 @@ mod tests {
             terminal: Arc::new(PaneTerminal::new(
                 GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
             )),
-            sender: tx,
-            resize_tx,
+            io: PaneRuntimeIo::TestChannel {
+                sender: tx,
+                resize_tx,
+            },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
-            pty_master: None,
-            raw_master_fd: None,
-            force_resize_fd: None,
-            io_stop: Arc::new(AtomicBool::new(false)),
-            reader_paused: Arc::new(AtomicBool::new(false)),
-            reader_pause_ack: Arc::new(AtomicBool::new(false)),
-            reader_stopped_rx: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
@@ -2806,17 +2445,12 @@ mod tests {
             terminal: Arc::new(PaneTerminal::new(
                 GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
             )),
-            sender: tx,
-            resize_tx,
+            io: PaneRuntimeIo::TestChannel {
+                sender: tx,
+                resize_tx,
+            },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
-            pty_master: None,
-            raw_master_fd: None,
-            force_resize_fd: None,
-            io_stop: Arc::new(AtomicBool::new(false)),
-            reader_paused: Arc::new(AtomicBool::new(false)),
-            reader_pause_ack: Arc::new(AtomicBool::new(false)),
-            reader_stopped_rx: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
