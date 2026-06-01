@@ -54,6 +54,7 @@ pub enum Agent {
     Amp,
     Grok,
     Hermes,
+    Kilo,
     Qodercli,
 }
 
@@ -74,6 +75,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Amp => "amp",
         Agent::Grok => "grok",
         Agent::Hermes => "hermes",
+        Agent::Kilo => "kilo",
         Agent::Qodercli => "qodercli",
     }
 }
@@ -96,6 +98,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
+        "kilo" | "kilo-code" | "kilo code" => Some(Agent::Kilo),
         "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
         _ => None,
     }
@@ -122,6 +125,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "amp" | "amp-local" => Some(Agent::Amp),
         "grok" | "grok-build" => Some(Agent::Grok),
         "hermes" | "hermes-agent" => Some(Agent::Hermes),
+        "kilo" | "kilo-code" | "kilo code" => Some(Agent::Kilo),
         "qodercli" | "qoderclicn" | "qoder" | "qodercn" => Some(Agent::Qodercli),
         _ => None,
     }
@@ -253,6 +257,11 @@ fn has_braille_spinner(content: &str) -> bool {
 #[cfg(test)]
 fn detect_qodercli(content: &str) -> AgentState {
     detect_state(Some(Agent::Qodercli), content)
+}
+
+#[cfg(test)]
+fn detect_kilo(content: &str) -> AgentState {
+    detect_state(Some(Agent::Kilo), content)
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +576,11 @@ mod tests {
                 AgentState::Working,
             ),
             (Agent::Hermes, "msg=interrupt", AgentState::Working),
+            (
+                Agent::Kilo,
+                "Ask · DeepSeek V4 Pro\nesc interrupt",
+                AgentState::Working,
+            ),
             (Agent::Qodercli, "\u{280B} Thinking...", AgentState::Working),
         ];
 
@@ -604,6 +618,8 @@ mod tests {
         assert_eq!(identify_agent("grok-build"), Some(Agent::Grok));
         assert_eq!(identify_agent("hermes"), Some(Agent::Hermes));
         assert_eq!(identify_agent("hermes-agent"), Some(Agent::Hermes));
+        assert_eq!(identify_agent("kilo"), Some(Agent::Kilo));
+        assert_eq!(identify_agent("kilo-code"), Some(Agent::Kilo));
     }
 
     #[test]
@@ -623,6 +639,7 @@ mod tests {
         assert_eq!(parse_agent_label("kiro-cli"), Some(Agent::Kiro));
         assert_eq!(parse_agent_label("grok-build"), Some(Agent::Grok));
         assert_eq!(parse_agent_label("hermes-agent"), Some(Agent::Hermes));
+        assert_eq!(parse_agent_label("kilo-code"), Some(Agent::Kilo));
     }
 
     #[test]
@@ -634,6 +651,7 @@ mod tests {
         assert_eq!(agent_label(Agent::Kiro), "kiro");
         assert_eq!(agent_label(Agent::Grok), "grok");
         assert_eq!(agent_label(Agent::Hermes), "hermes");
+        assert_eq!(agent_label(Agent::Kilo), "kilo");
     }
 
     #[test]
@@ -1579,6 +1597,38 @@ mod tests {
     #[test]
     fn opencode_idle() {
         assert_eq!(detect_opencode("> "), AgentState::Idle);
+    }
+
+    // ---- Kilo ----
+
+    #[test]
+    fn kilo_waiting_question_prompt() {
+        assert_eq!(
+            detect_kilo(
+                "Write the following joke to ~/joke.md?\n\
+                 1. Yes, write it\n\
+                 2. No, thanks\n\
+                 3. Type your own answer\n\
+                 ↑↓ select  enter submit  esc dismiss",
+            ),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn kilo_working() {
+        assert_eq!(
+            detect_kilo("Ask · DeepSeek V4 Pro\nesc interrupt\n12.8K (1%) · $0.01"),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn kilo_idle() {
+        assert_eq!(
+            detect_kilo("Ask anything... \"Fix broken tests\"\nCode · DeepSeek V4 Pro"),
+            AgentState::Idle
+        );
     }
 
     // ---- GitHub Copilot ----
