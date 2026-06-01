@@ -29,6 +29,7 @@ mod state;
 mod terminal;
 
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
+pub(crate) use self::terminal::{TerminalDirtyPatch, TerminalDirtyPatchOutcome};
 pub use self::{
     state::PaneState,
     terminal::{InputState, ScrollMetrics, TerminalCursorState},
@@ -1799,6 +1800,14 @@ impl PaneRuntime {
         self.terminal.render(frame, area, show_cursor);
     }
 
+    pub(crate) fn collect_dirty_patch(
+        &self,
+        area_width: u16,
+        area_height: u16,
+    ) -> TerminalDirtyPatchOutcome {
+        self.terminal.collect_dirty_patch(area_width, area_height)
+    }
+
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
         self.terminal.visible_hyperlinks(area)
     }
@@ -1972,6 +1981,11 @@ impl PaneRuntime {
 
     pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
         Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
+    }
+
+    pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
+        let (tx, _rx) = mpsc::channel(1);
+        let _ = self.terminal.process_pty_bytes(self.pane_id, 0, bytes, &tx);
     }
 
     pub(crate) fn test_with_scrollback_bytes(

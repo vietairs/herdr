@@ -273,6 +273,14 @@ impl TerminalRuntime {
         self.0.render(frame, area, show_cursor);
     }
 
+    pub(crate) fn collect_dirty_patch(
+        &self,
+        area_width: u16,
+        area_height: u16,
+    ) -> crate::pane::TerminalDirtyPatchOutcome {
+        self.0.collect_dirty_patch(area_width, area_height)
+    }
+
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
         self.0.visible_hyperlinks(area)
     }
@@ -376,6 +384,10 @@ impl TerminalRuntime {
         Self(crate::pane::PaneRuntime::test_with_screen_bytes(
             cols, rows, bytes,
         ))
+    }
+
+    pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
+        self.0.test_process_pty_bytes(bytes);
     }
 
     pub(crate) fn test_with_scrollback_bytes(

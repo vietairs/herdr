@@ -17,6 +17,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::mem;
+use std::ops::RangeInclusive;
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
@@ -69,6 +70,18 @@ pub enum Dirty {
     Clean,
     Partial,
     Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowSelection {
+    pub start_x: u16,
+    pub end_x: u16,
+}
+
+impl RowSelection {
+    pub fn range(self) -> RangeInclusive<u16> {
+        self.start_x..=self.end_x
+    }
 }
 
 impl Dirty {
@@ -2186,6 +2199,44 @@ impl<'a> RowIter<'a> {
         Ok(dirty)
     }
 
+    pub fn clear_dirty(&mut self) -> Result<(), Error> {
+        self.set_dirty(false)
+    }
+
+    pub fn set_dirty(&mut self, dirty: bool) -> Result<(), Error> {
+        // SAFETY: dirty pointer matches the expected row option type.
+        unsafe {
+            ffi::ghostty_render_state_row_set(
+                self.iterator.raw,
+                ffi::GhosttyRenderStateRowOption_GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY,
+                (&dirty as *const bool).cast(),
+            )
+            .into_result()
+        }
+    }
+
+    pub fn selection(&self) -> Result<Option<RowSelection>, Error> {
+        let mut selection = ffi::GhosttyRenderStateRowSelection {
+            size: mem::size_of::<ffi::GhosttyRenderStateRowSelection>(),
+            ..Default::default()
+        };
+        let result = unsafe {
+            ffi::ghostty_render_state_row_get(
+                self.iterator.raw,
+                ffi::GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
+                (&mut selection as *mut ffi::GhosttyRenderStateRowSelection).cast(),
+            )
+        };
+        match result {
+            ffi::GhosttyResult_GHOSTTY_SUCCESS => Ok(Some(RowSelection {
+                start_x: selection.start_x,
+                end_x: selection.end_x,
+            })),
+            ffi::GhosttyResult_GHOSTTY_NO_VALUE => Ok(None),
+            other => Err(Error(other)),
+        }
+    }
+
     pub fn populate_cells<'b>(
         &'b mut self,
         cells: &'b mut RowCells,
@@ -2234,6 +2285,25 @@ pub struct RowCellIter<'a> {
     cells: &'a mut RowCells,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellBasicData {
+    pub wide: CellWide,
+    pub has_hyperlink: bool,
+    pub has_styling: bool,
+    pub style: CellStyle,
+}
+
+impl Default for CellBasicData {
+    fn default() -> Self {
+        Self {
+            wide: CellWide::Narrow,
+            has_hyperlink: false,
+            has_styling: false,
+            style: CellStyle::default(),
+        }
+    }
+}
+
 impl<'a> RowCellIter<'a> {
     pub fn next(&mut self) -> bool {
         // SAFETY: cells handle is valid while self is alive.
@@ -2255,6 +2325,64 @@ impl<'a> RowCellIter<'a> {
             .into_result()?;
         }
         Ok(raw)
+    }
+
+    pub fn basic_data(&self) -> Result<CellBasicData, Error> {
+        let mut raw = ffi::GhosttyCell::default();
+        let mut style = ffi::GhosttyStyle {
+            size: mem::size_of::<ffi::GhosttyStyle>(),
+            ..Default::default()
+        };
+        let mut has_styling = false;
+        let row_keys = [
+            ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+            ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
+            ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING,
+        ];
+        let mut row_values = [
+            (&mut raw as *mut ffi::GhosttyCell).cast::<c_void>(),
+            (&mut style as *mut ffi::GhosttyStyle).cast::<c_void>(),
+            (&mut has_styling as *mut bool).cast::<c_void>(),
+        ];
+        let mut written = 0usize;
+        unsafe {
+            ffi::ghostty_render_state_row_cells_get_multi(
+                self.cells.raw,
+                row_keys.len(),
+                row_keys.as_ptr(),
+                row_values.as_mut_ptr(),
+                &mut written,
+            )
+            .into_result()?;
+        }
+
+        let mut wide = ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_NARROW;
+        let mut has_hyperlink = false;
+        let cell_keys = [
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE,
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK,
+        ];
+        let mut cell_values = [
+            (&mut wide as *mut ffi::GhosttyCellWide).cast::<c_void>(),
+            (&mut has_hyperlink as *mut bool).cast::<c_void>(),
+        ];
+        unsafe {
+            ffi::ghostty_cell_get_multi(
+                raw,
+                cell_keys.len(),
+                cell_keys.as_ptr(),
+                cell_values.as_mut_ptr(),
+                &mut written,
+            )
+            .into_result()?;
+        }
+
+        Ok(CellBasicData {
+            wide: CellWide::from_raw(wide),
+            has_hyperlink,
+            has_styling,
+            style: style.into(),
+        })
     }
 
     pub fn wide(&self) -> Result<CellWide, Error> {
@@ -2806,5 +2934,88 @@ mod tests {
 
         render_state.set_dirty(Dirty::Clean).unwrap();
         assert_eq!(render_state.dirty().unwrap(), Dirty::Clean);
+    }
+
+    #[test]
+    fn render_state_row_dirty_can_be_cleared_independently() {
+        let mut terminal = Terminal::new(8, 3, 100).unwrap();
+        let mut render_state = RenderState::new().unwrap();
+
+        render_state.update(&terminal).unwrap();
+        {
+            let mut row_iterator = RowIterator::new().unwrap();
+            let mut rows = render_state
+                .populate_row_iterator(&mut row_iterator)
+                .unwrap();
+            while rows.next() {
+                rows.clear_dirty().unwrap();
+                assert!(!rows.dirty().unwrap());
+            }
+        }
+        render_state.set_dirty(Dirty::Clean).unwrap();
+        assert_eq!(render_state.dirty().unwrap(), Dirty::Clean);
+
+        terminal.write(b"A");
+        render_state.update(&terminal).unwrap();
+        assert_eq!(render_state.dirty().unwrap(), Dirty::Partial);
+
+        let mut dirty_rows = 0usize;
+        {
+            let mut row_iterator = RowIterator::new().unwrap();
+            let mut rows = render_state
+                .populate_row_iterator(&mut row_iterator)
+                .unwrap();
+            while rows.next() {
+                if rows.dirty().unwrap() {
+                    dirty_rows += 1;
+                    rows.clear_dirty().unwrap();
+                    assert!(!rows.dirty().unwrap());
+                }
+            }
+        }
+        assert_eq!(dirty_rows, 1);
+        assert_eq!(render_state.dirty().unwrap(), Dirty::Partial);
+
+        render_state.set_dirty(Dirty::Clean).unwrap();
+        assert_eq!(render_state.dirty().unwrap(), Dirty::Clean);
+    }
+
+    #[test]
+    fn row_selection_returns_none_without_selection() {
+        let terminal = Terminal::new(8, 3, 100).unwrap();
+        let mut render_state = RenderState::new().unwrap();
+        render_state.update(&terminal).unwrap();
+
+        let mut row_iterator = RowIterator::new().unwrap();
+        let mut rows = render_state
+            .populate_row_iterator(&mut row_iterator)
+            .unwrap();
+        assert!(rows.next());
+        assert_eq!(rows.selection().unwrap(), None);
+    }
+
+    #[test]
+    fn row_cell_basic_data_uses_batched_vendor_reads() {
+        let mut terminal = Terminal::new(8, 3, 100).unwrap();
+        terminal.write(b"\x1b[31mA\x1b[0m");
+
+        let mut render_state = RenderState::new().unwrap();
+        render_state.update(&terminal).unwrap();
+
+        let mut row_iterator = RowIterator::new().unwrap();
+        let mut rows = render_state
+            .populate_row_iterator(&mut row_iterator)
+            .unwrap();
+        assert!(rows.next());
+
+        let mut row_cells = RowCells::new().unwrap();
+        let mut cells = rows.populate_cells(&mut row_cells).unwrap();
+        assert!(cells.next());
+
+        let basic = cells.basic_data().unwrap();
+        assert_eq!(basic.wide, CellWide::Narrow);
+        assert!(basic.has_styling);
+        assert_eq!(basic.style.fg_color, Some(CellColor::Palette(1)));
+        assert!(!basic.has_hyperlink);
     }
 }
