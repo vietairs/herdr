@@ -9,6 +9,9 @@
 ### Changed
 - Removed the automatic GitHub star prompt from `herdr update`.
 
+### Fixed
+- Pane input no longer waits behind the PTY actor's idle read poll, restoring responsive typing at quiet shell prompts. (#379)
+
 ## [0.6.6] - 2026-05-31
 
 ### Added
