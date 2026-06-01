@@ -372,6 +372,7 @@ fn cell_color_from_style_color(color: ffi::GhosttyStyleColor) -> Option<CellColo
 pub struct RenderColors {
     pub background: RgbColor,
     pub foreground: RgbColor,
+    pub palette: [RgbColor; 256],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1870,6 +1871,7 @@ impl RenderState {
         Ok(RenderColors {
             background: colors.background.into(),
             foreground: colors.foreground.into(),
+            palette: colors.palette.map(Into::into),
         })
     }
 

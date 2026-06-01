@@ -26,6 +26,7 @@ pub(super) enum DefaultColorEvent {
     Query(DefaultColorQuery),
     Set(DefaultColorQuery),
     Reset(DefaultColorQuery),
+    PaletteQuery(u8),
 }
 
 #[derive(Debug, Default)]
@@ -240,8 +241,22 @@ fn parse_default_color_event(body: &[u8]) -> Option<DefaultColorEvent> {
         b"11;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Background)),
         b"110" | b"110;" => Some(DefaultColorEvent::Reset(DefaultColorQuery::Foreground)),
         b"111" | b"111;" => Some(DefaultColorEvent::Reset(DefaultColorQuery::Background)),
-        _ => parse_default_color_set_event(body),
+        _ => parse_palette_color_query(body).or_else(|| parse_default_color_set_event(body)),
     }
+}
+
+fn parse_palette_color_query(body: &[u8]) -> Option<DefaultColorEvent> {
+    let index = body.strip_prefix(b"4;")?.strip_suffix(b";?")?;
+    if index.is_empty() || index.len() > 3 || !index.iter().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mut value: u16 = 0;
+    for &digit in index {
+        value = value * 10 + u16::from(digit - b'0');
+    }
+    u8::try_from(value)
+        .ok()
+        .map(DefaultColorEvent::PaletteQuery)
 }
 
 fn parse_default_color_set_event(body: &[u8]) -> Option<DefaultColorEvent> {
@@ -576,13 +591,16 @@ mod tests {
     fn default_color_event_tracker_detects_queries_sets_and_resets() {
         let mut tracker = DefaultColorEventTracker::default();
 
-        tracker.observe(b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]10;rgb:11/22/33\x07\x1b]111\x07");
+        tracker.observe(
+            b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]4;0;?\x07\x1b]10;rgb:11/22/33\x07\x1b]111\x07",
+        );
 
         assert_eq!(
             tracker.drain_pending(),
             vec![
                 DefaultColorEvent::Query(DefaultColorQuery::Foreground),
                 DefaultColorEvent::Query(DefaultColorQuery::Background),
+                DefaultColorEvent::PaletteQuery(0),
                 DefaultColorEvent::Set(DefaultColorQuery::Foreground),
                 DefaultColorEvent::Reset(DefaultColorQuery::Background),
             ]
@@ -590,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn default_color_event_tracker_handles_split_queries() {
+    fn default_color_event_tracker_handles_split_default_color_queries() {
         let mut tracker = DefaultColorEventTracker::default();
 
         tracker.observe(b"\x1b]11");
@@ -602,6 +620,39 @@ mod tests {
         assert_eq!(
             tracker.drain_pending(),
             vec![DefaultColorEvent::Query(DefaultColorQuery::Background)]
+        );
+    }
+
+    #[test]
+    fn default_color_event_tracker_handles_split_palette_color_queries() {
+        let mut tracker = DefaultColorEventTracker::default();
+
+        tracker.observe(b"\x1b]4;25");
+        assert!(tracker.drain_pending().is_empty());
+        tracker.observe(b"5;?\x1b");
+        assert!(tracker.drain_pending().is_empty());
+        tracker.observe(b"\\");
+
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![DefaultColorEvent::PaletteQuery(255)]
+        );
+    }
+
+    #[test]
+    fn default_color_event_tracker_rejects_malformed_palette_color_queries() {
+        let mut tracker = DefaultColorEventTracker::default();
+
+        tracker.observe(b"\x1b]4;;?\x07");
+        tracker.observe(b"\x1b]4;-1;?\x07");
+        tracker.observe(b"\x1b]4;256;?\x07");
+        tracker.observe(b"\x1b]4;0;?;1;?\x07");
+        tracker.observe(b"\x1b]4;0;rgb:1111/2222/3333\x07");
+        tracker.observe(b"\x1b]4;0;?\x07");
+
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![DefaultColorEvent::PaletteQuery(0)]
         );
     }
 

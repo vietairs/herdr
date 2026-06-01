@@ -11,6 +11,7 @@
 
 ### Fixed
 - Pane input no longer waits behind the PTY actor's idle read poll, restoring responsive typing at quiet shell prompts. (#379)
+- Pane apps that query OSC 4 ANSI palette colors now receive the active terminal palette response, so OpenCode and similar TUIs can enable system-theme behavior inside Herdr. (#387)
 
 ## [0.6.6] - 2026-05-31
 
