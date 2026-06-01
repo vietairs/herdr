@@ -462,7 +462,7 @@ fn prepare_remote_herdr(
 }
 
 fn detect_remote_platform(target: &str) -> io::Result<RemotePlatform> {
-    let output = ssh_output(target, "uname -s; uname -m")?;
+    let output = ssh_sh_output(target, "uname -s\nuname -m\n")?;
     if !output.status.success() {
         return Err(command_failed("remote platform detection failed", &output));
     }
@@ -484,40 +484,16 @@ fn remote_binary_on_path_any(
     target: &str,
     remote_herdr: &RemoteHerdr,
 ) -> io::Result<Option<RemoteHerdr>> {
-    let output = ssh_output(target, remote_path_probe_any_command())?;
+    let output = ssh_user_shell_output(target, "command -v herdr")?;
     if !output.status.success() {
         return Ok(None);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(remote_herdr_from_path_probe_any(remote_herdr, &stdout))
+    Ok(remote_herdr_from_path_discovery(remote_herdr, &stdout))
 }
 
-fn remote_path_probe_any_command() -> &'static str {
-    r#"path=$(command -v herdr) || exit 1
-test -n "$path" || exit 1
-printf '%s\n' "$path"
-"#
-}
-
-#[cfg(test)]
-fn remote_herdr_from_path_probe(remote_herdr: &RemoteHerdr, stdout: &str) -> Option<RemoteHerdr> {
-    let mut lines = stdout.lines();
-    let path = lines.next()?;
-    let version = lines.next()?.trim();
-    let status = lines.next()?;
-    let protocol = parse_client_status_json(status)?.protocol;
-    if !path.starts_with('/')
-        || version != format!("herdr {CURRENT_VERSION}")
-        || protocol != CURRENT_PROTOCOL
-    {
-        return None;
-    }
-
-    Some(remote_herdr.clone().with_shell_path(shell_quote(path)))
-}
-
-fn remote_herdr_from_path_probe_any(
+fn remote_herdr_from_path_discovery(
     remote_herdr: &RemoteHerdr,
     stdout: &str,
 ) -> Option<RemoteHerdr> {
@@ -534,7 +510,7 @@ fn remote_binary_matches(target: &str, remote_herdr: &RemoteHerdr) -> io::Result
         "test -x {0} && {0} --version && {0} status client --json",
         remote_herdr.shell_path
     );
-    let output = ssh_output(target, &command)?;
+    let output = ssh_sh_output(target, &command)?;
     if !output.status.success() {
         return Ok(false);
     }
@@ -551,7 +527,7 @@ fn remote_binary_matches(target: &str, remote_herdr: &RemoteHerdr) -> io::Result
 
 fn remote_binary_exists(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
     let command = format!("test -x {}", remote_herdr.shell_path);
-    Ok(ssh_output(target, &command)?.status.success())
+    Ok(ssh_sh_output(target, &command)?.status.success())
 }
 
 fn remote_binary_override_path() -> io::Result<Option<PathBuf>> {
@@ -807,7 +783,7 @@ fn remote_server_status(
     remote_herdr: &RemoteHerdr,
 ) -> io::Result<RemoteServerStatus> {
     let command = format!("{} status server --json", remote_herdr.shell_path);
-    let output = ssh_output(target, &command)?;
+    let output = ssh_sh_output(target, &command)?;
     if !output.status.success() {
         return Err(command_failed("remote server status failed", &output));
     }
@@ -931,7 +907,7 @@ fn live_handoff_remote_server(target: &str, remote_herdr: &RemoteHerdr) -> io::R
         remote_herdr.shell_path,
         remote_herdr.shell_path
     );
-    let output = ssh_output(target, &command)?;
+    let output = ssh_sh_output(target, &command)?;
     if !output.status.success() {
         return Err(command_failed("remote server live handoff failed", &output));
     }
@@ -944,7 +920,7 @@ fn live_handoff_remote_server(target: &str, remote_herdr: &RemoteHerdr) -> io::R
 
 fn stop_remote_server(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<()> {
     let command = format!("{} server stop", remote_herdr.shell_path);
-    let output = ssh_output(target, &command)?;
+    let output = ssh_sh_output(target, &command)?;
     if !output.status.success() {
         return Err(command_failed("remote server stop failed", &output));
     }
@@ -978,16 +954,25 @@ fn version_label(version: Option<&str>) -> &str {
 }
 
 fn warn_if_remote_bin_not_on_path(target: &str) -> io::Result<()> {
-    let output = ssh_output(
-        target,
-        "case \":$PATH:\" in *\":$HOME/.local/bin:\"*) exit 0 ;; *) exit 1 ;; esac",
-    )?;
-    if !output.status.success() {
-        eprintln!(
-            "herdr: installed remote binary to ~/.local/bin/herdr, but ~/.local/bin is not in the remote PATH"
-        );
+    let output = ssh_user_shell_output(target, "command -v herdr")?;
+    if output.status.success()
+        && remote_shell_resolves_managed_install(&String::from_utf8_lossy(&output.stdout))
+    {
+        return Ok(());
     }
+
+    eprintln!(
+        "herdr: installed remote binary to ~/.local/bin/herdr, but the remote shell does not resolve `herdr` to that path"
+    );
     Ok(())
+}
+
+fn remote_shell_resolves_managed_install(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .next()
+        .map(str::trim)
+        .is_some_and(|path| path.ends_with("/.local/bin/herdr"))
 }
 
 fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource> {
@@ -1126,7 +1111,7 @@ mv "$tmp" "$dest"
     let mut child = Command::new("ssh")
         .arg("-T")
         .arg(target)
-        .arg(format!("sh -eu -c {}", shell_quote(&script)))
+        .arg(format!("/bin/sh -eu -c {}", shell_quote(&script)))
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -1154,7 +1139,32 @@ mv "$tmp" "$dest"
     }
 }
 
-fn ssh_output(target: &str, command: &str) -> io::Result<Output> {
+fn ssh_sh_output(target: &str, script: &str) -> io::Result<Output> {
+    // Feed POSIX bootstrap scripts to /bin/sh so the user's login shell only
+    // has to parse a simple executable invocation.
+    let mut child = Command::new("ssh")
+        .arg("-T")
+        .arg(target)
+        .arg("/bin/sh -s")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let write_result = if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(script.as_bytes())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "ssh bootstrap stdin missing",
+        ))
+    };
+    let output = child.wait_with_output()?;
+    write_result?;
+    Ok(output)
+}
+
+fn ssh_user_shell_output(target: &str, command: &str) -> io::Result<Output> {
     Command::new("ssh")
         .arg("-T")
         .arg(target)
@@ -1846,14 +1856,13 @@ mod tests {
     }
 
     #[test]
-    fn remote_path_probe_uses_path_binary_when_version_matches() {
+    fn remote_path_discovery_uses_path_binary() {
         let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
             os: "linux",
             arch: "x86_64",
         });
-        let stdout = matching_path_probe_stdout("/usr/bin/herdr");
-        let remote_herdr =
-            remote_herdr_from_path_probe(&remote_herdr, &stdout).expect("matching path binary");
+        let remote_herdr = remote_herdr_from_path_discovery(&remote_herdr, "/usr/bin/herdr\n")
+            .expect("path binary");
 
         assert_eq!(
             remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
@@ -1862,14 +1871,14 @@ mod tests {
     }
 
     #[test]
-    fn remote_path_probe_quotes_discovered_binary() {
+    fn remote_path_discovery_quotes_discovered_binary() {
         let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
             os: "linux",
             arch: "x86_64",
         });
-        let stdout = matching_path_probe_stdout("/opt/herdr bin/herdr");
         let remote_herdr =
-            remote_herdr_from_path_probe(&remote_herdr, &stdout).expect("matching path binary");
+            remote_herdr_from_path_discovery(&remote_herdr, "/opt/herdr bin/herdr\n")
+                .expect("path binary");
 
         assert_eq!(
             remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
@@ -1878,14 +1887,14 @@ mod tests {
     }
 
     #[test]
-    fn remote_path_probe_uses_macos_path_binary_when_version_matches() {
+    fn remote_path_discovery_uses_macos_path_binary() {
         let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
             os: "macos",
             arch: "aarch64",
         });
-        let stdout = matching_path_probe_stdout("/opt/homebrew/bin/herdr");
         let remote_herdr =
-            remote_herdr_from_path_probe(&remote_herdr, &stdout).expect("matching path binary");
+            remote_herdr_from_path_discovery(&remote_herdr, "/opt/homebrew/bin/herdr\n")
+                .expect("path binary");
 
         assert_eq!(
             remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
@@ -1895,14 +1904,14 @@ mod tests {
     }
 
     #[test]
-    fn remote_path_probe_quotes_single_quotes_in_discovered_binary() {
+    fn remote_path_discovery_quotes_single_quotes_in_discovered_binary() {
         let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
             os: "linux",
             arch: "x86_64",
         });
-        let stdout = matching_path_probe_stdout("/opt/herdr's/bin/herdr");
         let remote_herdr =
-            remote_herdr_from_path_probe(&remote_herdr, &stdout).expect("matching path binary");
+            remote_herdr_from_path_discovery(&remote_herdr, "/opt/herdr's/bin/herdr\n")
+                .expect("path binary");
 
         assert_eq!(
             remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
@@ -1911,41 +1920,39 @@ mod tests {
     }
 
     #[test]
-    fn remote_path_probe_ignores_version_mismatch() {
+    fn remote_path_discovery_ignores_relative_paths() {
         let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
             os: "linux",
             arch: "x86_64",
         });
-        let remote_herdr = remote_herdr_from_path_probe(
-            &remote_herdr,
-            &format!("/usr/bin/herdr\nherdr 0.0.0\n{{\"protocol\":{CURRENT_PROTOCOL}}}\n"),
-        );
+        let remote_herdr = remote_herdr_from_path_discovery(&remote_herdr, "bin/herdr\n");
 
         assert!(remote_herdr.is_none());
     }
 
     #[test]
-    fn remote_path_probe_ignores_relative_paths() {
+    fn remote_path_discovery_ignores_empty_output() {
         let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
             os: "linux",
             arch: "x86_64",
         });
-        let stdout = matching_path_probe_stdout("bin/herdr");
-        let remote_herdr = remote_herdr_from_path_probe(&remote_herdr, &stdout);
+        let remote_herdr = remote_herdr_from_path_discovery(&remote_herdr, "\n");
 
         assert!(remote_herdr.is_none());
     }
 
     #[test]
-    fn remote_path_probe_ignores_protocol_mismatch() {
-        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
-            os: "linux",
-            arch: "x86_64",
-        });
-        let stdout = format!("/usr/bin/herdr\nherdr {CURRENT_VERSION}\n{{\"protocol\":0}}\n");
-        let remote_herdr = remote_herdr_from_path_probe(&remote_herdr, &stdout);
-
-        assert!(remote_herdr.is_none());
+    fn remote_shell_path_warning_accepts_managed_install() {
+        assert!(remote_shell_resolves_managed_install(
+            "/home/can/.local/bin/herdr\n"
+        ));
+        assert!(remote_shell_resolves_managed_install(
+            "/Users/can/.local/bin/herdr\n"
+        ));
+        assert!(!remote_shell_resolves_managed_install(
+            "/usr/local/bin/herdr\n"
+        ));
+        assert!(!remote_shell_resolves_managed_install(""));
     }
 
     #[test]
@@ -2196,10 +2203,6 @@ mod tests {
             .expect("override source");
         assert_eq!(source.path, PathBuf::from("/tmp/herdr-aarch64"));
         assert!(source.temporary_dir.is_none());
-    }
-
-    fn matching_path_probe_stdout(path: &str) -> String {
-        format!("{path}\nherdr {CURRENT_VERSION}\n{{\"protocol\":{CURRENT_PROTOCOL}}}\n")
     }
 
     fn remote_env_lock() -> &'static std::sync::Mutex<()> {
