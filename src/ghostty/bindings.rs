@@ -104,6 +104,34 @@ const _: () = {
     ["Offset of field: GhosttyString::ptr"][::std::mem::offset_of!(GhosttyString, ptr) - 0usize];
     ["Offset of field: GhosttyString::len"][::std::mem::offset_of!(GhosttyString, len) - 8usize];
 };
+#[doc = " A caller-provided byte buffer.\n\n APIs that write to this type use `len` for the number of bytes written on\n GHOSTTY_SUCCESS and the required byte capacity on GHOSTTY_OUT_OF_SPACE."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct GhosttyBuffer {
+    #[doc = " Destination buffer for bytes. May be NULL when cap is 0 to query required size."]
+    pub ptr: *mut u8,
+    #[doc = " Capacity of ptr in bytes."]
+    pub cap: usize,
+    #[doc = " Bytes written on success, or required byte capacity on GHOSTTY_OUT_OF_SPACE."]
+    pub len: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of GhosttyBuffer"][::std::mem::size_of::<GhosttyBuffer>() - 24usize];
+    ["Alignment of GhosttyBuffer"][::std::mem::align_of::<GhosttyBuffer>() - 8usize];
+    ["Offset of field: GhosttyBuffer::ptr"][::std::mem::offset_of!(GhosttyBuffer, ptr) - 0usize];
+    ["Offset of field: GhosttyBuffer::cap"][::std::mem::offset_of!(GhosttyBuffer, cap) - 8usize];
+    ["Offset of field: GhosttyBuffer::len"][::std::mem::offset_of!(GhosttyBuffer, len) - 16usize];
+};
+impl Default for GhosttyBuffer {
+    fn default() -> Self {
+        let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::std::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
 impl Default for GhosttyString {
     fn default() -> Self {
         let mut s = ::std::mem::MaybeUninit::<Self>::uninit();
@@ -1605,6 +1633,15 @@ pub const GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_
 #[doc = " The resolved foreground color of the cell (GhosttyColorRgb).\n  Resolves palette indices through the palette. Bold color handling\n  is not applied; the caller should handle bold styling separately.\n  Returns GHOSTTY_INVALID_VALUE if the cell has no explicit foreground\n  color, in which case the caller should use whatever default foreground\n  color it wants (e.g. the terminal foreground)."]
 pub const GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR:
     GhosttyRenderStateRowCellsData = 6;
+#[doc = " Whether the cell is contained within the current selection (bool)."]
+pub const GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED:
+    GhosttyRenderStateRowCellsData = 7;
+#[doc = " Whether the cell has any explicit styling (bool)."]
+pub const GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING:
+    GhosttyRenderStateRowCellsData = 8;
+#[doc = " Encode the current cell's full grapheme cluster as UTF-8 into a GhosttyBuffer."]
+pub const GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8:
+    GhosttyRenderStateRowCellsData = 9;
 #[doc = " Queryable data kinds for ghostty_render_state_row_cells_get().\n\n @ingroup render"]
 pub type GhosttyRenderStateRowCellsData = ::std::os::raw::c_uint;
 unsafe extern "C" {

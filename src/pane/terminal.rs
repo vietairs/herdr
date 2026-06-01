@@ -562,9 +562,58 @@ impl GhosttyPaneTerminal {
 
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         if let Ok(mut core) = self.core.lock() {
+            let offset_from_bottom = core
+                .terminal
+                .scrollbar()
+                .ok()
+                .map(|scrollbar| {
+                    scrollbar
+                        .total
+                        .saturating_sub(scrollbar.offset + scrollbar.len)
+                })
+                .unwrap_or(0);
+            let bottom_before_resize = ghostty_detection_text(&core)
+                .map(|text| !text.trim().is_empty())
+                .unwrap_or(false);
+            let resize_recovery_probe_lines = usize::from(rows)
+                .saturating_mul(8)
+                .max(DEFAULT_DETECTION_ROWS);
+            let replay_ansi = if core.terminal.active_screen().ok()
+                == Some(crate::ghostty::ActiveScreen::Primary)
+                && bottom_before_resize
+            {
+                ghostty_recent_ansi(&core, resize_recovery_probe_lines, true)
+                    .ok()
+                    .filter(|ansi| !ansi.trim().is_empty())
+            } else {
+                None
+            };
+
             let _ = core
                 .terminal
                 .resize(cols, rows, cell_width_px, cell_height_px);
+
+            let bottom_is_blank = ghostty_detection_text(&core)
+                .map(|text| text.trim().is_empty())
+                .unwrap_or(false);
+            if bottom_is_blank {
+                if let Some(ansi) = replay_ansi.as_deref() {
+                    core.terminal.scroll_viewport_bottom();
+                    core.terminal.write(ansi.as_bytes());
+                }
+            }
+            ghostty_restore_scroll_offset_from_bottom(&mut core.terminal, offset_from_bottom);
+            if offset_from_bottom > 0 {
+                let mut remaining = offset_from_bottom.min(resize_recovery_probe_lines);
+                while remaining > 0
+                    && ghostty_visible_text(&mut core)
+                        .map(|text| text.trim().is_empty())
+                        .unwrap_or(false)
+                {
+                    core.terminal.scroll_viewport_delta(1);
+                    remaining -= 1;
+                }
+            }
         }
     }
 
@@ -889,7 +938,7 @@ impl GhosttyPaneTerminal {
                 Ok(rows) => rows,
                 Err(_) => return,
             };
-            let mut grapheme_scratch = Vec::new();
+            let mut grapheme_bytes = Vec::new();
             let mut symbol_scratch = String::new();
             let mut y = 0u16;
             while y < area.height && rows.next() {
@@ -911,7 +960,7 @@ impl GhosttyPaneTerminal {
                         &cells,
                         wide,
                         hide_kitty_placeholders,
-                        &mut grapheme_scratch,
+                        &mut grapheme_bytes,
                         &mut symbol_scratch,
                     ) {
                         Ok(symbol) => symbol,
@@ -1034,6 +1083,9 @@ fn ghostty_recent_text(
 ) -> Result<String, crate::ghostty::Error> {
     let total_rows = core.terminal.total_rows()?;
     let cols = core.terminal.cols()?;
+    if total_rows == 0 || cols == 0 {
+        return Ok(String::new());
+    }
     let start = total_rows.saturating_sub(lines);
     let mut rows = Vec::with_capacity(total_rows.saturating_sub(start));
     for y in start..total_rows {
@@ -1053,7 +1105,7 @@ fn ghostty_recent_text_unwrapped(
         return Ok(String::new());
     }
     let start = total_rows.saturating_sub(lines) as u32;
-    let end = (total_rows.saturating_sub(1)) as u32;
+    let end = total_rows.saturating_sub(1) as u32;
     core.terminal
         .read_text_screen((0, start), (cols.saturating_sub(1), end), false)
 }
@@ -1069,9 +1121,27 @@ fn ghostty_recent_ansi(
         return Ok(String::new());
     }
     let start = total_rows.saturating_sub(lines) as u32;
-    let end = (total_rows.saturating_sub(1)) as u32;
+    let end = total_rows.saturating_sub(1) as u32;
     core.terminal
         .read_ansi_screen((0, start), (cols.saturating_sub(1), end), false, unwrap)
+}
+
+fn ghostty_restore_scroll_offset_from_bottom(
+    terminal: &mut crate::ghostty::Terminal,
+    offset_from_bottom: usize,
+) {
+    terminal.scroll_viewport_bottom();
+    if offset_from_bottom == 0 {
+        return;
+    }
+    let Ok(scrollbar) = terminal.scrollbar() else {
+        return;
+    };
+    let max_offset = scrollbar.total.saturating_sub(scrollbar.len);
+    let offset = offset_from_bottom.min(max_offset).min(isize::MAX as usize) as isize;
+    if offset > 0 {
+        terminal.scroll_viewport_delta(-offset);
+    }
 }
 
 fn ghostty_extract_selection(
@@ -1091,7 +1161,9 @@ fn ghostty_screen_row(
     let mut line = String::new();
     for x in 0..cols {
         let graphemes = core.terminal.screen_graphemes(x, y)?;
-        if graphemes.is_empty() {
+        if graphemes.is_empty()
+            || graphemes.first().copied() == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER)
+        {
             line.push(' ');
         } else {
             for codepoint in graphemes {
@@ -1117,18 +1189,12 @@ fn ghostty_line_from_cells(
 fn ghostty_cell_symbol(
     cells: &crate::ghostty::RowCellIter<'_>,
 ) -> Result<String, crate::ghostty::Error> {
-    let graphemes = cells.graphemes()?;
-    if graphemes.is_empty() {
+    let text = cells.grapheme_text()?;
+    if text.chars().next().map(u32::from) == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER) {
         return Ok(" ".to_string());
     }
-    let mut text = String::new();
-    for codepoint in graphemes {
-        if let Some(ch) = char::from_u32(codepoint) {
-            text.push(ch);
-        }
-    }
     if text.is_empty() {
-        text.push(' ');
+        return Ok(" ".to_string());
     }
     Ok(text)
 }
@@ -1167,7 +1233,7 @@ fn ghostty_buffer_symbol_into<'a>(
     cells: &crate::ghostty::RowCellIter<'_>,
     wide: crate::ghostty::CellWide,
     hide_kitty_placeholders: bool,
-    grapheme_scratch: &mut Vec<u32>,
+    grapheme_bytes: &mut Vec<u8>,
     symbol_scratch: &'a mut String,
 ) -> Result<&'a str, crate::ghostty::Error> {
     symbol_scratch.clear();
@@ -1175,21 +1241,13 @@ fn ghostty_buffer_symbol_into<'a>(
         crate::ghostty::CellWide::SpacerTail => {}
         crate::ghostty::CellWide::SpacerHead => symbol_scratch.push(' '),
         crate::ghostty::CellWide::Narrow | crate::ghostty::CellWide::Wide => {
-            cells.graphemes_into(grapheme_scratch)?;
+            cells.grapheme_text_into(grapheme_bytes, symbol_scratch)?;
             let hidden_kitty_placeholder = hide_kitty_placeholders
-                && grapheme_scratch.first().copied()
+                && symbol_scratch.chars().next().map(u32::from)
                     == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER);
-            if hidden_kitty_placeholder || grapheme_scratch.is_empty() {
+            if hidden_kitty_placeholder || symbol_scratch.is_empty() {
+                symbol_scratch.clear();
                 symbol_scratch.push(' ');
-            } else {
-                for &codepoint in grapheme_scratch.iter() {
-                    if let Some(ch) = char::from_u32(codepoint) {
-                        symbol_scratch.push(ch);
-                    }
-                }
-                if symbol_scratch.is_empty() {
-                    symbol_scratch.push(' ');
-                }
             }
         }
     }
@@ -2106,13 +2164,59 @@ mod tests {
             let metrics = pane.scroll_metrics().expect("scroll metrics after resize");
             assert_eq!(metrics.viewport_rows, rows as usize);
             assert!(metrics.offset_from_bottom <= metrics.max_offset_from_bottom);
+            assert!(
+                metrics.offset_from_bottom > 0,
+                "resize should preserve a scrolled viewport instead of jumping to bottom"
+            );
             assert!(metrics.max_offset_from_bottom > 0);
-            assert!(!pane.visible_text().trim().is_empty());
+            let visible = pane.visible_text();
+            assert!(
+                !visible.trim().is_empty(),
+                "visible text should not be empty after resize to {rows}x{cols}; metrics={metrics:?}; detection={:?}; recent={:?}",
+                pane.detection_text(),
+                pane.recent_text(6)
+            );
             assert!(
                 pane.detection_text().contains("END"),
                 "bottom detection should remain independent from the scrolled viewport after resize"
             );
         }
+    }
+
+    #[test]
+    fn resize_recovery_does_not_replay_history_when_visible_screen_was_blank() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(20, 3, 10_000).unwrap();
+        terminal.write(b"old history\r\n\x1b[2J\x1b[H");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        assert!(pane.visible_text().trim().is_empty());
+        assert!(pane.detection_text().trim().is_empty());
+
+        pane.resize(3, 20, 0, 0);
+
+        assert!(pane.visible_text().trim().is_empty());
+        assert!(pane.detection_text().trim().is_empty());
+        assert!(pane.recent_text(3).trim().is_empty());
+    }
+
+    #[test]
+    fn resize_recovery_does_not_replay_scrolled_history_over_blank_bottom() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(20, 3, 10_000).unwrap();
+        write_numbered_lines(&mut terminal, 20);
+        terminal.write(b"\x1b[2J\x1b[H");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        assert!(pane.detection_text().trim().is_empty());
+        let metrics = pane.scroll_metrics().expect("scroll metrics");
+        pane.set_scroll_offset_from_bottom(metrics.max_offset_from_bottom);
+        assert!(!pane.visible_text().trim().is_empty());
+
+        pane.resize(3, 20, 0, 0);
+
+        assert!(pane.detection_text().trim().is_empty());
+        assert!(pane.recent_text(3).trim().is_empty());
     }
 
     #[test]
@@ -2198,6 +2302,8 @@ mod tests {
         assert_eq!(buffer[(0, 0)].symbol(), "b");
         assert_eq!(buffer[(6, 0)].symbol(), " ");
         assert_eq!(buffer[(7, 0)].symbol(), "a");
+        assert_eq!(pane.visible_text().lines().next(), Some("before after"));
+        assert_eq!(pane.recent_text(5), "before after\n");
     }
 
     #[test]
