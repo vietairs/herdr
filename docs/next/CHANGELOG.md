@@ -6,6 +6,9 @@
 - Added `ui.right_click_passthrough_modifier` so a configured modifier such as `ctrl` can forward right-click hold and drag gestures to mouse-reporting pane apps while normal right-click still opens Herdr's pane menu. (#148)
 - Added Kilo Code CLI automatic detection for idle, working, and blocked terminal states. (#270)
 
+### Changed
+- Removed the automatic GitHub star prompt from `herdr update`.
+
 ## [0.6.6] - 2026-05-31
 
 ### Added
