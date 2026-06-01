@@ -414,12 +414,6 @@ fn client_protocol_server_is_running() -> bool {
     client_protocol_server_is_running_at(&crate::server::socket_paths::client_socket_path())
 }
 
-fn protocol_label(protocol: Option<u32>) -> String {
-    protocol
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 fn version_label(version: Option<&str>) -> &str {
     version.unwrap_or("unknown")
 }
@@ -441,10 +435,11 @@ fn server_supports_live_handoff(server: &crate::api::RuntimeStatus) -> bool {
         .is_some_and(|capabilities| capabilities.live_handoff)
 }
 
-fn parse_live_handoff_before_update_response(input: &str) -> Option<bool> {
+fn parse_stop_old_servers_after_update_response(input: &str, default_yes: bool) -> Option<bool> {
     let trimmed = input.trim().to_ascii_lowercase();
     match trimmed.as_str() {
-        "" | "y" | "yes" => Some(true),
+        "" => Some(default_yes),
+        "y" | "yes" => Some(true),
         "n" | "no" => Some(false),
         _ => None,
     }
@@ -514,7 +509,6 @@ struct RunningSessionUpdateOutcome {
     stop_command: String,
     attach_command: Option<String>,
     server_version: Option<String>,
-    server_protocol: Option<u32>,
     outcome: RunningServerUpdateOutcome,
 }
 
@@ -703,28 +697,22 @@ fn prompt_to_stop_old_servers_before_update(
 ) -> Result<bool, String> {
     if !io::stdin().is_terminal() {
         return Err(
-            "one or more Herdr sessions must restart for this update. Stop the old server to use the new version, then run `herdr update` again from an interactive terminal."
+            "one or more Herdr sessions must stop for this update. Stop running Herdr sessions when ready, then run `herdr update` again from an interactive terminal."
                 .to_string(),
         );
     }
 
     eprintln!(
-        "This update changes Herdr's client/server protocol.\n\nRunning sessions that must restart to use v{}:",
+        "Running sessions that must stop to use v{}:",
         release.version
     );
     for plan in plans {
         eprintln!(
-            "  {}: server v{} protocol {}",
+            "  {}: server v{}",
             plan.label(),
-            version_label(plan.server.version.as_deref()),
-            protocol_label(plan.server.protocol)
+            version_label(plan.server.version.as_deref())
         );
     }
-    eprintln!(
-        "  update: v{} protocol {}",
-        release.version,
-        protocol_label(release.target_protocol)
-    );
     eprintln!();
     eprintln!("If you choose no, these sessions keep using the old server until you stop them.");
     eprintln!("Stop the old server after installing? Stopping exits pane processes.");
@@ -763,47 +751,19 @@ fn confirm_running_server_update_action(
     print_running_session_update_summary(&plans, release, options);
 
     if !options.live_handoff {
-        let restart_required: Vec<RunningServerUpdatePlan> = plans
-            .iter()
-            .filter(|plan| plan.requires_server_restart)
-            .cloned()
-            .collect();
-        let stop_restart_required = if restart_required.is_empty() {
-            false
-        } else {
-            prompt_to_stop_old_servers_before_update(&restart_required, release)?
-        };
         return Ok(plans
             .into_iter()
-            .map(|plan| {
-                let action = if plan.requires_server_restart && stop_restart_required {
-                    RunningServerUpdateAction::StopOldServer
-                } else {
-                    RunningServerUpdateAction::None
-                };
-                RunningServerUpdateDecision { plan, action }
+            .map(|plan| RunningServerUpdateDecision {
+                plan,
+                action: RunningServerUpdateAction::None,
             })
             .collect());
     }
 
-    let handoff_supported: Vec<&RunningServerUpdatePlan> = plans
-        .iter()
-        .filter(|plan| server_supports_live_handoff(&plan.server))
-        .collect();
     let handoff_unsupported_requiring_update: Vec<&RunningServerUpdatePlan> = plans
         .iter()
         .filter(|plan| !server_supports_live_handoff(&plan.server) && plan.requires_server_restart)
         .collect();
-
-    let live_handoff = if handoff_supported.is_empty() {
-        false
-    } else {
-        prompt_to_live_handoff_sessions_before_update(
-            &handoff_supported,
-            release,
-            plans.iter().any(|plan| plan.requires_server_restart),
-        )?
-    };
 
     let stop_unsupported = if handoff_unsupported_requiring_update.is_empty() {
         false
@@ -817,7 +777,7 @@ fn confirm_running_server_update_action(
 
     let mut decisions = Vec::new();
     for plan in plans {
-        let action = if server_supports_live_handoff(&plan.server) && live_handoff {
+        let action = if server_supports_live_handoff(&plan.server) {
             RunningServerUpdateAction::LiveHandoff
         } else if !server_supports_live_handoff(&plan.server)
             && plan.requires_server_restart
@@ -831,6 +791,85 @@ fn confirm_running_server_update_action(
     }
 
     Ok(decisions)
+}
+
+fn target_group_nouns(plans: &[&RunningServerUpdatePlan]) -> (&'static str, &'static str) {
+    let all_sessions = plans.iter().all(|plan| plan.target_noun() == "session");
+    let all_servers = plans.iter().all(|plan| plan.target_noun() == "server");
+    if all_sessions {
+        ("session", "sessions")
+    } else if all_servers {
+        ("server", "servers")
+    } else {
+        ("target", "targets")
+    }
+}
+
+fn prompt_to_complete_plain_update(
+    decisions: &[RunningServerUpdateDecision],
+    release: &ReleaseInfo,
+) -> Result<bool, String> {
+    if decisions.is_empty() {
+        return Ok(true);
+    }
+
+    if !io::stdin().is_terminal() {
+        return Ok(false);
+    }
+
+    let plans: Vec<&RunningServerUpdatePlan> =
+        decisions.iter().map(|decision| &decision.plan).collect();
+    let (singular, plural) = target_group_nouns(&plans);
+    let noun = if plans.len() == 1 { singular } else { plural };
+    eprintln!(
+        "To complete the update, Herdr must stop {} running {}.",
+        plans.len(),
+        noun
+    );
+    eprintln!("This stops active pane processes, including shells, dev servers, and tests.");
+    for plan in plans {
+        eprintln!(
+            "  {} {}: server v{}",
+            plan.target_noun(),
+            plan.label(),
+            version_label(plan.server.version.as_deref())
+        );
+    }
+
+    loop {
+        eprint!(
+            "Stop running {} and install v{} now? [y/N] ",
+            noun, release.version
+        );
+        io::stderr()
+            .flush()
+            .map_err(|e| format!("failed to flush prompt: {e}"))?;
+
+        let mut input = String::new();
+        let read = io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| format!("failed to read prompt response: {e}"))?;
+        if read == 0 {
+            return Ok(false);
+        }
+
+        if let Some(answer) = parse_stop_old_servers_after_update_response(&input, false) {
+            return Ok(answer);
+        }
+        eprintln!("please answer y or n");
+    }
+}
+
+fn mark_plain_update_stop_decisions(
+    decisions: Vec<RunningServerUpdateDecision>,
+) -> Vec<RunningServerUpdateDecision> {
+    decisions
+        .into_iter()
+        .map(|mut decision| {
+            decision.action = RunningServerUpdateAction::StopOldServer;
+            decision
+        })
+        .collect()
 }
 
 fn print_running_session_update_summary(
@@ -847,79 +886,21 @@ fn print_running_session_update_summary(
                 "too old for handoff"
             };
             eprintln!(
-                "  {}: v{} protocol {} ({})",
+                "  {}: server v{} ({})",
                 plan.label(),
                 version_label(plan.server.version.as_deref()),
-                protocol_label(plan.server.protocol),
                 capability
             );
         } else {
             eprintln!(
-                "  {}: v{} protocol {}",
+                "  {}: server v{}",
                 plan.label(),
-                version_label(plan.server.version.as_deref()),
-                protocol_label(plan.server.protocol)
+                version_label(plan.server.version.as_deref())
             );
         }
     }
-    eprintln!(
-        "  update: v{} protocol {}",
-        release.version,
-        protocol_label(release.target_protocol)
-    );
+    eprintln!("  update: v{}", release.version);
     eprintln!();
-}
-
-fn prompt_to_live_handoff_sessions_before_update(
-    plans: &[&RunningServerUpdatePlan],
-    release: &ReleaseInfo,
-    requires_live_handoff: bool,
-) -> Result<bool, String> {
-    if !io::stdin().is_terminal() {
-        if requires_live_handoff {
-            return Err(format!(
-                "one or more herdr targets are running and updating to v{} requires live server handoff; run `herdr update` from an interactive terminal, or stop those targets and run `herdr update` again",
-                release.version
-            ));
-        }
-        eprintln!(
-            "herdr targets are running. updating the binary will not affect them until they restart."
-        );
-        return Ok(false);
-    }
-
-    eprintln!(
-        "herdr can hand off {} running target{} to the new server so pane processes keep running.",
-        plans.len(),
-        if plans.len() == 1 { "" } else { "s" }
-    );
-    eprintln!("connected clients will disconnect during handoff and can attach again afterward.");
-
-    loop {
-        let prompt = if requires_live_handoff {
-            "update and live-handoff supported targets to the new server? [Y/n] "
-        } else {
-            "live-handoff supported running targets after updating? [Y/n] "
-        };
-        eprint!("{prompt}");
-        io::stderr()
-            .flush()
-            .map_err(|e| format!("failed to flush prompt: {e}"))?;
-
-        let mut input = String::new();
-        let read = io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| format!("failed to read prompt response: {e}"))?;
-        if read == 0 {
-            return Ok(false);
-        }
-
-        if let Some(answer) = parse_live_handoff_before_update_response(&input) {
-            return Ok(answer);
-        }
-
-        eprintln!("please answer y or n");
-    }
 }
 
 fn live_handoff_running_server_for_update(
@@ -974,16 +955,8 @@ fn prompt_to_stop_old_server_after_failed_handoff(
         plan.target_noun(),
         plan.label()
     );
-    eprintln!(
-        "  server: v{} protocol {}",
-        version_label(status.version.as_deref()),
-        protocol_label(status.protocol)
-    );
-    eprintln!(
-        "  installed: v{} protocol {}",
-        release.version,
-        protocol_label(release.target_protocol)
-    );
+    eprintln!("  server: v{}", version_label(status.version.as_deref()));
+    eprintln!("  installed: v{}", release.version);
     eprintln!(
         "you can keep using the old server, or stop it now so the next `herdr` start uses v{}.",
         release.version
@@ -1329,7 +1302,6 @@ fn apply_running_session_update_decisions(
             stop_command,
             attach_command: decision.plan.attach_command(),
             server_version: decision.plan.server.version.clone(),
-            server_protocol: decision.plan.server.protocol,
             outcome,
         });
     }
@@ -1339,7 +1311,7 @@ fn apply_running_session_update_decisions(
 
 fn print_running_session_update_outcomes(
     outcomes: &[RunningSessionUpdateOutcome],
-    _release: &ReleaseInfo,
+    release: &ReleaseInfo,
 ) {
     if outcomes.is_empty() {
         eprintln!("run herdr again.");
@@ -1363,19 +1335,20 @@ fn print_running_session_update_outcomes(
             }
             RunningServerUpdateOutcome::RestartDeferred => {
                 eprintln!(
-                    "{} {} is still running v{} protocol {}.",
-                    outcome.target_noun,
-                    outcome.session_label,
-                    version_label(outcome.server_version.as_deref()),
-                    protocol_label(outcome.server_protocol)
+                    "{} {} kept running.",
+                    outcome.target_noun, outcome.session_label
                 );
-                eprintln!(
-                    "{}",
-                    crate::session::restart_after_update_guidance(
-                        &outcome.stop_command,
-                        outcome.attach_command.as_deref()
-                    )
-                );
+                eprintln!("Stopping exits active pane processes.");
+                match &outcome.attach_command {
+                    Some(command) => eprintln!(
+                        "Run `{}`, then run `{command}` when ready to use v{}.",
+                        outcome.stop_command, release.version
+                    ),
+                    None => eprintln!(
+                        "Run `{}`, then restart Herdr with the same socket override when ready to use v{}.",
+                        outcome.stop_command, release.version
+                    ),
+                }
             }
             RunningServerUpdateOutcome::Stopped
             | RunningServerUpdateOutcome::FailedHandoffOldServerStopped
@@ -1394,11 +1367,10 @@ fn print_running_session_update_outcomes(
             }
             RunningServerUpdateOutcome::FailedHandoffOldServerKept => {
                 eprintln!(
-                    "{} {} is still running v{} protocol {}.",
+                    "{} {} is still running server v{}.",
                     outcome.target_noun,
                     outcome.session_label,
-                    version_label(outcome.server_version.as_deref()),
-                    protocol_label(outcome.server_protocol)
+                    version_label(outcome.server_version.as_deref())
                 );
                 eprintln!(
                     "{}",
@@ -1567,10 +1539,23 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
     }
     let downloaded_update = download_update(&release)?;
     let updated_exe = downloaded_update.current_exe.clone();
+    eprintln!("downloaded v{}", release.version);
+    if !options.live_handoff
+        && !prompt_to_complete_plain_update(&server_update_decisions, &release)?
+    {
+        eprintln!("Herdr was not updated.");
+        eprintln!("Stop running Herdr sessions when ready, then run `herdr update` again.");
+        return Ok(current);
+    }
     install_downloaded_update(downloaded_update)?;
+    eprintln!("installed v{}", release.version);
+    let server_update_decisions = if options.live_handoff {
+        server_update_decisions
+    } else {
+        mark_plain_update_stop_decisions(server_update_decisions)
+    };
     let server_update_outcomes =
         apply_running_session_update_decisions(&release, &updated_exe, server_update_decisions)?;
-    eprintln!("updated to v{}", release.version);
     print_outdated_integration_notice_with_updated_binary(&updated_exe);
 
     print_running_session_update_outcomes(&server_update_outcomes, &release);
@@ -2054,14 +2039,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_live_handoff_before_update_response_defaults_yes_for_blank() {
-        assert_eq!(parse_live_handoff_before_update_response(""), Some(true));
-        assert_eq!(parse_live_handoff_before_update_response("\n"), Some(true));
-        assert_eq!(parse_live_handoff_before_update_response("y"), Some(true));
-        assert_eq!(parse_live_handoff_before_update_response("yes"), Some(true));
-        assert_eq!(parse_live_handoff_before_update_response("n"), Some(false));
-        assert_eq!(parse_live_handoff_before_update_response("no"), Some(false));
-        assert_eq!(parse_live_handoff_before_update_response("later"), None);
+    fn parse_stop_old_servers_after_update_response_uses_prompt_default_for_blank() {
+        assert_eq!(
+            parse_stop_old_servers_after_update_response("", true),
+            Some(true)
+        );
+        assert_eq!(
+            parse_stop_old_servers_after_update_response("\n", false),
+            Some(false)
+        );
+        assert_eq!(
+            parse_stop_old_servers_after_update_response("y", false),
+            Some(true)
+        );
+        assert_eq!(
+            parse_stop_old_servers_after_update_response("no", true),
+            Some(false)
+        );
+        assert_eq!(
+            parse_stop_old_servers_after_update_response("later", true),
+            None
+        );
     }
 
     #[test]
@@ -2098,7 +2096,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_update_requires_restart_for_supported_servers_without_handoff() {
+    fn plain_update_defers_stop_prompt_until_after_install() {
         assert!(
             !io::stdin().is_terminal(),
             "this test relies on noninteractive test stdin"
@@ -2122,17 +2120,18 @@ mod tests {
             },
         };
 
-        let err = confirm_running_server_update_action(
+        let decisions = confirm_running_server_update_action(
             vec![plan],
             &release,
             SelfUpdateOptions {
                 live_handoff: false,
             },
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err.contains("must restart"), "unexpected error: {err}");
-        assert!(!err.contains("live handoff"), "unexpected error: {err}");
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].action, RunningServerUpdateAction::None);
+        assert!(decisions[0].plan.requires_server_restart);
     }
 
     #[test]
@@ -2291,7 +2290,7 @@ mod tests {
     }
 
     #[test]
-    fn noninteractive_plain_update_requiring_restart_fails_without_handoff() {
+    fn noninteractive_plain_update_does_not_complete_with_running_server() {
         let _guard = env_lock().lock().unwrap();
         assert!(
             !io::stdin().is_terminal(),
@@ -2324,17 +2323,17 @@ mod tests {
             server,
         };
 
-        let err = confirm_running_server_update_action(
+        let decisions = confirm_running_server_update_action(
             vec![plan],
             &release,
             SelfUpdateOptions {
                 live_handoff: false,
             },
         )
-        .unwrap_err();
+        .unwrap();
+        let complete = prompt_to_complete_plain_update(&decisions, &release).unwrap();
 
-        assert!(err.contains("must restart"), "unexpected error: {err}");
-        assert!(!err.contains("live handoff"), "unexpected error: {err}");
+        assert!(!complete);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
         crate::session::clear_explicit_session_for_test();
     }

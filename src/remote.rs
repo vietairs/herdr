@@ -166,6 +166,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         &remote.target,
         &prepared_remote.remote_herdr,
         prepared_remote.installed_or_replaced,
+        prepared_remote.stop_after_install_approved,
         remote.live_handoff,
     )?;
 
@@ -222,10 +223,9 @@ fn ensure_remote_server_running() -> io::Result<()> {
         if status.protocol == Some(CURRENT_PROTOCOL) {
             return Ok(());
         }
-        return Err(io::Error::other(format!(
-            "remote herdr server is running with protocol {}, but this bridge needs protocol {CURRENT_PROTOCOL}; rerun `herdr --remote` from an interactive terminal to approve stopping it",
-            protocol_label(status.protocol)
-        )));
+        return Err(io::Error::other(
+            "remote herdr server must restart before this bridge can attach; rerun `herdr --remote` from an interactive terminal to approve stopping it",
+        ));
     }
 
     crate::server::autodetect::spawn_server_daemon()?;
@@ -370,6 +370,7 @@ struct InstallSource {
 struct PreparedRemoteHerdr {
     remote_herdr: RemoteHerdr,
     installed_or_replaced: bool,
+    stop_after_install_approved: bool,
 }
 
 impl InstallSource {
@@ -411,22 +412,25 @@ fn prepare_remote_herdr(
             return Ok(PreparedRemoteHerdr {
                 remote_herdr: path_remote_herdr.clone(),
                 installed_or_replaced: false,
+                stop_after_install_approved: false,
             });
         }
         if remote_binary_matches(target, &remote_herdr)? {
             return Ok(PreparedRemoteHerdr {
                 remote_herdr,
                 installed_or_replaced: false,
+                stop_after_install_approved: false,
             });
         }
     }
 
+    let mut stop_after_install_approved = false;
     if let Some(status_probe_herdr) = path_remote_herdr.as_ref().or_else(|| {
         remote_binary_exists(target, &remote_herdr)
             .ok()
             .and_then(|exists| exists.then_some(&remote_herdr))
     }) {
-        confirm_remote_install_with_running_server(
+        stop_after_install_approved = confirm_remote_install_with_running_server(
             target,
             status_probe_herdr,
             live_handoff_enabled,
@@ -453,6 +457,7 @@ fn prepare_remote_herdr(
     Ok(PreparedRemoteHerdr {
         remote_herdr,
         installed_or_replaced: true,
+        stop_after_install_approved,
     })
 }
 
@@ -659,6 +664,7 @@ fn ensure_remote_server_ready(
     target: &str,
     remote_herdr: &RemoteHerdr,
     remote_binary_changed: bool,
+    stop_after_install_approved: bool,
     live_handoff_enabled: bool,
 ) -> io::Result<()> {
     let status = remote_server_status(target, remote_herdr)?;
@@ -677,10 +683,7 @@ fn ensure_remote_server_ready(
         return Ok(());
     };
 
-    if live_handoff_enabled
-        && live_handoff
-        && confirm_remote_server_handoff(target, version.as_deref(), protocol, reason)?
-    {
+    if live_handoff_enabled && live_handoff {
         match live_handoff_remote_server(target, remote_herdr) {
             Ok(()) => return Ok(()),
             Err(err) => {
@@ -688,6 +691,11 @@ fn ensure_remote_server_ready(
                 eprintln!("falling back to remote server restart.");
             }
         }
+    }
+
+    if stop_after_install_approved {
+        stop_remote_server(target, remote_herdr)?;
+        return Ok(());
     }
 
     if confirm_remote_server_stop(target, version.as_deref(), protocol, reason)? {
@@ -717,7 +725,7 @@ fn confirm_remote_install_with_running_server(
     target: &str,
     remote_herdr: &RemoteHerdr,
     live_handoff_enabled: bool,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let status = match remote_server_status(target, remote_herdr) {
         Ok(status) => status,
         Err(err) => {
@@ -729,65 +737,69 @@ fn confirm_remote_install_with_running_server(
             eprintln!(
                 "could not inspect the running remote herdr server on {target} before installing: {err}"
             );
-            eprint!("continue installing the remote herdr binary? [Y/n] ");
+            eprint!("continue installing the remote herdr binary? [y/N] ");
             io::stderr().flush()?;
 
             let mut answer = String::new();
             io::stdin().read_line(&mut answer)?;
             let answer = answer.trim().to_ascii_lowercase();
-            if answer == "n" || answer == "no" {
+            if answer != "y" && answer != "yes" {
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "remote herdr install cancelled",
                 ));
             }
-            return Ok(());
+            return Ok(false);
         }
     };
     let RemoteServerStatus::Running {
         version,
-        protocol,
+        protocol: _,
         live_handoff,
     } = status
     else {
-        return Ok(());
+        return Ok(false);
     };
-    if live_handoff_enabled && live_handoff {
-        return Ok(());
-    }
-
     if !io::stdin().is_terminal() {
+        if live_handoff_enabled && live_handoff {
+            return Ok(false);
+        }
         return Err(io::Error::other(format!(
-            "remote herdr server on {target} is running v{} protocol {}; run from an interactive terminal to approve updating the remote binary",
-            version_label(version.as_deref()),
-            protocol_label(protocol)
+            "remote herdr server on {target} is running v{}; run from an interactive terminal to approve stopping it for the update",
+            version_label(version.as_deref())
         )));
     }
 
+    if live_handoff_enabled && live_handoff {
+        eprintln!("remote herdr server on {target} is currently running:");
+        eprintln!("  server: v{}", version_label(version.as_deref()));
+        eprintln!(
+            "Herdr will install v{CURRENT_VERSION} and hand off live pane processes to the prepared server."
+        );
+        return Ok(false);
+    }
+
     eprintln!("remote herdr server on {target} is currently running:");
+    eprintln!("  server: v{}", version_label(version.as_deref()));
     eprintln!(
-        "  server: v{} protocol {}",
-        version_label(version.as_deref()),
-        protocol_label(protocol)
+        "To complete the remote update, Herdr must stop the running remote server after installing."
     );
-    eprintln!(
-        "this attach will not preserve running panes unless you pass --handoff and the remote server supports live handoff."
-    );
+    eprintln!("This stops active remote pane processes, including shells, dev servers, and tests.");
     eprintln!();
-    eprint!("continue installing the remote herdr binary? [Y/n] ");
+    eprint!("Install v{CURRENT_VERSION} and stop the remote server now? [y/N] ");
     io::stderr().flush()?;
 
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
     let answer = answer.trim().to_ascii_lowercase();
-    if answer == "n" || answer == "no" {
+    if answer != "y" && answer != "yes" {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
             "remote herdr install cancelled",
         ));
     }
 
-    Ok(())
+    Ok(true)
 }
 
 fn remote_server_status(
@@ -848,14 +860,13 @@ fn parse_remote_server_status_json(status: &str) -> io::Result<RemoteServerStatu
 fn confirm_remote_server_stop(
     target: &str,
     version: Option<&str>,
-    protocol: Option<u32>,
+    _protocol: Option<u32>,
     reason: RemoteServerRestartReason,
 ) -> io::Result<bool> {
     if !io::stdin().is_terminal() {
         if reason == RemoteServerRestartReason::ProtocolMismatch {
             return Err(io::Error::other(format!(
-                "remote herdr server on {target} is running with protocol {}, but this client needs protocol {CURRENT_PROTOCOL}; run from an interactive terminal to approve stopping it",
-                protocol_label(protocol)
+                "remote herdr server on {target} must stop before this client can attach; run from an interactive terminal to approve stopping it"
             )));
         }
 
@@ -867,19 +878,13 @@ fn confirm_remote_server_stop(
     }
 
     eprintln!("remote herdr server on {target} is currently running:");
-    eprintln!(
-        "  server: v{} protocol {}",
-        version_label(version),
-        protocol_label(protocol)
-    );
-    eprintln!("  prepared binary: v{CURRENT_VERSION} protocol {CURRENT_PROTOCOL}");
+    eprintln!("  server: v{}", version_label(version));
+    eprintln!("  prepared binary: v{CURRENT_VERSION}");
     eprintln!();
 
     match reason {
         RemoteServerRestartReason::ProtocolMismatch => {
-            eprintln!(
-                "the remote server protocol does not match this client. the remote server must be stopped before attaching."
-            );
+            eprintln!("the remote server must stop before this client can attach.");
         }
         RemoteServerRestartReason::BinaryUpdated => {
             eprintln!(
@@ -896,7 +901,7 @@ fn confirm_remote_server_stop(
     let prompt = if reason == RemoteServerRestartReason::ProtocolMismatch {
         "stop the remote server and continue attaching? [Y/n] "
     } else {
-        "restart the remote server now? [Y/n] "
+        "restart the remote server now? [y/N] "
     };
     eprint!("{prompt}");
     io::stderr().flush()?;
@@ -904,74 +909,20 @@ fn confirm_remote_server_stop(
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
     let answer = answer.trim().to_ascii_lowercase();
-    if answer == "n" || answer == "no" {
-        if reason == RemoteServerRestartReason::ProtocolMismatch {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "remote herdr server stop cancelled",
-            ));
-        }
-        return Ok(false);
+    if answer == "y" || answer == "yes" {
+        return Ok(true);
+    }
+    if answer.is_empty() && reason == RemoteServerRestartReason::ProtocolMismatch {
+        return Ok(true);
+    }
+    if reason == RemoteServerRestartReason::ProtocolMismatch {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "remote herdr server stop cancelled",
+        ));
     }
 
-    Ok(true)
-}
-
-fn confirm_remote_server_handoff(
-    target: &str,
-    version: Option<&str>,
-    protocol: Option<u32>,
-    reason: RemoteServerRestartReason,
-) -> io::Result<bool> {
-    if !io::stdin().is_terminal() {
-        if reason == RemoteServerRestartReason::ProtocolMismatch {
-            return Err(io::Error::other(format!(
-                "remote herdr server on {target} is running with protocol {}, but this client needs protocol {CURRENT_PROTOCOL}; run from an interactive terminal to approve live handoff or stopping it",
-                protocol_label(protocol)
-            )));
-        }
-
-        eprintln!(
-            "remote herdr server on {target} is still running v{}; it will use v{CURRENT_VERSION} after it restarts.",
-            version_label(version)
-        );
-        return Ok(false);
-    }
-
-    eprintln!("remote herdr server on {target} is currently running:");
-    eprintln!(
-        "  server: v{} protocol {}",
-        version_label(version),
-        protocol_label(protocol)
-    );
-    eprintln!("  prepared binary: v{CURRENT_VERSION} protocol {CURRENT_PROTOCOL}");
-    eprintln!();
-
-    match reason {
-        RemoteServerRestartReason::ProtocolMismatch => {
-            eprintln!(
-                "the remote server protocol does not match this client. herdr will try to hand off live pane processes to the prepared remote server before the old server exits."
-            );
-        }
-        RemoteServerRestartReason::BinaryUpdated => {
-            eprintln!(
-                "the remote herdr binary was installed or replaced. herdr will try to hand off live pane processes to the prepared remote server."
-            );
-        }
-        RemoteServerRestartReason::VersionMismatch => {
-            eprintln!(
-                "the remote server is still running a different herdr version. herdr will try to hand off live pane processes to the prepared remote server."
-            );
-        }
-    }
-
-    eprint!("live-handoff remote panes to the prepared server? [Y/n] ");
-    io::stderr().flush()?;
-
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    let answer = answer.trim().to_ascii_lowercase();
-    Ok(answer != "n" && answer != "no")
+    Ok(false)
 }
 
 fn live_handoff_remote_server(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<()> {
@@ -1024,12 +975,6 @@ fn wait_for_remote_server_shutdown(target: &str, remote_herdr: &RemoteHerdr) -> 
 
 fn version_label(version: Option<&str>) -> &str {
     version.unwrap_or("unknown")
-}
-
-fn protocol_label(protocol: Option<u32>) -> String {
-    protocol
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn warn_if_remote_bin_not_on_path(target: &str) -> io::Result<()> {
