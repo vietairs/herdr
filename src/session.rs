@@ -286,9 +286,11 @@ fn send_stop_request(
     let Some(write_timeout) = socket_timeout_until(deadline) else {
         return Ok(None);
     };
-    stream
-        .set_write_timeout(Some(write_timeout))
-        .map_err(|err| err.to_string())?;
+    if let Err(err) = stream.set_write_timeout(Some(write_timeout)) {
+        if err.kind() != std::io::ErrorKind::InvalidInput {
+            return Err(err.to_string());
+        }
+    }
 
     let response = send_stop_request_inner(&mut stream, request, deadline);
     match response {
@@ -313,7 +315,12 @@ fn send_stop_request_inner(
     let Some(read_timeout) = socket_timeout_until(deadline) else {
         return Ok(None);
     };
-    stream.set_read_timeout(Some(read_timeout))?;
+    if let Err(err) = stream.set_read_timeout(Some(read_timeout)) {
+        if err.kind() == std::io::ErrorKind::InvalidInput {
+            return Ok(None);
+        }
+        return Err(err);
+    }
 
     let mut line = String::new();
     let bytes_read = BufReader::new(stream).read_line(&mut line)?;
