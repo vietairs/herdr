@@ -16,7 +16,7 @@ lint:
 
 # Run PR CI checks
 ci: lint
-    cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
+    cargo nextest run --locked --status-level fail --final-status-level slow --failure-output final --success-output never
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
