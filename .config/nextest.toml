@@ -1,0 +1,6 @@
+[test-groups]
+live-handoff = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(live_handoff)'
+test-group = 'live-handoff'
