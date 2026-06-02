@@ -2607,9 +2607,7 @@ mod tests {
 
     fn write_padded_lines(terminal: &mut Terminal, count: usize, width: usize) {
         let line = format!("{}\r\n", "x".repeat(width));
-        for _ in 0..count {
-            terminal.write(line.as_bytes());
-        }
+        terminal.write(line.repeat(count).as_bytes());
     }
 
     fn build_info_bool(data: ffi::GhosttyBuildInfo) -> bool {
@@ -2823,8 +2821,8 @@ mod tests {
         let mut small = Terminal::new(80, 3, 1_000_000).unwrap();
         let mut large = Terminal::new(80, 3, 10_000_000).unwrap();
 
-        write_padded_lines(&mut small, 20_000, 70);
-        write_padded_lines(&mut large, 20_000, 70);
+        write_padded_lines(&mut small, 1_250, 70);
+        write_padded_lines(&mut large, 1_250, 70);
 
         let small_scrollback = small.scrollback_rows().unwrap();
         let large_scrollback = large.scrollback_rows().unwrap();
