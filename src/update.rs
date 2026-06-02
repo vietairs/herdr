@@ -3000,8 +3000,10 @@ mod tests {
 
     #[test]
     fn preview_manifest_reports_update_when_build_id_differs() {
-        let manifest: PreviewManifest = serde_json::from_str(
-            r####"{
+        let (os, arch) = platform_target();
+        let asset_key = format!("{os}-{arch}");
+        let json = format!(
+            r####"{{
                 "channel": "preview",
                 "base_version": "9.9.9",
                 "build_id": "2026-06-02-abcdef123456",
@@ -3009,29 +3011,29 @@ mod tests {
                 "built_at": "2026-06-02T03:00:00Z",
                 "protocol": 77,
                 "notes": "### Fixed\n- One",
-                "assets": {
-                    "linux-x86_64": {
+                "assets": {{
+                    "{asset_key}": {{
                         "url": "https://example.com/herdr-linux-x86_64",
                         "sha256": "deadbeef"
-                    }
-                },
-                "builds": {
-                    "2026-06-02-abcdef123456": {
+                    }}
+                }},
+                "builds": {{
+                    "2026-06-02-abcdef123456": {{
                         "base_version": "9.9.9",
                         "commit": "abcdef1234567890",
                         "built_at": "2026-06-02T03:00:00Z",
                         "protocol": 77,
-                        "assets": {
-                            "linux_x86_64": {
+                        "assets": {{
+                            "{asset_key}": {{
                                 "url": "https://example.com/herdr-linux_x86_64",
                                 "sha256": "deadbeef"
-                            }
-                        }
-                    }
-                }
-            }"####,
-        )
-        .unwrap();
+                            }}
+                        }}
+                    }}
+                }}
+            }}"####
+        );
+        let manifest: PreviewManifest = serde_json::from_str(&json).unwrap();
 
         let release = release_info_from_preview_manifest(&manifest)
             .unwrap()
