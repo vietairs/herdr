@@ -99,7 +99,10 @@ fn has_live_blocked_form(content: &str) -> bool {
         lower.contains("enter to select")
             && lower.contains("esc to cancel")
             && (lower.contains("tab/arrow keys to navigate")
-                || lower.contains("arrow keys to navigate"))
+                || lower.contains("arrow keys to navigate")
+                || lower.contains("arrows to navigate")
+                || lower.contains("↑/↓ to navigate")
+                || lower.contains("↑↓ to navigate"))
     })
 }
 

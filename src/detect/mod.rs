@@ -1000,6 +1000,16 @@ mod tests {
     }
 
     #[test]
+    fn claude_question_form_with_arrow_glyph_footer_is_visible_blocker() {
+        let screen = "❯ this is a test can you use question otol to ask questiosns\n\n  Thought for 16s (ctrl+o to expand)\n─────────────────────────────────────────────────────────────────────────────────────────\n ☐ Test type\n\nWhich kind of test question should I ask you next?\n\n❯ 1. Single choice\n     Ask one multiple-choice question.\n  2. Multi choice\n     Ask one question that allows several answers.\n  3. With preview\n     Ask with side-by-side previews.\n  4. Type something.\n─────────────────────────────────────────────────────────────────────────────────────────\n  5. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
     fn claude_question_form_selected_bottom_is_visible_blocker() {
         let screen = "❯ ask again\n─────────────────────────────────────────────────────────────────────────────────────────\n←  ☐ Subject  ☐ Tone  ✔ Submit  →\n\nWhat should I ask you about?\n\n  1. Today\n     Your current plan or priority.\n  2. Project\n     A codebase, feature, bug, or PR.\n  3. Preference\n     How you want me to work with you.\n  4. Random\n     A casual question with no work context.\n  5. Type something.\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ 6. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · ctrl+g to edit in Zed · Esc to cancel";
         let detection = detect_agent(Some(Agent::Claude), screen);

@@ -69,6 +69,22 @@ herdr update
 
 `herdr update` is for installs managed by Herdr's own installer. Homebrew and Nix installs update through `brew upgrade herdr` or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. Direct installs can opt into development preview builds with `herdr channel set preview` and return to stable with `herdr channel set stable`. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
 
+Herdr uses the stable update channel by default. To test preview builds from `master` before the next stable release:
+
+```bash
+herdr channel set preview
+herdr update
+```
+
+To return to stable:
+
+```bash
+herdr channel set stable
+herdr update
+```
+
+Preview is only for direct installs managed by Herdr's updater. Homebrew and Nix stay on stable and update through their package managers.
+
 ## how it compares
 
 |                          | tmux | gui managers | herdr |
