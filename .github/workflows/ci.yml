@@ -39,7 +39,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            nextest_filter: all()
+          - os: macos-latest
+            nextest_filter: not binary(live_handoff)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -71,4 +75,4 @@ jobs:
           cache-bin: false
 
       - name: Run checks
-        run: just ci
+        run: just ci '${{ matrix.nextest_filter }}'

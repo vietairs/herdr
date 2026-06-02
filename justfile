@@ -15,8 +15,8 @@ lint:
     cargo clippy --all-targets --locked -- -D warnings
 
 # Run PR CI checks
-ci: lint
-    cargo nextest run --locked --status-level fail --final-status-level slow --failure-output final --success-output never
+ci filter='all()': lint
+    cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
