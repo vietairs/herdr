@@ -23,6 +23,8 @@ const HANDOFF_VERSION: u32 = 1;
 #[cfg(unix)]
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(unix)]
+const OWNED_ACK_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(unix)]
 pub(crate) const MAX_FDS_PER_HANDOFF: usize = 64;
 #[cfg(unix)]
 pub(crate) const MAX_REPLAY_BYTES_PER_PANE: usize = 8 * 1024;
@@ -198,7 +200,7 @@ pub(crate) fn report_committed(stream: &mut UnixStream) -> io::Result<()> {
 
 #[cfg(unix)]
 pub(crate) fn wait_owned_ack(stream: &mut UnixStream) {
-    if let Err(err) = stream.set_read_timeout(Some(READY_TIMEOUT)) {
+    if let Err(err) = stream.set_read_timeout(Some(OWNED_ACK_TIMEOUT)) {
         warn!(err = %err, "failed to set handoff ownership ack timeout");
         return;
     }
