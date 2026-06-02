@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added an opt-in preview update channel with `herdr channel set preview`, automated preview manifests, and GitHub prerelease publishing for users who want fixes before stable releases.
 - Added `ui.right_click_passthrough_modifier` so a configured modifier such as `ctrl` can forward right-click hold and drag gestures to mouse-reporting pane apps while normal right-click still opens Herdr's pane menu. (#148)
 - Added Kilo Code CLI automatic detection for idle, working, and blocked terminal states. (#270)
 - Added `herdr integration install copilot` for GitHub Copilot CLI hooks that report prompt, tool, post-approval progress, permission, `ask_user`, `exit_plan_mode`, idle, session-exit state, and session ids through Herdr's socket API. When `[session] resume_agents_on_restore = true` is enabled, Herdr can resume Copilot panes with `copilot --resume=<id>`.

@@ -252,7 +252,7 @@ fn handle_request(
         Method::Ping(_) => serde_json::to_string(&SuccessResponse {
             id: request.id,
             result: ResponseResult::Pong {
-                version: env!("CARGO_PKG_VERSION").into(),
+                version: crate::build_info::version(),
                 protocol: crate::protocol::PROTOCOL_VERSION,
                 capabilities,
             },

@@ -67,7 +67,7 @@ Herdr notifies you when a new version is available. Run manually:
 herdr update
 ```
 
-`herdr update` is for installs managed by Herdr's own installer. Homebrew and Nix installs update through `brew upgrade herdr` or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
+`herdr update` is for installs managed by Herdr's own installer. Homebrew and Nix installs update through `brew upgrade herdr` or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. Direct installs can opt into development preview builds with `herdr channel set preview` and return to stable with `herdr channel set stable`. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
 
 ## how it compares
 
