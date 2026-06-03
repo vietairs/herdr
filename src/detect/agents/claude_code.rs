@@ -59,7 +59,7 @@ pub(super) fn has_working_chrome(content: &str) -> bool {
     let above_lower = above.to_lowercase();
     above_lower.contains("esc to interrupt")
         || above_lower.contains("ctrl+c to interrupt")
-        || has_background_agent_wait(above)
+        || has_running_status_line(above)
         || has_spinner_activity(above)
 }
 
@@ -119,7 +119,7 @@ fn has_live_blocked_form(content: &str) -> bool {
     })
 }
 
-fn has_background_agent_wait(content_above_prompt: &str) -> bool {
+fn has_running_status_line(content_above_prompt: &str) -> bool {
     let Some(line) = content_above_prompt
         .lines()
         .rev()
@@ -128,7 +128,7 @@ fn has_background_agent_wait(content_above_prompt: &str) -> bool {
         return false;
     };
 
-    is_background_agent_wait_line(line)
+    is_background_agent_wait_line(line) || is_still_running_status_line(line)
 }
 
 fn is_background_agent_wait_line(line: &str) -> bool {
@@ -156,6 +156,36 @@ fn is_background_agent_wait_line(line: &str) -> bool {
     }
 
     rest == "background agent to finish" || rest == "background agents to finish"
+}
+
+fn is_still_running_status_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+
+    for (index, word) in words.iter().enumerate() {
+        let Ok(count) = word.parse::<u32>() else {
+            continue;
+        };
+        if count == 0 {
+            continue;
+        }
+
+        if matches!(
+            words.get(index + 1..index + 4),
+            Some(["shell" | "shells", "still", "running"])
+        ) {
+            return true;
+        }
+
+        if matches!(
+            words.get(index + 1..index + 5),
+            Some(["local", "agent" | "agents", "still", "running"])
+        ) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn has_claude_yes_no_choice(content: &str) -> bool {
@@ -288,4 +318,53 @@ fn transcript_control_tail(line: &str) -> bool {
         || lower.contains("show all")
         || lower.contains("collapse")
         || lower.contains("verbose")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prompt_box_below(content_above_prompt: &str) -> String {
+        format!(
+            "{content_above_prompt}\n────────────────────────────────\n❯ \n────────────────────────────────\n"
+        )
+    }
+
+    #[test]
+    fn shell_still_running_status_line_is_working() {
+        let content = prompt_box_below(
+            "● Started. I'll tell you when it finishes.\n\n✻ Crunched for 7s · 1 shell still running",
+        );
+
+        assert_eq!(detect(&content), AgentState::Working);
+        assert!(has_working_chrome(&content));
+    }
+
+    #[test]
+    fn local_agent_still_running_status_line_is_working() {
+        let content = prompt_box_below(
+            "● Hey. What do you want to work on?\n\n✻ Worked for 4s · 2 local agents still running",
+        );
+
+        assert_eq!(detect(&content), AgentState::Working);
+        assert!(has_working_chrome(&content));
+    }
+
+    #[test]
+    fn lower_agent_picker_shell_count_is_not_working_chrome() {
+        let content = prompt_box_below("  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%\n  1 shell · ← for agents");
+
+        assert_eq!(detect(&content), AgentState::Idle);
+        assert!(!has_working_chrome(&content));
+    }
+
+    #[test]
+    fn stale_shell_running_line_above_newer_output_is_not_working_chrome() {
+        let content = prompt_box_below(
+            "● Started. I'll tell you when it finishes.\n\n✻ Crunched for 7s · 1 shell still running\n\n● hi",
+        );
+
+        assert_eq!(detect(&content), AgentState::Idle);
+        assert!(!has_working_chrome(&content));
+    }
 }
