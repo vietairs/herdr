@@ -1058,7 +1058,7 @@ impl GhosttyPaneTerminal {
                 Ok(rows) => rows,
                 Err(_) => return,
             };
-            let mut grapheme_bytes = Vec::new();
+            let mut grapheme_codepoints = Vec::new();
             let mut symbol_scratch = String::new();
             let mut y = 0u16;
             while y < area.height && rows.next() {
@@ -1081,7 +1081,7 @@ impl GhosttyPaneTerminal {
                         &cells,
                         basic.wide,
                         hide_kitty_placeholders,
-                        &mut grapheme_bytes,
+                        &mut grapheme_codepoints,
                         &mut symbol_scratch,
                     ) {
                         Ok(symbol) => symbol,
@@ -1226,7 +1226,7 @@ fn ghostty_collect_dirty_patch(
     let Ok(mut rows) = render_state.populate_row_iterator(&mut row_iterator) else {
         fallback!("populate_rows_error");
     };
-    let mut grapheme_bytes = Vec::new();
+    let mut grapheme_codepoints = Vec::new();
     let mut symbol_scratch = String::new();
     let mut patch_rows = Vec::new();
     let mut y = 0u16;
@@ -1264,7 +1264,7 @@ fn ghostty_collect_dirty_patch(
                     &cells,
                     basic.wide,
                     hide_kitty_placeholders,
-                    &mut grapheme_bytes,
+                    &mut grapheme_codepoints,
                     &mut symbol_scratch,
                 ) {
                     Ok(symbol) => symbol.to_owned(),
@@ -1539,7 +1539,7 @@ fn ghostty_buffer_symbol_into<'a>(
     cells: &crate::ghostty::RowCellIter<'_>,
     wide: crate::ghostty::CellWide,
     hide_kitty_placeholders: bool,
-    grapheme_bytes: &mut Vec<u8>,
+    grapheme_codepoints: &mut Vec<u32>,
     symbol_scratch: &'a mut String,
 ) -> Result<&'a str, crate::ghostty::Error> {
     symbol_scratch.clear();
@@ -1547,7 +1547,7 @@ fn ghostty_buffer_symbol_into<'a>(
         crate::ghostty::CellWide::SpacerTail => {}
         crate::ghostty::CellWide::SpacerHead => symbol_scratch.push(' '),
         crate::ghostty::CellWide::Narrow | crate::ghostty::CellWide::Wide => {
-            cells.grapheme_text_into(grapheme_bytes, symbol_scratch)?;
+            cells.grapheme_text_into(grapheme_codepoints, symbol_scratch)?;
             let hidden_kitty_placeholder = hide_kitty_placeholders
                 && symbol_scratch.chars().next().map(u32::from)
                     == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER);

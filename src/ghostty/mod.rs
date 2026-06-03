@@ -2546,63 +2546,51 @@ impl<'a> RowCellIter<'a> {
     }
 
     pub fn grapheme_text(&self) -> Result<String, Error> {
-        let mut bytes = Vec::new();
+        let mut codepoints = Vec::new();
         let mut text = String::new();
-        self.grapheme_text_into(&mut bytes, &mut text)?;
+        self.grapheme_text_into(&mut codepoints, &mut text)?;
         Ok(text)
     }
 
-    pub fn grapheme_text_into(&self, bytes: &mut Vec<u8>, text: &mut String) -> Result<(), Error> {
+    pub fn grapheme_text_into(
+        &self,
+        codepoints: &mut Vec<u32>,
+        text: &mut String,
+    ) -> Result<(), Error> {
         text.clear();
-        bytes.clear();
+        codepoints.clear();
 
-        let mut buffer = ffi::GhosttyBuffer {
-            ptr: ptr::null_mut(),
-            cap: 0,
-            len: 0,
-        };
-        let result = unsafe {
-            ffi::ghostty_render_state_row_cells_get(
-                self.cells.raw,
-                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8,
-                (&mut buffer as *mut ffi::GhosttyBuffer).cast(),
-            )
-        };
-        match result {
-            ffi::GhosttyResult_GHOSTTY_SUCCESS if buffer.len == 0 => {
-                return self.raw_cell_text_into(text);
-            }
-            ffi::GhosttyResult_GHOSTTY_SUCCESS => {
-                return Err(Error(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE));
-            }
-            ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE => {}
-            other => return Err(Error(other)),
-        }
-
-        if buffer.len == 0 {
-            return self.raw_cell_text_into(text);
-        }
-        bytes.resize(buffer.len, 0);
-        let mut buffer = ffi::GhosttyBuffer {
-            ptr: bytes.as_mut_ptr(),
-            cap: bytes.len(),
-            len: 0,
-        };
+        let mut len = 0u32;
         unsafe {
             ffi::ghostty_render_state_row_cells_get(
                 self.cells.raw,
-                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8,
-                (&mut buffer as *mut ffi::GhosttyBuffer).cast(),
+                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
+                (&mut len as *mut u32).cast(),
+            )
+            .into_result()?;
+        };
+
+        if len == 0 {
+            return self.raw_cell_text_into(text);
+        }
+
+        // Avoid GRAPHEMES_UTF8 here. In libghostty-vt 0.6.7's vendor, its
+        // required-byte query can underreport multi-codepoint graphemes.
+        codepoints.resize(len as usize, 0);
+        unsafe {
+            ffi::ghostty_render_state_row_cells_get(
+                self.cells.raw,
+                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
+                codepoints.as_mut_ptr().cast(),
             )
             .into_result()?;
         }
-        if buffer.len > bytes.len() {
-            return Err(Error(ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE));
-        }
-        bytes.truncate(buffer.len);
-        match std::str::from_utf8(bytes) {
-            Ok(value) => text.push_str(value),
-            Err(_) => text.push_str(&String::from_utf8_lossy(bytes)),
+
+        for codepoint in codepoints.iter().copied() {
+            match char::from_u32(codepoint) {
+                Some(ch) => text.push(ch),
+                None => text.push(char::REPLACEMENT_CHARACTER),
+            }
         }
         Ok(())
     }
@@ -2945,6 +2933,32 @@ mod tests {
 
         render_state.set_dirty(Dirty::Clean).unwrap();
         assert_eq!(render_state.dirty().unwrap(), Dirty::Clean);
+    }
+
+    #[test]
+    fn render_cells_handle_issue_453_unicode_payload() {
+        let mut terminal = Terminal::new(80, 3, 100).unwrap();
+        terminal.write("README 👨‍👩‍👧‍👦 🧑‍💻 ✅ ⚡ 漢字 café é 🏳️‍🌈 🚀\r\n".as_bytes());
+
+        let mut render_state = RenderState::new().unwrap();
+        render_state.update(&terminal).unwrap();
+
+        let mut row_iterator = RowIterator::new().unwrap();
+        let mut rows = render_state
+            .populate_row_iterator(&mut row_iterator)
+            .unwrap();
+        let mut row_cells = RowCells::new().unwrap();
+        let mut codepoints = Vec::new();
+        let mut text = String::new();
+
+        while rows.next() {
+            let mut cells = rows.populate_cells(&mut row_cells).unwrap();
+            while cells.next() {
+                cells
+                    .grapheme_text_into(&mut codepoints, &mut text)
+                    .unwrap();
+            }
+        }
     }
 
     #[test]
