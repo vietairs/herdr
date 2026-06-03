@@ -1662,6 +1662,37 @@ fn is_nix_managed_install() -> bool {
     is_nix_store_exe_path_following_links(&current_exe)
 }
 
+pub(crate) fn preview_channel_rejection_for_current_install() -> Option<&'static str> {
+    let Ok(current_exe) = env::current_exe() else {
+        return None;
+    };
+
+    preview_channel_rejection_for_exe_path(&current_exe)
+}
+
+pub(crate) fn package_manager_channel_update_guidance_for_current_install() -> Option<&'static str>
+{
+    if is_homebrew_managed_install() {
+        Some("Use `brew update && brew upgrade herdr` to update Homebrew installs.")
+    } else if is_nix_managed_install() {
+        Some("Update through Nix to update Nix-managed Herdr installs.")
+    } else {
+        None
+    }
+}
+
+fn preview_channel_rejection_for_exe_path(path: &Path) -> Option<&'static str> {
+    if is_homebrew_managed_exe_path_following_links(path) {
+        Some(
+            "preview channel is only available for direct Herdr installs; Homebrew installs update through `brew update && brew upgrade herdr`",
+        )
+    } else if is_nix_store_exe_path_following_links(path) {
+        Some("preview channel is only available for direct Herdr installs; Nix installs update through Nix")
+    } else {
+        None
+    }
+}
+
 pub(crate) fn is_package_manager_managed_exe_path(path: &Path) -> bool {
     is_homebrew_managed_exe_path_following_links(path)
         || is_nix_store_exe_path_following_links(path)
@@ -2152,6 +2183,19 @@ mod tests {
 
         assert!(is_nix_store_exe_path(path));
         assert!(is_package_manager_managed_exe_path(path));
+    }
+
+    #[test]
+    fn preview_channel_is_rejected_for_package_manager_paths() {
+        let homebrew = Path::new("/opt/homebrew/Cellar/herdr/0.6.6/bin/herdr");
+        let nix = Path::new("/nix/store/abc123-herdr-0.6.6/bin/herdr");
+        let direct = Path::new("/home/user/.local/bin/herdr");
+
+        assert!(preview_channel_rejection_for_exe_path(homebrew)
+            .is_some_and(|message| message.contains("Homebrew")));
+        assert!(preview_channel_rejection_for_exe_path(nix)
+            .is_some_and(|message| message.contains("Nix")));
+        assert!(preview_channel_rejection_for_exe_path(direct).is_none());
     }
 
     #[test]
@@ -2984,16 +3028,16 @@ mod tests {
 
     #[test]
     fn stable_channel_installs_stable_asset_when_current_binary_is_preview() {
-        let older_stable = Version::parse("0.6.5").unwrap();
-        let preview_base = Version::parse("0.6.6").unwrap();
+        let latest_stable = Version::parse("0.6.6").unwrap();
+        let installed_base = Version::parse("0.6.6").unwrap();
         assert!(stable_channel_should_install(
-            &older_stable,
-            &preview_base,
+            &latest_stable,
+            &installed_base,
             true
         ));
         assert!(!stable_channel_should_install(
-            &older_stable,
-            &preview_base,
+            &latest_stable,
+            &installed_base,
             false
         ));
     }

@@ -73,15 +73,15 @@ Herdr uses the stable update channel by default. To test preview builds from `ma
 
 ```bash
 herdr channel set preview
-herdr update
 ```
 
 To return to stable:
 
 ```bash
 herdr channel set stable
-herdr update
 ```
+
+For direct installs, changing channels also checks that channel and installs its latest binary. If that update fails, run `herdr update` to retry from the configured channel.
 
 Preview is only for direct installs managed by Herdr's updater. Homebrew and Nix stay on stable and update through their package managers.
 

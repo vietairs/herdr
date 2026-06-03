@@ -43,19 +43,19 @@ herdr update
 
 `herdr update` is for installs managed by Herdr's own installer. Homebrew and Nix installs are updated through those package managers instead.
 
-Herdr uses the stable update channel by default. To opt into preview builds from `master`, set the channel first, then update:
+Herdr uses the stable update channel by default. To opt into preview builds from `master`, set the channel:
 
 ```bash
 herdr channel set preview
-herdr update
 ```
 
 Switch back to stable the same way:
 
 ```bash
 herdr channel set stable
-herdr update
 ```
+
+For direct installs, changing channels also checks that channel and installs its latest binary. If that update fails, run `herdr update` to retry from the configured channel.
 
 Preview builds are GitHub prereleases published from the current development branch. They are useful when you want fixes before the next stable release, but they can regress. Homebrew and Nix installs do not use the preview channel.
 
