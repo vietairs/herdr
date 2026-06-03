@@ -2,30 +2,55 @@
   "schema_version": 1,
   "channel": "preview",
   "base_version": "0.6.6",
-  "build_id": "2026-06-03-fc82cbad2179",
-  "commit": "fc82cbad21791ed58c08905469055eb9357cd350",
-  "built_at": "2026-06-03T04:35:19Z",
+  "build_id": "2026-06-03-5b2fce600f76",
+  "commit": "5b2fce600f7688059e8ae245da7c6ffc561bb92a",
+  "built_at": "2026-06-03T12:07:53Z",
   "protocol": 12,
-  "notes": "Preview build 2026-06-03-fc82cbad2179\n\nBuilt from `fc82cbad2179` on `master`.\nBase stable: v0.6.6\nCompare: https://github.com/ogulcancelik/herdr/compare/cce3eacc49d281fd087ebf0d43eea3e08038033f...fc82cbad21791ed58c08905469055eb9357cd350\n\n### Fixed\n- Preserve status in transcript viewers\n- Avoid stale claude background wait detection\n- Support legacy shifted letter keybindings\n- Detect claude arrow-glyph question prompts\n- Forward any-motion pane mouse events\n- Preserve child argv flags after separator\n\n### Maintenance\n- Clarify integration restore and state roles\n- Clarify repo agent guidance",
+  "notes": "Preview build 2026-06-03-5b2fce600f76\n\nBuilt from `5b2fce600f76` on `master`.\nBase stable: v0.6.6\nCompare: https://github.com/ogulcancelik/herdr/compare/fc82cbad21791ed58c08905469055eb9357cd350...5b2fce600f7688059e8ae245da7c6ffc561bb92a\n\n### Fixed\n- Reconcile update channel switches\n- Reduce idle process probes\n\n### Maintenance\n- Finalize next release docs",
   "assets": {
     "linux-x86_64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-linux-x86_64",
-      "sha256": "c2291bc05f417329a233d09d769933ccccdc4e1f03e6f2d9a8223464b141728d"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-5b2fce600f76/herdr-linux-x86_64",
+      "sha256": "c4575cf293f39d72dac0dd6c9618f7e7a46d2b38ebbb7dcbe55d8ebed669866b"
     },
     "linux-aarch64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-linux-aarch64",
-      "sha256": "bce62864bf3cff6046799acd0e8eb2d6eab546f4be9fe0e37a026704a85db3b2"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-5b2fce600f76/herdr-linux-aarch64",
+      "sha256": "20e0b04335f6fb1572eee277b836146c4d4d7cf9d053978fc9e7194ce7ec13df"
     },
     "macos-x86_64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-macos-x86_64",
-      "sha256": "7990bdc39fa96322b37a497f85bc1963cb40f9f298d400f8da8fe13dac2adaf6"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-5b2fce600f76/herdr-macos-x86_64",
+      "sha256": "607c849e721802d3c75e0b6ba677be2baaa2239b5251ab370cb6457231d1ca53"
     },
     "macos-aarch64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-macos-aarch64",
-      "sha256": "c8bcd63323c6daf671022a6872134c6178c153ddd89c4260fbb9b28fe162c18a"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-5b2fce600f76/herdr-macos-aarch64",
+      "sha256": "29f3979e08420a6182f9dd0925a15d101dcbbb1eb75948cdf58f927b9f319da8"
     }
   },
   "builds": {
+    "2026-06-03-5b2fce600f76": {
+      "base_version": "0.6.6",
+      "commit": "5b2fce600f7688059e8ae245da7c6ffc561bb92a",
+      "built_at": "2026-06-03T12:07:53Z",
+      "protocol": 12,
+      "tag": "preview-2026-06-03-5b2fce600f76",
+      "assets": {
+        "linux-x86_64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-5b2fce600f76/herdr-linux-x86_64",
+          "sha256": "c4575cf293f39d72dac0dd6c9618f7e7a46d2b38ebbb7dcbe55d8ebed669866b"
+        },
+        "linux-aarch64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-5b2fce600f76/herdr-linux-aarch64",
+          "sha256": "20e0b04335f6fb1572eee277b836146c4d4d7cf9d053978fc9e7194ce7ec13df"
+        },
+        "macos-x86_64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-5b2fce600f76/herdr-macos-x86_64",
+          "sha256": "607c849e721802d3c75e0b6ba677be2baaa2239b5251ab370cb6457231d1ca53"
+        },
+        "macos-aarch64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-5b2fce600f76/herdr-macos-aarch64",
+          "sha256": "29f3979e08420a6182f9dd0925a15d101dcbbb1eb75948cdf58f927b9f319da8"
+        }
+      }
+    },
     "2026-06-03-fc82cbad2179": {
       "base_version": "0.6.6",
       "commit": "fc82cbad21791ed58c08905469055eb9357cd350",
