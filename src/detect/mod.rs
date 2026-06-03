@@ -84,7 +84,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
 }
 
 pub fn parse_agent_label(agent: &str) -> Option<Agent> {
-    let name = agent.trim().to_lowercase();
+    let name = normalized_agent_lookup_name(agent);
     match name.as_str() {
         "pi" => Some(Agent::Pi),
         "claude" | "claude-code" => Some(Agent::Claude),
@@ -110,7 +110,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
 /// Identify which agent is running from the process name.
 /// Returns `None` for plain shells or unrecognized programs.
 pub fn identify_agent(process_name: &str) -> Option<Agent> {
-    let name = process_name.to_lowercase();
+    let name = normalized_agent_lookup_name(process_name);
     // Match against known binary names
     match name.as_str() {
         "pi" => Some(Agent::Pi),
@@ -486,6 +486,14 @@ fn agent_name_from_basename(basename: &str) -> Option<String> {
     Some(agent_label(agent).to_string())
 }
 
+fn normalized_agent_lookup_name(name: &str) -> String {
+    let mut name = name.trim().to_lowercase();
+    if name.ends_with(".exe") {
+        name.truncate(name.len() - ".exe".len());
+    }
+    name
+}
+
 fn path_basename(path: &str) -> &str {
     std::path::Path::new(path)
         .file_name()
@@ -616,6 +624,7 @@ mod tests {
         assert_eq!(identify_agent("antigravity-cli"), Some(Agent::Antigravity));
         assert_eq!(identify_agent("cline"), Some(Agent::Cline));
         assert_eq!(identify_agent("opencode"), Some(Agent::OpenCode));
+        assert_eq!(identify_agent("opencode.exe"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("kimi"), Some(Agent::Kimi));
         assert_eq!(identify_agent("Kimi Code"), Some(Agent::Kimi));
         assert_eq!(identify_agent("kiro"), Some(Agent::Kiro));
@@ -637,6 +646,7 @@ mod tests {
         assert_eq!(parse_agent_label("cursor-agent"), Some(Agent::Cursor));
         assert_eq!(parse_agent_label("agy"), Some(Agent::Antigravity));
         assert_eq!(parse_agent_label("antigravity"), Some(Agent::Antigravity));
+        assert_eq!(parse_agent_label("opencode.exe"), Some(Agent::OpenCode));
         assert_eq!(parse_agent_label("copilot"), Some(Agent::GithubCopilot));
         assert_eq!(parse_agent_label("kimi-code"), Some(Agent::Kimi));
         assert_eq!(
@@ -773,6 +783,40 @@ mod tests {
         assert_eq!(
             identify_agent_in_job(&job),
             Some((Agent::Pi, "pi".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_opencode_exe_from_pnpm_package() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                123,
+                "opencode.exe",
+                &["/home/user/.local/share/pnpm/global/node_modules/opencode-ai/bin/opencode.exe"],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::OpenCode, "opencode.exe".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_opencode_exe_from_argv0_path() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                123,
+                "MainThread",
+                &["/home/user/.local/share/pnpm/global/node_modules/opencode-ai/bin/opencode.exe"],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::OpenCode, "opencode".to_string()))
         );
     }
 
