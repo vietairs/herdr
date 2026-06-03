@@ -42,10 +42,14 @@ jobs:
         include:
           - os: ubuntu-latest
             nextest_filter: all()
-          - os: macos-latest
+          - os: macos-15
             nextest_filter: not binary(live_handoff)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -67,7 +71,15 @@ jobs:
 
       - name: Install macOS build tools
         if: runner.os == 'macOS'
-        run: brew install cmake ninja
+        run: command -v cmake >/dev/null && command -v ninja >/dev/null || brew install cmake ninja
+
+      - name: Restore Zig build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/libghostty-vt/.zig-cache
+            vendor/libghostty-vt/zig-out
+          key: zig-${{ runner.os }}-${{ runner.arch }}-0.15.2-releasefast-simd-${{ hashFiles('build.rs', 'vendor/libghostty-vt.vendor.json', 'vendor/libghostty-vt/build.zig', 'vendor/libghostty-vt/build.zig.zon', 'vendor/libghostty-vt/VERSION', 'vendor/libghostty-vt/include/**', 'vendor/libghostty-vt/pkg/**', 'vendor/libghostty-vt/src/**') }}
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
