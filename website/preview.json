@@ -2,30 +2,55 @@
   "schema_version": 1,
   "channel": "preview",
   "base_version": "0.6.6",
-  "build_id": "2026-06-02-cce3eacc49d2",
-  "commit": "cce3eacc49d281fd087ebf0d43eea3e08038033f",
-  "built_at": "2026-06-02T20:59:19Z",
+  "build_id": "2026-06-03-fc82cbad2179",
+  "commit": "fc82cbad21791ed58c08905469055eb9357cd350",
+  "built_at": "2026-06-03T04:35:19Z",
   "protocol": 12,
-  "notes": "Preview build 2026-06-02-cce3eacc49d2\n\nBuilt from `cce3eacc49d2` on `master`.\nBase stable: v0.6.6\nCompare: https://github.com/ogulcancelik/herdr/compare/v0.6.6...cce3eacc49d281fd087ebf0d43eea3e08038033f\n\n### Added\n- Add preview update channel\n- Make claude codex opencode hooks session-only\n- Add github copilot cli integration (#386)\n- Keep remote bridge alive with an ssh config keepalive fallback (#355)\n- Detect kilo code cli\n- Add configurable right-click passthrough\n- Add expanded sidebar collapse control (#291)\n\n### Fixed\n- Allow preview publish after master moves\n- Tolerate macos socket timeout setup failure\n- Shorten handoff ownership ack wait\n- Return to bottom after copy mode exit (#410)\n- Publish preview manifest with bot token\n- Accept static aarch64 preview artifact packaging\n- Resolve git branch names in reftable repos (#423)\n- Preserve preview docs navigation\n- Resume restored agents across background panes\n- Make darwin nix package find sdk tools (#407)\n- Answer xtgettcap queries in panes\n- Preserve toasts during retained renders\n- Detect kiro subagent approvals\n- Restore agents through pane shells\n- Support fish remote bootstrap\n- Derive pane selection highlight colors\n- Clarify update restart prompts\n- Answer osc 4 palette queries\n- Wake pty actor for queued input\n- Remove update star prompt\n- Preserve linewise copy selection (#389)\n- Unify update-ready release notes scrolling\n- Request missing issue environment details\n\n### Performance\n- Retain terminal render updates\n\n### Maintenance\n- Skip live handoff tests on macos\n- Serialize live handoff nextest tests\n- Show slow nextest tests\n- Speed up ghostty scrollback limit test\n- Skip ci for contributor approvals\n- Update libghostty vendor\n- Limit nix workflow triggers\n- Add discussion templates\n- Route feature intake to discussions",
+  "notes": "Preview build 2026-06-03-fc82cbad2179\n\nBuilt from `fc82cbad2179` on `master`.\nBase stable: v0.6.6\nCompare: https://github.com/ogulcancelik/herdr/compare/cce3eacc49d281fd087ebf0d43eea3e08038033f...fc82cbad21791ed58c08905469055eb9357cd350\n\n### Fixed\n- Preserve status in transcript viewers\n- Avoid stale claude background wait detection\n- Support legacy shifted letter keybindings\n- Detect claude arrow-glyph question prompts\n- Forward any-motion pane mouse events\n- Preserve child argv flags after separator\n\n### Maintenance\n- Clarify integration restore and state roles\n- Clarify repo agent guidance",
   "assets": {
     "linux-x86_64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-02-cce3eacc49d2/herdr-linux-x86_64",
-      "sha256": "c22aa4b2e5fadd6e04910f92bbc125aa749c6a9a9edd281082f07a839e37cbff"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-linux-x86_64",
+      "sha256": "c2291bc05f417329a233d09d769933ccccdc4e1f03e6f2d9a8223464b141728d"
     },
     "linux-aarch64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-02-cce3eacc49d2/herdr-linux-aarch64",
-      "sha256": "26a15f394fd27425ab252424fd090913c1ae5cf644f4f3aac0f06c086bdaabb7"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-linux-aarch64",
+      "sha256": "bce62864bf3cff6046799acd0e8eb2d6eab546f4be9fe0e37a026704a85db3b2"
     },
     "macos-x86_64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-02-cce3eacc49d2/herdr-macos-x86_64",
-      "sha256": "c89a97b730e7e3b132a2eca53d49448ec2fb969362e903ce99b5b7b0fbd4d5b1"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-macos-x86_64",
+      "sha256": "7990bdc39fa96322b37a497f85bc1963cb40f9f298d400f8da8fe13dac2adaf6"
     },
     "macos-aarch64": {
-      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-02-cce3eacc49d2/herdr-macos-aarch64",
-      "sha256": "0f6c260d9cc65d01c1a58baca5f3ae8150b91f0a16a2ae223b71e76c9dda444f"
+      "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-macos-aarch64",
+      "sha256": "c8bcd63323c6daf671022a6872134c6178c153ddd89c4260fbb9b28fe162c18a"
     }
   },
   "builds": {
+    "2026-06-03-fc82cbad2179": {
+      "base_version": "0.6.6",
+      "commit": "fc82cbad21791ed58c08905469055eb9357cd350",
+      "built_at": "2026-06-03T04:35:19Z",
+      "protocol": 12,
+      "tag": "preview-2026-06-03-fc82cbad2179",
+      "assets": {
+        "linux-x86_64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-linux-x86_64",
+          "sha256": "c2291bc05f417329a233d09d769933ccccdc4e1f03e6f2d9a8223464b141728d"
+        },
+        "linux-aarch64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-linux-aarch64",
+          "sha256": "bce62864bf3cff6046799acd0e8eb2d6eab546f4be9fe0e37a026704a85db3b2"
+        },
+        "macos-x86_64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-macos-x86_64",
+          "sha256": "7990bdc39fa96322b37a497f85bc1963cb40f9f298d400f8da8fe13dac2adaf6"
+        },
+        "macos-aarch64": {
+          "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-06-03-fc82cbad2179/herdr-macos-aarch64",
+          "sha256": "c8bcd63323c6daf671022a6872134c6178c153ddd89c4260fbb9b28fe162c18a"
+        }
+      }
+    },
     "2026-06-02-cce3eacc49d2": {
       "base_version": "0.6.6",
       "commit": "cce3eacc49d281fd087ebf0d43eea3e08038033f",
