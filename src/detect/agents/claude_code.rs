@@ -107,12 +107,42 @@ fn has_live_blocked_form(content: &str) -> bool {
 }
 
 fn has_background_agent_wait(content_above_prompt: &str) -> bool {
-    content_above_prompt.lines().rev().take(8).any(|line| {
-        let lower = line.to_lowercase();
-        lower.contains("waiting for")
-            && lower.contains("background agent")
-            && lower.contains("to finish")
-    })
+    let Some(line) = content_above_prompt
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+    else {
+        return false;
+    };
+
+    is_background_agent_wait_line(line)
+}
+
+fn is_background_agent_wait_line(line: &str) -> bool {
+    let mut text = line.trim();
+    if !text.starts_with("Waiting for ") && !text.starts_with("waiting for ") {
+        let mut chars = text.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if first.is_alphanumeric() {
+            return false;
+        }
+        text = chars.as_str().trim_start();
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("waiting for ") else {
+        return false;
+    };
+    let Some((count, rest)) = rest.split_once(' ') else {
+        return false;
+    };
+    if count.parse::<u32>().ok().is_none_or(|count| count == 0) {
+        return false;
+    }
+
+    rest == "background agent to finish" || rest == "background agents to finish"
 }
 
 fn has_claude_yes_no_choice(content: &str) -> bool {

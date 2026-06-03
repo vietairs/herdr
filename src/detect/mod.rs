@@ -1121,6 +1121,58 @@ mod tests {
     }
 
     #[test]
+    fn claude_waiting_for_multiple_background_agents_is_working() {
+        let screen = "● Done. I’ve delegated two investigations.\n\n✻ Waiting for 2 background agents to finish\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn claude_completed_background_agent_wait_in_scrollback_is_idle() {
+        let screen = "❯ please create a background agent that sleeps 15 sec then say hi\n\n  Thought for 8s (ctrl+o to expand)\n\n● claude(Sleep then say hi)\n  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)\n\n● Done. I launched a background agent that will wait 15 seconds and then reply with hi.\n\n✻ Waiting for 1 background agent to finish\n\n● Agent \"Sleep then say hi\" completed · 17s\n\n● hi\n\n✻ Brewed for 28s\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn claude_completed_background_agent_with_prompt_box_is_idle() {
+        let screen = "● Done. I’ve started a background agent.\n\n✻ Waiting for 1 background agent to finish\n\n⏺ Agent \"Sleep then say hi\" completed · 31s\n\n⏺ hi\n\n✻ Baked for 42s\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%\n\n  ● main      ↑/↓ to select · Enter to view\n  ◯ general-purpose  Sleep then say hi  31s";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn claude_zero_background_agent_wait_with_prompt_box_is_idle() {
+        let screen = "✻ Waiting for 0 background agents to finish\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+    }
+
+    #[test]
+    fn claude_background_agent_wait_phrase_in_prose_is_idle() {
+        let screen = "Claude mentioned: Waiting for 1 background agent to finish\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+    }
+
+    #[test]
     fn claude_idle_search() {
         let screen = "⌕ Search…\nsome content";
         assert_eq!(detect_claude(screen), AgentState::Idle);
