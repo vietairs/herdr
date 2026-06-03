@@ -323,6 +323,29 @@ fn stable_visible_signal_refresh_due(
         })
 }
 
+fn detection_update_for_publish(
+    agent: Option<Agent>,
+    content: &str,
+    process_exited: bool,
+) -> Option<crate::detect::AgentDetection> {
+    if crate::detect::should_skip_state_update(agent, content) {
+        return None;
+    }
+
+    if process_exited {
+        return Some(crate::detect::AgentDetection {
+            state: AgentState::Idle,
+            skip_state_update: false,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+        });
+    }
+
+    let detection = crate::detect::detect_agent(agent, content);
+    (!detection.skip_state_update).then_some(detection)
+}
+
 fn spawn_basic_detection_task(
     pane_id: PaneId,
     child_pid: Arc<AtomicU32>,
@@ -380,6 +403,9 @@ fn spawn_basic_detection_task(
             let mut agent_changed = false;
             let mut agent = agent_presence.current_agent();
             let content = terminal.detection_text();
+            if crate::detect::should_skip_state_update(agent, &content) {
+                continue;
+            }
 
             let foreground_pgid = (pid > 0)
                 .then(|| crate::detect::foreground_process_group_id(pid))
@@ -429,7 +455,9 @@ fn spawn_basic_detection_task(
                 }
             }
 
-            let detection = crate::detect::detect_agent(agent, &content);
+            let Some(detection) = detection_update_for_publish(agent, &content, false) else {
+                continue;
+            };
             let new_state = detection.state;
             let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
             let visible_idle = detection.visible_idle && new_state == AgentState::Idle;
@@ -1467,6 +1495,9 @@ impl PaneRuntime {
                     release_was_active = suppressed_agent.is_some();
                     let pid = child_pid.load(Ordering::Acquire);
                     let content = terminal.detection_text();
+                    if detect::should_skip_state_update(agent_presence.current_agent(), &content) {
+                        continue;
+                    }
                     let foreground_pgid = (pid > 0)
                         .then(|| detect::foreground_process_group_id(pid))
                         .flatten();
@@ -1581,15 +1612,10 @@ impl PaneRuntime {
                     let process_exited = pending_foreground_shell_clear
                         && agent.is_some()
                         && !foreground_shell_exit_reported;
-                    let detection = if process_exited {
-                        detect::AgentDetection {
-                            state: AgentState::Idle,
-                            visible_blocker: false,
-                            visible_idle: false,
-                            visible_working: false,
-                        }
-                    } else {
-                        detect::detect_agent(agent, &content)
+                    let Some(detection) =
+                        detection_update_for_publish(agent, &content, process_exited)
+                    else {
+                        continue;
                     };
                     let raw_state = detection.state;
                     let new_state = crate::terminal::state::stabilize_agent_detection(
@@ -2422,6 +2448,30 @@ mod tests {
             foreground_shell_agent_action(Some(Agent::Codex), None, true, true),
             ForegroundShellAgentAction::ClearAgent
         );
+    }
+
+    #[test]
+    fn codex_transcript_viewer_suppresses_prompt_idle_publish() {
+        let content = "/ T R A N S C R I P T /\n\n› yeah go ahead\n────────────────────────────────────────────────────────────────────────────────── 100% ─\n ↑/↓ to scroll   pgup/pgdn to page   home/end to jump\n q to quit   esc to edit prev";
+
+        assert!(detection_update_for_publish(Some(Agent::Codex), content, false).is_none());
+    }
+
+    #[test]
+    fn codex_transcript_viewer_suppresses_process_exit_idle_publish() {
+        let content = "/ T R A N S C R I P T /\n\n› yeah go ahead\n────────────────────────────────────────────────────────────────────────────────── 100% ─\n ↑/↓ to scroll   pgup/pgdn to page   home/end to jump\n q to quit   esc to edit prev";
+
+        assert!(detection_update_for_publish(Some(Agent::Codex), content, true).is_none());
+    }
+
+    #[test]
+    fn process_exit_without_transcript_still_reports_idle() {
+        let detection =
+            detection_update_for_publish(Some(Agent::Codex), "Codex finished\n› ", true)
+                .expect("process exit should publish idle outside transcript viewer");
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(!detection.skip_state_update);
     }
 
     #[test]
