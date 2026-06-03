@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.6.8] - 2026-06-04
+
 This is a hotfix release for v0.6.7, prioritizing a server-crash fix for panes that print complex Unicode or emoji output.
 
 ### Fixed
