@@ -100,7 +100,6 @@ fn has_claude_blocked_prompt(content: &str, lower_content: &str) -> bool {
         || lower_content.contains("do you want to allow this connection?")
         || lower_content.contains("tab to amend")
         || lower_content.contains("ctrl+e to explain")
-        || lower_content.contains("chat about this")
         || lower_content.contains("review your answers")
         || lower_content.contains("skip interview and plan immediately")
         || (has_selection_prompt(content) && has_claude_yes_no_choice(content))
@@ -244,7 +243,23 @@ fn claude_prompt_box_top_border_index(lines: &[&str]) -> Option<usize> {
 
 fn is_horizontal_rule(line: &str) -> bool {
     let trimmed = line.trim();
-    !trimmed.is_empty() && trimmed.chars().all(|c| c == '─')
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let rule_chars = trimmed.chars().take_while(|&c| c == '─').count();
+    if rule_chars == 0 {
+        return false;
+    }
+
+    let rule_bytes = trimmed
+        .char_indices()
+        .nth(rule_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(trimmed.len());
+    let suffix = trimmed[rule_bytes..].trim_start();
+
+    suffix.is_empty() || rule_chars >= 3
 }
 
 fn bottom_non_empty_lines(content: &str, max_lines: usize) -> Vec<&str> {

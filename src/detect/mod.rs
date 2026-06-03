@@ -1091,6 +1091,16 @@ mod tests {
     }
 
     #[test]
+    fn claude_prompt_box_with_status_text_and_custom_status_is_visible_idle() {
+        let screen = "──────────────────────────────────────────── ◐ medium · /effort\n❯ \n────────────────────────────────────────────\n  thommie-backend | refactor/cleanup-codebase | Opus 4.8 (1M context)\nIppy Tippy\n/coach-dive to chat about this\n▸▸ auto mode on (shift+tab to cycle) · ← for agents";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
     fn claude_interrupted_permission_prompt_box_is_visible_idle() {
         let screen = "❯ this is a test, create some dummy files on /tmp and -rm rf them i wanna test\n    permissions\n\n  Thought for 7s (ctrl+o to expand)\n\n● Bash(tmpdir=$(mktemp -d /tmp/claude-perm-test.XXXXXX) && touch \"$tmpdir/file1.txt\"\n      \"$tmpdir/file2.log\" && mkdir \"$tmpdir/subdir\" && touch\n      \"$tmpdir/subdir/nested.txt\"…)\n  ⎿  Interrupted · What should Claude do instead?\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
         let detection = detect_agent(Some(Agent::Claude), screen);
