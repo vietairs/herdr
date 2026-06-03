@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+This is a hotfix release for v0.6.7, prioritizing a server-crash fix for panes that print complex Unicode or emoji output.
+
+### Fixed
+- Fixed a Herdr server crash triggered by pane output containing complex Unicode, emoji, or decomposed accent graphemes. Affected sessions could lose running pane processes or crash again after restore if the same saved pane output was replayed. (#453)
+- Direct installs managed by mise now update through the mise install path instead of failing to replace the active binary.
+- Claude Code panes that are actively thinking or streaming no longer flicker to blocked because of custom status text. (#409)
+- Claude Code panes now detect running shell-command status more reliably.
+- OpenCode installed through pnpm is now detected as `opencode` instead of being missed because the packaged executable is named `opencode.exe`. (#447)
+
+### Added
+- Added opt-in macOS input-source switching during prefix mode with `experimental.switch_ascii_input_source_in_prefix`, so users typing with a non-Latin IME can run prefix commands through an ASCII-capable input source and return to the previous input source when prefix mode ends. (#400, #434, thanks @sf-jin-ku)
+
 ## [0.6.7] - 2026-06-03
 
 ### Added

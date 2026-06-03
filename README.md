@@ -31,6 +31,12 @@ or install with homebrew:
 brew install herdr
 ```
 
+or install with mise:
+
+```bash
+mise use -g herdr
+```
+
 or download the binary from [releases](https://github.com/ogulcancelik/herdr/releases). requires linux or macos.
 
 ## quick start
@@ -67,7 +73,7 @@ Herdr notifies you when a new version is available. Run manually:
 herdr update
 ```
 
-`herdr update` is for installs managed by Herdr's own installer. Homebrew and Nix installs update through `brew upgrade herdr` or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. Direct installs can opt into development preview builds with `herdr channel set preview` and return to stable with `herdr channel set stable`. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
+`herdr update` is for installs managed by Herdr's own installer. Homebrew, mise, and Nix installs update through `brew upgrade herdr`, `mise upgrade herdr`, or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. Direct installs can opt into development preview builds with `herdr channel set preview` and return to stable with `herdr channel set stable`. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
 
 Herdr uses the stable update channel by default. To test preview builds from `master` before the next stable release:
 
@@ -83,7 +89,7 @@ herdr channel set stable
 
 For direct installs, changing channels also checks that channel and installs its latest binary. If that update fails, run `herdr update` to retry from the configured channel.
 
-Preview is only for direct installs managed by Herdr's updater. Homebrew and Nix stay on stable and update through their package managers.
+Preview is only for direct installs managed by Herdr's updater. Homebrew, mise, and Nix stay on stable and update through their package managers.
 
 ## how it compares
 
@@ -239,7 +245,7 @@ In-app settings cover theme, sound, and toast preferences. Herdr writes logs und
 ## docs
 
 - [quick start](https://herdr.dev/docs/quick-start/) — first session, panes, copy, and named sessions
-- [install](https://herdr.dev/docs/install/) — install, update, Homebrew, and Nix
+- [install](https://herdr.dev/docs/install/) — install, update, Homebrew, mise, and Nix
 - [session state](https://herdr.dev/docs/session-state/) — detach, restart restore, agent restore, and live handoff
 - [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
 - [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, github copilot cli, opencode, hermes, qodercli integrations
