@@ -1305,11 +1305,10 @@ impl HeadlessServer {
             AppEvent::ClipboardWrite { content } => {
                 // Clipboard writes are client-local side effects. Forward them only to
                 // the foreground client instead of broadcasting to every attached client.
-                if let Some(client_id) = self.foreground_client_id {
-                    let data = base64::engine::general_purpose::STANDARD.encode(content.as_slice());
-                    self.send_to_client(client_id, ServerMessage::Clipboard { data });
+                let data = base64::engine::general_purpose::STANDARD.encode(content.as_slice());
+                if self.send_to_foreground_client(ServerMessage::Clipboard { data }) {
+                    self.app.show_clipboard_feedback();
                 }
-                self.app.show_clipboard_feedback();
                 true
             }
             AppEvent::StateChanged { pane_id, agent, .. } => {
@@ -5992,6 +5991,57 @@ next_tab = ""
                 .recv_timeout(Duration::from_millis(50))
                 .is_err(),
             "background client should not receive clipboard writes"
+        );
+    }
+
+    #[test]
+    fn clipboard_write_without_foreground_client_does_not_show_feedback() {
+        let mut server = test_headless_server();
+        server.foreground_client_id = None;
+
+        let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+            content: b"test".to_vec(),
+        });
+
+        assert!(changed);
+        assert!(
+            server.app.state.copy_feedback.is_none(),
+            "clipboard feedback should only show when a foreground client can receive the write"
+        );
+    }
+
+    #[test]
+    fn clipboard_write_failed_foreground_send_does_not_show_feedback() {
+        let mut server = test_headless_server();
+        let (foreground_tx, foreground_control_rx, _foreground_rx) = test_client_writer();
+        drop(foreground_control_rx);
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(foreground_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+            content: b"test".to_vec(),
+        });
+
+        assert!(changed);
+        assert!(
+            server.app.state.copy_feedback.is_none(),
+            "clipboard feedback should only show after the foreground client receives the write"
+        );
+        assert!(
+            !server.clients.contains_key(&1),
+            "failed targeted send should remove the broken foreground client"
         );
     }
 

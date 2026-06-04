@@ -317,7 +317,7 @@ fn should_prefer_osc52() -> bool {
     )
 }
 
-/// Write clipboard bytes to the system clipboard via OSC 52.
+/// Write clipboard bytes to the system clipboard via native platform tools or OSC 52.
 ///
 /// OSC 52 format: `ESC ] 52 ; c ; <base64> BEL`
 ///
