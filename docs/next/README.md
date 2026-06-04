@@ -149,7 +149,7 @@ detection works by reading foreground process and terminal output. zero config, 
 
 ## lives in your terminal
 
-not a gui window, not a web dashboard, not electron. herdr runs inside whatever terminal you already use. single rust binary, no dependencies. works inside tmux.
+not a gui window, not a web dashboard, not electron. herdr runs inside whatever terminal you already use. single rust binary, no dependencies. works inside tmux as the outer terminal environment.
 
 ## what you get
 
