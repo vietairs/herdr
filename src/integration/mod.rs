@@ -2089,9 +2089,15 @@ fn update_hermes_enabled_plugin(content: &str, enabled: bool) -> String {
 
     let plugins_end =
         next_top_level_yaml_key_index(&lines, plugins_index + 1).unwrap_or(lines.len());
+    let plugins_inline_items = yaml_key_value_at_indent(&lines[plugins_index], 0, "plugins")
+        .and_then(yaml_flow_sequence_items);
     let enabled_index = lines[plugins_index + 1..plugins_end]
         .iter()
         .position(|line| yaml_key_at_indent(line, 2) == Some("enabled"))
+        .map(|offset| plugins_index + 1 + offset);
+    let flat_list_start = lines[plugins_index + 1..plugins_end]
+        .iter()
+        .position(|line| yaml_list_item_value_at_indent(line, 2).is_some())
         .map(|offset| plugins_index + 1 + offset);
 
     if let Some(enabled_index) = enabled_index {
@@ -2114,12 +2120,46 @@ fn update_hermes_enabled_plugin(content: &str, enabled: bool) -> String {
             .unwrap_or(plugins_end);
         let existing_item_index = lines[list_start..list_end]
             .iter()
-            .position(|line| yaml_list_item_value(line) == Some(HERMES_PLUGIN_INSTALL_NAME))
+            .position(|line| yaml_list_item_matches(line, HERMES_PLUGIN_INSTALL_NAME))
             .map(|offset| list_start + offset);
 
         match (enabled, existing_item_index) {
             (true, Some(_)) | (false, None) => return content.to_string(),
             (true, None) => lines.insert(list_start, "    - herdr-agent-state".to_string()),
+            (false, Some(index)) => {
+                lines.remove(index);
+            }
+        }
+        return join_yaml_lines(lines, trailing_newline);
+    }
+
+    if let Some(mut items) = plugins_inline_items {
+        let existing_item_index = items
+            .iter()
+            .position(|item| item == HERMES_PLUGIN_INSTALL_NAME);
+
+        match (enabled, existing_item_index) {
+            (true, Some(_)) | (false, None) => return content.to_string(),
+            (true, None) => items.insert(0, HERMES_PLUGIN_INSTALL_NAME.to_string()),
+            (false, Some(index)) => {
+                items.remove(index);
+            }
+        }
+
+        let replacement = hermes_flat_plugin_lines(&items);
+        lines.splice(plugins_index..plugins_end, replacement);
+        return join_yaml_lines(lines, trailing_newline);
+    }
+
+    if let Some(flat_list_start) = flat_list_start {
+        let existing_item_index = lines[plugins_index + 1..plugins_end]
+            .iter()
+            .position(|line| yaml_list_item_matches_at_indent(line, 2, HERMES_PLUGIN_INSTALL_NAME))
+            .map(|offset| plugins_index + 1 + offset);
+
+        match (enabled, existing_item_index) {
+            (true, Some(_)) | (false, None) => return content.to_string(),
+            (true, None) => lines.insert(flat_list_start, "  - herdr-agent-state".to_string()),
             (false, Some(index)) => {
                 lines.remove(index);
             }
@@ -2134,6 +2174,16 @@ fn update_hermes_enabled_plugin(content: &str, enabled: bool) -> String {
     }
 
     content.to_string()
+}
+
+fn hermes_flat_plugin_lines(items: &[String]) -> Vec<String> {
+    if items.is_empty() {
+        return vec!["plugins: []".to_string()];
+    }
+
+    let mut lines = vec!["plugins:".to_string()];
+    lines.extend(items.iter().map(|item| format!("  - {item}")));
+    lines
 }
 
 fn top_level_yaml_key_index(lines: &[String], key: &str) -> Option<usize> {
@@ -2156,6 +2206,18 @@ fn yaml_key_at_indent(line: &str, indent: usize) -> Option<&str> {
     yaml_key_name(line)
 }
 
+fn yaml_key_value_at_indent<'a>(line: &'a str, indent: usize, key: &str) -> Option<&'a str> {
+    if yaml_indent(line)? != indent {
+        return None;
+    }
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
+        return None;
+    }
+    let (line_key, value) = trimmed.split_once(':')?;
+    (line_key.trim() == key).then_some(value.trim())
+}
+
 fn yaml_key_name(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
     if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
@@ -2176,6 +2238,111 @@ fn yaml_indent(line: &str) -> Option<usize> {
 
 fn yaml_list_item_value(line: &str) -> Option<&str> {
     line.trim().strip_prefix("- ").map(str::trim)
+}
+
+fn yaml_list_item_matches(line: &str, value: &str) -> bool {
+    yaml_list_item_value(line).is_some_and(|item| yaml_scalar_value(item) == value)
+}
+
+fn yaml_list_item_value_at_indent(line: &str, indent: usize) -> Option<&str> {
+    if yaml_indent(line)? != indent {
+        return None;
+    }
+    yaml_list_item_value(line)
+}
+
+fn yaml_list_item_matches_at_indent(line: &str, indent: usize, value: &str) -> bool {
+    yaml_list_item_value_at_indent(line, indent)
+        .is_some_and(|item| yaml_scalar_value(item) == value)
+}
+
+fn yaml_flow_sequence_items(value: &str) -> Option<Vec<String>> {
+    let value = strip_yaml_inline_comment(value).trim();
+    let inner = value.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in inner.chars() {
+        if let Some(quote_char) = quote {
+            current.push(ch);
+            if quote_char == '"' && ch == '\\' && !escaped {
+                escaped = true;
+                continue;
+            }
+            if ch == quote_char && !escaped {
+                quote = None;
+            }
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            ',' => {
+                items.push(yaml_scalar_value(&current));
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if quote.is_some() {
+        return None;
+    }
+
+    items.push(yaml_scalar_value(&current));
+    Some(items)
+}
+
+fn yaml_scalar_value(value: &str) -> String {
+    let value = strip_yaml_inline_comment(value).trim();
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let quoted = (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'');
+        if quoted {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
+}
+
+fn strip_yaml_inline_comment(value: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (index, ch) in value.char_indices() {
+        if let Some(quote_char) = quote {
+            if quote_char == '"' && ch == '\\' && !escaped {
+                escaped = true;
+                continue;
+            }
+            if ch == quote_char && !escaped {
+                quote = None;
+            }
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '#' if index == 0 || value[..index].ends_with(char::is_whitespace) => {
+                return value[..index].trim_end();
+            }
+            _ => {}
+        }
+    }
+
+    value
 }
 
 fn join_yaml_lines(lines: Vec<String>, trailing_newline: bool) -> String {
@@ -3998,6 +4165,84 @@ mod tests {
     }
 
     #[test]
+    fn install_hermes_preserves_flat_plugin_list() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let hermes_dir = home.join(".hermes");
+        fs::create_dir_all(&hermes_dir).unwrap();
+        fs::write(
+            hermes_dir.join("config.yaml"),
+            "plugins:\n  - platforms/discord\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_hermes().unwrap();
+
+        let config = fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+        assert_eq!(
+            config,
+            "plugins:\n  - herdr-agent-state\n  - platforms/discord\n"
+        );
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_hermes_converts_flow_plugin_list_to_block_list() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let hermes_dir = home.join(".hermes");
+        fs::create_dir_all(&hermes_dir).unwrap();
+        fs::write(
+            hermes_dir.join("config.yaml"),
+            "plugins: [platforms/discord]\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_hermes().unwrap();
+
+        let config = fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+        assert_eq!(
+            config,
+            "plugins:\n  - herdr-agent-state\n  - platforms/discord\n"
+        );
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_hermes_is_idempotent_for_quoted_flat_plugin_entry() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let hermes_dir = home.join(".hermes");
+        fs::create_dir_all(&hermes_dir).unwrap();
+        fs::write(
+            hermes_dir.join("config.yaml"),
+            "plugins:\n  - \"herdr-agent-state\" # installed by herdr\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_hermes().unwrap();
+
+        let config = fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+        assert_eq!(
+            config,
+            "plugins:\n  - \"herdr-agent-state\" # installed by herdr\n"
+        );
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn uninstall_hermes_removes_plugin_and_enabled_entry() {
         let _lock = integration_env_lock();
         let base = unique_base();
@@ -4025,6 +4270,99 @@ mod tests {
         assert!(!plugin_dir.exists());
         assert!(config.contains("    - other-plugin"));
         assert!(!config.contains("herdr-agent-state"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_hermes_preserves_flat_plugin_list() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let hermes_dir = home.join(".hermes");
+        let plugin_dir = hermes_dir.join("plugins").join(HERMES_PLUGIN_INSTALL_NAME);
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(
+            plugin_dir.join(HERMES_PLUGIN_INIT_INSTALL_NAME),
+            HERMES_PLUGIN_INIT_ASSET,
+        )
+        .unwrap();
+        fs::write(
+            hermes_dir.join("config.yaml"),
+            "plugins:\n  - other-plugin\n  - herdr-agent-state\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let result = uninstall_hermes().unwrap();
+        let config = fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+
+        assert!(result.removed_plugin_dir);
+        assert!(result.updated_config);
+        assert_eq!(config, "plugins:\n  - other-plugin\n");
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_hermes_removes_flow_plugin_list_entry() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let hermes_dir = home.join(".hermes");
+        let plugin_dir = hermes_dir.join("plugins").join(HERMES_PLUGIN_INSTALL_NAME);
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(
+            plugin_dir.join(HERMES_PLUGIN_INIT_INSTALL_NAME),
+            HERMES_PLUGIN_INIT_ASSET,
+        )
+        .unwrap();
+        fs::write(
+            hermes_dir.join("config.yaml"),
+            "plugins: [other-plugin, herdr-agent-state]\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let result = uninstall_hermes().unwrap();
+        let config = fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+
+        assert!(result.removed_plugin_dir);
+        assert!(result.updated_config);
+        assert_eq!(config, "plugins:\n  - other-plugin\n");
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_hermes_removes_commented_flat_plugin_entry() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let hermes_dir = home.join(".hermes");
+        let plugin_dir = hermes_dir.join("plugins").join(HERMES_PLUGIN_INSTALL_NAME);
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(
+            plugin_dir.join(HERMES_PLUGIN_INIT_INSTALL_NAME),
+            HERMES_PLUGIN_INIT_ASSET,
+        )
+        .unwrap();
+        fs::write(
+            hermes_dir.join("config.yaml"),
+            "plugins:\n  - other-plugin\n  - herdr-agent-state # installed by herdr\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let result = uninstall_hermes().unwrap();
+        let config = fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
+
+        assert!(result.removed_plugin_dir);
+        assert!(result.updated_config);
+        assert_eq!(config, "plugins:\n  - other-plugin\n");
 
         std::env::remove_var("HOME");
         let _ = fs::remove_dir_all(base);
