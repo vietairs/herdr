@@ -146,9 +146,15 @@ impl PaneTerminal {
             .process_pty_bytes(pane_id, shell_pid, bytes, response_writer)
     }
 
-    pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
+    pub fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Vec<Bytes> {
         self.ghostty
-            .resize(rows, cols, cell_width_px, cell_height_px);
+            .resize(rows, cols, cell_width_px, cell_height_px)
     }
 
     pub fn scroll_up(&self, lines: usize) {
@@ -662,7 +668,13 @@ impl GhosttyPaneTerminal {
         }
     }
 
-    pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
+    pub fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Vec<Bytes> {
         if let Ok(mut core) = self.core.lock() {
             let offset_from_bottom = core
                 .terminal
@@ -694,6 +706,7 @@ impl GhosttyPaneTerminal {
             let _ = core
                 .terminal
                 .resize(cols, rows, cell_width_px, cell_height_px);
+            let terminal_responses = self.drain_pending_pty_responses();
 
             let bottom_is_blank = ghostty_detection_text(&core)
                 .map(|text| text.trim().is_empty())
@@ -716,6 +729,9 @@ impl GhosttyPaneTerminal {
                     remaining -= 1;
                 }
             }
+            terminal_responses
+        } else {
+            Vec::new()
         }
     }
 
@@ -2619,6 +2635,21 @@ mod tests {
 
         assert!(pane.detection_text().trim().is_empty());
         assert!(pane.recent_text(3).trim().is_empty());
+    }
+
+    #[test]
+    fn resize_returns_in_band_size_report_response() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.mode_set(2048, true).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let responses = pane.resize(40, 100, 9, 18);
+
+        assert_eq!(
+            responses,
+            vec![Bytes::from_static(b"\x1B[48;40;100;720;900t")]
+        );
     }
 
     #[test]

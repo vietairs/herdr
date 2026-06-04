@@ -50,9 +50,15 @@ struct PtyResize {
     cell_height_px: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PtyResizeRequest {
+    resize: PtyResize,
+    terminal_responses: Vec<Bytes>,
+}
+
 #[derive(Default)]
 struct SharedPtyControls {
-    resize: Option<PtyResize>,
+    resize: Option<PtyResizeRequest>,
     nudge: Option<PtyResize>,
 }
 
@@ -151,17 +157,27 @@ impl PtyIoActorHandle {
         }
     }
 
-    pub(crate) fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
+    pub(crate) fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+        terminal_responses: Vec<Bytes>,
+    ) {
         {
             let mut controls = self
                 .controls
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            controls.resize = Some(PtyResize {
-                rows,
-                cols,
-                cell_width_px,
-                cell_height_px,
+            controls.resize = Some(PtyResizeRequest {
+                resize: PtyResize {
+                    rows,
+                    cols,
+                    cell_width_px,
+                    cell_height_px,
+                },
+                terminal_responses,
             });
         }
         self.wake_actor();
@@ -592,8 +608,9 @@ impl PtyIoActorRunner {
         if self.state == ActorState::Released {
             return;
         }
-        if let Some(resize) = resize {
-            self.resize(resize);
+        if let Some(request) = resize {
+            self.resize(request.resize);
+            self.enqueue_terminal_responses(request.terminal_responses);
         }
         if let Some(nudge) = nudge {
             self.nudge(nudge);
@@ -612,14 +629,17 @@ impl PtyIoActorRunner {
             }
             Ok(n) => {
                 let result = (self.on_read)(&buf[..n]);
-                for response in result.terminal_responses {
-                    if self.state != ActorState::Released {
-                        self.pending_writes.push_back(response);
-                    }
-                }
+                self.enqueue_terminal_responses(result.terminal_responses);
                 true
             }
         }
+    }
+
+    fn enqueue_terminal_responses(&mut self, terminal_responses: Vec<Bytes>) {
+        if self.state == ActorState::Released {
+            return;
+        }
+        self.pending_writes.extend(terminal_responses);
     }
 
     fn flush_pending_writes_once(&mut self) {
@@ -922,18 +942,21 @@ mod tests {
             controls: Arc::clone(&controls),
         };
 
-        handle.resize(20, 80, 8, 16);
-        handle.resize(40, 120, 9, 18);
+        handle.resize(20, 80, 8, 16, vec![Bytes::from_static(b"old")]);
+        handle.resize(40, 120, 9, 18, vec![Bytes::from_static(b"new")]);
         handle.nudge_child_redraw_after_handoff(41, 121, 10, 20);
 
         let controls = controls.lock().expect("controls lock");
         assert_eq!(
             controls.resize,
-            Some(PtyResize {
-                rows: 40,
-                cols: 120,
-                cell_width_px: 9,
-                cell_height_px: 18,
+            Some(PtyResizeRequest {
+                resize: PtyResize {
+                    rows: 40,
+                    cols: 120,
+                    cell_width_px: 9,
+                    cell_height_px: 18,
+                },
+                terminal_responses: vec![Bytes::from_static(b"new")],
             })
         );
         assert_eq!(
@@ -945,6 +968,20 @@ mod tests {
                 cell_height_px: 20,
             })
         );
+    }
+
+    #[test]
+    fn resize_writes_terminal_responses_after_applying_resize() {
+        let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
+        let response = Bytes::from_static(b"\x1B[48;40;100;720;900t");
+
+        handle.resize(40, 100, 9, 18, vec![response.clone()]);
+
+        let mut buf = vec![0; response.len()];
+        peer.read_exact(&mut buf)
+            .expect("peer receives resize response");
+        assert_eq!(Bytes::from(buf), response);
+        handle.shutdown();
     }
 
     #[tokio::test]
