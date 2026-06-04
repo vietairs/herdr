@@ -126,9 +126,14 @@ impl App {
         if self.state.mode == Mode::Navigator {
             match mouse.kind {
                 MouseEventKind::Moved => {
-                    if let Some(idx) = self.state.navigator_row_index_at(mouse.column, mouse.row) {
+                    if let Some(idx) = self.state.navigator_row_index_at_from(
+                        &self.terminal_runtimes,
+                        mouse.column,
+                        mouse.row,
+                    ) {
                         self.state.navigator.selected = idx;
-                        self.state.ensure_navigator_selection_visible();
+                        self.state
+                            .ensure_navigator_selection_visible_from(&self.terminal_runtimes);
                     }
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -137,23 +142,29 @@ impl App {
                         .navigator_search_contains(mouse.column, mouse.row)
                     {
                         self.state.navigator.search_focused = true;
-                    } else if let Some(idx) =
-                        self.state.navigator_row_index_at(mouse.column, mouse.row)
-                    {
+                    } else if let Some(idx) = self.state.navigator_row_index_at_from(
+                        &self.terminal_runtimes,
+                        mouse.column,
+                        mouse.row,
+                    ) {
                         self.state.navigator.selected = idx;
                         let target = self
                             .state
-                            .navigator_rows()
+                            .navigator_rows_from(&self.terminal_runtimes)
                             .get(idx)
                             .map(|row| (row.target.clone(), row.is_workspace));
                         if let Some((NavigatorTarget::Workspace { .. }, true)) = target {
                             if self.state.navigator_row_caret_at(mouse.column) {
-                                self.state.toggle_selected_navigator_workspace();
+                                self.state.toggle_selected_navigator_workspace_from(
+                                    &self.terminal_runtimes,
+                                );
                             } else {
-                                self.state.accept_navigator_selection();
+                                self.state
+                                    .accept_navigator_selection_from(&self.terminal_runtimes);
                             }
                         } else {
-                            self.state.accept_navigator_selection();
+                            self.state
+                                .accept_navigator_selection_from(&self.terminal_runtimes);
                         }
                     } else if !self.state.navigator_popup_contains(mouse.column, mouse.row) {
                         leave_modal(&mut self.state);
@@ -162,15 +173,19 @@ impl App {
                 MouseEventKind::ScrollUp => {
                     self.state.navigator.scroll = self.state.navigator.scroll.saturating_sub(3);
                     self.state.navigator.selected = self.state.navigator.scroll;
-                    self.state.clamp_navigator_selection();
+                    self.state
+                        .clamp_navigator_selection_from(&self.terminal_runtimes);
                 }
                 MouseEventKind::ScrollDown => {
                     let viewport = self.state.navigator_body_rect().height as usize;
-                    let max = self.state.navigator_max_scroll(viewport);
+                    let max = self
+                        .state
+                        .navigator_max_scroll_from(&self.terminal_runtimes, viewport);
                     self.state.navigator.scroll =
                         self.state.navigator.scroll.saturating_add(3).min(max);
                     self.state.navigator.selected = self.state.navigator.scroll;
-                    self.state.clamp_navigator_selection();
+                    self.state
+                        .clamp_navigator_selection_from(&self.terminal_runtimes);
                 }
                 _ => {}
             }
@@ -312,7 +327,12 @@ impl AppState {
         rect_contains(self.navigator_search_rect(), col, row)
     }
 
-    pub(crate) fn navigator_row_index_at(&self, col: u16, row: u16) -> Option<usize> {
+    pub(crate) fn navigator_row_index_at_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        col: u16,
+        row: u16,
+    ) -> Option<usize> {
         let body = self.navigator_body_rect();
         if !rect_contains(body, col, row) {
             return None;
@@ -321,7 +341,7 @@ impl AppState {
             .navigator
             .scroll
             .saturating_add(row.saturating_sub(body.y) as usize);
-        (idx < self.navigator_rows().len()).then_some(idx)
+        (idx < self.navigator_rows_from(terminal_runtimes).len()).then_some(idx)
     }
 
     pub(crate) fn navigator_row_caret_at(&self, col: u16) -> bool {

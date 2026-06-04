@@ -182,7 +182,16 @@ impl AppState {
         false
     }
 
+    #[cfg(test)]
     pub(crate) fn open_navigator(&mut self) {
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        self.open_navigator_from(&terminal_runtimes);
+    }
+
+    pub(crate) fn open_navigator_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
         self.navigator.query.clear();
         self.navigator.search_focused = false;
         self.navigator.state_filter = None;
@@ -194,17 +203,27 @@ impl AppState {
         }
 
         self.mode = Mode::Navigator;
-        self.navigator.selected = self.current_navigator_row_index().unwrap_or(0);
-        self.ensure_navigator_selection_visible();
+        self.navigator.selected = self
+            .current_navigator_row_index_from(terminal_runtimes)
+            .unwrap_or(0);
+        self.ensure_navigator_selection_visible_from(terminal_runtimes);
     }
 
+    #[cfg(test)]
     pub(crate) fn navigator_rows(&self) -> Vec<NavigatorRow> {
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        self.navigator_rows_from(&terminal_runtimes)
+    }
+
+    pub(crate) fn navigator_rows_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> Vec<NavigatorRow> {
         let query = self.navigator.query.trim().to_lowercase();
         let query_kind = navigator_query_kind(&query, self.navigator.state_filter);
-        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let mut rows = Vec::new();
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
-            let workspace_label = ws.display_name_from(&self.terminals, &terminal_runtimes);
+            let workspace_label = ws.display_name_from(&self.terminals, terminal_runtimes);
             let activity = workspace_activity_summary(ws, &self.terminals);
             let workspace_search_text = format!("{workspace_label} {activity}").to_lowercase();
             let workspace_matches = match query_kind {
@@ -397,21 +416,27 @@ impl AppState {
         rows
     }
 
-    fn current_navigator_row_index(&self) -> Option<usize> {
-        let rows = self.navigator_rows();
+    fn current_navigator_row_index_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> Option<usize> {
+        let rows = self.navigator_rows_from(terminal_runtimes);
         rows.iter()
             .position(|row| matches!(row.target, NavigatorTarget::Pane { .. }) && row.is_current)
             .or_else(|| rows.iter().position(|row| row.is_current))
     }
 
-    pub(crate) fn ensure_navigator_selection_visible(&mut self) {
+    pub(crate) fn ensure_navigator_selection_visible_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
         let body = self.navigator_body_rect();
         let viewport = body.height as usize;
         if viewport == 0 {
             self.navigator.scroll = 0;
             return;
         }
-        let max_scroll = self.navigator_max_scroll(viewport);
+        let max_scroll = self.navigator_max_scroll_from(terminal_runtimes, viewport);
         if self.navigator.selected < self.navigator.scroll {
             self.navigator.scroll = self.navigator.selected;
         } else if self.navigator.selected >= self.navigator.scroll.saturating_add(viewport) {
@@ -424,15 +449,25 @@ impl AppState {
         self.navigator.scroll = self.navigator.scroll.min(max_scroll);
     }
 
-    pub(crate) fn navigator_max_scroll(&self, viewport: usize) -> usize {
+    pub(crate) fn navigator_max_scroll_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        viewport: usize,
+    ) -> usize {
         if viewport == 0 {
             return 0;
         }
-        self.navigator_rows().len().saturating_sub(viewport)
+        self.navigator_rows_from(terminal_runtimes)
+            .len()
+            .saturating_sub(viewport)
     }
 
-    pub(crate) fn move_navigator_selection(&mut self, delta: isize) {
-        let count = self.navigator_rows().len();
+    pub(crate) fn move_navigator_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        delta: isize,
+    ) {
+        let count = self.navigator_rows_from(terminal_runtimes).len();
         if count == 0 {
             self.navigator.selected = 0;
             self.navigator.scroll = 0;
@@ -440,17 +475,27 @@ impl AppState {
         }
         let current = self.navigator.selected.min(count - 1) as isize;
         self.navigator.selected = (current + delta).clamp(0, count as isize - 1) as usize;
-        self.ensure_navigator_selection_visible();
+        self.ensure_navigator_selection_visible_from(terminal_runtimes);
     }
 
-    pub(crate) fn clamp_navigator_selection(&mut self) {
-        let count = self.navigator_rows().len();
+    pub(crate) fn clamp_navigator_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let count = self.navigator_rows_from(terminal_runtimes).len();
         self.navigator.selected = self.navigator.selected.min(count.saturating_sub(1));
-        self.ensure_navigator_selection_visible();
+        self.ensure_navigator_selection_visible_from(terminal_runtimes);
     }
 
-    pub(crate) fn toggle_selected_navigator_workspace(&mut self) {
-        let Some(row) = self.navigator_rows().get(self.navigator.selected).cloned() else {
+    pub(crate) fn toggle_selected_navigator_workspace_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let Some(row) = self
+            .navigator_rows_from(terminal_runtimes)
+            .get(self.navigator.selected)
+            .cloned()
+        else {
             return;
         };
         let NavigatorTarget::Workspace { ws_idx } = row.target else {
@@ -464,11 +509,24 @@ impl AppState {
         } else {
             self.navigator.expanded_workspaces.insert(workspace_id);
         }
-        self.clamp_navigator_selection();
+        self.clamp_navigator_selection_from(terminal_runtimes);
     }
 
+    #[cfg(test)]
     pub(crate) fn accept_navigator_selection(&mut self) -> bool {
-        let Some(row) = self.navigator_rows().get(self.navigator.selected).cloned() else {
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        self.accept_navigator_selection_from(&terminal_runtimes)
+    }
+
+    pub(crate) fn accept_navigator_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> bool {
+        let Some(row) = self
+            .navigator_rows_from(terminal_runtimes)
+            .get(self.navigator.selected)
+            .cloned()
+        else {
             return false;
         };
         self.focus_navigator_target(row.target)
@@ -2594,6 +2652,67 @@ mod tests {
                 tab_idx: 1
             }
         )));
+    }
+
+    #[tokio::test]
+    async fn navigator_rows_match_live_root_runtime_cwd_workspace_label() {
+        let unique = format!(
+            "herdr-navigator-runtime-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let stale_cwd = root.join("issue-264-nix-support");
+        let live_cwd = root.join("herdr");
+        std::fs::create_dir_all(stale_cwd.join(".git")).unwrap();
+        std::fs::create_dir_all(live_cwd.join(".git")).unwrap();
+
+        let mut state = AppState::test_new();
+        let mut workspace = Workspace::test_new("stale-name");
+        workspace.custom_name = None;
+        workspace.identity_cwd = stale_cwd.clone();
+        let pane = workspace.tabs[0].root_pane;
+        state.workspaces = vec![workspace];
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        state.terminals.get_mut(&terminal_id).unwrap().cwd = stale_cwd;
+
+        let (events, _) = tokio::sync::mpsc::channel(4);
+        let runtime = crate::terminal::TerminalRuntime::spawn(
+            pane,
+            24,
+            80,
+            live_cwd.clone(),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while runtime.cwd() != Some(live_cwd.clone()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut runtime_registry = crate::terminal::TerminalRuntimeRegistry::new();
+        runtime_registry.insert(terminal_id, runtime);
+        state.open_navigator_from(&runtime_registry);
+        state.navigator.query = "herdr".into();
+        let rows = state.navigator_rows_from(&runtime_registry);
+
+        for (_, runtime) in runtime_registry.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(root);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "herdr (1)");
     }
 
     #[test]

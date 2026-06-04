@@ -401,7 +401,7 @@ pub fn render_with_runtime_registry(
         Mode::ConfirmRemoveWorktree => render_remove_worktree_overlay(app, frame, frame.area()),
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
-        Mode::Navigator => render_navigator_overlay(app, frame),
+        Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::Terminal => {}
     }
 }

@@ -830,7 +830,7 @@ pub(super) fn execute_navigate_action_in_context(
             super::modal::request_detach(state);
             leave_navigate_mode(state);
         }
-        NavigateAction::OpenNavigator => state.open_navigator(),
+        NavigateAction::OpenNavigator => state.open_navigator_from(terminal_runtimes),
     }
 
     finish_action_context(state, context, previous_mode);

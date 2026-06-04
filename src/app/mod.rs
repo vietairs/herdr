@@ -1415,7 +1415,7 @@ impl App {
                 self.handle_settings_key(key_event);
             }
             Mode::Navigator => {
-                input::handle_navigator_key(&mut self.state, key_event);
+                input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
             }
             Mode::Terminal => {
                 // Should not be called in terminal mode.
