@@ -161,6 +161,7 @@ pub const MODE_MOUSE_ALTERNATE_SCROLL: u16 = 1007;
 pub const MODE_MOUSE_SGR_PIXELS: u16 = 1016;
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 pub const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
+pub const MODE_GRAPHEME_CLUSTER: u16 = 2027;
 
 const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const APC_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -676,6 +677,10 @@ impl Terminal {
 
     pub fn mode_set(&mut self, mode: u16, value: bool) -> Result<(), Error> {
         unsafe { ffi::ghostty_terminal_mode_set(self.raw, mode, value).into_result() }
+    }
+
+    pub fn enable_grapheme_cluster_mode(&mut self) -> Result<(), Error> {
+        self.mode_set(MODE_GRAPHEME_CLUSTER, true)
     }
 
     pub fn kitty_keyboard_flags(&self) -> Result<u8, Error> {
@@ -2959,6 +2964,43 @@ mod tests {
                     .unwrap();
             }
         }
+    }
+
+    #[test]
+    fn grapheme_cluster_mode_keeps_issue_453_payload_safe() {
+        let mut terminal = Terminal::new(80, 3, 100).unwrap();
+        terminal.enable_grapheme_cluster_mode().unwrap();
+        terminal.write("README 👨‍👩‍👧‍👦 🧑‍💻 ✅ ⚡ 漢字 café é 🏳️‍🌈 🚀\r\n".as_bytes());
+
+        let mut render_state = RenderState::new().unwrap();
+        render_state.update(&terminal).unwrap();
+
+        let mut row_iterator = RowIterator::new().unwrap();
+        let mut rows = render_state
+            .populate_row_iterator(&mut row_iterator)
+            .unwrap();
+        let mut row_cells = RowCells::new().unwrap();
+        let mut codepoints = Vec::new();
+        let mut text = String::new();
+
+        while rows.next() {
+            let mut cells = rows.populate_cells(&mut row_cells).unwrap();
+            while cells.next() {
+                cells
+                    .grapheme_text_into(&mut codepoints, &mut text)
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn grapheme_cluster_mode_is_default_and_survives_full_reset() {
+        let mut terminal = Terminal::new(80, 3, 100).unwrap();
+        assert!(terminal.mode_get(MODE_GRAPHEME_CLUSTER).unwrap());
+
+        terminal.write(b"\x1bc");
+
+        assert!(terminal.mode_get(MODE_GRAPHEME_CLUSTER).unwrap());
     }
 
     #[test]

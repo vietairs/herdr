@@ -263,6 +263,7 @@ fn new_(
         .cols = opts.cols,
         .rows = opts.rows,
         .max_scrollback = opts.max_scrollback,
+        .default_modes = .{ .grapheme_cluster = true },
     });
     errdefer t.deinit(alloc);
 
