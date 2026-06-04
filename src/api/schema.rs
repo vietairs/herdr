@@ -524,6 +524,7 @@ pub enum IntegrationTarget {
     Claude,
     Codex,
     Copilot,
+    Droid,
     Kimi,
     Opencode,
     Hermes,

@@ -72,7 +72,10 @@ pub fn session_ref_from_report(
 pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
     matches!(
         (source, agent),
-        ("herdr:claude", "claude") | ("herdr:codex", "codex") | ("herdr:opencode", "opencode")
+        ("herdr:claude", "claude")
+            | ("herdr:codex", "codex")
+            | ("herdr:droid", "droid")
+            | ("herdr:opencode", "opencode")
     )
 }
 
@@ -116,6 +119,9 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         ("herdr:copilot", "copilot", AgentSessionRefKind::Id) => {
             vec!["copilot".into(), format!("--resume={}", session_ref.value)]
         }
+        ("herdr:droid", "droid", AgentSessionRefKind::Id) => {
+            vec!["droid".into(), "--resume".into(), session_ref.value.clone()]
+        }
         ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             vec!["pi".into(), "--session".into(), session_ref.value.clone()]
         }
@@ -156,6 +162,7 @@ fn is_official_agent_source(source: &str, agent: &str) -> bool {
         ("herdr:claude", "claude")
             | ("herdr:codex", "codex")
             | ("herdr:copilot", "copilot")
+            | ("herdr:droid", "droid")
             | ("herdr:pi", "pi")
             | ("herdr:hermes", "hermes")
             | ("herdr:opencode", "opencode")
@@ -208,6 +215,16 @@ mod tests {
             .unwrap()
             .argv,
             vec!["copilot", "--resume=copilot-session"]
+        );
+        assert_eq!(
+            plan(
+                "herdr:droid",
+                "droid",
+                &AgentSessionRef::id("droid-session").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["droid", "--resume", "droid-session"]
         );
         assert_eq!(
             plan(
@@ -293,6 +310,18 @@ mod tests {
             "copilot",
             None,
             Some("/tmp/copilot-session".into())
+        )
+        .is_none());
+
+        let session_ref =
+            session_ref_from_report("herdr:droid", "droid", Some("droid-id".into()), None).unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "droid-id");
+        assert!(session_ref_from_report(
+            "herdr:droid",
+            "droid",
+            None,
+            Some("/tmp/droid-session".into())
         )
         .is_none());
     }

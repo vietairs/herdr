@@ -48,6 +48,9 @@ const COPILOT_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
 const COPILOT_HOOK_ASSET: &str = include_str!("assets/copilot/herdr-agent-state.sh");
 const COPILOT_INTEGRATION_VERSION: u32 = 1;
 const COPILOT_HOME_ENV_VAR: &str = "COPILOT_HOME";
+const DROID_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const DROID_HOOK_ASSET: &str = include_str!("assets/droid/herdr-agent-state.sh");
+const DROID_INTEGRATION_VERSION: u32 = 1;
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
 const OPENCODE_INTEGRATION_VERSION: u32 = 4;
@@ -86,6 +89,14 @@ pub(crate) struct KimiInstallPaths {
 pub(crate) struct CopilotInstallPaths {
     pub hook_path: PathBuf,
     pub settings_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct DroidInstallPaths {
+    pub hook_path: PathBuf,
+    pub hooks_path: PathBuf,
+    pub settings_path: PathBuf,
+    pub updated_legacy_hooks: bool,
 }
 
 #[derive(Debug)]
@@ -207,6 +218,16 @@ pub(crate) struct CopilotUninstallResult {
 }
 
 #[derive(Debug)]
+pub(crate) struct DroidUninstallResult {
+    pub hook_path: PathBuf,
+    pub hooks_path: PathBuf,
+    pub settings_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub updated_hooks: bool,
+    pub updated_settings: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct OpenCodeUninstallResult {
     pub plugin_path: PathBuf,
     pub removed_plugin: bool,
@@ -301,6 +322,26 @@ pub(crate) fn install_target(
                 format!("ensured kimi config at {}", installed.config_path.display()),
                 format!("requires kimi code {KIMI_MIN_VERSION} or newer"),
             ]
+        }
+        crate::api::schema::IntegrationTarget::Droid => {
+            let installed = install_droid()?;
+            let mut messages = vec![
+                format!(
+                    "installed droid integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "ensured droid hooks at {}",
+                    installed.settings_path.display()
+                ),
+            ];
+            if installed.updated_legacy_hooks {
+                messages.push(format!(
+                    "removed legacy herdr droid hook entries from {}",
+                    installed.hooks_path.display()
+                ));
+            }
+            messages
         }
         crate::api::schema::IntegrationTarget::Opencode => {
             let installed = install_opencode()?;
@@ -485,6 +526,44 @@ pub(crate) fn uninstall_target(
             }
             messages
         }
+        crate::api::schema::IntegrationTarget::Droid => {
+            let result = uninstall_droid()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed droid hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no droid hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_hooks {
+                messages.push(format!(
+                    "removed legacy herdr droid hook entries from {}",
+                    result.hooks_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no legacy herdr droid hook entries found in {}",
+                    result.hooks_path.display()
+                ));
+            }
+            if result.updated_settings {
+                messages.push(format!(
+                    "removed herdr droid hook entries from {}",
+                    result.settings_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr droid hook entries found in {}",
+                    result.settings_path.display()
+                ));
+            }
+            messages
+        }
         crate::api::schema::IntegrationTarget::Opencode => {
             let result = uninstall_opencode()?;
             if result.removed_plugin {
@@ -568,6 +647,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Copilot => "copilot",
+        crate::api::schema::IntegrationTarget::Droid => "droid",
         crate::api::schema::IntegrationTarget::Kimi => "kimi",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
@@ -582,6 +662,7 @@ fn integration_target_command(target: crate::api::schema::IntegrationTarget) -> 
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Copilot => "copilot",
+        crate::api::schema::IntegrationTarget::Droid => "droid",
         crate::api::schema::IntegrationTarget::Kimi => "kimi",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
         crate::api::schema::IntegrationTarget::Hermes => "hermes",
@@ -659,7 +740,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 9] {
+); 10] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -685,6 +766,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Copilot,
             copilot_dir().map(|dir| dir.join("hooks").join(COPILOT_HOOK_INSTALL_NAME)),
             COPILOT_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Droid,
+            droid_dir().map(|dir| dir.join("hooks").join(DROID_HOOK_INSTALL_NAME)),
+            DROID_INTEGRATION_VERSION,
         ),
         (
             crate::api::schema::IntegrationTarget::Kimi,
@@ -1106,6 +1192,81 @@ pub(crate) fn install_copilot() -> io::Result<CopilotInstallPaths> {
     })
 }
 
+pub(crate) fn install_droid() -> io::Result<DroidInstallPaths> {
+    let dir = droid_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "droid config directory not found at {}. install droid first",
+            dir.display()
+        )));
+    }
+
+    let hooks_dir = dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join(DROID_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, DROID_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    let settings_path = dir.join("settings.json");
+    let mut settings = if settings_path.is_file() {
+        serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?).map_err(|err| {
+            io::Error::other(format!(
+                "failed to parse {}: {err}",
+                settings_path.display()
+            ))
+        })?
+    } else {
+        json!({})
+    };
+
+    let hooks = ensure_hooks_object(
+        &mut settings,
+        &settings_path,
+        "droid settings",
+        "droid settings hooks",
+    )?;
+    let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+    remove_command_hook(hooks, "SessionStart", &format!("bash {quoted_hook_path}"))?;
+    ensure_command_hook(
+        hooks,
+        "SessionStart",
+        format!("bash {quoted_hook_path}"),
+        10,
+        None,
+    )?;
+
+    fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+
+    let hooks_path = dir.join("hooks.json");
+    let mut updated_legacy_hooks = false;
+    if hooks_path.is_file() {
+        let mut hooks_file = serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?)
+            .map_err(|err| {
+                io::Error::other(format!("failed to parse {}: {err}", hooks_path.display()))
+            })?;
+        if let Some(hooks) = hooks_object_if_present(
+            &mut hooks_file,
+            &hooks_path,
+            "droid hooks file",
+            "droid hooks file hooks",
+        )? {
+            updated_legacy_hooks =
+                remove_command_hook(hooks, "SessionStart", &format!("bash {quoted_hook_path}"))?;
+        }
+        if updated_legacy_hooks {
+            fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
+        }
+    }
+
+    Ok(DroidInstallPaths {
+        hook_path,
+        hooks_path,
+        settings_path,
+        updated_legacy_hooks,
+    })
+}
+
 pub(crate) fn install_opencode() -> io::Result<OpenCodeInstallPaths> {
     let dir = opencode_dir()?;
     if !dir.is_dir() {
@@ -1403,6 +1564,71 @@ pub(crate) fn uninstall_copilot() -> io::Result<CopilotUninstallResult> {
         hook_path,
         settings_path,
         removed_hook_file,
+        updated_settings,
+    })
+}
+
+pub(crate) fn uninstall_droid() -> io::Result<DroidUninstallResult> {
+    let droid_dir = droid_dir()?;
+    let hook_path = droid_dir.join("hooks").join(DROID_HOOK_INSTALL_NAME);
+    let hooks_path = droid_dir.join("hooks.json");
+    let settings_path = droid_dir.join("settings.json");
+    let mut updated_hooks = false;
+    let mut updated_settings = false;
+    let quoted_hook_path = shell_single_quote(&hook_path.display().to_string());
+
+    if hooks_path.is_file() {
+        let mut hooks_file = serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?)
+            .map_err(|err| {
+                io::Error::other(format!("failed to parse {}: {err}", hooks_path.display()))
+            })?;
+
+        if let Some(hooks) = hooks_object_if_present(
+            &mut hooks_file,
+            &hooks_path,
+            "droid hooks file",
+            "droid hooks file hooks",
+        )? {
+            updated_hooks |=
+                remove_command_hook(hooks, "SessionStart", &format!("bash {quoted_hook_path}"))?;
+        }
+
+        if updated_hooks {
+            fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
+        }
+    }
+
+    if settings_path.is_file() {
+        let mut settings = serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?)
+            .map_err(|err| {
+                io::Error::other(format!(
+                    "failed to parse {}: {err}",
+                    settings_path.display()
+                ))
+            })?;
+        if let Some(hooks) = hooks_object_if_present(
+            &mut settings,
+            &settings_path,
+            "droid settings",
+            "droid settings hooks",
+        )? {
+            updated_settings =
+                remove_command_hook(hooks, "SessionStart", &format!("bash {quoted_hook_path}"))?;
+        }
+
+        if updated_settings {
+            fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+        }
+    }
+
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+
+    Ok(DroidUninstallResult {
+        hook_path,
+        hooks_path,
+        settings_path,
+        removed_hook_file,
+        updated_hooks,
         updated_settings,
     })
 }
@@ -2185,6 +2411,10 @@ fn kimi_dir() -> io::Result<PathBuf> {
 
 fn copilot_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(COPILOT_HOME_ENV_VAR, &[".copilot"])
+}
+
+fn droid_dir() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".factory"))
 }
 
 fn config_dir_from_env_or_home(
@@ -3457,6 +3687,197 @@ mod tests {
     }
 
     #[test]
+    fn install_droid_writes_hook_to_settings_and_cleans_legacy_hooks_json() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let droid_dir = home.join(".factory");
+        let legacy_hook_path = droid_dir.join("hooks").join(DROID_HOOK_INSTALL_NAME);
+        fs::create_dir_all(legacy_hook_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&droid_dir).unwrap();
+        let legacy_command = format!(
+            "bash {}",
+            shell_single_quote(&legacy_hook_path.display().to_string())
+        );
+        fs::write(
+            droid_dir.join("hooks.json"),
+            format!(
+                r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"{}","timeout":10}}]}}],"PreToolUse":[{{"matcher":"Read","hooks":[{{"type":"command","command":"echo keep","timeout":10}}]}}]}}}}"#,
+                legacy_command,
+            ),
+        )
+        .unwrap();
+        fs::write(
+            droid_dir.join("settings.json"),
+            r#"{"theme":"factory-dark"}"#,
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let installed = install_droid().unwrap();
+        let hook_content = fs::read_to_string(&installed.hook_path).unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&installed.settings_path).unwrap()).unwrap();
+        let legacy_hooks: Value =
+            serde_json::from_str(&fs::read_to_string(&installed.hooks_path).unwrap()).unwrap();
+
+        assert_eq!(
+            installed.hook_path,
+            droid_dir.join("hooks").join(DROID_HOOK_INSTALL_NAME)
+        );
+        assert_eq!(installed.hooks_path, droid_dir.join("hooks.json"));
+        assert_eq!(installed.settings_path, droid_dir.join("settings.json"));
+        assert!(installed.updated_legacy_hooks);
+        assert_eq!(hook_content, DROID_HOOK_ASSET);
+        assert_eq!(settings["theme"], "factory-dark");
+        assert!(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(DROID_HOOK_INSTALL_NAME));
+        assert!(settings["hooks"]["SessionStart"][0]
+            .get("matcher")
+            .is_none());
+        assert_eq!(legacy_hooks["hooks"]["PreToolUse"][0]["matcher"], "Read");
+        assert!(legacy_hooks["hooks"].get("SessionStart").is_none());
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_droid_is_idempotent_for_hook_entries() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let droid_dir = home.join(".factory");
+        fs::create_dir_all(&droid_dir).unwrap();
+        std::env::set_var("HOME", &home);
+
+        install_droid().unwrap();
+        install_droid().unwrap();
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(droid_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings["hooks"]["SessionStart"].as_array().unwrap().len(),
+            1
+        );
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn droid_v1_integration_status_is_current() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let droid_hooks_dir = home.join(".factory").join("hooks");
+        fs::create_dir_all(&droid_hooks_dir).unwrap();
+        let hook_path = droid_hooks_dir.join(DROID_HOOK_INSTALL_NAME);
+        fs::write(
+            &hook_path,
+            "#!/bin/sh\n# HERDR_INTEGRATION_ID=droid\n# HERDR_INTEGRATION_VERSION=1\n",
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let statuses = installed_integration_statuses();
+        let droid = statuses
+            .iter()
+            .find(|status| status.target == crate::api::schema::IntegrationTarget::Droid)
+            .unwrap();
+
+        assert_eq!(droid.path, hook_path);
+        assert_eq!(droid.installed_version, Some(1));
+        assert_eq!(droid.expected_version, 1);
+        assert_eq!(droid.state, IntegrationStatusKind::Current);
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_droid_removes_herdr_hooks_and_preserves_others() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        let droid_dir = home.join(".factory");
+        let hooks_dir = droid_dir.join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join(DROID_HOOK_INSTALL_NAME);
+        fs::write(&hook_path, DROID_HOOK_ASSET).unwrap();
+        let command = format!(
+            "bash {}",
+            shell_single_quote(&hook_path.display().to_string())
+        );
+        fs::write(
+            droid_dir.join("hooks.json"),
+            format!(
+                r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"{}","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"PreToolUse":[{{"matcher":"Read","hooks":[{{"type":"command","command":"echo read","timeout":10}}]}}]}}}}"#,
+                command,
+            ),
+        )
+        .unwrap();
+        fs::write(
+            droid_dir.join("settings.json"),
+            format!(
+                r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"{}","timeout":10}}]}}],"PostToolUse":[{{"matcher":"Edit","hooks":[{{"type":"command","command":"echo post","timeout":10}}]}}]}}}}"#,
+                command,
+            ),
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+
+        let result = uninstall_droid().unwrap();
+        let hooks: Value =
+            serde_json::from_str(&fs::read_to_string(droid_dir.join("hooks.json")).unwrap())
+                .unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(droid_dir.join("settings.json")).unwrap())
+                .unwrap();
+
+        assert!(result.removed_hook_file);
+        assert!(result.updated_hooks);
+        assert!(result.updated_settings);
+        assert!(!result.hook_path.exists());
+        assert_eq!(
+            hooks["hooks"]["SessionStart"][0]["hooks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "echo keep"
+        );
+        assert_eq!(hooks["hooks"]["PreToolUse"][0]["matcher"], "Read");
+        assert!(settings["hooks"].get("SessionStart").is_none());
+        assert_eq!(settings["hooks"]["PostToolUse"][0]["matcher"], "Edit");
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_droid_errors_when_config_dir_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let err = install_droid().unwrap_err().to_string();
+
+        assert!(err.contains("droid config directory not found"));
+
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn install_opencode_writes_plugin_to_plugins_dir() {
         let _lock = integration_env_lock();
         let base = unique_base();
@@ -3647,6 +4068,12 @@ mod tests {
         assert!(COPILOT_HOOK_ASSET.contains("notification_type"));
         assert!(COPILOT_HOOK_ASSET.contains("ask_user"));
         assert!(COPILOT_HOOK_ASSET.contains("exit_plan_mode"));
+        assert!(DROID_HOOK_ASSET.contains("hook_event_name"));
+        assert!(DROID_HOOK_ASSET.contains("SessionStart"));
+        assert!(DROID_HOOK_ASSET.contains("agent_session_id"));
+        assert!(DROID_HOOK_ASSET.contains("pane.report_agent_session"));
+        assert!(!DROID_HOOK_ASSET.contains("\"state\":"));
+        assert!(!DROID_HOOK_ASSET.contains("pane.release_agent"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("properties?.sessionID"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("agent_session_id: sessionID"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("pane.report_agent_session"));
