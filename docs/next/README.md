@@ -162,7 +162,7 @@ not a gui window, not a web dashboard, not electron. herdr runs inside whatever 
 
 ## agents can use herdr too
 
-The local Unix socket lets agents create workspaces, split panes, spawn helpers, read output, and wait for state changes. Start with the [socket API docs](https://herdr.dev/docs/socket-api/) and [`SKILL.md`](./SKILL.md).
+The local Unix socket lets agents create workspaces, split or zoom panes, spawn helpers, read output, and wait for state changes. Start with the [socket API docs](https://herdr.dev/docs/socket-api/) and [`SKILL.md`](./SKILL.md).
 
 ## supported agents
 

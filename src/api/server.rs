@@ -296,6 +296,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::AgentStart(_) => "agent.start",
         Method::PaneSplit(_) => "pane.split",
         Method::PaneSwap(_) => "pane.swap",
+        Method::PaneZoom(_) => "pane.zoom",
         Method::PaneLayout(_) => "pane.layout",
         Method::PaneNeighbor(_) => "pane.neighbor",
         Method::PaneEdges(_) => "pane.edges",

@@ -1350,6 +1350,28 @@ impl AppState {
 // Pane operations
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneZoomCommand {
+    Toggle,
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneZoomNoopReason {
+    SinglePane,
+    AlreadyZoomed,
+    AlreadyUnzoomed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PaneZoomOutcome {
+    pub changed: bool,
+    pub focus_changed: bool,
+    pub reason: Option<PaneZoomNoopReason>,
+    pub zoomed: bool,
+}
+
 impl AppState {
     pub fn navigate_pane(&mut self, direction: NavDirection) {
         let Some(ws_idx) = self.active else {
@@ -1468,17 +1490,72 @@ impl AppState {
         }
     }
 
-    pub fn toggle_zoom(&mut self) {
-        if let Some(tab) = self
-            .active
-            .and_then(|i| self.workspaces.get_mut(i))
-            .and_then(|ws| ws.active_tab_mut())
-        {
-            if tab.layout.pane_count() > 1 {
-                tab.zoomed = !tab.zoomed;
-                self.mark_session_dirty();
-            }
+    pub(crate) fn apply_pane_zoom(
+        &mut self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        command: PaneZoomCommand,
+    ) -> Option<PaneZoomOutcome> {
+        let tab_idx = self
+            .workspaces
+            .get(ws_idx)?
+            .find_tab_index_for_pane(pane_id)?;
+        let focus_changed = self.focus_pane_in_workspace(ws_idx, pane_id);
+        let tab = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))?;
+        if tab.layout.pane_count() <= 1 {
+            return Some(PaneZoomOutcome {
+                changed: false,
+                focus_changed,
+                reason: Some(PaneZoomNoopReason::SinglePane),
+                zoomed: tab.zoomed,
+            });
         }
+
+        let desired = match command {
+            PaneZoomCommand::Toggle => !tab.zoomed,
+            PaneZoomCommand::On => true,
+            PaneZoomCommand::Off => false,
+        };
+        let reason = match (command, tab.zoomed) {
+            (PaneZoomCommand::On, true) => Some(PaneZoomNoopReason::AlreadyZoomed),
+            (PaneZoomCommand::Off, false) => Some(PaneZoomNoopReason::AlreadyUnzoomed),
+            _ => None,
+        };
+        if reason.is_some() {
+            return Some(PaneZoomOutcome {
+                changed: false,
+                focus_changed,
+                reason,
+                zoomed: tab.zoomed,
+            });
+        }
+
+        tab.zoomed = desired;
+        let zoomed = tab.zoomed;
+        self.mark_session_dirty();
+        Some(PaneZoomOutcome {
+            changed: true,
+            focus_changed,
+            reason: None,
+            zoomed,
+        })
+    }
+
+    pub fn toggle_zoom(&mut self) {
+        let Some(ws_idx) = self.active else {
+            return;
+        };
+        let Some(pane_id) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(crate::workspace::Workspace::focused_pane_id)
+        else {
+            return;
+        };
+        self.apply_pane_zoom(ws_idx, pane_id, PaneZoomCommand::Toggle);
     }
 
     pub(crate) fn workspace_close_would_close_worktree_group(&self, ws_idx: usize) -> bool {

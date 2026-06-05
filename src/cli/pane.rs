@@ -2,8 +2,8 @@ use crate::api::schema::{
     Method, PaneDirection, PaneEdgesParams, PaneFocusDirectionParams, PaneLayoutParams,
     PaneListParams, PaneNeighborParams, PaneReadParams, PaneRenameParams, PaneReportAgentParams,
     PaneReportMetadataParams, PaneResizeParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, ReadFormat, ReadSource,
-    Request,
+    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams,
+    ReadFormat, ReadSource, Request,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -20,6 +20,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "edges" => pane_edges(&args[1..]),
         "focus" => pane_focus(&args[1..]),
         "resize" => pane_resize(&args[1..]),
+        "zoom" => pane_zoom(&args[1..]),
         "read" => pane_read(&args[1..]),
         "rename" => pane_rename(&args[1..]),
         "split" => pane_split(&args[1..]),
@@ -287,6 +288,78 @@ fn parse_pane_resize_args(args: &[String]) -> Result<PaneResizeParams, String> {
         direction,
         amount,
     })
+}
+
+fn pane_zoom(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_zoom_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:zoom".into(),
+        method: Method::PaneZoom(params),
+    })?)
+}
+
+fn parse_pane_zoom_args(args: &[String]) -> Result<PaneZoomParams, String> {
+    let mut pane_id = None;
+    let mut mode = PaneZoomMode::Toggle;
+    let mut mode_seen = false;
+
+    let mut index = 0;
+    if args
+        .first()
+        .is_some_and(|arg| !arg.as_str().starts_with("--"))
+    {
+        pane_id = args.first().map(|arg| super::normalize_pane_id(arg));
+        index = 1;
+    }
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pane".into());
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--current" => {
+                pane_id = None;
+                index += 1;
+            }
+            "--toggle" => {
+                if mode_seen {
+                    return Err("provide only one of --toggle, --on, or --off".into());
+                }
+                mode = PaneZoomMode::Toggle;
+                mode_seen = true;
+                index += 1;
+            }
+            "--on" => {
+                if mode_seen {
+                    return Err("provide only one of --toggle, --on, or --off".into());
+                }
+                mode = PaneZoomMode::On;
+                mode_seen = true;
+                index += 1;
+            }
+            "--off" => {
+                if mode_seen {
+                    return Err("provide only one of --toggle, --on, or --off".into());
+                }
+                mode = PaneZoomMode::Off;
+                mode_seen = true;
+                index += 1;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+
+    Ok(PaneZoomParams { pane_id, mode })
 }
 
 fn pane_rename(args: &[String]) -> std::io::Result<i32> {
@@ -953,6 +1026,7 @@ fn print_pane_help() {
     eprintln!(
         "  herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]"
     );
+    eprintln!("  herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]");
     eprintln!("  herdr pane rename <pane_id> <label>|--clear");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!(
@@ -1047,6 +1121,37 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("usage: herdr pane swap"));
+    }
+
+    #[test]
+    fn parse_pane_zoom_args_defaults_to_current_toggle() {
+        let params = parse_pane_zoom_args(&args(&[])).unwrap();
+
+        assert_eq!(params.pane_id, None);
+        assert_eq!(params.mode, PaneZoomMode::Toggle);
+    }
+
+    #[test]
+    fn parse_pane_zoom_args_accepts_positional_pane_and_on() {
+        let params = parse_pane_zoom_args(&args(&["issue-1", "--on"])).unwrap();
+
+        assert_eq!(params.pane_id, Some("issue-1".into()));
+        assert_eq!(params.mode, PaneZoomMode::On);
+    }
+
+    #[test]
+    fn parse_pane_zoom_args_accepts_pane_option_and_off() {
+        let params = parse_pane_zoom_args(&args(&["--pane", "issue-2", "--off"])).unwrap();
+
+        assert_eq!(params.pane_id, Some("issue-2".into()));
+        assert_eq!(params.mode, PaneZoomMode::Off);
+    }
+
+    #[test]
+    fn parse_pane_zoom_args_rejects_multiple_modes() {
+        let err = parse_pane_zoom_args(&args(&["--on", "--off"])).unwrap_err();
+
+        assert!(err.contains("provide only one"));
     }
 
     #[test]
