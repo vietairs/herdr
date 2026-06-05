@@ -100,8 +100,15 @@ herdr tab close <tab_id>
 ```bash
 herdr pane list [--workspace <workspace_id>]
 herdr pane get <pane_id>
+herdr pane layout [--pane ID|--current]
+herdr pane neighbor --direction left|right|up|down [--pane ID|--current]
+herdr pane edges [--pane ID|--current]
+herdr pane focus --direction left|right|up|down [--pane ID|--current]
+herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]
 herdr pane rename <pane_id> <label>|--clear
-herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]
+herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--focus] [--no-focus]
+herdr pane swap --direction left|right|up|down [--pane ID|--current]
+herdr pane swap --source-pane ID --target-pane ID
 herdr pane close <pane_id>
 ```
 

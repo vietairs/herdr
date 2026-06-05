@@ -315,6 +315,14 @@ pub struct KeysConfig {
     pub focus_pane_up: BindingConfig,
     /// Focus the pane to the right. Default: "prefix+l".
     pub focus_pane_right: BindingConfig,
+    /// Swap the focused pane with the pane to the left. Default: "prefix+shift+h".
+    pub swap_pane_left: BindingConfig,
+    /// Swap the focused pane with the pane below. Default: "prefix+shift+j".
+    pub swap_pane_down: BindingConfig,
+    /// Swap the focused pane with the pane above. Default: "prefix+shift+k".
+    pub swap_pane_up: BindingConfig,
+    /// Swap the focused pane with the pane to the right. Default: "prefix+shift+l".
+    pub swap_pane_right: BindingConfig,
     /// Cycle to the next pane. Default: "prefix+tab".
     pub cycle_pane_next: BindingConfig,
     /// Cycle to the previous pane. Default: "prefix+shift+tab".
@@ -527,6 +535,10 @@ impl Default for KeysConfig {
             focus_pane_down: BindingConfig::one("prefix+j"),
             focus_pane_up: BindingConfig::one("prefix+k"),
             focus_pane_right: BindingConfig::one("prefix+l"),
+            swap_pane_left: BindingConfig::one("prefix+shift+h"),
+            swap_pane_down: BindingConfig::one("prefix+shift+j"),
+            swap_pane_up: BindingConfig::one("prefix+shift+k"),
+            swap_pane_right: BindingConfig::one("prefix+shift+l"),
             cycle_pane_next: BindingConfig::one("prefix+tab"),
             cycle_pane_previous: BindingConfig::one("prefix+shift+tab"),
             last_pane: BindingConfig::empty(),

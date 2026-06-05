@@ -2590,12 +2590,40 @@ mod tests {
                 crate::api::schema::WorktreeCreateParams::default(),
             ),
         };
+        let pane_swap = crate::api::schema::Request {
+            id: "req_6".into(),
+            method: crate::api::schema::Method::PaneSwap(crate::api::schema::PaneSwapParams {
+                pane_id: Some("w_1-1".into()),
+                direction: Some(crate::api::schema::PaneDirection::Right),
+                ..crate::api::schema::PaneSwapParams::default()
+            }),
+        };
+        let pane_focus_direction = crate::api::schema::Request {
+            id: "req_7".into(),
+            method: crate::api::schema::Method::PaneFocusDirection(
+                crate::api::schema::PaneFocusDirectionParams {
+                    pane_id: Some("w_1-1".into()),
+                    direction: crate::api::schema::PaneDirection::Right,
+                },
+            ),
+        };
+        let pane_resize = crate::api::schema::Request {
+            id: "req_8".into(),
+            method: crate::api::schema::Method::PaneResize(crate::api::schema::PaneResizeParams {
+                pane_id: Some("w_1-1".into()),
+                direction: crate::api::schema::PaneDirection::Right,
+                amount: Some(0.05),
+            }),
+        };
 
         assert!(!crate::api::request_changes_ui(&read_only));
         assert!(!crate::api::request_changes_ui(&worktree_list));
         assert!(crate::api::request_changes_ui(&mutating));
         assert!(crate::api::request_changes_ui(&pane_rename));
         assert!(crate::api::request_changes_ui(&worktree_create));
+        assert!(crate::api::request_changes_ui(&pane_swap));
+        assert!(crate::api::request_changes_ui(&pane_focus_direction));
+        assert!(crate::api::request_changes_ui(&pane_resize));
     }
 
     #[test]
@@ -2936,8 +2964,9 @@ mod tests {
             id: "req_pane_split_background_tab".into(),
             method: crate::api::schema::Method::PaneSplit(crate::api::schema::PaneSplitParams {
                 workspace_id: None,
-                target_pane_id,
+                target_pane_id: Some(target_pane_id),
                 direction: crate::api::schema::SplitDirection::Right,
+                ratio: None,
                 cwd: None,
                 focus: false,
             }),
@@ -3014,8 +3043,9 @@ mod tests {
             id: "req_pane_split_focus_background_tab".into(),
             method: crate::api::schema::Method::PaneSplit(crate::api::schema::PaneSplitParams {
                 workspace_id: None,
-                target_pane_id,
+                target_pane_id: Some(target_pane_id),
                 direction: crate::api::schema::SplitDirection::Right,
+                ratio: None,
                 cwd: None,
                 focus: true,
             }),
@@ -3027,6 +3057,97 @@ mod tests {
         assert_eq!(response["result"]["pane"]["focused"], true);
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.workspaces[0].active_tab, background_tab);
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
+        match original_shell {
+            Some(value) => std::env::set_var("SHELL", value),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pane_split_request_applies_ratio() {
+        let _guard = config_env_lock().lock().unwrap();
+        let original_shell = std::env::var_os("SHELL");
+        std::env::set_var("SHELL", "/usr/bin/true");
+
+        let mut app = test_app();
+        let workspace = Workspace::test_new("api-pane-split-ratio");
+        let target_pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let target_pane_id = app.pane_info(0, target_pane).unwrap().pane_id;
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_split_ratio".into(),
+            method: crate::api::schema::Method::PaneSplit(crate::api::schema::PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: Some(target_pane_id),
+                direction: crate::api::schema::SplitDirection::Right,
+                ratio: Some(0.333),
+                cwd: None,
+                focus: false,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "pane_info");
+        let splits = app.state.workspaces[0].tabs[0]
+            .layout
+            .splits(ratatui::layout::Rect::new(0, 0, 100, 20));
+        assert_eq!(splits.len(), 1);
+        assert!((splits[0].ratio - 0.333).abs() < f32::EPSILON);
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
+        match original_shell {
+            Some(value) => std::env::set_var("SHELL", value),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pane_split_request_uses_active_focused_pane_when_target_is_omitted() {
+        let _guard = config_env_lock().lock().unwrap();
+        let original_shell = std::env::var_os("SHELL");
+        std::env::set_var("SHELL", "/usr/bin/true");
+
+        let mut app = test_app();
+        let workspace = Workspace::test_new("api-pane-split-current");
+        let target_pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.focus_pane_in_workspace(0, target_pane);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_split_current".into(),
+            method: crate::api::schema::Method::PaneSplit(crate::api::schema::PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: None,
+                direction: crate::api::schema::SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: false,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "pane_info");
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            target_pane
+        );
 
         let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
         for (_terminal_id, runtime) in runtimes {

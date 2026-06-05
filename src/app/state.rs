@@ -1052,7 +1052,10 @@ pub enum ContextMenuKind {
         tab_idx: usize,
     },
     Pane {
+        ws_idx: usize,
+        tab_idx: usize,
         pane_id: PaneId,
+        source_pane_id: Option<PaneId>,
         has_manual_label: bool,
     },
 }
@@ -1105,22 +1108,49 @@ impl ContextMenuState {
             ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Close"],
             ContextMenuKind::Pane {
                 has_manual_label: true,
+                source_pane_id: Some(_),
                 ..
             } => &[
                 "Rename pane",
                 "Clear pane name",
-                "Split vertical",
-                "Split horizontal",
+                "Swap with focused pane",
+                "Split right",
+                "Split down",
                 "Zoom",
                 "Close pane",
             ],
             ContextMenuKind::Pane {
                 has_manual_label: false,
+                source_pane_id: Some(_),
                 ..
             } => &[
                 "Rename pane",
-                "Split vertical",
-                "Split horizontal",
+                "Swap with focused pane",
+                "Split right",
+                "Split down",
+                "Zoom",
+                "Close pane",
+            ],
+            ContextMenuKind::Pane {
+                has_manual_label: true,
+                source_pane_id: None,
+                ..
+            } => &[
+                "Rename pane",
+                "Clear pane name",
+                "Split right",
+                "Split down",
+                "Zoom",
+                "Close pane",
+            ],
+            ContextMenuKind::Pane {
+                has_manual_label: false,
+                source_pane_id: None,
+                ..
+            } => &[
+                "Rename pane",
+                "Split right",
+                "Split down",
                 "Zoom",
                 "Close pane",
             ],

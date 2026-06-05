@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub id: String,
     #[serde(flatten)]
     pub method: Method,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Method {
     #[serde(rename = "ping")]
@@ -68,6 +68,18 @@ pub enum Method {
     AgentStart(AgentStartParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
+    #[serde(rename = "pane.swap")]
+    PaneSwap(PaneSwapParams),
+    #[serde(rename = "pane.layout")]
+    PaneLayout(PaneLayoutParams),
+    #[serde(rename = "pane.neighbor")]
+    PaneNeighbor(PaneNeighborParams),
+    #[serde(rename = "pane.edges")]
+    PaneEdges(PaneEdgesParams),
+    #[serde(rename = "pane.focus_direction")]
+    PaneFocusDirection(PaneFocusDirectionParams),
+    #[serde(rename = "pane.resize")]
+    PaneResize(PaneResizeParams),
     #[serde(rename = "pane.list")]
     PaneList(PaneListParams),
     #[serde(rename = "pane.get")]
@@ -262,12 +274,15 @@ pub struct AgentStartParams {
     pub argv: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneSplitParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    pub target_pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_pane_id: Option<String>,
     pub direction: SplitDirection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -279,6 +294,62 @@ pub struct PaneSplitParams {
 pub enum SplitDirection {
     Right,
     Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PaneSwapParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<PaneDirection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_pane_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PaneLayoutParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneNeighborParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    pub direction: PaneDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PaneEdgesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneFocusDirectionParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    pub direction: PaneDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneResizeParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    pub direction: PaneDirection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -628,7 +699,7 @@ pub enum EventKind {
     PaneAgentStatusChanged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuccessResponse {
     pub id: String,
     pub result: ResponseResult,
@@ -651,7 +722,7 @@ pub struct ServerCapabilities {
     pub live_handoff: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
     Pong {
@@ -718,6 +789,24 @@ pub enum ResponseResult {
     },
     PaneList {
         panes: Vec<PaneInfo>,
+    },
+    PaneSwap {
+        swap: PaneSwapResult,
+    },
+    PaneLayout {
+        layout: PaneLayoutSnapshot,
+    },
+    PaneNeighbor {
+        neighbor: PaneNeighborResult,
+    },
+    PaneEdges {
+        edges: PaneEdgesResult,
+    },
+    PaneFocusDirection {
+        focus: PaneFocusDirectionResult,
+    },
+    PaneResize {
+        resize: PaneResizeResult,
     },
     PaneRead {
         read: PaneReadResult,
@@ -861,6 +950,113 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
     pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneSwapResult {
+    pub changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<PaneSwapReason>,
+    pub source_pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_pane_id: Option<String>,
+    pub focused_pane_id: String,
+    pub layout: PaneLayoutSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneSwapReason {
+    NoNeighbor,
+    SamePane,
+    NotFound,
+    CrossTab,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneLayoutSnapshot {
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub zoomed: bool,
+    pub area: PaneLayoutRect,
+    pub focused_pane_id: String,
+    pub panes: Vec<PaneLayoutPane>,
+    pub splits: Vec<PaneLayoutSplit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneLayoutRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneLayoutPane {
+    pub pane_id: String,
+    pub focused: bool,
+    pub rect: PaneLayoutRect,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneLayoutSplit {
+    pub id: String,
+    pub direction: SplitDirection,
+    pub ratio: f32,
+    pub rect: PaneLayoutRect,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneNeighborResult {
+    pub pane_id: String,
+    pub direction: PaneDirection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neighbor_pane_id: Option<String>,
+    pub layout: PaneLayoutSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneEdgesResult {
+    pub pane_id: String,
+    pub left: bool,
+    pub right: bool,
+    pub up: bool,
+    pub down: bool,
+    pub layout: PaneLayoutSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneFocusDirectionResult {
+    pub changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<PaneFocusDirectionReason>,
+    pub source_pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused_pane_id: Option<String>,
+    pub layout: PaneLayoutSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneFocusDirectionReason {
+    NoNeighbor,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneResizeResult {
+    pub changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<PaneResizeReason>,
+    pub pane_id: String,
+    pub focused_pane_id: String,
+    pub layout: PaneLayoutSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneResizeReason {
+    Unchanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

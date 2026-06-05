@@ -722,33 +722,111 @@ pub(super) fn apply_context_menu_action(
         (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
             open_rename_pane(state, pane_id);
         }
-        (ContextMenuKind::Pane { pane_id, .. }, Some("Clear pane name")) => {
-            if let Some(ws_idx) = state.active {
-                if let Some(ws) = state.workspaces.get(ws_idx) {
-                    if let Some(pane) = ws.pane_state(pane_id) {
-                        let terminal_id = pane.attached_terminal_id.clone();
-                        if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
-                            terminal.clear_manual_label();
-                            state.mark_session_dirty();
-                        }
+        (
+            ContextMenuKind::Pane {
+                ws_idx, pane_id, ..
+            },
+            Some("Clear pane name"),
+        ) => {
+            if let Some(ws) = state.workspaces.get(ws_idx) {
+                if let Some(pane) = ws.pane_state(pane_id) {
+                    let terminal_id = pane.attached_terminal_id.clone();
+                    if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
+                        terminal.clear_manual_label();
+                        state.mark_session_dirty();
                     }
                 }
             }
             state.mode = Mode::Terminal;
         }
-        (ContextMenuKind::Pane { .. }, Some("Split vertical")) => {
+        (
+            ContextMenuKind::Pane {
+                ws_idx,
+                tab_idx,
+                pane_id,
+                source_pane_id,
+                ..
+            },
+            Some("Swap with focused pane"),
+        ) => {
+            if let Some(source_pane_id) = source_pane_id {
+                state.selected = ws_idx;
+                state.active = Some(ws_idx);
+                state.switch_tab(tab_idx);
+                if let Some(tab) = state
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .and_then(|ws| ws.tabs.get_mut(tab_idx))
+                {
+                    if tab.layout.swap_panes(source_pane_id, pane_id) {
+                        tab.layout.focus_pane(source_pane_id);
+                        state.mark_session_dirty();
+                    }
+                }
+            }
+            state.mode = Mode::Terminal;
+        }
+        (
+            ContextMenuKind::Pane {
+                ws_idx,
+                tab_idx,
+                pane_id,
+                ..
+            },
+            Some("Split right"),
+        ) => {
+            state.selected = ws_idx;
+            state.active = Some(ws_idx);
+            state.switch_tab(tab_idx);
+            state.focus_pane_in_workspace(ws_idx, pane_id);
             state.split_pane(terminal_runtimes, Direction::Horizontal);
             state.mode = Mode::Terminal;
         }
-        (ContextMenuKind::Pane { .. }, Some("Split horizontal")) => {
+        (
+            ContextMenuKind::Pane {
+                ws_idx,
+                tab_idx,
+                pane_id,
+                ..
+            },
+            Some("Split down"),
+        ) => {
+            state.selected = ws_idx;
+            state.active = Some(ws_idx);
+            state.switch_tab(tab_idx);
+            state.focus_pane_in_workspace(ws_idx, pane_id);
             state.split_pane(terminal_runtimes, Direction::Vertical);
             state.mode = Mode::Terminal;
         }
-        (ContextMenuKind::Pane { .. }, Some("Zoom")) => {
+        (
+            ContextMenuKind::Pane {
+                ws_idx,
+                tab_idx,
+                pane_id,
+                ..
+            },
+            Some("Zoom"),
+        ) => {
+            state.selected = ws_idx;
+            state.active = Some(ws_idx);
+            state.switch_tab(tab_idx);
+            state.focus_pane_in_workspace(ws_idx, pane_id);
             state.toggle_zoom();
             state.mode = Mode::Terminal;
         }
-        (ContextMenuKind::Pane { .. }, Some("Close pane")) => {
+        (
+            ContextMenuKind::Pane {
+                ws_idx,
+                tab_idx,
+                pane_id,
+                ..
+            },
+            Some("Close pane"),
+        ) => {
+            state.selected = ws_idx;
+            state.active = Some(ws_idx);
+            state.switch_tab(tab_idx);
+            state.focus_pane_in_workspace(ws_idx, pane_id);
             if !state.close_pane() {
                 state.mode = if state.active.is_some() {
                     Mode::Terminal
@@ -1301,7 +1379,10 @@ mod tests {
         let pane_id = state.workspaces[0].tabs[0].root_pane;
         let menu = ContextMenuState {
             kind: ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
                 pane_id,
+                source_pane_id: None,
                 has_manual_label: false,
             },
             x: 0,

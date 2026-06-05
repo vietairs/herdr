@@ -1371,6 +1371,41 @@ impl AppState {
         }
     }
 
+    pub fn swap_pane(&mut self, direction: NavDirection) -> bool {
+        let Some(ws_idx) = self.active else {
+            return false;
+        };
+        let Some(tab) = self.workspaces.get(ws_idx).and_then(|ws| ws.active_tab()) else {
+            return false;
+        };
+        let panes = if tab.zoomed {
+            tab.layout.panes(self.view.terminal_area)
+        } else {
+            self.view.pane_infos.clone()
+        };
+
+        let Some(focused) = panes.iter().find(|p| p.is_focused) else {
+            return false;
+        };
+        let Some(target) = find_in_direction(focused, direction, &panes) else {
+            return false;
+        };
+        let source = focused.id;
+        let Some(tab) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.active_tab_mut())
+        else {
+            return false;
+        };
+        if tab.layout.swap_panes(source, target) {
+            self.mark_session_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn resize_pane(&mut self, direction: NavDirection) {
         if let Some(first) = self.view.pane_infos.first() {
             let area = self
@@ -4090,6 +4125,91 @@ mod tests {
         assert_eq!(state.view.pane_infos.len(), 1);
         assert_eq!(state.view.pane_infos[0].id, right);
         assert!(state.view.pane_infos[0].inner_rect.x > state.view.pane_infos[0].rect.x);
+    }
+
+    #[test]
+    fn swap_pane_direction_preserves_focus_and_swaps_layout_cells() {
+        let mut state = app_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let right = state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].layout.focus_pane(root);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 20));
+        let before_root_rect = state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == root)
+            .unwrap()
+            .rect;
+        let before_right_rect = state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == right)
+            .unwrap()
+            .rect;
+
+        assert!(state.swap_pane(NavDirection::Right));
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 20));
+
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        assert_eq!(
+            state
+                .view
+                .pane_infos
+                .iter()
+                .find(|info| info.id == root)
+                .unwrap()
+                .rect,
+            before_right_rect
+        );
+        assert_eq!(
+            state
+                .view
+                .pane_infos
+                .iter()
+                .find(|info| info.id == right)
+                .unwrap()
+                .rect,
+            before_root_rect
+        );
+    }
+
+    #[test]
+    fn swap_pane_direction_stays_zoomed_and_mutates_hidden_layout() {
+        let mut state = app_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let right = state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].layout.focus_pane(root);
+        state.workspaces[0].zoomed = true;
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 20));
+
+        assert!(state.swap_pane(NavDirection::Right));
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 20));
+
+        assert!(state.workspaces[0].zoomed);
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        assert_eq!(state.view.pane_infos.len(), 1);
+        assert_eq!(state.view.pane_infos[0].id, root);
+
+        state.workspaces[0].zoomed = false;
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 100, 20));
+        let root_rect = state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == root)
+            .unwrap()
+            .rect;
+        let right_rect = state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == right)
+            .unwrap()
+            .rect;
+
+        assert!(root_rect.x > right_rect.x);
     }
 
     #[test]

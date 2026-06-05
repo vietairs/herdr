@@ -1,7 +1,9 @@
 use crate::api::schema::{
-    Method, PaneListParams, PaneReadParams, PaneRenameParams, PaneReportAgentParams,
-    PaneReportMetadataParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams,
-    PaneSplitParams, PaneTarget, ReadFormat, ReadSource, Request,
+    Method, PaneDirection, PaneEdgesParams, PaneFocusDirectionParams, PaneLayoutParams,
+    PaneListParams, PaneNeighborParams, PaneReadParams, PaneRenameParams, PaneReportAgentParams,
+    PaneReportMetadataParams, PaneResizeParams, PaneSendInputParams, PaneSendKeysParams,
+    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, ReadFormat, ReadSource,
+    Request,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -13,9 +15,15 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "list" => pane_list(&args[1..]),
         "get" => pane_get(&args[1..]),
+        "layout" => pane_layout(&args[1..]),
+        "neighbor" => pane_neighbor(&args[1..]),
+        "edges" => pane_edges(&args[1..]),
+        "focus" => pane_focus(&args[1..]),
+        "resize" => pane_resize(&args[1..]),
         "read" => pane_read(&args[1..]),
         "rename" => pane_rename(&args[1..]),
         "split" => pane_split(&args[1..]),
+        "swap" => pane_swap(&args[1..]),
         "close" => pane_close(&args[1..]),
         "send-text" => pane_send_text(&args[1..]),
         "send-keys" => pane_send_keys(&args[1..]),
@@ -76,6 +84,209 @@ fn pane_get(args: &[String]) -> std::io::Result<i32> {
             pane_id: super::normalize_pane_id(raw_pane_id),
         }),
     })?)
+}
+
+fn pane_layout(args: &[String]) -> std::io::Result<i32> {
+    let pane_id = match parse_optional_current_pane_args(args) {
+        Ok(pane_id) => pane_id,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:layout".into(),
+        method: Method::PaneLayout(PaneLayoutParams { pane_id }),
+    })?)
+}
+
+fn pane_edges(args: &[String]) -> std::io::Result<i32> {
+    let pane_id = match parse_optional_current_pane_args(args) {
+        Ok(pane_id) => pane_id,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:edges".into(),
+        method: Method::PaneEdges(PaneEdgesParams { pane_id }),
+    })?)
+}
+
+fn pane_neighbor(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_neighbor_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:neighbor".into(),
+        method: Method::PaneNeighbor(params),
+    })?)
+}
+
+fn pane_focus(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_focus_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:focus".into(),
+        method: Method::PaneFocusDirection(params),
+    })?)
+}
+
+fn pane_resize(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_resize_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:resize".into(),
+        method: Method::PaneResize(params),
+    })?)
+}
+
+fn parse_optional_current_pane_args(args: &[String]) -> Result<Option<String>, String> {
+    let mut pane_id = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pane".into());
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--current" => {
+                pane_id = None;
+                index += 1;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+    Ok(pane_id)
+}
+
+fn parse_pane_neighbor_args(args: &[String]) -> Result<PaneNeighborParams, String> {
+    let mut pane_id = None;
+    let mut direction = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pane".into());
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--current" => {
+                pane_id = None;
+                index += 1;
+            }
+            "--direction" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --direction".into());
+                };
+                direction = Some(parse_pane_direction(value)?);
+                index += 2;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+
+    let Some(direction) = direction else {
+        return Err(
+            "usage: herdr pane neighbor --direction left|right|up|down [--pane ID|--current]"
+                .into(),
+        );
+    };
+
+    Ok(PaneNeighborParams { pane_id, direction })
+}
+
+fn parse_pane_focus_args(args: &[String]) -> Result<PaneFocusDirectionParams, String> {
+    let params = parse_pane_neighbor_args(args).map_err(|_| {
+        "usage: herdr pane focus --direction left|right|up|down [--pane ID|--current]".to_string()
+    })?;
+    Ok(PaneFocusDirectionParams {
+        pane_id: params.pane_id,
+        direction: params.direction,
+    })
+}
+
+fn parse_pane_resize_args(args: &[String]) -> Result<PaneResizeParams, String> {
+    let mut pane_id = None;
+    let mut direction = None;
+    let mut amount = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pane".into());
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--current" => {
+                pane_id = None;
+                index += 1;
+            }
+            "--direction" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --direction".into());
+                };
+                direction = Some(parse_pane_direction(value)?);
+                index += 2;
+            }
+            "--amount" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --amount".into());
+                };
+                let parsed = value
+                    .parse::<f32>()
+                    .map_err(|_| format!("invalid amount: {value}"))?;
+                if !parsed.is_finite() {
+                    return Err(format!("invalid amount: {value}"));
+                }
+                amount = Some(parsed);
+                index += 2;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+
+    let Some(direction) = direction else {
+        return Err(
+            "usage: herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]"
+                .into(),
+        );
+    };
+
+    Ok(PaneResizeParams {
+        pane_id,
+        direction,
+        amount,
+    })
 }
 
 fn pane_rename(args: &[String]) -> std::io::Result<i32> {
@@ -180,33 +391,72 @@ fn pane_read(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn pane_split(args: &[String]) -> std::io::Result<i32> {
-    let Some(raw_pane_id) = args.first() else {
-        eprintln!(
-            "usage: herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]"
-        );
-        return Ok(2);
+    let params = match parse_pane_split_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
     };
 
-    let pane_id = super::normalize_pane_id(raw_pane_id);
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:split".into(),
+        method: Method::PaneSplit(params),
+    })?)
+}
+
+fn parse_pane_split_args(args: &[String]) -> Result<PaneSplitParams, String> {
+    let mut pane_id = None;
     let mut direction = None;
+    let mut ratio = None;
     let mut cwd = None;
     let mut focus = false;
 
-    let mut index = 1;
+    let mut index = 0;
+    if args
+        .first()
+        .is_some_and(|arg| !arg.as_str().starts_with("--"))
+    {
+        pane_id = args.first().map(|arg| super::normalize_pane_id(arg));
+        index = 1;
+    }
     while index < args.len() {
         match args[index].as_str() {
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pane".into());
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--current" => {
+                pane_id = None;
+                index += 1;
+            }
             "--direction" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --direction");
-                    return Ok(2);
+                    return Err("missing value for --direction".into());
                 };
-                direction = Some(super::parse_split_direction(value)?);
+                direction =
+                    Some(super::parse_split_direction(value).map_err(|err| err.to_string())?);
+                index += 2;
+            }
+            "--ratio" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --ratio".into());
+                };
+                let parsed = value
+                    .parse::<f32>()
+                    .map_err(|_| format!("invalid ratio: {value}"))?;
+                if !parsed.is_finite() {
+                    return Err(format!("invalid ratio: {value}"));
+                }
+                ratio = Some(parsed);
                 index += 2;
             }
             "--cwd" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --cwd");
-                    return Ok(2);
+                    return Err("missing value for --cwd".into());
                 };
                 cwd = Some(value.clone());
                 index += 2;
@@ -219,28 +469,119 @@ fn pane_split(args: &[String]) -> std::io::Result<i32> {
                 focus = false;
                 index += 1;
             }
-            other => {
-                eprintln!("unknown option: {other}");
-                return Ok(2);
-            }
+            other => return Err(format!("unknown option: {other}")),
         }
     }
 
     let Some(direction) = direction else {
-        eprintln!("missing required --direction");
-        return Ok(2);
+        return Err(
+            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--focus] [--no-focus]"
+                .into(),
+        );
+    };
+
+    Ok(PaneSplitParams {
+        workspace_id: None,
+        target_pane_id: pane_id,
+        direction,
+        ratio,
+        cwd,
+        focus,
+    })
+}
+
+fn pane_swap(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_swap_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
     };
 
     super::print_response(&super::send_request(&Request {
-        id: "cli:pane:split".into(),
-        method: Method::PaneSplit(PaneSplitParams {
-            workspace_id: None,
-            target_pane_id: pane_id,
-            direction,
-            cwd,
-            focus,
-        }),
+        id: "cli:pane:swap".into(),
+        method: Method::PaneSwap(params),
     })?)
+}
+
+fn parse_pane_swap_args(args: &[String]) -> Result<PaneSwapParams, String> {
+    let mut pane_id = None;
+    let mut direction = None;
+    let mut source_pane_id = None;
+    let mut target_pane_id = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pane".into());
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--current" => {
+                pane_id = None;
+                index += 1;
+            }
+            "--direction" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --direction".into());
+                };
+                direction = Some(parse_pane_direction(value)?);
+                index += 2;
+            }
+            "--source-pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --source-pane".into());
+                };
+                source_pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--target-pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --target-pane".into());
+                };
+                target_pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+
+    let directional = direction.is_some();
+    let explicit = source_pane_id.is_some() || target_pane_id.is_some();
+    match (directional, explicit) {
+        (true, false) => Ok(PaneSwapParams {
+            pane_id,
+            direction,
+            ..PaneSwapParams::default()
+        }),
+        (false, true) if pane_id.is_none() && source_pane_id.is_some() && target_pane_id.is_some() => {
+            Ok(PaneSwapParams {
+                source_pane_id,
+                target_pane_id,
+                ..PaneSwapParams::default()
+            })
+        }
+        _ => Err(
+            "usage: herdr pane swap --direction left|right|up|down [--pane ID|--current]\n       herdr pane swap --source-pane ID --target-pane ID"
+                .into(),
+        ),
+    }
+}
+
+fn parse_pane_direction(value: &str) -> Result<PaneDirection, String> {
+    match value {
+        "left" => Ok(PaneDirection::Left),
+        "right" => Ok(PaneDirection::Right),
+        "up" => Ok(PaneDirection::Up),
+        "down" => Ok(PaneDirection::Down),
+        _ => Err(format!(
+            "invalid pane direction: {value} (expected left, right, up, or down)"
+        )),
+    }
 }
 
 fn pane_close(args: &[String]) -> std::io::Result<i32> {
@@ -605,15 +946,146 @@ fn print_pane_help() {
     eprintln!("herdr pane commands:");
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane get <pane_id>");
+    eprintln!("  herdr pane layout [--pane ID|--current]");
+    eprintln!("  herdr pane neighbor --direction left|right|up|down [--pane ID|--current]");
+    eprintln!("  herdr pane edges [--pane ID|--current]");
+    eprintln!("  herdr pane focus --direction left|right|up|down [--pane ID|--current]");
+    eprintln!(
+        "  herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]"
+    );
     eprintln!("  herdr pane rename <pane_id> <label>|--clear");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!(
-        "  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]"
+        "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--focus] [--no-focus]"
     );
+    eprintln!("  herdr pane swap --direction left|right|up|down [--pane ID|--current]");
+    eprintln!("  herdr pane swap --source-pane ID --target-pane ID");
     eprintln!("  herdr pane close <pane_id>");
     eprintln!("  herdr pane send-text <pane_id> <text>");
     eprintln!("  herdr pane send-keys <pane_id> <key> [key ...]");
     eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--custom-status TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--custom-status TEXT|--clear-custom-status] [--state-label STATUS=TEXT] [--clear-state-labels] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr pane run <pane_id> <command>");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_pane_split_args_accepts_ratio() {
+        let params = parse_pane_split_args(&args(&[
+            "issue-1",
+            "--direction",
+            "right",
+            "--ratio",
+            "0.333",
+        ]))
+        .unwrap();
+
+        assert_eq!(params.target_pane_id, Some("issue-1".into()));
+        assert_eq!(params.direction, crate::api::schema::SplitDirection::Right);
+        assert_eq!(params.ratio, Some(0.333));
+    }
+
+    #[test]
+    fn parse_pane_split_args_accepts_current_target() {
+        let params = parse_pane_split_args(&args(&["--direction", "down", "--current"])).unwrap();
+
+        assert_eq!(params.target_pane_id, None);
+        assert_eq!(params.direction, crate::api::schema::SplitDirection::Down);
+    }
+
+    #[test]
+    fn parse_pane_split_args_accepts_pane_option() {
+        let params =
+            parse_pane_split_args(&args(&["--pane", "issue-2", "--direction", "right"])).unwrap();
+
+        assert_eq!(params.target_pane_id, Some("issue-2".into()));
+        assert_eq!(params.direction, crate::api::schema::SplitDirection::Right);
+    }
+
+    #[test]
+    fn parse_pane_swap_args_accepts_directional_current() {
+        let params = parse_pane_swap_args(&args(&["--direction", "right"])).unwrap();
+
+        assert_eq!(params.pane_id, None);
+        assert_eq!(params.direction, Some(PaneDirection::Right));
+        assert_eq!(params.source_pane_id, None);
+        assert_eq!(params.target_pane_id, None);
+    }
+
+    #[test]
+    fn parse_pane_swap_args_accepts_explicit_source_and_target() {
+        let params = parse_pane_swap_args(&args(&[
+            "--source-pane",
+            "issue-1",
+            "--target-pane",
+            "issue-2",
+        ]))
+        .unwrap();
+
+        assert_eq!(params.direction, None);
+        assert_eq!(params.source_pane_id, Some("issue-1".into()));
+        assert_eq!(params.target_pane_id, Some("issue-2".into()));
+    }
+
+    #[test]
+    fn parse_pane_swap_args_rejects_mixed_forms() {
+        let err = parse_pane_swap_args(&args(&[
+            "--direction",
+            "left",
+            "--source-pane",
+            "issue-1",
+            "--target-pane",
+            "issue-2",
+        ]))
+        .unwrap_err();
+
+        assert!(err.contains("usage: herdr pane swap"));
+    }
+
+    #[test]
+    fn parse_pane_neighbor_args_accepts_directional_current() {
+        let params = parse_pane_neighbor_args(&args(&["--direction", "down"])).unwrap();
+
+        assert_eq!(params.pane_id, None);
+        assert_eq!(params.direction, PaneDirection::Down);
+    }
+
+    #[test]
+    fn parse_optional_current_pane_args_accepts_explicit_pane() {
+        let pane_id = parse_optional_current_pane_args(&args(&["--pane", "issue-2"])).unwrap();
+
+        assert_eq!(pane_id, Some("issue-2".into()));
+    }
+
+    #[test]
+    fn parse_pane_focus_args_accepts_directional_current() {
+        let params = parse_pane_focus_args(&args(&["--direction", "up"])).unwrap();
+
+        assert_eq!(params.pane_id, None);
+        assert_eq!(params.direction, PaneDirection::Up);
+    }
+
+    #[test]
+    fn parse_pane_resize_args_accepts_amount_and_pane() {
+        let params = parse_pane_resize_args(&args(&[
+            "--pane",
+            "issue-2",
+            "--direction",
+            "left",
+            "--amount",
+            "0.125",
+        ]))
+        .unwrap();
+
+        assert_eq!(params.pane_id, Some("issue-2".into()));
+        assert_eq!(params.direction, PaneDirection::Left);
+        assert_eq!(params.amount, Some(0.125));
+    }
 }

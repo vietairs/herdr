@@ -555,6 +555,14 @@ impl App {
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
             Method::AgentSend(params) => return self.handle_agent_send(request.id, params),
             Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
+            Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
+            Method::PaneLayout(params) => return self.handle_pane_layout(request.id, params),
+            Method::PaneNeighbor(params) => return self.handle_pane_neighbor(request.id, params),
+            Method::PaneEdges(params) => return self.handle_pane_edges(request.id, params),
+            Method::PaneFocusDirection(params) => {
+                return self.handle_pane_focus_direction(request.id, params);
+            }
+            Method::PaneResize(params) => return self.handle_pane_resize(request.id, params),
             Method::PaneList(params) => return self.handle_pane_list(request.id, params),
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),

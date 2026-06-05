@@ -878,7 +878,9 @@ mod tests {
     #[test]
     fn capture_contract_tracks_resize_ratio_changes() {
         let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
         state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].layout.focus_pane(root);
         crate::ui::compute_view(&mut state, Rect::new(0, 0, 106, 20));
         let before = capture_from_state(&state);
 

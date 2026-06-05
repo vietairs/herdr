@@ -225,6 +225,7 @@ Press `ctrl+b` to enter prefix mode. Default actions are prefix-first and tmux-l
 | `prefix+shift+w` | rename workspace |
 | `prefix+shift+d` | close workspace |
 | `prefix+h/j/k/l` | focus pane |
+| `prefix+shift+h/j/k/l` | swap pane |
 | `prefix+v` / `prefix+minus` | split pane |
 | `prefix+x` | close pane |
 | `prefix+b` | toggle sidebar |

@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clicking_unfocused_pane_with_mouse_reporting_focuses_it_via_right_button() {
+    async fn right_clicking_unfocused_mouse_reporting_pane_keeps_focus_for_context_menu() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
         let first_pane = ws.tabs[0].root_pane;
@@ -702,12 +702,10 @@ mod tests {
             second_info.inner_rect.y + 2,
         ));
 
-        assert_eq!(
-            app.state.workspaces[0].tabs[0].layout.focused(),
-            second_pane
-        );
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), first_pane);
         assert_eq!(app.state.mode, Mode::ContextMenu);
-        assert!(app.state.context_menu.is_some());
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(menu.items().contains(&"Swap with focused pane"));
     }
 
     #[tokio::test]
