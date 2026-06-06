@@ -12,8 +12,9 @@ use crate::workspace::WorkspaceGitStatus;
 use unicode_width::UnicodeWidthChar;
 
 use super::state::{
-    text_matches_query, AppState, Mode, NavigatorRow, NavigatorStateFilter, NavigatorTarget,
-    PaneFocusTarget, ToastKind, ToastNotification, ToastTarget, ViewLayout,
+    text_matches_query, AgentNotificationDelivery, AppState, Mode, NavigatorRow,
+    NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification, ToastKind,
+    ToastNotification, ToastTarget, ViewLayout,
 };
 
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
@@ -69,6 +70,27 @@ pub fn notification_toast_for_state_change(
 
 fn toast_agent_label(agent_label: &str) -> &str {
     agent_label
+}
+
+fn toast_event_text(kind: ToastKind) -> &'static str {
+    match kind {
+        ToastKind::NeedsAttention => "needs attention",
+        ToastKind::Finished => "finished",
+        ToastKind::UpdateInstalled => "updated",
+    }
+}
+
+fn sound_for_toast_kind(
+    kind: ToastKind,
+    suppress_active_tab_notifications: bool,
+) -> Option<crate::sound::Sound> {
+    match kind {
+        ToastKind::NeedsAttention => Some(crate::sound::Sound::Request),
+        ToastKind::Finished if !suppress_active_tab_notifications => {
+            Some(crate::sound::Sound::Done)
+        }
+        ToastKind::Finished | ToastKind::UpdateInstalled => None,
+    }
 }
 
 pub fn notification_context(
@@ -2174,6 +2196,7 @@ impl AppState {
                         kind: ToastKind::UpdateInstalled,
                         title: format!("v{version} available"),
                         context: crate::update::update_install_instruction(&install_command),
+                        position: None,
                         target: None,
                     });
                 }
@@ -2384,12 +2407,149 @@ impl AppState {
         }
         let seen = pane.seen;
 
-        if self.local_sound_playback && self.sound.allows(change.known_agent) {
-            if let Some(sound) = notification_sound_for_state_change(
-                suppress_active_tab_notifications,
-                change.previous_state,
+        if let Some(delivery) = self.record_or_deliver_agent_notification(ws_idx, pane_id, change) {
+            self.apply_agent_notification_delivery(&delivery);
+        }
+
+        Some(seen)
+    }
+
+    fn record_or_deliver_agent_notification(
+        &mut self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        change: &EffectiveStateChange,
+    ) -> Option<AgentNotificationDelivery> {
+        self.pending_agent_notifications.remove(&pane_id);
+
+        let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
+        let suppress_active_tab_notifications =
+            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
+
+        let client_notification_kind = notification_toast_for_state_change(
+            suppress_active_tab_notifications,
+            change.previous_state,
+            change.state,
+        );
+        let sound = notification_sound_for_state_change(
+            suppress_active_tab_notifications,
+            change.previous_state,
+            change.state,
+        );
+        if client_notification_kind.is_none() && sound.is_none() {
+            return None;
+        }
+
+        let agent_label = change.agent_label.clone()?;
+        let kind = client_notification_kind.unwrap_or(match sound {
+            Some(crate::sound::Sound::Request) => ToastKind::NeedsAttention,
+            Some(crate::sound::Sound::Done) | None => ToastKind::Finished,
+        });
+        let workspace_id = self.workspaces[ws_idx].id.clone();
+
+        if self.toast_config.delay_seconds == 0 {
+            return self.agent_notification_delivery(
+                ws_idx,
+                pane_id,
+                workspace_id,
+                agent_label,
+                change.known_agent,
+                kind,
                 change.state,
-            ) {
+            );
+        }
+
+        self.pending_agent_notifications.insert(
+            pane_id,
+            PendingAgentNotification {
+                pane_id,
+                workspace_id,
+                agent_label,
+                known_agent: change.known_agent,
+                kind,
+                state: change.state,
+                deadline: {
+                    let now = std::time::Instant::now();
+                    let delay_seconds = self
+                        .toast_config
+                        .delay_seconds
+                        .min(crate::config::MAX_TOAST_DELAY_SECONDS);
+                    now.checked_add(std::time::Duration::from_secs(delay_seconds))
+                        .unwrap_or(now)
+                },
+            },
+        );
+        None
+    }
+
+    fn agent_notification_delivery(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        workspace_id: String,
+        agent_label: String,
+        known_agent: Option<Agent>,
+        kind: ToastKind,
+        expected_state: AgentState,
+    ) -> Option<AgentNotificationDelivery> {
+        let terminal_state = self
+            .workspaces
+            .get(ws_idx)?
+            .pane_state(pane_id)
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))?;
+        if terminal_state.state != expected_state {
+            return None;
+        }
+        if terminal_state.effective_agent_label() != Some(agent_label.as_str()) {
+            return None;
+        }
+
+        let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
+        let suppress_active_tab_notifications =
+            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
+        let sound = sound_for_toast_kind(kind, suppress_active_tab_notifications)
+            .filter(|_| self.sound.allows(known_agent));
+        let build_toast = || {
+            let workspace_label = self.workspaces[ws_idx].display_name();
+            let context =
+                notification_context(&self.workspaces[ws_idx], &workspace_label, ws_idx, pane_id);
+            ToastNotification {
+                kind,
+                title: format!(
+                    "{} {}",
+                    toast_agent_label(&agent_label),
+                    toast_event_text(kind)
+                ),
+                context,
+                position: None,
+                target: Some(ToastTarget {
+                    workspace_id: workspace_id.clone(),
+                    pane_id,
+                }),
+            }
+        };
+        let toast = (!is_active_tab).then(&build_toast);
+        let client_notification = (!suppress_active_tab_notifications).then(build_toast);
+
+        if toast.is_none() && client_notification.is_none() && sound.is_none() {
+            return None;
+        }
+
+        Some(AgentNotificationDelivery {
+            pane_id,
+            workspace_id,
+            agent_label,
+            known_agent,
+            kind,
+            toast,
+            client_notification,
+            sound,
+        })
+    }
+
+    fn apply_agent_notification_delivery(&mut self, delivery: &AgentNotificationDelivery) {
+        if self.local_sound_playback {
+            if let Some(sound) = delivery.sound {
                 crate::sound::play(sound, &self.sound);
             }
         }
@@ -2398,42 +2558,61 @@ impl AppState {
             self.toast_config.delivery,
             crate::config::ToastDelivery::Herdr
         ) {
-            if let (Some(agent_label), Some(kind)) = (
-                change.agent_label.as_deref(),
-                notification_toast_for_state_change(
-                    is_active_tab,
-                    change.previous_state,
-                    change.state,
-                ),
-            ) {
-                let event_text = match kind {
-                    ToastKind::NeedsAttention => "needs attention",
-                    ToastKind::Finished => "finished",
-                    ToastKind::UpdateInstalled => "updated",
-                };
-                let workspace_label = self.workspaces[ws_idx].display_name();
-                let context = notification_context(
-                    &self.workspaces[ws_idx],
-                    &workspace_label,
-                    ws_idx,
-                    pane_id,
-                );
-                self.toast = Some(ToastNotification {
-                    kind,
-                    title: format!("{} {}", toast_agent_label(agent_label), event_text),
-                    context,
-                    target: Some(ToastTarget {
-                        workspace_id: self.workspaces[ws_idx].id.clone(),
-                        pane_id,
-                    }),
-                });
+            if let Some(toast) = delivery.toast.clone() {
+                self.toast = Some(toast);
             }
         }
+    }
 
-        Some(seen)
+    pub fn next_pending_agent_notification_deadline(&self) -> Option<std::time::Instant> {
+        self.pending_agent_notifications
+            .values()
+            .map(|pending| pending.deadline)
+            .min()
+    }
+
+    pub fn drain_due_agent_notifications(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Vec<AgentNotificationDelivery> {
+        let due_panes: Vec<PaneId> = self
+            .pending_agent_notifications
+            .iter()
+            .filter_map(|(&pane_id, pending)| (pending.deadline <= now).then_some(pane_id))
+            .collect();
+        let mut deliveries = Vec::new();
+
+        for pane_id in due_panes {
+            let Some(pending) = self.pending_agent_notifications.remove(&pane_id) else {
+                continue;
+            };
+            let Some(ws_idx) = self
+                .workspaces
+                .iter()
+                .position(|ws| ws.id == pending.workspace_id)
+            else {
+                continue;
+            };
+            let Some(delivery) = self.agent_notification_delivery(
+                ws_idx,
+                pending.pane_id,
+                pending.workspace_id,
+                pending.agent_label,
+                pending.known_agent,
+                pending.kind,
+                pending.state,
+            ) else {
+                continue;
+            };
+            self.apply_agent_notification_delivery(&delivery);
+            deliveries.push(delivery);
+        }
+
+        deliveries
     }
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {
+        self.pending_agent_notifications.remove(&pane_id);
         let ws_idx = self
             .workspaces
             .iter()
@@ -2500,6 +2679,7 @@ mod tests {
 
     fn app_with_workspaces(names: &[&str]) -> AppState {
         let mut state = AppState::test_new();
+        state.toast_config.delay_seconds = 0;
         for name in names {
             let ws = Workspace::test_new(name);
             state.workspaces.push(ws);
@@ -3782,6 +3962,157 @@ mod tests {
         assert_eq!(toast.kind, ToastKind::NeedsAttention);
         assert_eq!(toast.title, "pi needs attention");
         assert_eq!(toast.context, "background · 2");
+    }
+
+    #[test]
+    fn delayed_background_waiting_schedules_before_toast() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 1;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        assert!(state.toast.is_none());
+        assert!(state.pending_agent_notifications.contains_key(&bg_pane_id));
+
+        let deadline = state.next_pending_agent_notification_deadline().unwrap();
+        let deliveries = state.drain_due_agent_notifications(deadline);
+        assert_eq!(deliveries.len(), 1);
+
+        let toast = state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, ToastKind::NeedsAttention);
+        assert_eq!(toast.title, "pi needs attention");
+        assert_eq!(toast.context, "background · 2");
+        assert!(state.pending_agent_notifications.is_empty());
+    }
+
+    #[test]
+    fn delayed_background_waiting_cancels_when_agent_resumes_working() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 1;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        let deadline = state.next_pending_agent_notification_deadline().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: true,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        assert!(state.pending_agent_notifications.is_empty());
+        assert!(state.drain_due_agent_notifications(deadline).is_empty());
+        assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn delayed_background_waiting_is_suppressed_if_pane_becomes_active() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 1;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        let deadline = state.next_pending_agent_notification_deadline().unwrap();
+        state.active = Some(1);
+
+        assert!(state.drain_due_agent_notifications(deadline).is_empty());
+        assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn delayed_active_tab_unfocused_keeps_client_notification_available() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.outer_terminal_focus = Some(false);
+        state.toast_config.delivery = crate::config::ToastDelivery::System;
+        state.toast_config.delay_seconds = 1;
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        let deadline = state.next_pending_agent_notification_deadline().unwrap();
+        let deliveries = state.drain_due_agent_notifications(deadline);
+
+        assert_eq!(deliveries.len(), 1);
+        assert!(deliveries[0].toast.is_none());
+        assert!(deliveries[0].client_notification.is_some());
+        assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn delayed_background_waiting_is_cleared_when_pane_dies() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 1;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_idle: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        let deadline = state.next_pending_agent_notification_deadline().unwrap();
+        state.handle_app_event(AppEvent::PaneDied {
+            pane_id: bg_pane_id,
+        });
+
+        assert!(state.pending_agent_notifications.is_empty());
+        assert!(state.drain_due_agent_notifications(deadline).is_empty());
+        assert!(state.toast.is_none());
     }
 
     #[test]

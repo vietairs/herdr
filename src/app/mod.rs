@@ -97,6 +97,7 @@ pub struct App {
     pub(crate) config_diagnostic_deadline: Option<Instant>,
     pub(crate) toast_deadline: Option<Instant>,
     pub(crate) copy_feedback_deadline: Option<Instant>,
+    pub(crate) last_api_notification_at: Option<Instant>,
     pub(crate) last_git_remote_status_refresh: Instant,
     pub(crate) git_refresh_in_flight: bool,
     pub(crate) git_refresh_due_after_in_flight: bool,
@@ -479,6 +480,7 @@ impl App {
             update_dismissed: false,
             config_diagnostic,
             toast: None,
+            pending_agent_notifications: std::collections::HashMap::new(),
             copy_feedback: None,
             outer_terminal_focus: None,
             prefix_code,
@@ -568,6 +570,7 @@ impl App {
             config_diagnostic_deadline: None,
             toast_deadline: None,
             copy_feedback_deadline: None,
+            last_api_notification_at: None,
             state,
             terminal_runtimes: restored_terminal_runtimes,
             event_tx,
@@ -1263,6 +1266,7 @@ impl App {
                     kind: crate::app::state::ToastKind::UpdateInstalled,
                     title: "reloaded config".to_string(),
                     context: "using config.toml".to_string(),
+                    position: None,
                     target: None,
                 });
             }
@@ -1274,6 +1278,7 @@ impl App {
                     kind: crate::app::state::ToastKind::UpdateInstalled,
                     title: "reloaded config".to_string(),
                     context: "with warnings".to_string(),
+                    position: None,
                     target: None,
                 });
             }
@@ -1730,12 +1735,26 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_feedback_can_be_disabled() {
+        let mut app = test_app();
+        app.state.toast_config.clipboard.enabled = false;
+
+        app.handle_internal_event(AppEvent::ClipboardWrite {
+            content: b"copied".to_vec(),
+        });
+
+        assert!(app.state.copy_feedback.is_none());
+        assert!(app.copy_feedback_deadline.is_none());
+    }
+
+    #[test]
     fn clipboard_feedback_does_not_replace_notification_toast() {
         let mut app = test_app();
         app.state.toast = Some(crate::app::state::ToastNotification {
             kind: crate::app::state::ToastKind::NeedsAttention,
             title: "pi needs attention".to_string(),
             context: "background · 2".to_string(),
+            position: None,
             target: None,
         });
         let original_toast = app.state.toast.clone();
@@ -1752,6 +1771,172 @@ mod tests {
                 .map(|feedback| feedback.message.as_str()),
             Some("copied to clipboard")
         );
+    }
+
+    #[test]
+    fn notification_show_api_creates_herdr_toast_with_position() {
+        let mut app = test_app();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "notify".into(),
+                method: crate::api::schema::Method::NotificationShow(
+                    crate::api::schema::NotificationShowParams {
+                        title: "build failed".into(),
+                        body: Some("api workspace".into()),
+                        position: Some(crate::config::ToastHerdrPosition::TopLeft),
+                        sound: crate::api::schema::NotificationShowSound::None,
+                    },
+                ),
+            });
+
+        let parsed: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            crate::api::schema::ResponseResult::NotificationShow {
+                shown: true,
+                reason: crate::api::schema::NotificationShowReason::Shown,
+            }
+        );
+        let toast = app.state.toast.as_ref().expect("api toast");
+        assert_eq!(toast.title, "build failed");
+        assert_eq!(toast.context, "api workspace");
+        assert_eq!(
+            toast.position,
+            Some(crate::config::ToastHerdrPosition::TopLeft)
+        );
+        assert!(app.toast_deadline.is_some());
+    }
+
+    #[test]
+    fn notification_show_api_herdr_toast_expires() {
+        let mut app = test_app();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "notify".into(),
+                method: crate::api::schema::Method::NotificationShow(
+                    crate::api::schema::NotificationShowParams {
+                        title: "build failed".into(),
+                        body: None,
+                        position: None,
+                        sound: crate::api::schema::NotificationShowSound::None,
+                    },
+                ),
+            });
+
+        let parsed: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            crate::api::schema::ResponseResult::NotificationShow {
+                shown: true,
+                reason: crate::api::schema::NotificationShowReason::Shown,
+            }
+        );
+        let deadline = app.toast_deadline.expect("api toast deadline");
+        assert!(app.handle_scheduled_tasks(deadline, false));
+        assert!(app.state.toast.is_none());
+        assert!(app.toast_deadline.is_none());
+    }
+
+    #[test]
+    fn notification_show_api_respects_off_delivery() {
+        let mut app = test_app();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Off;
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "notify".into(),
+                method: crate::api::schema::Method::NotificationShow(
+                    crate::api::schema::NotificationShowParams {
+                        title: "build failed".into(),
+                        body: None,
+                        position: None,
+                        sound: crate::api::schema::NotificationShowSound::None,
+                    },
+                ),
+            });
+
+        let parsed: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            crate::api::schema::ResponseResult::NotificationShow {
+                shown: false,
+                reason: crate::api::schema::NotificationShowReason::Disabled,
+            }
+        );
+        assert!(app.state.toast.is_none());
+    }
+
+    #[test]
+    fn notification_show_api_does_not_replace_existing_toast() {
+        let mut app = test_app();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::NeedsAttention,
+            title: "pi needs attention".to_string(),
+            context: "background · 2".to_string(),
+            position: None,
+            target: None,
+        });
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "notify".into(),
+                method: crate::api::schema::Method::NotificationShow(
+                    crate::api::schema::NotificationShowParams {
+                        title: "build failed".into(),
+                        body: None,
+                        position: None,
+                        sound: crate::api::schema::NotificationShowSound::None,
+                    },
+                ),
+            });
+
+        let parsed: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            crate::api::schema::ResponseResult::NotificationShow {
+                shown: false,
+                reason: crate::api::schema::NotificationShowReason::Busy,
+            }
+        );
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some("pi needs attention")
+        );
+    }
+
+    #[test]
+    fn notification_show_api_is_rate_limited() {
+        let mut app = test_app();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.mark_api_notification_shown(Instant::now());
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "notify".into(),
+                method: crate::api::schema::Method::NotificationShow(
+                    crate::api::schema::NotificationShowParams {
+                        title: "build failed".into(),
+                        body: None,
+                        position: None,
+                        sound: crate::api::schema::NotificationShowSound::None,
+                    },
+                ),
+            });
+
+        let parsed: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            crate::api::schema::ResponseResult::NotificationShow {
+                shown: false,
+                reason: crate::api::schema::NotificationShowReason::RateLimited,
+            }
+        );
+        assert!(app.state.toast.is_none());
     }
 
     #[test]

@@ -1176,7 +1176,31 @@ pub struct ToastNotification {
     pub kind: ToastKind,
     pub title: String,
     pub context: String,
+    pub position: Option<crate::config::ToastHerdrPosition>,
     pub target: Option<ToastTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAgentNotification {
+    pub pane_id: PaneId,
+    pub workspace_id: String,
+    pub agent_label: String,
+    pub known_agent: Option<crate::detect::Agent>,
+    pub kind: ToastKind,
+    pub state: AgentState,
+    pub deadline: std::time::Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentNotificationDelivery {
+    pub pane_id: PaneId,
+    pub workspace_id: String,
+    pub agent_label: String,
+    pub known_agent: Option<crate::detect::Agent>,
+    pub kind: ToastKind,
+    pub toast: Option<ToastNotification>,
+    pub client_notification: Option<ToastNotification>,
+    pub sound: Option<crate::sound::Sound>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1288,6 +1312,7 @@ pub struct AppState {
     pub update_dismissed: bool,
     pub config_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
+    pub pending_agent_notifications: std::collections::HashMap<PaneId, PendingAgentNotification>,
     pub copy_feedback: Option<CopyFeedback>,
     /// Last reported focus state for the outer terminal hosting herdr.
     /// None means unsupported or not yet reported, which preserves active-pane suppression.
@@ -1615,6 +1640,7 @@ impl AppState {
             update_dismissed: false,
             config_diagnostic: None,
             toast: None,
+            pending_agent_notifications: std::collections::HashMap::new(),
             copy_feedback: None,
             outer_terminal_focus: None,
             prefix_code: KeyCode::Char('b'),

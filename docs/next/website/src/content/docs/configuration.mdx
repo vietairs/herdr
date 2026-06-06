@@ -303,17 +303,29 @@ Herdr can show popup notifications when agents finish or need input.
 ```toml
 [ui.toast]
 delivery = "off"
+delay_seconds = 1
+
+[ui.toast.herdr]
+position = "bottom-right"
+
+[ui.toast.clipboard]
+enabled = true
+position = "bottom-center"
 ```
 
 `delivery = "off"` disables popup notifications. This is the default.
 
-`delivery = "herdr"` shows a top-right toast inside the Herdr UI. Click the toast, or bind `keys.open_notification_target`, to focus the target workspace, tab, and pane.
+`delivery = "herdr"` shows a toast inside the Herdr UI. Click the toast, or bind `keys.open_notification_target`, to focus the target workspace, tab, and pane. Set `ui.toast.herdr.position` to `top-left`, `top-right`, `bottom-left`, or `bottom-right`; desktop positions are relative to the full Herdr frame.
 
 `delivery = "terminal"` asks the outer terminal to show a desktop notification. Herdr sends terminal notification escape sequences for Ghostty, iTerm2, Kitty, and WezTerm. This is useful over SSH because the local terminal owns the notification.
 
 `delivery = "system"` asks the local operating system directly. On macOS, Herdr uses `terminal-notifier` when available, then falls back to `/usr/bin/osascript`. `terminal-notifier` can activate the hosting terminal when you click the notification. On Linux, Herdr uses `notify-send` and requires `DISPLAY` or `WAYLAND_DISPLAY`.
 
 Popup notifications are for background attention. Herdr suppresses popups for the active tab.
+
+`delay_seconds` waits before sending finished or needs-input agent notifications. Herdr notifies only if the pane is still in the same state when the delay expires. Set it to `0` for instant notifications. Valid values are `0` through `3600`.
+
+Clipboard feedback is configured separately because it confirms a foreground copy action and is never sent through terminal or system delivery. Set `ui.toast.clipboard.enabled = false` to hide the copied-to-clipboard popup. Clipboard positions are `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, and `bottom-right`.
 
 ## Sound
 

@@ -233,10 +233,18 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Background notification popup delivery
 [ui.toast]
 # off = disable pop-up notifications
-# herdr = show top-right in-app toasts
+# herdr = show in-app toasts
 # terminal = ask the outer terminal to show a desktop notification
 # system = ask the OS notification service directly
 # delivery = "off"
+# delay_seconds = 1
+
+[ui.toast.herdr]
+# position = "bottom-right"
+
+[ui.toast.clipboard]
+# enabled = true
+# position = "bottom-center"
 
 # Play sounds when agents change state in background workspaces
 [ui.sound]
@@ -424,6 +432,7 @@ fn main() -> io::Result<()> {
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr worktree <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
+        println!("       herdr notification <subcommand> ...");
         println!("       herdr agent <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr wait <subcommand> ...");
@@ -467,6 +476,10 @@ fn main() -> io::Result<()> {
                 "Git worktree helpers over the socket API",
             ),
             ("herdr tab <subcommand>", "Tab helpers over the socket API"),
+            (
+                "herdr notification <subcommand>",
+                "Notification helpers over the socket API",
+            ),
             (
                 "herdr agent <subcommand>",
                 "Agent/terminal helpers over the socket API",

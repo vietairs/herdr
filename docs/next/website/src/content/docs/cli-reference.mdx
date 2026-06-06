@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: Herdr commands for sessions, workspaces, tabs, panes, agents, waits, integrations, and status.
+description: Herdr commands for sessions, workspaces, tabs, panes, notifications, agents, waits, integrations, and status.
 ---
 
 Herdr’s CLI talks to the running server over the same local socket API used by integrations and agents.
@@ -42,6 +42,14 @@ herdr server reload-config
 ```
 
 `herdr server` runs the headless server explicitly. Use it for supervised or service-style setups. `reload-config` applies reloadable settings without restarting panes.
+
+## Notifications
+
+```bash
+herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]
+```
+
+`notification show` uses the configured `[ui.toast]` delivery. `--position` only affects in-app Herdr toasts. `--sound` defaults to `none`; `done` and `request` play the existing finished and needs-attention sounds only when the notification is shown.
 
 ## Sessions
 

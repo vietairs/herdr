@@ -2244,6 +2244,7 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.toast_config.delay_seconds = 0;
         let target_terminal_id = app.state.workspaces[1]
             .panes
             .get(&target_pane)
@@ -2305,6 +2306,7 @@ mod tests {
             kind: crate::app::state::ToastKind::Finished,
             title: "pi finished".into(),
             context: "background · 2".into(),
+            position: None,
             target: Some(crate::app::state::ToastTarget {
                 workspace_id,
                 pane_id: target_pane,

@@ -81,6 +81,7 @@ Raw socket method names use dot notation:
 | Area | Methods |
 | --- | --- |
 | Server | `ping`, `server.stop`, `server.reload_config` |
+| Notification | `notification.show` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.close` |
@@ -136,6 +137,28 @@ Omitting `pane_id` targets the server's active focused pane. The response is
 `reason`, `pane_id`, `focused_pane_id`, `zoomed`, and `layout`. `changed` is
 true when either zoom state or focus changed. Reason values are `single_pane`,
 `already_zoomed`, and `already_unzoomed`.
+
+The CLI wrapper for `notification.show` is:
+
+```bash
+herdr notification show "build failed" --body "api workspace" --position top-left --sound request
+```
+
+Show a user notification through the configured toast delivery:
+
+```json
+{"id":"req_notify","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}
+```
+
+`title` is required and must contain visible text after control characters and repeated whitespace are removed. `body` is optional. Herdr collapses newlines, tabs, carriage returns, and repeated whitespace into spaces, then trims notification text to 80 characters for `title` and 240 characters for `body`. An empty sanitized `title` returns `invalid_params`. `position` is optional and applies only when `ui.toast.delivery = "herdr"`; desktop positions are relative to the full Herdr frame, and omitted positions use `ui.toast.herdr.position`. Terminal, system, and off delivery ignore `position`. `sound` is optional and can be `none`, `done`, or `request`; it defaults to `none` and plays only when the notification is shown.
+
+The response reports whether anything was shown:
+
+```json
+{"id":"req_notify","result":{"type":"notification_show","shown":true,"reason":"shown"}}
+```
+
+Possible reasons are `shown`, `disabled`, `rate_limited`, `no_foreground_client`, and `busy`. `disabled` means `ui.toast.delivery = "off"`. `busy` means an existing in-app toast was not replaced. Terminal and system delivery are best-effort through the current foreground attached Herdr client.
 
 Worktree methods manage Git checkouts as Herdr workspaces. `worktree.create` creates a checkout and returns the new `workspace`, `tab`, `root_pane`, and `worktree` records. `worktree.open` opens an existing checkout or returns the already-open workspace. `worktree.remove` runs `git worktree remove` against a linked child workspace and never deletes the branch.
 

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -371,8 +371,10 @@ pub enum ServerMessage {
     Notify {
         /// What kind of notification.
         kind: NotifyKind,
-        /// Human-readable message.
+        /// Human-readable title or sound label.
         message: String,
+        /// Optional human-readable notification body.
+        body: Option<String>,
     },
 
     /// OSC 52 clipboard data forwarded from a PTY through the server.
@@ -889,6 +891,7 @@ mod tests {
             let msg = ServerMessage::Notify {
                 kind,
                 message: "agent done".to_owned(),
+                body: None,
             };
             let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
             let (decoded, _): (ServerMessage, _) =
