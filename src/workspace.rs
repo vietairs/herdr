@@ -26,7 +26,7 @@ pub use self::{
         derive_label_from_cwd, git_branch, git_space_metadata, git_status_cache_key,
         GitSpaceMetadata, GitStatusCacheEntry,
     },
-    tab::Tab,
+    tab::{NewPane, Tab},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -384,6 +384,26 @@ impl Workspace {
             host_terminal_theme,
             shell_config,
             None,
+        )
+    }
+
+    pub fn create_tab_argv_command(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        cwd: PathBuf,
+        argv: &[String],
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
+        self.create_tab_with_runtime(
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            Some(argv),
         )
     }
 

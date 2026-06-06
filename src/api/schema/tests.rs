@@ -1,0 +1,682 @@
+use std::collections::HashMap;
+
+use super::*;
+
+#[test]
+fn request_round_trips_for_pane_read() {
+    let request = Request {
+        id: "req_1".into(),
+        method: Method::PaneRead(PaneReadParams {
+            pane_id: "p_1".into(),
+            source: ReadSource::Recent,
+            lines: Some(80),
+            format: ReadFormat::Text,
+            strip_ansi: true,
+        }),
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_pane_report_agent() {
+    let request = Request {
+        id: "req_hook".into(),
+        method: Method::PaneReportAgent(PaneReportAgentParams {
+            pane_id: "1-1".into(),
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            state: PaneAgentState::Working,
+            message: Some("thinking".into()),
+            custom_status: Some("indexing".into()),
+            seq: Some(42),
+            agent_session_id: Some("pi-session".into()),
+            agent_session_path: Some("/tmp/pi-session.jsonl".into()),
+        }),
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_pane_report_agent_session() {
+    let request = Request {
+        id: "req_session".into(),
+        method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
+            pane_id: "1-1".into(),
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            seq: Some(42),
+            agent_session_id: Some("claude-session".into()),
+            agent_session_path: None,
+        }),
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_pane_report_metadata() {
+    let request = Request {
+        id: "req_metadata".into(),
+        method: Method::PaneReportMetadata(PaneReportMetadataParams {
+            pane_id: "1-1".into(),
+            source: "user:claude-title".into(),
+            agent: Some("claude".into()),
+            applies_to_source: Some("herdr:claude".into()),
+            title: Some("Refactor auth".into()),
+            display_agent: Some("Claude auth".into()),
+            custom_status: Some("refactor auth".into()),
+            state_labels: HashMap::from([("working".into(), "deep in the mines".into())]),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_custom_status: false,
+            clear_state_labels: false,
+            seq: Some(42),
+            ttl_ms: Some(3_600_000),
+        }),
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_pane_clear_agent_authority() {
+    let request = Request {
+        id: "req_clear".into(),
+        method: Method::PaneClearAgentAuthority(PaneClearAgentAuthorityParams {
+            pane_id: "1-1".into(),
+            source: Some("herdr:pi".into()),
+            seq: Some(42),
+        }),
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_pane_release_agent() {
+    let request = Request {
+        id: "req_release".into(),
+        method: Method::PaneReleaseAgent(PaneReleaseAgentParams {
+            pane_id: "1-1".into(),
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            seq: Some(42),
+        }),
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_uses_dot_method_names() {
+    let request = Request {
+        id: "req_1".into(),
+        method: Method::WorkspaceCreate(WorkspaceCreateParams {
+            cwd: Some("/tmp".into()),
+            focus: true,
+            label: Some("api".into()),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "workspace.create");
+}
+
+#[test]
+fn request_round_trips_for_server_stop() {
+    let request = Request {
+        id: "req_stop".into(),
+        method: Method::ServerStop(EmptyParams::default()),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "server.stop");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_server_reload_config() {
+    let request = Request {
+        id: "req_reload".into(),
+        method: Method::ServerReloadConfig(EmptyParams::default()),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "server.reload_config");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_server_reload_agent_manifests() {
+    let request = Request {
+        id: "req_reload_agent_manifests".into(),
+        method: Method::ServerReloadAgentManifests(EmptyParams::default()),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "server.reload_agent_manifests");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_server_agent_manifests() {
+    let request = Request {
+        id: "req_agent_manifests".into(),
+        method: Method::ServerAgentManifests(EmptyParams::default()),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "server.agent_manifests");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn request_round_trips_for_agent_explain() {
+    let request = Request {
+        id: "req_agent_explain".into(),
+        method: Method::AgentExplain(AgentTarget {
+            target: "agent-1".into(),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "agent.explain");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn notification_show_request_parses() {
+    let json = r#"{"id":"req_1","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}"#;
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::NotificationShow(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+    assert_eq!(params.title, "build failed");
+    assert_eq!(params.body.as_deref(), Some("api workspace"));
+    assert_eq!(
+        params.position,
+        Some(crate::config::ToastHerdrPosition::TopLeft)
+    );
+    assert_eq!(params.sound, NotificationShowSound::Request);
+}
+
+#[test]
+fn notification_show_sound_defaults_to_none() {
+    let json = r#"{"id":"req_1","method":"notification.show","params":{"title":"build failed"}}"#;
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::NotificationShow(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+
+    assert_eq!(params.sound, NotificationShowSound::None);
+}
+
+#[test]
+fn unknown_method_is_rejected() {
+    let json = r#"{"id":"req_1","method":"nope","params":{}}"#;
+    let err = serde_json::from_str::<Request>(json)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unknown variant"));
+}
+
+#[test]
+fn missing_required_params_are_rejected() {
+    let json = r#"{"id":"req_1","method":"pane.send_text","params":{"pane_id":"p_1"}}"#;
+    let err = serde_json::from_str::<Request>(json)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("text"));
+}
+
+#[test]
+fn pane_send_input_defaults_to_empty_text_and_keys() {
+    let json = r#"
+    {
+        "id": "req_1",
+        "method": "pane.send_input",
+        "params": {
+            "pane_id": "p_1"
+        }
+    }
+    "#;
+
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::PaneSendInput(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+    assert_eq!(params.pane_id, "p_1");
+    assert!(params.text.is_empty());
+    assert!(params.keys.is_empty());
+}
+
+#[test]
+fn pane_wait_for_output_defaults_strip_ansi_to_true() {
+    let json = r#"
+    {
+        "id": "req_1",
+        "method": "pane.wait_for_output",
+        "params": {
+            "pane_id": "p_1",
+            "source": "recent",
+            "match": { "type": "substring", "value": "ready" }
+        }
+    }
+    "#;
+
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::PaneWaitForOutput(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+    assert!(params.strip_ansi);
+}
+
+#[test]
+fn pane_read_defaults_to_text_format() {
+    let json = r#"
+    {
+        "id": "req_1",
+        "method": "pane.read",
+        "params": {
+            "pane_id": "p_1",
+            "source": "visible"
+        }
+    }
+    "#;
+
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::PaneRead(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+    assert_eq!(params.format, ReadFormat::Text);
+}
+
+#[test]
+fn pane_current_request_round_trips() {
+    let request = Request {
+        id: "req_current".into(),
+        method: Method::PaneCurrent(PaneCurrentParams {
+            caller_pane_id: Some("w1-1".into()),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "pane.current");
+    assert_eq!(json["params"]["caller_pane_id"], "w1-1");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn event_envelope_round_trips() {
+    let event = EventEnvelope {
+        event: EventKind::PaneOutputChanged,
+        data: EventData::PaneOutputChanged {
+            pane_id: "p_1".into(),
+            workspace_id: "w_1".into(),
+            revision: 42,
+        },
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, event);
+}
+
+#[test]
+fn subscribe_request_parses_parameterized_subscriptions() {
+    let json = r#"
+    {
+        "id": "sub_1",
+        "method": "events.subscribe",
+        "params": {
+            "subscriptions": [
+                {
+                    "type": "pane.output_matched",
+                    "pane_id": "p_1_1",
+                    "source": "recent",
+                    "lines": 200,
+                    "match": { "type": "substring", "value": "auth: received" }
+                },
+                {
+                    "type": "pane.agent_status_changed",
+                    "pane_id": "p_1_1",
+                    "agent_status": "done"
+                }
+            ]
+        }
+    }
+    "#;
+
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::EventsSubscribe(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+    assert_eq!(params.subscriptions.len(), 2);
+    assert!(matches!(
+        &params.subscriptions[0],
+        Subscription::PaneOutputMatched {
+            pane_id,
+            source: ReadSource::Recent,
+            lines: Some(200),
+            r#match: OutputMatch::Substring { value },
+            strip_ansi: true,
+        } if pane_id == "p_1_1" && value == "auth: received"
+    ));
+    assert!(matches!(
+        &params.subscriptions[1],
+        Subscription::PaneAgentStatusChanged {
+            pane_id,
+            agent_status: Some(AgentStatus::Done),
+        } if pane_id == "p_1_1"
+    ));
+}
+
+#[test]
+fn subscription_event_envelope_round_trips() {
+    let event = SubscriptionEventEnvelope {
+        event: SubscriptionEventKind::PaneOutputMatched,
+        data: SubscriptionEventData::PaneOutputMatched(PaneOutputMatchedEvent {
+            pane_id: "p_1_1".into(),
+            matched_line: "auth: received".into(),
+            read: PaneReadResult {
+                pane_id: "p_1_1".into(),
+                workspace_id: "w_1".into(),
+                tab_id: "t_1_1".into(),
+                source: ReadSource::Recent,
+                format: ReadFormat::Text,
+                text: "auth: received\n".into(),
+                revision: 0,
+                truncated: false,
+            },
+        }),
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("\"event\":\"pane.output_matched\""));
+    let restored: SubscriptionEventEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, event);
+}
+
+#[test]
+fn success_response_round_trips() {
+    let response = SuccessResponse {
+        id: "req_1".into(),
+        result: ResponseResult::Pong {
+            version: "0.1.2".into(),
+            protocol: 6,
+            capabilities: Some(ServerCapabilities { live_handoff: true }),
+        },
+    };
+
+    let json = serde_json::to_string(&response).unwrap();
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
+fn worktree_request_and_response_round_trip() {
+    let request = Request {
+        id: "req_worktree".into(),
+        method: Method::WorktreeCreate(WorktreeCreateParams {
+            workspace_id: Some("1".into()),
+            branch: Some("worktree/api".into()),
+            base: Some("HEAD".into()),
+            focus: true,
+            ..WorktreeCreateParams::default()
+        }),
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+
+    let response = SuccessResponse {
+        id: "req_worktree".into(),
+        result: ResponseResult::WorktreeCreated {
+            workspace: WorkspaceInfo {
+                workspace_id: "w_1".into(),
+                number: 2,
+                label: "herdr".into(),
+                focused: true,
+                pane_count: 1,
+                tab_count: 1,
+                active_tab_id: "w_1:1".into(),
+                agent_status: AgentStatus::Unknown,
+                worktree: Some(WorkspaceWorktreeInfo {
+                    repo_key: "/repo/herdr/.git".into(),
+                    repo_name: "herdr".into(),
+                    repo_root: "/repo/herdr".into(),
+                    checkout_path: "/worktrees/herdr/worktree-api".into(),
+                    is_linked_worktree: true,
+                }),
+            },
+            tab: TabInfo {
+                tab_id: "w_1:1".into(),
+                workspace_id: "w_1".into(),
+                number: 1,
+                label: "herdr".into(),
+                focused: true,
+                pane_count: 1,
+                agent_status: AgentStatus::Unknown,
+            },
+            root_pane: PaneInfo {
+                pane_id: "w_1-1".into(),
+                terminal_id: "term_1".into(),
+                workspace_id: "w_1".into(),
+                tab_id: "w_1:1".into(),
+                focused: true,
+                cwd: Some("/worktrees/herdr/worktree-api".into()),
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                title: None,
+                display_agent: None,
+                agent_status: AgentStatus::Unknown,
+                custom_status: None,
+                state_labels: HashMap::new(),
+                agent_session: None,
+                revision: 0,
+            },
+            worktree: WorktreeInfo {
+                path: "/worktrees/herdr/worktree-api".into(),
+                branch: Some("worktree/api".into()),
+                is_bare: false,
+                is_detached: false,
+                is_prunable: false,
+                is_linked_worktree: true,
+                open_workspace_id: Some("w_1".into()),
+                label: "herdr".into(),
+            },
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(json.contains("\"type\":\"worktree_created\""));
+    assert!(json.contains("\"worktree\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
+fn create_response_round_trips_with_root_pane() {
+    let response = SuccessResponse {
+        id: "req_2".into(),
+        result: ResponseResult::TabCreated {
+            tab: TabInfo {
+                tab_id: "w_1:2".into(),
+                workspace_id: "w_1".into(),
+                number: 2,
+                label: "review".into(),
+                focused: false,
+                pane_count: 1,
+                agent_status: AgentStatus::Unknown,
+            },
+            root_pane: PaneInfo {
+                pane_id: "w_1-3".into(),
+                terminal_id: "term_example".into(),
+                workspace_id: "w_1".into(),
+                tab_id: "w_1:2".into(),
+                focused: false,
+                cwd: Some("/tmp/review".into()),
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                title: None,
+                display_agent: None,
+                agent_status: AgentStatus::Unknown,
+                custom_status: None,
+                state_labels: HashMap::new(),
+                agent_session: None,
+                revision: 0,
+            },
+        },
+    };
+
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(json.contains("\"type\":\"tab_created\""));
+    assert!(json.contains("\"root_pane\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
+fn error_response_round_trips() {
+    let response = ErrorResponse {
+        id: "req_1".into(),
+        error: ErrorBody {
+            code: "pane_not_found".into(),
+            message: "pane p_1 not found".into(),
+        },
+    };
+
+    let json = serde_json::to_string(&response).unwrap();
+    let restored: ErrorResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
+fn event_wait_parses_typed_match() {
+    let json = r#"
+    {
+        "id": "req_9",
+        "method": "events.wait",
+        "params": {
+            "match_event": {
+                "event": "pane_agent_status_changed",
+                "pane_id": "p_1",
+                "agent_status": "done"
+            },
+            "timeout_ms": 30000
+        }
+    }
+    "#;
+
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::EventsWait(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+    assert_eq!(
+        params.match_event,
+        EventMatch::PaneAgentStatusChanged {
+            pane_id: "p_1".into(),
+            agent_status: AgentStatus::Done,
+        }
+    );
+}
+
+#[test]
+fn plugin_action_request_round_trips() {
+    let request = Request {
+        id: "req_plugin_action".into(),
+        method: Method::PluginActionRegister(PluginActionRegisterParams {
+            plugin_id: "example.issue-flow".into(),
+            action_id: "assign-issue".into(),
+            title: "Assign Issue".into(),
+            description: Some("Open the issue assignment UI".into()),
+            contexts: vec![PluginActionContext::Workspace, PluginActionContext::Pane],
+            entrypoint: Some("assign".into()),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "plugin.action.register");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn plugin_storage_request_round_trips() {
+    let request = Request {
+        id: "req_plugin_storage".into(),
+        method: Method::PluginStorageSet(PluginStorageSetParams {
+            plugin_id: "example.notes".into(),
+            scope: PluginStorageScope::Workspace,
+            key: "pins".into(),
+            value: serde_json::json!([{"text": "follow up"}]),
+            workspace_id: Some("1".into()),
+            project_id: None,
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "plugin.storage.set");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn plugin_pane_open_request_round_trips() {
+    let request = Request {
+        id: "req_plugin_pane".into(),
+        method: Method::PluginPaneOpen(PluginPaneOpenParams {
+            plugin_id: "example.board".into(),
+            entrypoint: "board".into(),
+            argv: vec!["herdr-board".into(), "--workspace".into(), "1".into()],
+            placement: PluginPanePlacement::Zoomed,
+            workspace_id: Some("1".into()),
+            tab_id: None,
+            target_pane_id: Some("1-1".into()),
+            direction: Some(SplitDirection::Right),
+            cwd: Some("/tmp".into()),
+            focus: true,
+            context: Some(PluginInvocationContext {
+                workspace_id: Some("1".into()),
+                workspace_label: Some("api".into()),
+                workspace_cwd: Some("/repo".into()),
+                worktree: None,
+                tab_id: None,
+                tab_label: None,
+                focused_pane_id: Some("1-1".into()),
+                focused_pane_cwd: Some("/tmp".into()),
+                focused_pane_agent: None,
+                focused_pane_status: None,
+                selected_text: None,
+                invocation_source: Some("keybinding".into()),
+                correlation_id: Some("invoke-1".into()),
+            }),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "plugin.pane.open");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}

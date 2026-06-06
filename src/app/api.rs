@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 mod agents;
 mod integrations;
 mod panes;
+mod plugins;
 mod responses;
 mod tabs;
 mod workspaces;
@@ -764,6 +765,7 @@ impl App {
             }
             Method::PaneResize(params) => return self.handle_pane_resize(request.id, params),
             Method::PaneList(params) => return self.handle_pane_list(request.id, params),
+            Method::PaneCurrent(params) => return self.handle_pane_current(request.id, params),
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
@@ -793,6 +795,36 @@ impl App {
             }
             Method::IntegrationUninstall(params) => {
                 return self.handle_integration_uninstall(request.id, params);
+            }
+            Method::PluginActionRegister(params) => {
+                return self.handle_plugin_action_register(request.id, params);
+            }
+            Method::PluginActionList(params) => {
+                return self.handle_plugin_action_list(request.id, params);
+            }
+            Method::PluginActionInvoke(params) => {
+                return self.handle_plugin_action_invoke(request.id, params);
+            }
+            Method::PluginStorageGet(params) => {
+                return self.handle_plugin_storage_get(request.id, params);
+            }
+            Method::PluginStorageSet(params) => {
+                return self.handle_plugin_storage_set(request.id, params);
+            }
+            Method::PluginStorageDelete(params) => {
+                return self.handle_plugin_storage_delete(request.id, params);
+            }
+            Method::PluginStorageList(params) => {
+                return self.handle_plugin_storage_list(request.id, params);
+            }
+            Method::PluginPaneOpen(params) => {
+                return self.handle_plugin_pane_open(request.id, params);
+            }
+            Method::PluginPaneFocus(params) => {
+                return self.handle_plugin_pane_focus(request.id, params);
+            }
+            Method::PluginPaneClose(params) => {
+                return self.handle_plugin_pane_close(request.id, params);
             }
             _ => {
                 return responses::encode_error(

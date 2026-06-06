@@ -132,7 +132,7 @@ pub(crate) const APP_EVENT_DRAIN_LIMIT: usize = 64;
 pub(crate) enum LoopEvent {
     Timer,
     Internal(AppEvent),
-    Api(crate::api::ApiRequestMessage),
+    Api(Box<crate::api::ApiRequestMessage>),
     RawInput(crate::raw_input::RawInputEvent),
     InputClosed,
     RenderRequested,
@@ -542,6 +542,9 @@ impl App {
             agent_manifest_summaries,
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),
             integration_install_messages: Vec::new(),
+            plugin_actions: std::collections::HashMap::new(),
+            plugin_storage: std::collections::HashMap::new(),
+            plugin_panes: std::collections::HashMap::new(),
             global_menu: state::MenuListState::new(0),
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
@@ -895,7 +898,7 @@ impl App {
                 let input_rx = self.input_rx.as_mut();
                 tokio::select! {
                     maybe_api = self.api_rx.recv() => match maybe_api {
-                        Some(msg) => LoopEvent::Api(msg),
+                        Some(msg) => LoopEvent::Api(Box::new(msg)),
                         None => LoopEvent::Timer,
                     },
                     maybe_ev = self.event_rx.recv() => match maybe_ev {
@@ -918,7 +921,7 @@ impl App {
                     needs_render = true;
                 }
                 LoopEvent::Api(msg) => {
-                    if self.handle_api_request_message(msg) {
+                    if self.handle_api_request_message(*msg) {
                         needs_render = true;
                     }
                 }

@@ -110,6 +110,7 @@ herdr tab close <tab_id>
 
 ```bash
 herdr pane list [--workspace <workspace_id>]
+herdr pane current [--pane ID|--current]
 herdr pane get <pane_id>
 herdr pane layout [--pane ID|--current]
 herdr pane neighbor --direction left|right|up|down [--pane ID|--current]
@@ -262,6 +263,37 @@ herdr integration uninstall qodercli
 herdr integration uninstall cursor
 herdr integration status [--outdated-only]
 ```
+
+## Plugins
+
+Plugin commands expose the early plugin host API. They are for local workflow tools that register actions, store namespaced JSON records, or open managed terminal UIs.
+
+Actions:
+
+```bash
+herdr plugin action register --plugin ID --action ID --title TEXT [--description TEXT] [--context global|workspace|tab|pane|selection] [--entrypoint ID]
+herdr plugin action list [--plugin ID]
+herdr plugin action invoke <action_id> [--plugin ID]
+```
+
+Storage:
+
+```bash
+herdr plugin storage get --plugin ID --scope global|workspace|project --key KEY [--workspace ID] [--project ID]
+herdr plugin storage set --plugin ID --scope global|workspace|project --key KEY --value JSON [--workspace ID] [--project ID]
+herdr plugin storage delete --plugin ID --scope global|workspace|project --key KEY [--workspace ID] [--project ID]
+herdr plugin storage list --plugin ID --scope global|workspace|project [--workspace ID] [--project ID]
+```
+
+Managed terminal panes:
+
+```bash
+herdr plugin pane open --plugin ID --entrypoint ID [--placement split|tab|zoomed] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--focus|--no-focus] -- <argv...>
+herdr plugin pane focus <pane_id>
+herdr plugin pane close <pane_id>
+```
+
+`plugin pane open` starts the argv after `--` as a Herdr-managed terminal pane. It can open as a split, a new tab, or a zoomed pane. Native non-terminal plugin panes are a later surface.
 
 ## Read sources
 

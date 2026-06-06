@@ -1,16 +1,17 @@
 use bytes::Bytes;
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneDirection,
-    PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams, PaneFocusDirectionReason,
-    PaneFocusDirectionResult, PaneInfo, PaneLayoutPane, PaneLayoutParams, PaneLayoutRect,
-    PaneLayoutSnapshot, PaneLayoutSplit, PaneListParams, PaneMoveDestination, PaneMoveParams,
-    PaneMoveReason, PaneMoveResult, PaneNeighborParams, PaneNeighborResult, PaneReadParams,
-    PaneReadResult, PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams,
-    PaneReportAgentSessionParams, PaneReportMetadataParams, PaneResizeParams, PaneResizeReason,
-    PaneResizeResult, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams,
-    PaneSwapParams, PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams,
-    PaneZoomReason, PaneZoomResult, ReadFormat, ReadSource, ResponseResult,
+    EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneCurrentParams,
+    PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
+    PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneLayoutPane,
+    PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit, PaneListParams,
+    PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult, PaneNeighborParams,
+    PaneNeighborResult, PaneReadParams, PaneReadResult, PaneReleaseAgentParams, PaneRenameParams,
+    PaneReportAgentParams, PaneReportAgentSessionParams, PaneReportMetadataParams,
+    PaneResizeParams, PaneResizeReason, PaneResizeResult, PaneSendInputParams, PaneSendKeysParams,
+    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
+    PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason, PaneZoomResult, ReadFormat,
+    ReadSource, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::{App, Mode};
@@ -126,6 +127,21 @@ impl App {
             Ok(panes) => encode_success(id, ResponseResult::PaneList { panes }),
             Err((code, message)) => encode_error(id, &code, message),
         }
+    }
+
+    pub(super) fn handle_pane_current(&mut self, id: String, params: PaneCurrentParams) -> String {
+        let target = match params.caller_pane_id.as_deref() {
+            Some(caller_pane_id) => self.parse_pane_id(caller_pane_id),
+            None => self.resolve_optional_pane(None),
+        };
+        let Some((ws_idx, pane_id)) = target else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+
+        encode_success(id, ResponseResult::PaneCurrent { pane })
     }
 
     pub(super) fn handle_pane_get(&mut self, id: String, target: PaneTarget) -> String {
@@ -1745,6 +1761,7 @@ mod tests {
             crate::api::EventHub::default(),
         );
         app.state.workspaces = vec![Workspace::test_new("issue")];
+        app.state.ensure_test_terminals();
         app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
             key: "repo-key".into(),
             label: "herdr".into(),
@@ -1790,6 +1807,106 @@ mod tests {
         assert_eq!(success.id, "req");
         assert_eq!(app.state.request_remove_linked_worktree, None);
         assert!(app.state.workspaces.is_empty());
+    }
+
+    #[test]
+    fn api_pane_current_prefers_caller_pane_id() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let right = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let right_public = app.public_pane_id(0, right).unwrap();
+
+        let response = app.handle_pane_current(
+            "req".into(),
+            crate::api::schema::PaneCurrentParams {
+                caller_pane_id: Some(right_public.clone()),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneCurrent { pane } = success.result else {
+            panic!("expected pane current response");
+        };
+        assert_eq!(pane.pane_id, right_public);
+        assert!(!pane.focused);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+        assert_ne!(pane.pane_id, root_public);
+    }
+
+    #[test]
+    fn api_pane_current_falls_back_to_focused_pane() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        let root_public = app.public_pane_id(0, root).unwrap();
+
+        let response = app.handle_pane_current(
+            "req".into(),
+            crate::api::schema::PaneCurrentParams::default(),
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneCurrent { pane } = success.result else {
+            panic!("expected pane current response");
+        };
+        assert_eq!(pane.pane_id, root_public);
+        assert!(pane.focused);
+    }
+
+    #[test]
+    fn api_pane_current_dispatches_through_socket_request() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneCurrent(
+                crate::api::schema::PaneCurrentParams::default(),
+            ),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneCurrent { pane } = success.result else {
+            panic!("expected pane current response");
+        };
+        assert_eq!(pane.pane_id, root_public);
+    }
+
+    #[test]
+    fn api_pane_current_reports_invalid_caller_pane_id() {
+        let mut app = app_with_linked_worktree();
+
+        let response = app.handle_pane_current(
+            "req".into(),
+            crate::api::schema::PaneCurrentParams {
+                caller_pane_id: Some("missing".into()),
+            },
+        );
+
+        assert_eq!(metadata_error_code(&response), "pane_not_found");
+    }
+
+    #[test]
+    fn api_pane_current_reports_no_active_pane() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = None;
+
+        let response = app.handle_pane_current(
+            "req".into(),
+            crate::api::schema::PaneCurrentParams::default(),
+        );
+
+        assert_eq!(metadata_error_code(&response), "pane_not_found");
     }
 
     #[test]

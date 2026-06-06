@@ -313,6 +313,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneFocusDirection(_) => "pane.focus_direction",
         Method::PaneResize(_) => "pane.resize",
         Method::PaneList(_) => "pane.list",
+        Method::PaneCurrent(_) => "pane.current",
         Method::PaneGet(_) => "pane.get",
         Method::PaneRename(_) => "pane.rename",
         Method::PaneSendText(_) => "pane.send_text",
@@ -330,6 +331,16 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneWaitForOutput(_) => "pane.wait_for_output",
         Method::IntegrationInstall(_) => "integration.install",
         Method::IntegrationUninstall(_) => "integration.uninstall",
+        Method::PluginActionRegister(_) => "plugin.action.register",
+        Method::PluginActionList(_) => "plugin.action.list",
+        Method::PluginActionInvoke(_) => "plugin.action.invoke",
+        Method::PluginStorageGet(_) => "plugin.storage.get",
+        Method::PluginStorageSet(_) => "plugin.storage.set",
+        Method::PluginStorageDelete(_) => "plugin.storage.delete",
+        Method::PluginStorageList(_) => "plugin.storage.list",
+        Method::PluginPaneOpen(_) => "plugin.pane.open",
+        Method::PluginPaneFocus(_) => "plugin.pane.focus",
+        Method::PluginPaneClose(_) => "plugin.pane.close",
     }
 }
 

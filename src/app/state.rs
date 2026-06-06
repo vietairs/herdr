@@ -7,6 +7,26 @@ use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
 
+pub(crate) type PluginActionRegistry =
+    std::collections::HashMap<String, crate::api::schema::PluginActionInfo>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PluginStorageKey {
+    pub plugin_id: String,
+    pub scope: crate::api::schema::PluginStorageScope,
+    pub workspace_id: Option<String>,
+    pub project_id: Option<String>,
+    pub key: String,
+}
+
+pub(crate) type PluginStorage = std::collections::HashMap<PluginStorageKey, serde_json::Value>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PluginPaneRecord {
+    pub plugin_id: String,
+    pub entrypoint: String,
+}
+
 // ---------------------------------------------------------------------------
 // Selection autoscroll types
 // ---------------------------------------------------------------------------
@@ -1384,6 +1404,12 @@ pub struct AppState {
     pub agent_manifest_update_status: crate::detect::manifest_update::ManifestUpdateStatus,
     /// Result messages from the latest integration install action.
     pub integration_install_messages: Vec<String>,
+    /// Runtime plugin actions registered through the socket API.
+    pub(crate) plugin_actions: PluginActionRegistry,
+    /// Namespaced plugin storage records.
+    pub(crate) plugin_storage: PluginStorage,
+    /// Pane ids opened through the plugin pane API.
+    pub(crate) plugin_panes: std::collections::HashMap<PaneId, PluginPaneRecord>,
     /// Highlight state for the bottom-right global launcher menu.
     pub global_menu: MenuListState,
     /// Resolved host terminal default colors for theming embedded panes.
@@ -1714,6 +1740,9 @@ impl AppState {
             agent_manifest_update_status:
                 crate::detect::manifest_update::ManifestUpdateStatus::default(),
             integration_install_messages: Vec::new(),
+            plugin_actions: std::collections::HashMap::new(),
+            plugin_storage: std::collections::HashMap::new(),
+            plugin_panes: std::collections::HashMap::new(),
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
