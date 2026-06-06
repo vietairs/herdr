@@ -1015,6 +1015,55 @@ mod tests {
     }
 
     #[test]
+    fn open_new_worktree_dialog_supports_standalone_bare_repo_source() {
+        let repo = create_committed_repo("app-worktree-dialog-bare-origin");
+        let bare = unique_temp_path("app-worktree-dialog-bare-repo");
+        run_git(
+            &repo,
+            &["clone", "--quiet", "--bare", ".", bare.to_str().unwrap()],
+        );
+        let worktree_root = unique_temp_path("app-worktree-dialog-bare-root");
+
+        let mut app = app_for_worktree_tests();
+        app.state.worktree_directory = worktree_root.clone();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("source")];
+        app.state.workspaces[0].identity_cwd = bare.clone();
+
+        app.open_new_linked_worktree_dialog(0);
+
+        assert_eq!(app.state.mode, Mode::NewLinkedWorktree);
+        assert!(app.state.config_diagnostic.is_none());
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert_eq!(create.source_checkout_path, bare);
+        assert_eq!(create.source_repo_root, create.source_checkout_path);
+        let source_checkout_path = create.source_checkout_path.clone();
+
+        let branch = "worktree/from-bare-source";
+        let repo_name = create.repo_name.clone();
+        let checkout = crate::worktree::default_checkout_path(&worktree_root, &repo_name, branch);
+        app.state.name_input = branch.into();
+
+        app.start_worktree_add();
+
+        let event = wait_for_worktree_event(&mut app);
+        match event {
+            AppEvent::WorktreeAddFinished(result) => {
+                assert_eq!(result.path, checkout);
+                assert_eq!(result.result, Ok(()));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(checkout.join("README.md").exists());
+
+        let remove_new =
+            crate::worktree::build_worktree_remove_command(&source_checkout_path, &checkout, false);
+        crate::worktree::run_worktree_command(&remove_new).unwrap();
+        let _ = std::fs::remove_dir_all(worktree_root);
+        let _ = std::fs::remove_dir_all(source_checkout_path);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
     fn start_worktree_add_uses_source_checkout_head_as_base() {
         let repo = create_committed_repo("app-worktree-add-source-repo");
         let source_checkout = unique_temp_path("app-worktree-add-source-checkout");
