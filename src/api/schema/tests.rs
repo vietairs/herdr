@@ -517,6 +517,94 @@ fn worktree_request_and_response_round_trip() {
 }
 
 #[test]
+fn worktree_lifecycle_events_round_trip() {
+    let subscription = Request {
+        id: "sub_worktrees".into(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: vec![
+                Subscription::WorktreeCreated {},
+                Subscription::WorktreeOpened {},
+                Subscription::WorktreeRemoved {},
+            ],
+        }),
+    };
+    let json = serde_json::to_string(&subscription).unwrap();
+    assert!(json.contains("\"type\":\"worktree.created\""));
+    assert!(json.contains("\"type\":\"worktree.opened\""));
+    assert!(json.contains("\"type\":\"worktree.removed\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, subscription);
+
+    let workspace = WorkspaceInfo {
+        workspace_id: "w_2".into(),
+        number: 2,
+        label: "herdr".into(),
+        focused: true,
+        pane_count: 1,
+        tab_count: 1,
+        active_tab_id: "w_2:1".into(),
+        agent_status: AgentStatus::Unknown,
+        worktree: Some(WorkspaceWorktreeInfo {
+            repo_key: "/repo/herdr/.git".into(),
+            repo_name: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/worktrees/herdr/worktree-api".into(),
+            is_linked_worktree: true,
+        }),
+    };
+    let worktree = WorktreeInfo {
+        path: "/worktrees/herdr/worktree-api".into(),
+        branch: Some("worktree/api".into()),
+        is_bare: false,
+        is_detached: false,
+        is_prunable: false,
+        is_linked_worktree: true,
+        open_workspace_id: Some("w_2".into()),
+        label: "herdr".into(),
+    };
+
+    for event in [
+        EventEnvelope {
+            event: EventKind::WorktreeCreated,
+            data: EventData::WorktreeCreated {
+                workspace: workspace.clone(),
+                worktree: worktree.clone(),
+            },
+        },
+        EventEnvelope {
+            event: EventKind::WorktreeOpened,
+            data: EventData::WorktreeOpened {
+                workspace: workspace.clone(),
+                worktree: worktree.clone(),
+                already_open: false,
+            },
+        },
+        EventEnvelope {
+            event: EventKind::WorktreeRemoved,
+            data: EventData::WorktreeRemoved {
+                workspace_id: "w_2".into(),
+                worktree: WorktreeInfo {
+                    open_workspace_id: None,
+                    ..worktree.clone()
+                },
+                forced: false,
+            },
+        },
+        EventEnvelope {
+            event: EventKind::WorkspaceClosed,
+            data: EventData::WorkspaceClosed {
+                workspace_id: "w_2".into(),
+                workspace: Some(workspace.clone()),
+            },
+        },
+    ] {
+        let json = serde_json::to_string(&event).unwrap();
+        let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, event);
+    }
+}
+
+#[test]
 fn create_response_round_trips_with_root_pane() {
     let response = SuccessResponse {
         id: "req_2".into(),

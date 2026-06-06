@@ -151,12 +151,16 @@ impl App {
             return workspace_not_found(id, &target.workspace_id);
         }
         let workspace_id = self.public_workspace_id(index);
+        let workspace = self.workspace_info(index);
         self.state.selected = index;
         self.state.close_selected_workspace();
         self.shutdown_detached_terminal_runtimes();
         self.emit_event(EventEnvelope {
             event: EventKind::WorkspaceClosed,
-            data: EventData::WorkspaceClosed { workspace_id },
+            data: EventData::WorkspaceClosed {
+                workspace_id,
+                workspace: Some(workspace),
+            },
         });
 
         encode_success(id, ResponseResult::Ok {})
@@ -211,5 +215,38 @@ mod tests {
         assert_eq!(success.id, "req");
         assert_eq!(app.state.request_remove_linked_worktree, None);
         assert!(app.state.workspaces.is_empty());
+    }
+
+    #[test]
+    fn api_workspace_close_event_includes_final_worktree_snapshot() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = app_with_linked_worktree().state.workspaces;
+        let workspace_id = app.state.workspaces[0].id.clone();
+
+        let response = app.handle_workspace_close(
+            "req".into(),
+            WorkspaceTarget {
+                workspace_id: workspace_id.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        let events = event_hub.events_after(0);
+        assert!(events.iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                EventData::WorkspaceClosed {
+                    workspace_id: closed_id,
+                    workspace: Some(workspace),
+                } if closed_id == &workspace_id
+                    && workspace
+                        .worktree
+                        .as_ref()
+                        .is_some_and(|worktree| worktree.is_linked_worktree)
+            )
+        }));
     }
 }

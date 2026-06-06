@@ -1392,6 +1392,7 @@ impl App {
                 "closing this pane would close a worktree group",
             );
         }
+        let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
@@ -1412,7 +1413,10 @@ impl App {
             });
             self.emit_event(EventEnvelope {
                 event: EventKind::WorkspaceClosed,
-                data: EventData::WorkspaceClosed { workspace_id },
+                data: EventData::WorkspaceClosed {
+                    workspace_id,
+                    workspace: Some(workspace_snapshot),
+                },
             });
         } else {
             self.state.remove_unattached_terminal_ids(terminal_id);

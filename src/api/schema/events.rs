@@ -6,6 +6,7 @@ use super::common::{AgentStatus, ReadSource};
 use super::panes::{PaneInfo, PaneReadResult};
 use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
+use super::worktrees::WorktreeInfo;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventsSubscribeParams {
@@ -25,6 +26,12 @@ pub enum Subscription {
     WorkspaceClosed {},
     #[serde(rename = "workspace.focused")]
     WorkspaceFocused {},
+    #[serde(rename = "worktree.created")]
+    WorktreeCreated {},
+    #[serde(rename = "worktree.opened")]
+    WorktreeOpened {},
+    #[serde(rename = "worktree.removed")]
+    WorktreeRemoved {},
     #[serde(rename = "tab.created")]
     TabCreated {},
     #[serde(rename = "tab.closed")]
@@ -165,6 +172,9 @@ pub enum EventKind {
     WorkspaceClosed,
     WorkspaceRenamed,
     WorkspaceFocused,
+    WorktreeCreated,
+    WorktreeOpened,
+    WorktreeRemoved,
     TabCreated,
     TabClosed,
     TabRenamed,
@@ -240,6 +250,8 @@ pub enum EventData {
     },
     WorkspaceClosed {
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<WorkspaceInfo>,
     },
     WorkspaceRenamed {
         workspace_id: String,
@@ -247,6 +259,20 @@ pub enum EventData {
     },
     WorkspaceFocused {
         workspace_id: String,
+    },
+    WorktreeCreated {
+        workspace: WorkspaceInfo,
+        worktree: WorktreeInfo,
+    },
+    WorktreeOpened {
+        workspace: WorkspaceInfo,
+        worktree: WorktreeInfo,
+        already_open: bool,
+    },
+    WorktreeRemoved {
+        workspace_id: String,
+        worktree: WorktreeInfo,
+        forced: bool,
     },
     TabCreated {
         tab: TabInfo,
