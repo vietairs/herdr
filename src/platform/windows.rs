@@ -257,7 +257,7 @@ fn session_processes_from_entries(child_pid: u32, entries: &[WindowsProcessEntry
 
     let mut pids = vec![child_pid];
     pids.extend(
-        descendant_entries(child_pid, &entries)
+        descendant_entries(child_pid, entries)
             .into_iter()
             .map(|entry| entry.pid),
     );
@@ -407,7 +407,7 @@ fn read_process_value<T: Copy>(process: HANDLE, address: *const c_void) -> Optio
 }
 
 fn read_unicode_string(process: HANDLE, unicode: UNICODE_STRING) -> Option<String> {
-    if unicode.Buffer.is_null() || unicode.Length == 0 || unicode.Length % 2 != 0 {
+    if unicode.Buffer.is_null() || unicode.Length == 0 || !unicode.Length.is_multiple_of(2) {
         return None;
     }
 
@@ -445,14 +445,16 @@ mod tests {
         let cwd = std::env::temp_dir().join(format!("herdr-cwd-test-{}", std::process::id()));
         fs::create_dir_all(&cwd).expect("create cwd fixture");
 
-        let mut child = Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 10"])
+        let shell =
+            std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into());
+        let mut child = Command::new(shell)
+            .args(["/D", "/Q", "/C", "ping -n 11 127.0.0.1 > NUL"])
             .current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn powershell");
+            .expect("spawn cmd");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut observed = None;

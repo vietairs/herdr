@@ -93,11 +93,6 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Install Rust tools
-        uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2
-        with:
-          tool: cargo-nextest
-
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
@@ -112,10 +107,19 @@ jobs:
       - name: Run Windows checks
         shell: pwsh
         run: |
-          cargo fmt --check
-          cargo clippy --bin herdr --locked --target x86_64-pc-windows-msvc -- -D warnings
-          cargo nextest run --locked --target x86_64-pc-windows-msvc -E "binary(herdr)" --status-level fail --final-status-level slow --failure-output final --success-output never
-          cargo build --locked --target x86_64-pc-windows-msvc
+          $ErrorActionPreference = "Stop"
+          function Invoke-Checked {
+            param([string]$Command, [string[]]$Arguments)
+            & $Command @Arguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "command failed with exit code $LASTEXITCODE`: $Command $($Arguments -join ' ')"
+            }
+          }
+          Invoke-Checked cargo @("fmt", "--check")
+          Invoke-Checked cargo @("clippy", "--bin", "herdr", "--locked", "--target", "x86_64-pc-windows-msvc", "--", "-D", "warnings")
+          Invoke-Checked cargo @("test", "--locked", "--target", "x86_64-pc-windows-msvc", "--bin", "herdr", "windows_")
+          Invoke-Checked cargo @("test", "--locked", "--target", "x86_64-pc-windows-msvc", "--bin", "herdr", "server::client_transport::tests")
+          Invoke-Checked cargo @("build", "--locked", "--target", "x86_64-pc-windows-msvc")
 
       - name: Smoke ConPTY pane
         shell: pwsh

@@ -935,7 +935,7 @@ fn pane_shell_from(configured_shell: &str, env_shell: Option<String>) -> String 
     #[cfg(windows)]
     {
         let _ = env_shell;
-        return default_pane_shell();
+        default_pane_shell()
     }
 
     #[cfg(not(windows))]
