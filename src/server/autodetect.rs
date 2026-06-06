@@ -55,7 +55,7 @@ fn is_server_listening_at(socket_path: &Path) -> bool {
     #[cfg(windows)]
     {
         let _ = socket_path;
-        return read_server_status().ok().flatten().is_some();
+        read_server_status().ok().flatten().is_some()
     }
 
     #[cfg(not(windows))]

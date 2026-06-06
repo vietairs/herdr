@@ -465,7 +465,7 @@ fn parse_file_uri_cwd(uri: &str) -> Option<PathBuf> {
         {
             path.remove(0);
         }
-        return Some(PathBuf::from(path.replace('/', "\\")));
+        Some(PathBuf::from(path.replace('/', "\\")))
     }
 
     #[cfg(not(windows))]

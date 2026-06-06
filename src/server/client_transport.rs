@@ -531,21 +531,40 @@ fn client_read_loop(
 mod tests {
     use super::*;
     use interprocess::local_socket::traits::Listener as _;
+    use std::path::PathBuf;
+
+    struct TestSocketPath(PathBuf);
+
+    impl Drop for TestSocketPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
 
     fn unique_test_path(name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+        let filename = format!("h{}-{nanos}.sock", std::process::id());
+        #[cfg(unix)]
+        {
+            let _ = name;
+            PathBuf::from("/tmp").join(filename)
+        }
+        #[cfg(windows)]
+        {
+            std::env::temp_dir().join(format!("herdr-{name}-{filename}"))
+        }
     }
 
-    fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, std::path::PathBuf) {
+    fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, TestSocketPath) {
         let path = unique_test_path(name);
+        let _ = std::fs::remove_file(&path);
         let listener = crate::ipc::bind_local_listener(&path).unwrap();
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
-        (client, server, path)
+        (client, server, TestSocketPath(path))
     }
 
     #[test]
