@@ -153,6 +153,33 @@ fn input_events_within_limits(events: &[ClientInputEvent]) -> bool {
     true
 }
 
+#[cfg(windows)]
+fn set_client_recv_timeout(
+    stream: &LocalStream,
+    timeout: Option<Duration>,
+    context: &'static str,
+    client_id: u64,
+) -> io::Result<()> {
+    match stream.set_recv_timeout(timeout) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            debug!(client_id, err = %err, context, "client socket receive timeout unavailable");
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(not(windows))]
+fn set_client_recv_timeout(
+    stream: &LocalStream,
+    timeout: Option<Duration>,
+    _context: &'static str,
+    _client_id: u64,
+) -> io::Result<()> {
+    stream.set_recv_timeout(timeout)
+}
+
 /// Handles the client handshake on a blocking thread.
 ///
 /// Reads the `Hello` message, validates the version, sends `Welcome`,
@@ -167,9 +194,12 @@ pub(crate) fn handle_client_handshake(
     // the handshake thread needs blocking I/O for read_message/write_message.
     stream.set_nonblocking(false)?;
 
-    if let Err(err) = stream.set_recv_timeout(Some(HANDSHAKE_TIMEOUT)) {
-        debug!(client_id, err = %err, "client handshake read timeout unavailable");
-    }
+    set_client_recv_timeout(
+        &stream,
+        Some(HANDSHAKE_TIMEOUT),
+        "client handshake read timeout unavailable",
+        client_id,
+    )?;
 
     // Read the Hello message.
     let hello: ClientMessage = match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
@@ -268,9 +298,12 @@ pub(crate) fn handle_client_handshake(
     };
     protocol::write_message(&mut stream, &welcome).map_err(|e| io::Error::other(e.to_string()))?;
 
-    if let Err(err) = stream.set_recv_timeout(None) {
-        debug!(client_id, err = %err, "failed to clear client handshake read timeout");
-    }
+    set_client_recv_timeout(
+        &stream,
+        None,
+        "failed to clear client handshake read timeout",
+        client_id,
+    )?;
 
     // Create separate channels for reliable control messages and droppable renders.
     let (control_tx, control_rx) = std::sync::mpsc::channel::<Vec<u8>>();

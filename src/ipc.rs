@@ -79,14 +79,7 @@ pub(crate) fn prepare_socket_path(
         Ok(_) => {
             return Err(io::Error::new(io::ErrorKind::AddrInUse, busy_message(path)));
         }
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::ConnectionRefused
-                    | io::ErrorKind::NotFound
-                    | io::ErrorKind::TimedOut
-                    | io::ErrorKind::WouldBlock
-            ) => {}
+        Err(err) if stale_socket_connect_error(err.kind()) => {}
         Err(err) => return Err(err),
     }
 
@@ -97,6 +90,13 @@ pub(crate) fn prepare_socket_path(
     }
 
     Ok(())
+}
+
+fn stale_socket_connect_error(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound | io::ErrorKind::TimedOut
+    ) || (cfg!(windows) && kind == io::ErrorKind::WouldBlock)
 }
 
 pub(crate) fn socket_file_identity(path: &Path) -> io::Result<SocketFileIdentity> {
@@ -159,11 +159,24 @@ pub(crate) fn restrict_socket_permissions(_path: &Path, _mode: u32) -> io::Resul
     Ok(())
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
     use std::path::PathBuf;
 
+    #[test]
+    fn stale_socket_connect_errors_keep_unix_would_block_strict() {
+        assert!(stale_socket_connect_error(io::ErrorKind::ConnectionRefused));
+        assert!(stale_socket_connect_error(io::ErrorKind::NotFound));
+        assert!(stale_socket_connect_error(io::ErrorKind::TimedOut));
+        assert_eq!(
+            stale_socket_connect_error(io::ErrorKind::WouldBlock),
+            cfg!(windows)
+        );
+    }
+
+    #[cfg(windows)]
     #[test]
     fn remove_socket_file_if_owned_compares_windows_marker_contents() {
         let path = temp_socket_marker_path("same-len-marker");
@@ -180,6 +193,7 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    #[cfg(windows)]
     fn temp_socket_marker_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("herdr-{name}-{}.sock", std::process::id()))
     }

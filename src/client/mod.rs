@@ -448,6 +448,33 @@ fn requested_keybindings() -> ClientKeybindings {
     }
 }
 
+#[cfg(windows)]
+fn set_handshake_recv_timeout(
+    stream: &LocalStream,
+    timeout: Option<Duration>,
+    context: &'static str,
+) -> Result<(), ClientError> {
+    match stream.set_recv_timeout(timeout) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            debug!(err = %err, context, "client socket receive timeout unavailable");
+            Ok(())
+        }
+        Err(err) => Err(ClientError::ConnectionFailed(err)),
+    }
+}
+
+#[cfg(not(windows))]
+fn set_handshake_recv_timeout(
+    stream: &LocalStream,
+    timeout: Option<Duration>,
+    _context: &'static str,
+) -> Result<(), ClientError> {
+    stream
+        .set_recv_timeout(timeout)
+        .map_err(ClientError::ConnectionFailed)
+}
+
 /// Performs the client→server handshake.
 ///
 /// Sends Hello with the terminal size and protocol version, reads the Welcome
@@ -484,13 +511,17 @@ fn do_handshake(
         .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
 
     // Read Welcome.
-    if let Err(err) = stream.set_recv_timeout(Some(Duration::from_secs(5))) {
-        debug!(err = %err, "client handshake read timeout unavailable");
-    }
+    set_handshake_recv_timeout(
+        stream,
+        Some(Duration::from_secs(5)),
+        "client handshake read timeout unavailable",
+    )?;
     let welcome: ServerMessage = protocol::read_message(stream, MAX_FRAME_SIZE)?;
-    if let Err(err) = stream.set_recv_timeout(None) {
-        debug!(err = %err, "failed to clear client handshake read timeout");
-    }
+    set_handshake_recv_timeout(
+        stream,
+        None,
+        "failed to clear client handshake read timeout",
+    )?;
 
     match welcome {
         ServerMessage::Welcome {
