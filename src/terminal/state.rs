@@ -15,7 +15,7 @@ use crate::terminal::TerminalId;
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
 
-const CLAUDE_WORKING_HOLD: Duration = Duration::from_millis(1200);
+const SCREEN_WORKING_HOLD: Duration = Duration::from_millis(1200);
 const STALE_HOOK_IDLE_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -640,7 +640,7 @@ impl TerminalState {
                 )
                 .is_some_and(|(observed_at, reported_at)| {
                     reported_at >= observed_at
-                        && reported_at.duration_since(observed_at) < CLAUDE_WORKING_HOLD
+                        && reported_at.duration_since(observed_at) < SCREEN_WORKING_HOLD
                 })
     }
 
@@ -783,21 +783,21 @@ pub(crate) fn stabilize_agent_state(
     previous: AgentState,
     raw: AgentState,
     now: std::time::Instant,
-    last_claude_working_at: &mut Option<std::time::Instant>,
+    last_screen_working_at: &mut Option<std::time::Instant>,
 ) -> AgentState {
-    if agent != Some(Agent::Claude) {
+    if !matches!(agent, Some(Agent::Claude | Agent::Droid)) {
         return raw;
     }
 
     match raw {
         AgentState::Working => {
-            *last_claude_working_at = Some(now);
+            *last_screen_working_at = Some(now);
             AgentState::Working
         }
         AgentState::Blocked => AgentState::Blocked,
         AgentState::Idle if previous == AgentState::Working => {
-            if last_claude_working_at
-                .is_some_and(|last_working| now.duration_since(last_working) < CLAUDE_WORKING_HOLD)
+            if last_screen_working_at
+                .is_some_and(|last_working| now.duration_since(last_working) < SCREEN_WORKING_HOLD)
             {
                 AgentState::Working
             } else {
@@ -814,7 +814,7 @@ pub(crate) fn stabilize_agent_detection(
     detection: crate::detect::AgentDetection,
     process_exited: bool,
     now: std::time::Instant,
-    last_claude_working_at: &mut Option<std::time::Instant>,
+    last_screen_working_at: &mut Option<std::time::Instant>,
 ) -> AgentState {
     if process_exited {
         return detection.state;
@@ -825,7 +825,7 @@ pub(crate) fn stabilize_agent_detection(
         previous,
         detection.state,
         now,
-        last_claude_working_at,
+        last_screen_working_at,
     )
 }
 
@@ -871,7 +871,7 @@ mod tests {
             Some(Agent::Claude),
             AgentState::Working,
             AgentState::Idle,
-            now + CLAUDE_WORKING_HOLD + std::time::Duration::from_millis(1),
+            now + SCREEN_WORKING_HOLD + std::time::Duration::from_millis(1),
             &mut last_working,
         );
         assert_eq!(state, AgentState::Idle);
@@ -924,7 +924,84 @@ mod tests {
     }
 
     #[test]
-    fn non_claude_states_are_unchanged() {
+    fn droid_working_is_sticky_for_short_gap() {
+        let now = std::time::Instant::now();
+        let mut last_working = None;
+
+        let working = stabilize_agent_state(
+            Some(Agent::Droid),
+            AgentState::Idle,
+            AgentState::Working,
+            now,
+            &mut last_working,
+        );
+        assert_eq!(working, AgentState::Working);
+
+        let still_working = stabilize_agent_state(
+            Some(Agent::Droid),
+            AgentState::Working,
+            AgentState::Idle,
+            now + std::time::Duration::from_millis(400),
+            &mut last_working,
+        );
+        assert_eq!(still_working, AgentState::Working);
+    }
+
+    #[test]
+    fn droid_transitions_to_idle_after_hold_expires() {
+        let now = std::time::Instant::now();
+        let mut last_working = Some(now);
+
+        let state = stabilize_agent_state(
+            Some(Agent::Droid),
+            AgentState::Working,
+            AgentState::Idle,
+            now + SCREEN_WORKING_HOLD + std::time::Duration::from_millis(1),
+            &mut last_working,
+        );
+        assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn process_exit_idle_bypasses_droid_working_hold() {
+        let now = std::time::Instant::now();
+        let mut last_working = Some(now);
+
+        let state = stabilize_agent_detection(
+            Some(Agent::Droid),
+            AgentState::Working,
+            AgentDetection {
+                state: AgentState::Idle,
+                skip_state_update: false,
+                visible_blocker: false,
+                visible_idle: false,
+                visible_working: false,
+            },
+            true,
+            now + std::time::Duration::from_millis(100),
+            &mut last_working,
+        );
+
+        assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn droid_blocked_bypasses_working_hold() {
+        let now = std::time::Instant::now();
+        let mut last_working = Some(now);
+
+        let state = stabilize_agent_state(
+            Some(Agent::Droid),
+            AgentState::Working,
+            AgentState::Blocked,
+            now + std::time::Duration::from_millis(100),
+            &mut last_working,
+        );
+        assert_eq!(state, AgentState::Blocked);
+    }
+
+    #[test]
+    fn codex_states_are_unchanged_by_screen_working_hold() {
         let now = std::time::Instant::now();
         let mut last_working = None;
 
@@ -1290,7 +1367,7 @@ mod tests {
             None,
             None,
             None,
-            now + CLAUDE_WORKING_HOLD + Duration::from_millis(1),
+            now + SCREEN_WORKING_HOLD + Duration::from_millis(1),
         );
 
         assert_eq!(terminal.state, AgentState::Idle);
@@ -1325,7 +1402,7 @@ mod tests {
             Some("permission".into()),
             None,
             None,
-            now + CLAUDE_WORKING_HOLD + Duration::from_millis(1),
+            now + SCREEN_WORKING_HOLD + Duration::from_millis(1),
         );
 
         assert_eq!(terminal.state, AgentState::Blocked);
@@ -1337,7 +1414,7 @@ mod tests {
             false,
             true,
             false,
-            now + CLAUDE_WORKING_HOLD + Duration::from_millis(800),
+            now + SCREEN_WORKING_HOLD + Duration::from_millis(800),
         );
 
         assert_eq!(terminal.state, AgentState::Working);

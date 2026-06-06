@@ -413,6 +413,7 @@ fn spawn_basic_detection_task(
         let mut last_visible_idle = false;
         let mut last_visible_working = false;
         let mut last_visible_signal_refresh = None;
+        let mut last_screen_working_at = None;
         let mut last_process_check = std::time::Instant::now();
         let mut last_foreground_pgid = None;
         let mut has_process_probe = false;
@@ -431,6 +432,7 @@ fn spawn_basic_detection_task(
                     last_visible_idle = false;
                     last_visible_working = false;
                     last_visible_signal_refresh = None;
+                    last_screen_working_at = None;
                     last_process_check = std::time::Instant::now();
                     last_foreground_pgid = None;
                     has_process_probe = false;
@@ -514,13 +516,23 @@ fn spawn_basic_detection_task(
                 if agent_presence.observe_process_probe(new_agent) {
                     agent = agent_presence.current_agent();
                     agent_changed = previous_agent != agent;
+                    if agent_changed {
+                        last_screen_working_at = None;
+                    }
                 }
             }
 
             let Some(detection) = detection_update_for_publish(agent, &content, false) else {
                 continue;
             };
-            let new_state = detection.state;
+            let new_state = crate::terminal::state::stabilize_agent_detection(
+                agent,
+                state,
+                detection,
+                false,
+                now,
+                &mut last_screen_working_at,
+            );
             let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
             let visible_idle = detection.visible_idle && new_state == AgentState::Idle;
             let visible_working = detection.visible_working && new_state == AgentState::Working;
@@ -1529,7 +1541,7 @@ impl PaneRuntime {
                 let mut foreground_shell_exit_reported = false;
                 let mut release_was_active = false;
                 let mut pending_restore_probe = initial_state.detected_agent.is_some();
-                let mut last_claude_working_at = None;
+                let mut last_screen_working_at = None;
                 let mut last_visible_blocker = false;
                 let mut last_visible_idle = false;
                 let mut last_visible_working = false;
@@ -1562,7 +1574,7 @@ impl PaneRuntime {
                             foreground_shell_exit_reported = false;
                             release_was_active = false;
                             pending_restore_probe = false;
-                            last_claude_working_at = None;
+                            last_screen_working_at = None;
                             last_visible_blocker = false;
                             last_visible_idle = false;
                             last_visible_working = false;
@@ -1675,6 +1687,9 @@ impl PaneRuntime {
                             }
                             if changed {
                                 agent = agent_presence.current_agent();
+                                if agent != previous_agent {
+                                    last_screen_working_at = None;
+                                }
                                 if let Some(process_name) = process_name {
                                     info!(
                                         pane = pane_id.raw(),
@@ -1722,7 +1737,7 @@ impl PaneRuntime {
                         detection,
                         process_exited,
                         now,
-                        &mut last_claude_working_at,
+                        &mut last_screen_working_at,
                     );
                     let visible_blocker =
                         detection.visible_blocker && new_state == AgentState::Blocked;
