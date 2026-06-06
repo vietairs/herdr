@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::common::AgentStatus;
@@ -175,6 +177,8 @@ pub struct PluginPaneOpenParams {
     pub cwd: Option<String>,
     #[serde(default)]
     pub focus: bool,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<PluginInvocationContext>,
 }

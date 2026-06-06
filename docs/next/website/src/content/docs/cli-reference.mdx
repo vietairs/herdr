@@ -69,7 +69,7 @@ Use `default` as the session name when you need to stop the default session expl
 
 ```bash
 herdr workspace list
-herdr workspace create [--cwd PATH] [--label TEXT] [--focus] [--no-focus]
+herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
@@ -99,7 +99,7 @@ Worktrees are normal Herdr workspaces with Git checkout provenance. `worktree cr
 
 ```bash
 herdr tab list [--workspace <workspace_id>]
-herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--focus] [--no-focus]
+herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
 herdr tab get <tab_id>
 herdr tab focus <tab_id>
 herdr tab rename <tab_id> <label>
@@ -119,7 +119,7 @@ herdr pane focus --direction left|right|up|down [--pane ID|--current]
 herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]
 herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
 herdr pane rename <pane_id> <label>|--clear
-herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--focus] [--no-focus]
+herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]
 herdr pane swap --direction left|right|up|down [--pane ID|--current]
 herdr pane swap --source-pane ID --target-pane ID
 herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
@@ -197,7 +197,7 @@ herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
 herdr agent attach <target> [--takeover]
-herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--focus|--no-focus] -- <argv...>
+herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
 herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 ```
@@ -288,12 +288,14 @@ herdr plugin storage list --plugin ID --scope global|workspace|project [--worksp
 Managed terminal panes:
 
 ```bash
-herdr plugin pane open --plugin ID --entrypoint ID [--placement split|tab|zoomed] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--focus|--no-focus] -- <argv...>
+herdr plugin pane open --plugin ID --entrypoint ID [--placement split|tab|zoomed] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
 herdr plugin pane focus <pane_id>
 herdr plugin pane close <pane_id>
 ```
 
 `plugin pane open` starts the argv after `--` as a Herdr-managed terminal pane. It can open as a split, a new tab, or a zoomed pane. Native non-terminal plugin panes are a later surface.
+
+`--env KEY=VALUE` can be repeated on process-launching commands. It applies to the newly launched process only. Herdr-managed variables such as `HERDR_SOCKET_PATH`, `HERDR_ENV`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID` stay authoritative when they conflict with caller-provided env.
 
 ## Read sources
 
@@ -311,5 +313,9 @@ herdr plugin pane close <pane_id>
 | `HERDR_CONFIG_PATH` | Override the config file path. |
 | `HERDR_SESSION` | Select a named session for CLI commands. |
 | `HERDR_SOCKET_PATH` | Low-level socket path override. |
+| `HERDR_ENV` | Set to `1` inside Herdr-managed pane processes. |
+| `HERDR_PANE_ID` | Public pane id for the running pane process. |
+| `HERDR_TAB_ID` | Public tab id for the running pane process. |
+| `HERDR_WORKSPACE_ID` | Public workspace id for the running pane process. |
 | `HERDR_LOG` | Set log filter, for example `HERDR_LOG=herdr=debug`. |
 | `HERDR_DISABLE_SOUND` | Disable sound playback even when sound notifications are enabled. |

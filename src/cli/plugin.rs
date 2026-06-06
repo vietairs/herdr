@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::api::schema::{
     Method, PluginActionContext, PluginActionInvokeParams, PluginActionListParams,
     PluginActionRegisterParams, PluginInvocationContext, PluginPaneCloseParams,
@@ -302,6 +304,7 @@ fn plugin_pane_open(args: &[String]) -> std::io::Result<i32> {
     let mut direction = None;
     let mut cwd = None;
     let mut focus = true;
+    let mut env = HashMap::new();
     let mut argv = Vec::new();
 
     let mut index = 0;
@@ -330,6 +333,17 @@ fn plugin_pane_open(args: &[String]) -> std::io::Result<i32> {
                 )?)?);
             }
             "--cwd" => cwd = Some(required_value(args, &mut index, "--cwd")?),
+            "--env" => {
+                let value = required_value(args, &mut index, "--env")?;
+                let (key, value) = match super::parse_env_assignment(&value) {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        eprintln!("{err}");
+                        return Ok(2);
+                    }
+                };
+                env.insert(key, value);
+            }
             "--focus" => {
                 focus = true;
                 index += 1;
@@ -369,6 +383,7 @@ fn plugin_pane_open(args: &[String]) -> std::io::Result<i32> {
         direction,
         cwd,
         focus,
+        env,
         context: Some(PluginInvocationContext {
             workspace_id: None,
             workspace_label: None,
@@ -563,7 +578,7 @@ fn print_plugin_storage_help() {
 
 fn print_plugin_pane_help() {
     eprintln!("herdr plugin pane commands:");
-    eprintln!("  herdr plugin pane open --plugin ID --entrypoint ID [--placement split|tab|zoomed] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--focus|--no-focus] -- <argv...>");
+    eprintln!("  herdr plugin pane open --plugin ID --entrypoint ID [--placement split|tab|zoomed] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>");
     eprintln!("  herdr plugin pane focus <pane_id>");
     eprintln!("  herdr plugin pane close <pane_id>");
 }

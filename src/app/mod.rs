@@ -3205,6 +3205,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: false,
+                env: Default::default(),
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3284,6 +3285,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: true,
+                env: Default::default(),
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3329,6 +3331,7 @@ mod tests {
                 ratio: Some(0.333),
                 cwd: None,
                 focus: false,
+                env: Default::default(),
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3374,6 +3377,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: false,
+                env: Default::default(),
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3415,6 +3419,7 @@ mod tests {
                 split: Some(crate::api::schema::SplitDirection::Right),
                 focus: true,
                 argv: vec![exiting_test_command().into()],
+                env: Default::default(),
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();

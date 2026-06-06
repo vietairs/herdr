@@ -18,6 +18,8 @@ pub struct PaneSplitParams {
     pub cwd: Option<String>,
     #[serde(default)]
     pub focus: bool,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

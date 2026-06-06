@@ -7,9 +7,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use portable_pty::CommandBuilder;
 use serde_json::{json, Map, Value};
 
-use crate::layout::PaneId;
-
 pub(crate) const HERDR_PANE_ID_ENV_VAR: &str = "HERDR_PANE_ID";
+pub(crate) const HERDR_TAB_ID_ENV_VAR: &str = "HERDR_TAB_ID";
+pub(crate) const HERDR_WORKSPACE_ID_ENV_VAR: &str = "HERDR_WORKSPACE_ID";
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 2;
@@ -360,18 +360,8 @@ pub(crate) struct HermesUninstallResult {
     pub updated_config: bool,
 }
 
-pub(crate) fn apply_pane_env(
-    cmd: &mut CommandBuilder,
-    pane_id: PaneId,
-    public_pane_id: Option<&str>,
-) {
+pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
     cmd.env(crate::api::SOCKET_PATH_ENV_VAR, crate::api::socket_path());
-    cmd.env(
-        HERDR_PANE_ID_ENV_VAR,
-        public_pane_id
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("p_{}", pane_id.raw())),
-    );
 }
 
 pub(crate) const INSTALL_WARNING_PREFIX: &str = "warning:";

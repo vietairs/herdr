@@ -52,6 +52,7 @@ impl App {
             cwd,
             focus,
             label,
+            env,
         } = params;
         let ws_idx = if let Some(workspace_id) = workspace_id {
             let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
@@ -74,6 +75,10 @@ impl App {
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
+        let extra_env = match super::env::normalize_launch_env(env) {
+            Ok(env) => env,
+            Err((code, message)) => return encode_error(id, &code, message),
+        };
         let result = self
             .state
             .workspaces
@@ -87,6 +92,7 @@ impl App {
                     scrollback_limit_bytes,
                     host_terminal_theme,
                     crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
+                    extra_env,
                 )
             });
         match result {

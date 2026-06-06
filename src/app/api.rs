@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 mod agents;
+mod env;
 mod integrations;
 mod panes;
 mod plugins;
@@ -328,7 +329,6 @@ impl App {
         let Some((ws_idx, pane_state)) = self.find_pane(pane_id) else {
             return false;
         };
-        let public_pane_id = self.public_pane_id(ws_idx, pane_id);
         let terminal_id = pane_state.attached_terminal_id.clone();
         let Some(terminal) = self.state.terminals.get(&terminal_id) else {
             return false;
@@ -340,6 +340,9 @@ impl App {
             .get(&terminal_id)
             .map(|runtime| runtime.current_size())
             .unwrap_or_else(|| self.state.estimate_pane_size());
+        let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
+            return false;
+        };
         let runtime = match crate::terminal::TerminalRuntime::spawn(
             pane_id,
             rows,
@@ -348,10 +351,10 @@ impl App {
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
             crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
+            &launch_env,
             self.event_tx.clone(),
             self.render_notify.clone(),
             self.render_dirty.clone(),
-            public_pane_id.as_deref(),
         ) {
             Ok(runtime) => runtime,
             Err(err) => {
@@ -1268,6 +1271,7 @@ mod tests {
             0,
             crate::terminal_theme::TerminalTheme::default(),
             crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            &crate::pane::PaneLaunchEnv::default(),
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1360,6 +1364,7 @@ mod tests {
             0,
             crate::terminal_theme::TerminalTheme::default(),
             crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            &crate::pane::PaneLaunchEnv::default(),
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

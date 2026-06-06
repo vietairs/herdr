@@ -129,6 +129,7 @@ fn request_uses_dot_method_names() {
             cwd: Some("/tmp".into()),
             focus: true,
             label: Some("api".into()),
+            env: Default::default(),
         }),
     };
 
@@ -657,6 +658,7 @@ fn plugin_pane_open_request_round_trips() {
             direction: Some(SplitDirection::Right),
             cwd: Some("/tmp".into()),
             focus: true,
+            env: [("HERDR_ROLE".to_string(), "board".to_string())].into(),
             context: Some(PluginInvocationContext {
                 workspace_id: Some("1".into()),
                 workspace_label: Some("api".into()),
@@ -677,6 +679,7 @@ fn plugin_pane_open_request_round_trips() {
 
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["method"], "plugin.pane.open");
+    assert_eq!(json["params"]["env"]["HERDR_ROLE"], "board");
     let restored: Request = serde_json::from_value(json).unwrap();
     assert_eq!(restored, request);
 }

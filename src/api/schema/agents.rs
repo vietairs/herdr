@@ -43,6 +43,8 @@ pub struct AgentStartParams {
     #[serde(default)]
     pub focus: bool,
     pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

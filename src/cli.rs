@@ -19,6 +19,19 @@ mod tab;
 mod workspace;
 mod worktree;
 
+pub(crate) fn parse_env_assignment(raw: &str) -> Result<(String, String), String> {
+    let Some((key, value)) = raw.split_once('=') else {
+        return Err("env must use KEY=VALUE".into());
+    };
+    if key.is_empty() {
+        return Err("env key must not be empty".into());
+    }
+    if key.contains('\0') || value.contains('\0') {
+        return Err("env must not contain NUL bytes".into());
+    }
+    Ok((key.to_string(), value.to_string()))
+}
+
 pub enum CommandOutcome {
     Handled(i32),
     NotCli,
@@ -948,6 +961,22 @@ mod tests {
         assert_eq!(
             super::channel_set_install_action(None),
             super::ChannelSetInstallAction::RunSelfUpdate
+        );
+    }
+
+    #[test]
+    fn parse_env_assignment_accepts_empty_values() {
+        assert_eq!(
+            super::parse_env_assignment("HERDR_ROLE=").unwrap(),
+            ("HERDR_ROLE".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn parse_env_assignment_requires_key_value_separator() {
+        assert_eq!(
+            super::parse_env_assignment("HERDR_ROLE").unwrap_err(),
+            "env must use KEY=VALUE"
         );
     }
 }

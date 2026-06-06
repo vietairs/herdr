@@ -305,6 +305,10 @@ impl App {
                 format!("pane {target_pane_id} not found"),
             );
         };
+        let extra_env = match super::env::normalize_launch_env(params.env.clone()) {
+            Ok(env) => env,
+            Err((code, message)) => return encode_error(id, &code, message),
+        };
         let direction = match params
             .direction
             .unwrap_or(crate::api::schema::SplitDirection::Right)
@@ -328,6 +332,7 @@ impl App {
             cols.max(10),
             cwd,
             &params.argv,
+            extra_env,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
             params.focus || params.placement == PluginPanePlacement::Zoomed,
@@ -383,6 +388,10 @@ impl App {
             .cwd
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| self.default_cwd_for_workspace(ws_idx));
+        let extra_env = match super::env::normalize_launch_env(params.env.clone()) {
+            Ok(env) => env,
+            Err((code, message)) => return encode_error(id, &code, message),
+        };
         let (rows, cols) = self.state.estimate_pane_size();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
@@ -392,6 +401,7 @@ impl App {
             cols.max(10),
             cwd,
             &params.argv,
+            extra_env,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
         ) {

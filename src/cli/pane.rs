@@ -527,6 +527,7 @@ fn pane_split(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn parse_pane_split_args(args: &[String]) -> Result<PaneSplitParams, String> {
+    let mut env = std::collections::HashMap::new();
     let mut pane_id = None;
     let mut direction = None;
     let mut ratio = None;
@@ -590,13 +591,21 @@ fn parse_pane_split_args(args: &[String]) -> Result<PaneSplitParams, String> {
                 focus = false;
                 index += 1;
             }
+            "--env" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --env".into());
+                };
+                let (key, value) = super::parse_env_assignment(value)?;
+                env.insert(key, value);
+                index += 2;
+            }
             other => return Err(format!("unknown option: {other}")),
         }
     }
 
     let Some(direction) = direction else {
         return Err(
-            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--focus] [--no-focus]"
+            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]"
                 .into(),
         );
     };
@@ -608,6 +617,7 @@ fn parse_pane_split_args(args: &[String]) -> Result<PaneSplitParams, String> {
         ratio,
         cwd,
         focus,
+        env,
     })
 }
 
@@ -1405,7 +1415,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane rename <pane_id> <label>|--clear");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!(
-        "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--focus] [--no-focus]"
+        "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]"
     );
     eprintln!("  herdr pane swap --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  herdr pane swap --source-pane ID --target-pane ID");

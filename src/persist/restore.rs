@@ -10,7 +10,7 @@ use tracing::{error, warn};
 use crate::detect::AgentState;
 use crate::events::AppEvent;
 use crate::layout::{Node, PaneId, TileLayout};
-use crate::pane::PaneState;
+use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
 use crate::workspace::Workspace;
 
@@ -354,10 +354,12 @@ fn restore_workspace(
     let mut failed_imports = 0;
 
     for (idx, tab_snap) in snap.tabs.iter().enumerate() {
+        let tab_number = snap.public_tab_numbers.get(idx).copied().unwrap_or(idx + 1);
         let (restored_tab, tab_failed_imports) = restore_tab(
             tab_snap,
             history.and_then(|history| history.tabs.get(idx)),
-            idx + 1,
+            tab_number,
+            &workspace_id,
             rows,
             cols,
             runtime_context,
@@ -438,6 +440,7 @@ fn restore_tab(
     snap: &TabSnapshot,
     history: Option<&TabHistorySnapshot>,
     number: usize,
+    workspace_id: &str,
     rows: u16,
     cols: u16,
     runtime_context: &RestoreRuntimeContext<'_>,
@@ -502,6 +505,19 @@ fn restore_tab(
         let public_pane_id = old_pane_id
             .and_then(|old_id| public_pane_ids_by_old_raw.get(&old_id))
             .map(String::as_str);
+        let launch_env = public_pane_id
+            .map(|pane_id| {
+                PaneLaunchEnv::from_extra(Vec::new()).with_identity(
+                    workspace_id.to_string(),
+                    format!(
+                        "{}:t{}",
+                        workspace_id,
+                        crate::workspace::encode_public_number(number)
+                    ),
+                    pane_id.to_string(),
+                )
+            })
+            .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
         let pending_native_agent_restore = if was_imported {
@@ -570,11 +586,11 @@ fn restore_tab(
                     runtime_context.scrollback_limit_bytes,
                     crate::terminal_theme::TerminalTheme::default(),
                     runtime_context.shell_config,
+                    &launch_env,
                     startup.initial_history_ansi,
                     runtime_context.events.clone(),
                     runtime_context.render_notify.clone(),
                     runtime_context.render_dirty.clone(),
-                    public_pane_id,
                 )
             }
 
@@ -588,11 +604,11 @@ fn restore_tab(
                     runtime_context.scrollback_limit_bytes,
                     crate::terminal_theme::TerminalTheme::default(),
                     runtime_context.shell_config,
+                    &launch_env,
                     startup.initial_history_ansi,
                     runtime_context.events.clone(),
                     runtime_context.render_notify.clone(),
                     runtime_context.render_dirty.clone(),
-                    public_pane_id,
                 )
             }
         };

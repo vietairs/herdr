@@ -51,7 +51,11 @@ impl App {
                 .and_then(|ws_idx| self.seed_cwd_from_workspace(ws_idx));
             self.resolve_new_terminal_cwd(follow_cwd)
         });
-        match self.create_workspace_with_options(cwd, params.focus) {
+        let extra_env = match super::env::normalize_launch_env(params.env) {
+            Ok(env) => env,
+            Err((code, message)) => return encode_error(id, &code, message),
+        };
+        match self.create_workspace_with_launch_env(cwd, params.focus, extra_env) {
             Ok(index) => {
                 if let Some(label) = params.label {
                     if let Some(workspace) = self.state.workspaces.get_mut(index) {

@@ -45,6 +45,10 @@ impl App {
         let Some((ws_idx, target_pane_id)) = target else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
+        let extra_env = match super::env::normalize_launch_env(params.env) {
+            Ok(env) => env,
+            Err((code, message)) => return encode_error(id, &code, message),
+        };
         let (rows, cols) = self.state.estimate_pane_size();
         let split_cwd = params.cwd.map(std::path::PathBuf::from).or_else(|| {
             let follow_cwd = self.state.workspaces.get(ws_idx).and_then(|ws| {
@@ -80,6 +84,7 @@ impl App {
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 shell_config,
+                extra_env,
                 params.focus,
             ),
             None => ws.split_pane(
@@ -91,6 +96,7 @@ impl App {
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 shell_config,
+                extra_env,
                 params.focus,
             ),
         };
