@@ -548,21 +548,44 @@ impl App {
     }
 
     pub(crate) fn start_worktree_remove(&mut self) {
-        let Some(remove) = &mut self.state.worktree_remove else {
+        let Some((workspace_id, repo_root, path, force)) =
+            self.state.worktree_remove.as_mut().and_then(|remove| {
+                if remove.removing {
+                    return None;
+                }
+                #[cfg(windows)]
+                if !remove.force_confirmation
+                    && crate::worktree::checkout_has_dirty_files(&remove.path).unwrap_or(false)
+                {
+                    remove.force_confirmation = true;
+                    remove.error = None;
+                    return None;
+                }
+                remove.removing = true;
+                remove.error = None;
+                Some((
+                    remove.workspace_id.clone(),
+                    remove.repo_root.clone(),
+                    remove.path.clone(),
+                    remove.force_confirmation,
+                ))
+            })
+        else {
             return;
         };
-        if remove.removing {
-            return;
-        }
-        remove.removing = true;
-        remove.error = None;
-        let force = remove.force_confirmation;
 
-        let command =
-            crate::worktree::build_worktree_remove_command(&remove.repo_root, &remove.path, force);
-        tracing::info!(workspace_id = %remove.workspace_id, path = %remove.path.display(), force, "starting git worktree remove");
-        let path = remove.path.clone();
-        let workspace_id = remove.workspace_id.clone();
+        #[cfg(windows)]
+        if let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == workspace_id)
+        {
+            self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
+        }
+
+        let command = crate::worktree::build_worktree_remove_command(&repo_root, &path, force);
+        tracing::info!(workspace_id = %workspace_id, path = %path.display(), force, "starting git worktree remove");
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = crate::worktree::run_worktree_command(&command);
@@ -694,6 +717,23 @@ impl App {
                 }
                 self.render_dirty.store(true, Ordering::Release);
                 self.render_notify.notify_one();
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn shutdown_workspace_terminal_runtimes_for_worktree_remove(
+        &mut self,
+        ws_idx: usize,
+    ) {
+        for terminal_id in self.state.terminal_ids_for_workspace(ws_idx) {
+            if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
+                tracing::debug!(
+                    workspace_index = ws_idx,
+                    terminal_id = %terminal_id,
+                    "shutting down terminal runtime before Windows worktree removal"
+                );
+                runtime.shutdown();
             }
         }
     }
@@ -1212,15 +1252,19 @@ mod tests {
         app.open_remove_linked_worktree_confirmation(0);
 
         app.start_worktree_remove();
-        let safe_event = wait_for_worktree_event(&mut app);
-        match safe_event {
-            AppEvent::WorktreeRemoveFinished(result) => {
-                assert_eq!(result.workspace_id, workspace_id);
-                assert_eq!(result.path, checkout);
-                assert!(result.result.is_err());
-                app.handle_worktree_remove_finished(result);
+
+        #[cfg(not(windows))]
+        {
+            let safe_event = wait_for_worktree_event(&mut app);
+            match safe_event {
+                AppEvent::WorktreeRemoveFinished(result) => {
+                    assert_eq!(result.workspace_id, workspace_id);
+                    assert_eq!(result.path, checkout);
+                    assert!(result.result.is_err());
+                    app.handle_worktree_remove_finished(result);
+                }
+                other => panic!("unexpected event: {other:?}"),
             }
-            other => panic!("unexpected event: {other:?}"),
         }
 
         let remove = app.state.worktree_remove.as_ref().unwrap();
