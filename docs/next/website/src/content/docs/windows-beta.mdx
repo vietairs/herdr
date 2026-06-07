@@ -3,7 +3,11 @@ title: Windows beta
 description: Native Windows support status, supported workflows, and known limitations.
 ---
 
-Native Windows support is beta. It runs as the same Herdr version as Linux and macOS, but some Unix features are intentionally unavailable on Windows.
+Native Windows support is experimental beta.
+
+Herdr on Windows uses ConPTY and Windows process/runtime behavior instead of the Unix PTY model Herdr was originally built around. Some Herdr features map cleanly to Windows, and some do not. This preview is not a commitment that every Linux/macOS feature will become fully supported on Windows.
+
+The goal of the beta is to learn from real use: install success, pane reliability, agent workflows, bug volume, missing features, and whether Windows users are getting enough value from Herdr. Based on that feedback, Windows support may graduate to stable, stay preview-only while it matures, or be reduced if the maintenance cost is not justified.
 
 Install native Windows beta builds with PowerShell:
 
@@ -11,7 +15,7 @@ Install native Windows beta builds with PowerShell:
 $env:HERDR_CHANNEL="preview"; powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
 ```
 
-Windows beta builds ship through the preview channel first. The Windows installer stores releases under `%USERPROFILE%\.herdr\packages\standalone\releases`, points `%LOCALAPPDATA%\Programs\Herdr\bin` at the current release, and keeps a small number of older releases so running processes do not block updates.
+Windows beta builds ship only through the preview channel. The Windows installer stores releases under `%USERPROFILE%\.herdr\packages\standalone\releases`, points `%LOCALAPPDATA%\Programs\Herdr\bin` at the current release, and keeps a small number of older releases so running processes do not block updates.
 
 For internal beta testing, `HERDR_MANIFEST_URL` can point the installer at a custom manifest instead of Herdr's stable or preview manifest.
 
@@ -49,6 +53,12 @@ Herdr can launch panes in the right directory and can create the initial workspa
 Windows Terminal may support image paste paths for specific agents, but Herdr's own clipboard-image reader is not wired on Windows yet. Treat `alt+v` image paste as unverified until the Windows clipboard bridge is implemented and tested. Remote clipboard image bridging is separate and remains tied to Unix/macOS `herdr --remote`.
 
 Kitty graphics remains experimental and is not claimed as Windows-supported yet. Leave `experimental.kitty_graphics = false` unless you are specifically testing image rendering in Windows Terminal.
+
+## Copy and paste
+
+Herdr's pane text copy works on Windows beta. Drag-select text inside a pane to copy through Herdr.
+
+For paste, use `ctrl+shift+v` in Windows Terminal, or hold `shift` and right-click to use the outer terminal paste action instead of sending the click through Herdr.
 
 ## Not supported on Windows beta
 

@@ -3,7 +3,7 @@ title: Install Herdr
 description: Install, update, and verify Herdr on Linux, macOS, and Windows beta.
 ---
 
-Herdr ships as a single binary for Linux and macOS. Native Windows support is beta.
+Herdr ships stable binaries for Linux and macOS. Native Windows support is preview-only beta.
 
 ## Install
 
@@ -13,7 +13,7 @@ On Linux or macOS, run:
 curl -fsSL https://herdr.dev/install.sh | sh
 ```
 
-On Windows beta, install the preview channel:
+On Windows preview beta, install the preview channel:
 
 ```powershell
 $env:HERDR_CHANNEL="preview"; powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
@@ -126,7 +126,6 @@ Choose the asset that matches your system:
 | Linux aarch64 | `herdr-linux-aarch64` |
 | macOS Intel | `herdr-macos-x86_64` |
 | macOS Apple silicon | `herdr-macos-aarch64` |
-| Windows x86_64 beta | `herdr-windows-x86_64.exe` |
 
 On Linux or macOS, make it executable and move it somewhere on your PATH.
 
@@ -135,6 +134,14 @@ chmod +x herdr-linux-x86_64
 mv herdr-linux-x86_64 ~/.local/bin/herdr
 ```
 
+### Windows beta downloads
+
+Windows binaries are published only on preview releases while native Windows support is in beta. Use the preview installer above for normal testing, or download the Windows asset from a preview GitHub prerelease:
+
+| System | Asset |
+| --- | --- |
+| Windows x86_64 beta | `herdr-windows-x86_64.exe` |
+
 ## Requirements
 
-Herdr supports Linux and macOS. Native Windows support is beta; see [Windows beta](/docs/windows-beta/) for supported workflows and known limitations.
+Stable Herdr releases support Linux and macOS. Native Windows builds are preview-only beta releases; see [Windows beta](/docs/windows-beta/) for supported workflows and known limitations.
