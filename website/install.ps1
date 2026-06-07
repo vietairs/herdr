@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("stable", "preview")]
     [string]$Channel = $env:HERDR_CHANNEL,
     [string]$ManifestUrl = $env:HERDR_MANIFEST_URL,
     [string]$InstallDir = $env:HERDR_INSTALL_DIR,
@@ -13,6 +12,11 @@ $ProgressPreference = "SilentlyContinue"
 
 if ([string]::IsNullOrWhiteSpace($Channel)) {
     $Channel = "preview"
+}
+
+if ($Channel -notin @("stable", "preview")) {
+    Write-Error "Invalid Herdr channel '$Channel'. Use 'preview'."
+    exit 1
 }
 
 function Write-Step {
