@@ -297,6 +297,13 @@ pub(crate) fn apply_pane_env(cmd: &mut CommandBuilder, pane_id: PaneId) {
 pub(crate) fn install_target(
     target: crate::api::schema::IntegrationTarget,
 ) -> io::Result<Vec<String>> {
+    if !integration_target_supported(target) {
+        return Err(io::Error::other(format!(
+            "{} integration is not supported on Windows",
+            integration_target_label(target)
+        )));
+    }
+
     let messages = match target {
         crate::api::schema::IntegrationTarget::Pi => {
             let path = install_pi()?;
@@ -724,7 +731,32 @@ fn integration_target_command_names(
     }
 }
 
+fn integration_target_supported(target: crate::api::schema::IntegrationTarget) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(
+            target,
+            crate::api::schema::IntegrationTarget::Claude
+                | crate::api::schema::IntegrationTarget::Codex
+                | crate::api::schema::IntegrationTarget::Copilot
+                | crate::api::schema::IntegrationTarget::Droid
+                | crate::api::schema::IntegrationTarget::Kimi
+                | crate::api::schema::IntegrationTarget::Qodercli
+        )
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        true
+    }
+}
+
 fn integration_target_available(target: crate::api::schema::IntegrationTarget) -> bool {
+    if !integration_target_supported(target) {
+        return false;
+    }
+
     integration_target_command_names(target)
         .iter()
         .any(|command| command_available(command))
@@ -855,6 +887,9 @@ pub(crate) fn installed_integration_statuses() -> Vec<IntegrationStatus> {
     integration_specs()
         .into_iter()
         .filter_map(|(target, path, expected_version)| {
+            if !integration_target_supported(target) {
+                return None;
+            }
             Some(integration_status_at(target, path.ok()?, expected_version))
         })
         .collect()
@@ -864,6 +899,9 @@ pub(crate) fn integration_recommendations() -> Vec<IntegrationRecommendation> {
     integration_specs()
         .into_iter()
         .filter_map(|(target, path, expected_version)| {
+            if !integration_target_supported(target) {
+                return None;
+            }
             let path = path.ok()?;
             let status = integration_status_at(target, path.clone(), expected_version);
             Some(IntegrationRecommendation {
@@ -2925,6 +2963,89 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_supports_only_cli_hook_integrations() {
+        use crate::api::schema::IntegrationTarget;
+
+        assert!(!integration_target_supported(IntegrationTarget::Pi));
+        assert!(!integration_target_supported(IntegrationTarget::Omp));
+        assert!(!integration_target_supported(IntegrationTarget::Opencode));
+        assert!(!integration_target_supported(IntegrationTarget::Hermes));
+
+        assert!(integration_target_supported(IntegrationTarget::Claude));
+        assert!(integration_target_supported(IntegrationTarget::Codex));
+        assert!(integration_target_supported(IntegrationTarget::Copilot));
+        assert!(integration_target_supported(IntegrationTarget::Droid));
+        assert!(integration_target_supported(IntegrationTarget::Kimi));
+        assert!(integration_target_supported(IntegrationTarget::Qodercli));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_does_not_offer_unsupported_integrations_even_when_commands_exist() {
+        use crate::api::schema::IntegrationTarget;
+
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let bin = base.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", &bin);
+
+        fs::write(bin.join("pi.cmd"), "@echo off\r\n").unwrap();
+        fs::write(bin.join("omp.cmd"), "@echo off\r\n").unwrap();
+        fs::write(bin.join("opencode.cmd"), "@echo off\r\n").unwrap();
+        fs::write(bin.join("hermes.exe"), "").unwrap();
+
+        assert!(!integration_target_available(IntegrationTarget::Pi));
+        assert!(!integration_target_available(IntegrationTarget::Omp));
+        assert!(!integration_target_available(IntegrationTarget::Opencode));
+        assert!(!integration_target_available(IntegrationTarget::Hermes));
+
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_rejects_unsupported_integration_before_config_lookup() {
+        use crate::api::schema::IntegrationTarget;
+
+        let _lock = integration_env_lock();
+        let original_home = std::env::var_os("HOME");
+        let original_userprofile = std::env::var_os("USERPROFILE");
+        let original_homedrive = std::env::var_os("HOMEDRIVE");
+        let original_homepath = std::env::var_os("HOMEPATH");
+        std::env::remove_var("HOME");
+        std::env::remove_var("USERPROFILE");
+        std::env::remove_var("HOMEDRIVE");
+        std::env::remove_var("HOMEPATH");
+
+        let err = install_target(IntegrationTarget::Pi).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "pi integration is not supported on Windows"
+        );
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+        if let Some(userprofile) = original_userprofile {
+            std::env::set_var("USERPROFILE", userprofile);
+        }
+        if let Some(homedrive) = original_homedrive {
+            std::env::set_var("HOMEDRIVE", homedrive);
+        }
+        if let Some(homepath) = original_homepath {
+            std::env::set_var("HOMEPATH", homepath);
+        }
+    }
+
     #[test]
     #[cfg(unix)]
     fn command_available_requires_executable_file_on_path() {
@@ -3005,7 +3126,7 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn hermes_availability_checks_windows_install_layout() {
+    fn hermes_layout_can_exist_without_making_unsupported_target_available() {
         let _lock = integration_env_lock();
         let base = unique_base();
         let local_app_data = base.join("local-app-data");
@@ -3017,7 +3138,8 @@ mod tests {
         std::env::set_var("LOCALAPPDATA", &local_app_data);
         std::env::set_var("PATH", "");
 
-        assert!(integration_target_available(
+        assert!(hermes_install_layout_available());
+        assert!(!integration_target_available(
             crate::api::schema::IntegrationTarget::Hermes
         ));
 
