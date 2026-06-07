@@ -30,14 +30,23 @@ impl UpdateChannelConfig {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct UpdateConfig {
+    #[serde(default = "default_update_channel")]
     pub channel: UpdateChannelConfig,
 }
 
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            channel: UpdateChannelConfig::Stable,
+            channel: default_update_channel(),
         }
+    }
+}
+
+fn default_update_channel() -> UpdateChannelConfig {
+    if cfg!(windows) {
+        UpdateChannelConfig::Preview
+    } else {
+        UpdateChannelConfig::Stable
     }
 }
 
@@ -714,9 +723,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn update_channel_defaults_stable_and_parses() {
+    fn update_channel_defaults_for_platform_and_parses() {
         let default_config = Config::default();
-        assert_eq!(default_config.update.channel, UpdateChannelConfig::Stable);
+        assert_eq!(default_config.update.channel, default_update_channel());
 
         let toml = r#"
 [update]
