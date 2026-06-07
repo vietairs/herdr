@@ -408,6 +408,12 @@ struct PtyIoActorRunner {
 }
 
 impl PtyIoActorRunner {
+    fn enqueue_write(&mut self, bytes: Bytes) {
+        if !bytes.is_empty() {
+            self.pending_writes.push_back(bytes);
+        }
+    }
+
     fn run(&mut self) {
         let mut should_exit = false;
         while !should_exit {
@@ -515,7 +521,7 @@ impl PtyIoActorRunner {
         match command {
             PtyIoDataCommand::WriteUserInput(bytes) => {
                 if self.state == ActorState::Running {
-                    self.pending_writes.push_back(bytes);
+                    self.enqueue_write(bytes);
                 }
             }
         }
@@ -592,7 +598,7 @@ impl PtyIoActorRunner {
     fn drain_pre_quiesce_commands(&mut self) {
         while let Ok(PtyIoDataCommand::WriteUserInput(bytes)) = self.data_rx.try_recv() {
             if self.state != ActorState::Released {
-                self.pending_writes.push_back(bytes);
+                self.enqueue_write(bytes);
             }
         }
     }
@@ -639,7 +645,9 @@ impl PtyIoActorRunner {
         if self.state == ActorState::Released {
             return;
         }
-        self.pending_writes.extend(terminal_responses);
+        for bytes in terminal_responses {
+            self.enqueue_write(bytes);
+        }
     }
 
     fn flush_pending_writes_once(&mut self) {
@@ -787,6 +795,41 @@ mod tests {
         }
         .expect("actor spawn");
         (handle, peer, read_rx)
+    }
+
+    fn actor_runner_for_unit_test() -> (PtyIoActorRunner, UnixStream) {
+        let (actor_socket, peer) = UnixStream::pair().expect("socket pair");
+        actor_socket
+            .set_nonblocking(true)
+            .expect("actor socket nonblocking");
+        let owned = unsafe { OwnedFd::from_raw_fd(actor_socket.into_raw_fd()) };
+        let (_data_tx, data_rx) = mpsc::channel(ACTOR_COMMAND_BUFFER);
+        let (_control_tx, control_rx) = std_mpsc::channel();
+        let wake_pipe = fd::create_wake_pipe().expect("wake pipe");
+        let runner = PtyIoActorRunner {
+            pane_id: 1,
+            file: std::fs::File::from(owned),
+            data_rx,
+            control_rx,
+            state: ActorState::Running,
+            pending_writes: VecDeque::new(),
+            current_write_offset: 0,
+            wake_read_fd: wake_pipe.read_fd,
+            controls: Arc::new(Mutex::new(SharedPtyControls::default())),
+            on_read: Box::new(|_| PtyReadResult::empty()),
+            on_reader_exit: None,
+            poll_observer: None,
+        };
+        (runner, peer)
+    }
+
+    #[test]
+    fn actor_ignores_empty_user_input_write() {
+        let (mut runner, _peer) = actor_runner_for_unit_test();
+
+        assert!(!runner.handle_data_command(PtyIoDataCommand::WriteUserInput(Bytes::new())));
+
+        assert!(runner.pending_writes.is_empty());
     }
 
     #[test]
