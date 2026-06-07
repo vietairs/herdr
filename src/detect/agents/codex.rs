@@ -152,6 +152,7 @@ fn codex_working_status_line(line: &str) -> bool {
     trimmed.starts_with('•')
         && (trimmed.contains("Working (")
             || trimmed.contains("Waiting for background terminal (")
+            || lower.contains(" • esc to interrupt")
             || lower.contains("reviewing approval request (")
             || (lower.contains("reviewing ") && lower.contains(" approval requests ("))
             || trimmed.contains("Booting MCP server:"))

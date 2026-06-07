@@ -1567,6 +1567,18 @@ mod tests {
     }
 
     #[test]
+    fn codex_generic_interrupt_status_above_current_prompt_stays_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• I need to inspect more code first.\n\n• Investigating code output (44s • esc to interrupt)\n\n\n› Summarize recent commits\n\n  gpt-5.5 high · ~/Codes/herdr",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
     fn codex_background_terminal_status_above_current_prompt_stays_working() {
         let detection = detect_agent(
             Some(Agent::Codex),
