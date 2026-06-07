@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use crate::api::schema::{
     Method, PluginActionContext, PluginActionInvokeParams, PluginActionListParams,
-    PluginActionRegisterParams, PluginInvocationContext, PluginPaneCloseParams,
-    PluginPaneFocusParams, PluginPaneOpenParams, PluginPanePlacement, PluginStorageDeleteParams,
-    PluginStorageGetParams, PluginStorageListParams, PluginStorageScope, PluginStorageSetParams,
-    Request, SplitDirection,
+    PluginActionRegisterParams, PluginInvocationContext, PluginLinkParams, PluginListParams,
+    PluginPaneCloseParams, PluginPaneFocusParams, PluginPaneOpenParams, PluginPanePlacement,
+    PluginStorageDeleteParams, PluginStorageGetParams, PluginStorageListParams, PluginStorageScope,
+    PluginStorageSetParams, PluginUnlinkParams, Request, SplitDirection,
 };
 
 pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
@@ -15,6 +15,9 @@ pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
     };
 
     match subcommand {
+        "link" => plugin_link(&args[1..]),
+        "list" => plugin_list(&args[1..]),
+        "unlink" => plugin_unlink(&args[1..]),
         "action" => run_plugin_action_command(&args[1..]),
         "storage" => run_plugin_storage_command(&args[1..]),
         "pane" => run_plugin_pane_command(&args[1..]),
@@ -27,6 +30,64 @@ pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn plugin_link(args: &[String]) -> std::io::Result<i32> {
+    let Some(path) = args.first() else {
+        eprintln!("usage: herdr plugin link <path> [--disabled]");
+        return Ok(2);
+    };
+    let mut enabled = true;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--disabled" => {
+                enabled = false;
+                index += 1;
+            }
+            "--enabled" => {
+                enabled = true;
+                index += 1;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    print_plugin_response(Method::PluginLink(PluginLinkParams {
+        path: path.clone(),
+        enabled,
+    }))
+}
+
+fn plugin_list(args: &[String]) -> std::io::Result<i32> {
+    let mut plugin_id = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--plugin" => plugin_id = Some(required_value(args, &mut index, "--plugin")?),
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    print_plugin_response(Method::PluginList(PluginListParams { plugin_id }))
+}
+
+fn plugin_unlink(args: &[String]) -> std::io::Result<i32> {
+    let Some(plugin_id) = args.first() else {
+        eprintln!("usage: herdr plugin unlink <plugin_id>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr plugin unlink <plugin_id>");
+        return Ok(2);
+    }
+    print_plugin_response(Method::PluginUnlink(PluginUnlinkParams {
+        plugin_id: plugin_id.clone(),
+    }))
 }
 
 fn run_plugin_action_command(args: &[String]) -> std::io::Result<i32> {
@@ -556,6 +617,9 @@ fn print_plugin_response(method: Method) -> std::io::Result<i32> {
 
 fn print_plugin_help() {
     eprintln!("herdr plugin commands:");
+    eprintln!("  herdr plugin link <path> [--disabled]");
+    eprintln!("  herdr plugin list [--plugin ID]");
+    eprintln!("  herdr plugin unlink <plugin_id>");
     eprintln!("  herdr plugin action <register|list|invoke>");
     eprintln!("  herdr plugin storage <get|set|delete|list>");
     eprintln!("  herdr plugin pane <open|focus|close>");

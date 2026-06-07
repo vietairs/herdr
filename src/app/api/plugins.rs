@@ -2,11 +2,12 @@ use ratatui::layout::Direction;
 
 use super::responses::{encode_error, encode_success};
 use crate::api::schema::{
-    PluginActionInfo, PluginActionInvokeParams, PluginActionListParams, PluginActionRegisterParams,
-    PluginInvocationContext, PluginPaneCloseParams, PluginPaneFocusParams, PluginPaneInfo,
-    PluginPaneOpenParams, PluginPanePlacement, PluginStorageDeleteParams, PluginStorageEntry,
-    PluginStorageGetParams, PluginStorageListParams, PluginStorageScope, PluginStorageSetParams,
-    ResponseResult,
+    InstalledPluginInfo, PluginActionInfo, PluginActionInvokeParams, PluginActionListParams,
+    PluginActionRegisterParams, PluginInvocationContext, PluginLinkParams, PluginListParams,
+    PluginManifestAction, PluginManifestEventHook, PluginPaneCloseParams, PluginPaneFocusParams,
+    PluginPaneInfo, PluginPaneOpenParams, PluginPanePlacement, PluginStorageDeleteParams,
+    PluginStorageEntry, PluginStorageGetParams, PluginStorageListParams, PluginStorageScope,
+    PluginStorageSetParams, PluginUnlinkParams, ResponseResult,
 };
 use crate::app::App;
 
@@ -18,6 +19,58 @@ const PLUGIN_STORAGE_VALUE_MAX_BYTES: usize = 256 * 1024;
 type PluginStoragePrefix = (String, PluginStorageScope, Option<String>, Option<String>);
 
 impl App {
+    pub(super) fn handle_plugin_link(&mut self, id: String, params: PluginLinkParams) -> String {
+        let plugin = match load_plugin_manifest(&params.path, params.enabled) {
+            Ok(plugin) => plugin,
+            Err((code, message)) => return encode_error(id, code, message),
+        };
+        self.state
+            .installed_plugins
+            .insert(plugin.plugin_id.clone(), plugin.clone());
+        self.state.mark_session_dirty();
+        encode_success(id, ResponseResult::PluginLinked { plugin })
+    }
+
+    pub(super) fn handle_plugin_list(&mut self, id: String, params: PluginListParams) -> String {
+        let plugin_id = match params.plugin_id {
+            Some(plugin_id) => {
+                let Some(plugin_id) = normalize_plugin_id(&plugin_id) else {
+                    return invalid_plugin_id(id);
+                };
+                Some(plugin_id)
+            }
+            None => None,
+        };
+        let mut plugins = self
+            .state
+            .installed_plugins
+            .values()
+            .filter(|plugin| {
+                plugin_id
+                    .as_deref()
+                    .is_none_or(|plugin_id| plugin.plugin_id == plugin_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        plugins.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+        encode_success(id, ResponseResult::PluginList { plugins })
+    }
+
+    pub(super) fn handle_plugin_unlink(
+        &mut self,
+        id: String,
+        params: PluginUnlinkParams,
+    ) -> String {
+        let Some(plugin_id) = normalize_plugin_id(&params.plugin_id) else {
+            return invalid_plugin_id(id);
+        };
+        let removed = self.state.installed_plugins.remove(&plugin_id).is_some();
+        if removed {
+            self.state.mark_session_dirty();
+        }
+        encode_success(id, ResponseResult::PluginUnlinked { plugin_id, removed })
+    }
+
     pub(super) fn handle_plugin_action_register(
         &mut self,
         id: String,
@@ -611,6 +664,159 @@ impl App {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct RawPluginManifest {
+    id: String,
+    name: String,
+    version: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    actions: Vec<RawPluginManifestAction>,
+    #[serde(default)]
+    events: Vec<RawPluginManifestEventHook>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPluginManifestAction {
+    id: String,
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    contexts: Vec<crate::api::schema::PluginActionContext>,
+    command: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPluginManifestEventHook {
+    on: String,
+    command: Vec<String>,
+}
+
+fn load_plugin_manifest(
+    path: &str,
+    enabled: bool,
+) -> Result<InstalledPluginInfo, (&'static str, String)> {
+    let path = std::path::PathBuf::from(path);
+    let manifest_path = if path.is_dir() {
+        path.join("herdr-plugin.toml")
+    } else {
+        path
+    };
+    let manifest_path = manifest_path
+        .canonicalize()
+        .map_err(|err| ("plugin_manifest_not_found", err.to_string()))?;
+    let plugin_root = manifest_path
+        .parent()
+        .ok_or_else(|| {
+            (
+                "invalid_plugin_manifest_path",
+                "manifest path has no parent directory".to_string(),
+            )
+        })?
+        .to_path_buf();
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|err| ("plugin_manifest_read_failed", err.to_string()))?;
+    let raw: RawPluginManifest = toml::from_str(&content)
+        .map_err(|err| ("plugin_manifest_parse_failed", err.to_string()))?;
+    let plugin_id = normalize_plugin_id(&raw.id)
+        .ok_or_else(|| ("invalid_plugin_id", "invalid plugin id".to_string()))?;
+    let name = non_empty_trimmed(&raw.name, "invalid_plugin_name", "plugin name is required")?;
+    let version = non_empty_trimmed(
+        &raw.version,
+        "invalid_plugin_version",
+        "plugin version is required",
+    )?;
+    let description = raw
+        .description
+        .map(|description| description.trim().to_string())
+        .filter(|description| !description.is_empty());
+    let mut actions = raw
+        .actions
+        .into_iter()
+        .map(normalize_manifest_action)
+        .collect::<Result<Vec<_>, _>>()?;
+    actions.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut events = raw
+        .events
+        .into_iter()
+        .map(normalize_manifest_event)
+        .collect::<Result<Vec<_>, _>>()?;
+    events.sort_by(|a, b| a.on.cmp(&b.on).then_with(|| a.command.cmp(&b.command)));
+
+    Ok(InstalledPluginInfo {
+        plugin_id,
+        name,
+        version,
+        description,
+        manifest_path: manifest_path.display().to_string(),
+        plugin_root: plugin_root.display().to_string(),
+        enabled,
+        actions,
+        events,
+    })
+}
+
+fn normalize_manifest_action(
+    action: RawPluginManifestAction,
+) -> Result<PluginManifestAction, (&'static str, String)> {
+    let id = normalize_action_id(&action.id)
+        .ok_or_else(|| ("invalid_plugin_action_id", "invalid action id".to_string()))?;
+    let title = non_empty_trimmed(
+        &action.title,
+        "invalid_plugin_action_title",
+        "action title is required",
+    )?;
+    let description = action
+        .description
+        .map(|description| description.trim().to_string())
+        .filter(|description| !description.is_empty());
+    let command = normalize_command(action.command)?;
+    Ok(PluginManifestAction {
+        id,
+        title,
+        description,
+        contexts: action.contexts,
+        command,
+    })
+}
+
+fn normalize_manifest_event(
+    event: RawPluginManifestEventHook,
+) -> Result<PluginManifestEventHook, (&'static str, String)> {
+    let on = non_empty_trimmed(&event.on, "invalid_plugin_event", "event name is required")?;
+    let command = normalize_command(event.command)?;
+    Ok(PluginManifestEventHook { on, command })
+}
+
+fn normalize_command(command: Vec<String>) -> Result<Vec<String>, (&'static str, String)> {
+    let command = command
+        .into_iter()
+        .map(|arg| arg.trim().to_string())
+        .collect::<Vec<_>>();
+    if command.is_empty() || command.iter().any(|arg| arg.is_empty()) {
+        return Err((
+            "invalid_plugin_command",
+            "command must contain non-empty argv strings".to_string(),
+        ));
+    }
+    Ok(command)
+}
+
+fn non_empty_trimmed(
+    value: &str,
+    code: &'static str,
+    message: &'static str,
+) -> Result<String, (&'static str, String)> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        Err((code, message.to_string()))
+    } else {
+        Ok(value)
+    }
+}
+
 fn normalize_plugin_id(value: &str) -> Option<String> {
     normalize_identifier(value, PLUGIN_ID_MAX_CHARS)
 }
@@ -742,6 +948,7 @@ fn storage_entry(
 mod tests {
     use super::*;
     use crate::api::schema::{Method, PluginActionContext, Request, SuccessResponse};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_app() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -758,6 +965,103 @@ mod tests {
         serde_json::from_str::<SuccessResponse>(response)
             .expect("success response")
             .result
+    }
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn write_manifest(root: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(root).unwrap();
+        let manifest = root.join("herdr-plugin.toml");
+        std::fs::write(
+            &manifest,
+            r#"
+id = "example.worktree-bootstrap"
+name = "Worktree Bootstrap"
+version = "0.1.0"
+description = "Prepare new worktrees"
+
+[[actions]]
+id = "bootstrap"
+title = "Bootstrap worktree"
+contexts = ["workspace"]
+command = ["bun", "run", "bootstrap.ts"]
+
+[[events]]
+on = "worktree.created"
+command = ["bun", "run", "bootstrap.ts"]
+"#,
+        )
+        .unwrap();
+        manifest
+    }
+
+    #[test]
+    fn plugin_link_lists_and_unlinks_manifest() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-link");
+        write_manifest(&root);
+
+        let link = app.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::PluginLink(PluginLinkParams {
+                path: root.display().to_string(),
+                enabled: true,
+            }),
+        });
+        let ResponseResult::PluginLinked { plugin } = response_result(&link) else {
+            panic!("expected plugin linked response: {link}");
+        };
+        assert_eq!(plugin.plugin_id, "example.worktree-bootstrap");
+        assert_eq!(plugin.name, "Worktree Bootstrap");
+        assert_eq!(plugin.version, "0.1.0");
+        assert_eq!(plugin.plugin_root, root.display().to_string());
+        assert!(plugin.enabled);
+        assert_eq!(plugin.actions.len(), 1);
+        assert_eq!(plugin.actions[0].id, "bootstrap");
+        assert_eq!(plugin.actions[0].command, ["bun", "run", "bootstrap.ts"]);
+        assert_eq!(plugin.events.len(), 1);
+        assert_eq!(plugin.events[0].on, "worktree.created");
+
+        let list = app.handle_api_request(Request {
+            id: "list".into(),
+            method: Method::PluginList(PluginListParams { plugin_id: None }),
+        });
+        let ResponseResult::PluginList { plugins } = response_result(&list) else {
+            panic!("expected plugin list response: {list}");
+        };
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].plugin_id, "example.worktree-bootstrap");
+
+        let unlink = app.handle_api_request(Request {
+            id: "unlink".into(),
+            method: Method::PluginUnlink(PluginUnlinkParams {
+                plugin_id: "example.worktree-bootstrap".into(),
+            }),
+        });
+        assert!(matches!(
+            response_result(&unlink),
+            ResponseResult::PluginUnlinked {
+                plugin_id,
+                removed: true
+            } if plugin_id == "example.worktree-bootstrap"
+        ));
+
+        let list = app.handle_api_request(Request {
+            id: "list-empty".into(),
+            method: Method::PluginList(PluginListParams { plugin_id: None }),
+        });
+        let ResponseResult::PluginList { plugins } = response_result(&list) else {
+            panic!("expected plugin list response: {list}");
+        };
+        assert!(plugins.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

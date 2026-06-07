@@ -8,6 +8,57 @@ use super::panes::PaneInfo;
 use super::workspaces::WorkspaceWorktreeInfo;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginLinkParams {
+    pub path: String,
+    #[serde(default = "super::common::default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PluginListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginUnlinkParams {
+    pub plugin_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstalledPluginInfo {
+    pub plugin_id: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub manifest_path: String,
+    pub plugin_root: String,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<PluginManifestAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<PluginManifestEventHook>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginManifestAction {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<PluginActionContext>,
+    pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginManifestEventHook {
+    pub on: String,
+    pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginActionRegisterParams {
     pub plugin_id: String,
     pub action_id: String,

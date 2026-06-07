@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 mod agents;
 mod env;
 mod integrations;
+mod layouts;
 mod panes;
 mod plugins;
 mod responses;
@@ -761,6 +762,8 @@ impl App {
             Method::PaneMove(params) => return self.handle_pane_move(request.id, params),
             Method::PaneZoom(params) => return self.handle_pane_zoom(request.id, params),
             Method::PaneLayout(params) => return self.handle_pane_layout(request.id, params),
+            Method::LayoutExport(params) => return self.handle_layout_export(request.id, params),
+            Method::LayoutApply(params) => return self.handle_layout_apply(request.id, params),
             Method::PaneNeighbor(params) => return self.handle_pane_neighbor(request.id, params),
             Method::PaneEdges(params) => return self.handle_pane_edges(request.id, params),
             Method::PaneFocusDirection(params) => {
@@ -798,6 +801,15 @@ impl App {
             }
             Method::IntegrationUninstall(params) => {
                 return self.handle_integration_uninstall(request.id, params);
+            }
+            Method::PluginLink(params) => {
+                return self.handle_plugin_link(request.id, params);
+            }
+            Method::PluginList(params) => {
+                return self.handle_plugin_list(request.id, params);
+            }
+            Method::PluginUnlink(params) => {
+                return self.handle_plugin_unlink(request.id, params);
             }
             Method::PluginActionRegister(params) => {
                 return self.handle_plugin_action_register(request.id, params);

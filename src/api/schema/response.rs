@@ -7,11 +7,12 @@ use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
 };
 use super::panes::{
-    PaneEdgesResult, PaneFocusDirectionResult, PaneInfo, PaneLayoutSnapshot, PaneNeighborResult,
-    PaneReadResult, PaneResizeResult, PaneSwapResult, PaneZoomResult,
+    LayoutDescription, PaneEdgesResult, PaneFocusDirectionResult, PaneInfo, PaneLayoutSnapshot,
+    PaneNeighborResult, PaneReadResult, PaneResizeResult, PaneSwapResult, PaneZoomResult,
 };
 use super::plugins::{
-    PluginActionInfo, PluginInvocationContext, PluginPaneInfo, PluginStorageEntry,
+    InstalledPluginInfo, PluginActionInfo, PluginInvocationContext, PluginPaneInfo,
+    PluginStorageEntry,
 };
 use super::server::ServerCapabilities;
 use super::tabs::TabInfo;
@@ -116,6 +117,12 @@ pub enum ResponseResult {
     PaneLayout {
         layout: PaneLayoutSnapshot,
     },
+    LayoutExport {
+        layout: LayoutDescription,
+    },
+    LayoutApply {
+        layout: LayoutDescription,
+    },
     PaneNeighbor {
         neighbor: PaneNeighborResult,
     },
@@ -165,6 +172,16 @@ pub enum ResponseResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_result: Option<String>,
         manifests: Vec<AgentManifestInfo>,
+    },
+    PluginLinked {
+        plugin: InstalledPluginInfo,
+    },
+    PluginList {
+        plugins: Vec<InstalledPluginInfo>,
+    },
+    PluginUnlinked {
+        plugin_id: String,
+        removed: bool,
     },
     PluginActionRegistered {
         action: PluginActionInfo,

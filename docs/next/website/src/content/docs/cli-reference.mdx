@@ -266,7 +266,17 @@ herdr integration status [--outdated-only]
 
 ## Plugins
 
-Plugin commands expose the early plugin host API. They are for local workflow tools that register actions, store namespaced JSON records, or open managed terminal UIs.
+Plugin commands expose the early plugin host API. They are for local workflow tools that link manifests, register actions, store namespaced JSON records, or open managed terminal UIs.
+
+Local manifests:
+
+```bash
+herdr plugin link <path> [--disabled]
+herdr plugin list [--plugin ID]
+herdr plugin unlink <plugin_id>
+```
+
+`plugin link` accepts a plugin directory containing `herdr-plugin.toml` or a direct manifest path. The first manifest slice records metadata, actions, and event hooks; manifest commands are executed by later runner work.
 
 Actions:
 

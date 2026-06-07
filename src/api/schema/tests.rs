@@ -605,6 +605,156 @@ fn worktree_lifecycle_events_round_trip() {
 }
 
 #[test]
+fn plugin_link_list_unlink_round_trip() {
+    let link = Request {
+        id: "plugin_link".into(),
+        method: Method::PluginLink(PluginLinkParams {
+            path: "/plugins/worktree-bootstrap".into(),
+            enabled: true,
+        }),
+    };
+    let json = serde_json::to_string(&link).unwrap();
+    assert!(json.contains("\"method\":\"plugin.link\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, link);
+
+    let list = Request {
+        id: "plugin_list".into(),
+        method: Method::PluginList(PluginListParams {
+            plugin_id: Some("example.worktree-bootstrap".into()),
+        }),
+    };
+    let json = serde_json::to_string(&list).unwrap();
+    assert!(json.contains("\"method\":\"plugin.list\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, list);
+
+    let unlink = Request {
+        id: "plugin_unlink".into(),
+        method: Method::PluginUnlink(PluginUnlinkParams {
+            plugin_id: "example.worktree-bootstrap".into(),
+        }),
+    };
+    let json = serde_json::to_string(&unlink).unwrap();
+    assert!(json.contains("\"method\":\"plugin.unlink\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, unlink);
+
+    let plugin = InstalledPluginInfo {
+        plugin_id: "example.worktree-bootstrap".into(),
+        name: "Worktree Bootstrap".into(),
+        version: "0.1.0".into(),
+        description: Some("Prepare new worktrees".into()),
+        manifest_path: "/plugins/worktree-bootstrap/herdr-plugin.toml".into(),
+        plugin_root: "/plugins/worktree-bootstrap".into(),
+        enabled: true,
+        actions: vec![PluginManifestAction {
+            id: "bootstrap".into(),
+            title: "Bootstrap worktree".into(),
+            description: None,
+            contexts: vec![PluginActionContext::Workspace],
+            command: vec!["bun".into(), "run".into(), "bootstrap.ts".into()],
+        }],
+        events: vec![PluginManifestEventHook {
+            on: "worktree.created".into(),
+            command: vec!["bun".into(), "run".into(), "bootstrap.ts".into()],
+        }],
+    };
+
+    for response in [
+        SuccessResponse {
+            id: "plugin_link".into(),
+            result: ResponseResult::PluginLinked {
+                plugin: plugin.clone(),
+            },
+        },
+        SuccessResponse {
+            id: "plugin_list".into(),
+            result: ResponseResult::PluginList {
+                plugins: vec![plugin.clone()],
+            },
+        },
+        SuccessResponse {
+            id: "plugin_unlink".into(),
+            result: ResponseResult::PluginUnlinked {
+                plugin_id: plugin.plugin_id.clone(),
+                removed: true,
+            },
+        },
+    ] {
+        let json = serde_json::to_string(&response).unwrap();
+        let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, response);
+    }
+}
+
+#[test]
+fn layout_export_apply_round_trip() {
+    let root = LayoutNode::Split {
+        direction: SplitDirection::Right,
+        ratio: 0.6,
+        first: Box::new(LayoutNode::Pane {
+            pane: LayoutPane {
+                label: Some("editor".into()),
+                cwd: Some("/repo".into()),
+                ..Default::default()
+            },
+        }),
+        second: Box::new(LayoutNode::Pane {
+            pane: LayoutPane {
+                label: Some("tests".into()),
+                command: Some(vec!["sh".into(), "-c".into(), "just test".into()]),
+                env: HashMap::from([("HERDR_ROLE".into(), "tests".into())]),
+                ..Default::default()
+            },
+        }),
+    };
+
+    let export = Request {
+        id: "layout_export".into(),
+        method: Method::LayoutExport(LayoutExportParams {
+            tab_id: Some("w1:1".into()),
+            pane_id: None,
+        }),
+    };
+    let json = serde_json::to_string(&export).unwrap();
+    assert!(json.contains("\"method\":\"layout.export\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, export);
+
+    let apply = Request {
+        id: "layout_apply".into(),
+        method: Method::LayoutApply(LayoutApplyParams {
+            workspace_id: Some("w1".into()),
+            tab_id: None,
+            tab_label: Some("dev".into()),
+            focus: true,
+            root: root.clone(),
+        }),
+    };
+    let json = serde_json::to_string(&apply).unwrap();
+    assert!(json.contains("\"method\":\"layout.apply\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, apply);
+
+    let response = SuccessResponse {
+        id: "layout_export".into(),
+        result: ResponseResult::LayoutExport {
+            layout: LayoutDescription {
+                workspace_id: "w1".into(),
+                tab_id: "w1:1".into(),
+                zoomed: false,
+                focused_pane_id: "w1-1".into(),
+                root,
+            },
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
 fn create_response_round_trips_with_root_pane() {
     let response = SuccessResponse {
         id: "req_2".into(),

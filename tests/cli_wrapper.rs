@@ -2741,6 +2741,67 @@ fn wait_agent_status_exits_when_idle_status_matches() {
 }
 
 #[test]
+fn plugin_link_list_unlink_cli_smoke_test() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let plugin_dir = base.join("plugins").join("layout");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    fs::write(
+        plugin_dir.join("herdr-plugin.toml"),
+        r#"
+id = "example.layout"
+name = "Layout"
+version = "0.1.0"
+description = "Apply a preferred Herdr layout"
+
+[[actions]]
+id = "apply"
+title = "Apply layout"
+contexts = ["workspace"]
+command = ["sh", "-c", "echo layout"]
+
+[[events]]
+on = "worktree.created"
+command = ["sh", "-c", "echo worktree"]
+"#,
+    )
+    .unwrap();
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let linked = run_cli_json(
+        &socket_path,
+        &["plugin", "link", plugin_dir.to_str().unwrap()],
+    );
+    assert_eq!(linked["result"]["type"], "plugin_linked");
+    assert_eq!(linked["result"]["plugin"]["plugin_id"], "example.layout");
+    assert_eq!(linked["result"]["plugin"]["actions"][0]["id"], "apply");
+    assert_eq!(
+        linked["result"]["plugin"]["events"][0]["on"],
+        "worktree.created"
+    );
+
+    let listed = run_cli_json(&socket_path, &["plugin", "list"]);
+    assert_eq!(listed["result"]["type"], "plugin_list");
+    assert_eq!(
+        listed["result"]["plugins"][0]["plugin_id"],
+        "example.layout"
+    );
+
+    let unlinked = run_cli_json(&socket_path, &["plugin", "unlink", "example.layout"]);
+    assert_eq!(unlinked["result"]["type"], "plugin_unlinked");
+    assert_eq!(unlinked["result"]["removed"], true);
+
+    let listed = run_cli_json(&socket_path, &["plugin", "list"]);
+    assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn wait_agent_status_exits_immediately_when_status_already_matches() {
     let base = unique_test_dir();
     let config_home = base.join("config");

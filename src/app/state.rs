@@ -10,6 +10,9 @@ use crate::selection::Selection;
 pub(crate) type PluginActionRegistry =
     std::collections::HashMap<String, crate::api::schema::PluginActionInfo>;
 
+pub(crate) type InstalledPluginRegistry =
+    std::collections::HashMap<String, crate::api::schema::InstalledPluginInfo>;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PluginStorageKey {
     pub plugin_id: String,
@@ -1404,6 +1407,8 @@ pub struct AppState {
     pub agent_manifest_update_status: crate::detect::manifest_update::ManifestUpdateStatus,
     /// Result messages from the latest integration install action.
     pub integration_install_messages: Vec<String>,
+    /// Installed or linked plugins known to this running Herdr instance.
+    pub(crate) installed_plugins: InstalledPluginRegistry,
     /// Runtime plugin actions registered through the socket API.
     pub(crate) plugin_actions: PluginActionRegistry,
     /// Namespaced plugin storage records.
@@ -1740,6 +1745,7 @@ impl AppState {
             agent_manifest_update_status:
                 crate::detect::manifest_update::ManifestUpdateStatus::default(),
             integration_install_messages: Vec::new(),
+            installed_plugins: std::collections::HashMap::new(),
             plugin_actions: std::collections::HashMap::new(),
             plugin_storage: std::collections::HashMap::new(),
             plugin_panes: std::collections::HashMap::new(),

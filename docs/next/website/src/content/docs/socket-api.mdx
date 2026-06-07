@@ -86,10 +86,11 @@ Raw socket method names use dot notation:
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Layout | `layout.export`, `layout.apply` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
-| Plugins | `plugin.action.register`, `plugin.action.list`, `plugin.action.invoke`, `plugin.storage.get`, `plugin.storage.set`, `plugin.storage.delete`, `plugin.storage.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
+| Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
 
 Some CLI commands are conveniences around these methods. For example, `herdr agent wait` resolves an agent target and then subscribes to pane agent state events.
 
@@ -116,6 +117,59 @@ pane.
 `zoomed`, outer `area`, `focused_pane_id`, pane rects, and split rects/ratios.
 `pane.neighbor` and `pane.edges` include that same layout snapshot so clients
 can make the next decision without private layout state.
+
+`layout.export` returns a portable tab layout tree. Omit `tab_id` and `pane_id`
+to export the active tab, pass `tab_id` to export that tab, or pass `pane_id` to
+export the tab containing that pane.
+
+```json
+{"id":"req_export","method":"layout.export","params":{"tab_id":"w1:t1"}}
+```
+
+The response includes `workspace_id`, `tab_id`, `zoomed`, `focused_pane_id`, and
+`root`. `root` is a BSP tree of `pane` and `split` nodes. Pane nodes can include
+`pane_id`, `label`, `cwd`, `foreground_cwd`, and argv `command`. Split nodes use
+`direction` (`right` or `down`), `ratio`, `first`, and `second`.
+
+`layout.apply` creates a fresh tab from a declarative tree. If `tab_id` is
+provided, Herdr creates the replacement tab first and then closes the old tab.
+This restores structure, labels, cwd, env, and optional argv commands; it does
+not preserve live PTYs, scrollback, or running processes.
+
+```json
+{
+  "id": "req_apply",
+  "method": "layout.apply",
+  "params": {
+    "workspace_id": "wabc",
+    "tab_label": "dev",
+    "focus": true,
+    "root": {
+      "type": "split",
+      "direction": "right",
+      "ratio": 0.65,
+      "first": {
+        "type": "pane",
+        "label": "editor",
+        "cwd": "/repo"
+      },
+      "second": {
+        "type": "pane",
+        "label": "tests",
+        "cwd": "/repo",
+        "command": ["sh", "-c", "just test"],
+        "env": { "HERDR_ROLE": "tests" }
+      }
+    }
+  }
+}
+```
+
+Process-launching methods accept an `env` object. Herdr applies those key/value
+pairs to the newly launched process only. Herdr also injects `HERDR_SOCKET_PATH`,
+`HERDR_ENV=1`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID` into
+managed pane processes. Herdr-managed variables are authoritative when they
+conflict with caller-provided env.
 
 `pane.swap` supports directional and explicit forms:
 
@@ -217,7 +271,41 @@ Worktree commands also emit lifecycle events. `worktree.create` emits `workspace
 
 ## Plugin APIs
 
-The plugin API is an early host surface for local workflow tools. It does not require a manifest yet. A plugin process can register actions, store namespaced JSON records, and ask Herdr to open a managed terminal pane for its UI.
+The plugin API is an early host surface for local workflow tools. A plugin can be a local executable package with a `herdr-plugin.toml` manifest, or a process that registers actions directly. A plugin process can register actions, store namespaced JSON records, and ask Herdr to open a managed terminal pane for its UI.
+
+Link a local plugin manifest:
+
+```json
+{"id":"req_plugin_link","method":"plugin.link","params":{"path":"/path/to/plugin","enabled":true}}
+```
+
+The path can be a plugin directory containing `herdr-plugin.toml` or a direct manifest path. The manifest shape for this slice is:
+
+```toml
+id = "example.worktree-bootstrap"
+name = "Worktree Bootstrap"
+version = "0.1.0"
+description = "Prepare new worktrees"
+
+[[actions]]
+id = "bootstrap"
+title = "Bootstrap worktree"
+contexts = ["workspace"]
+command = ["bun", "run", "bootstrap.ts"]
+
+[[events]]
+on = "worktree.created"
+command = ["bun", "run", "bootstrap.ts"]
+```
+
+List or unlink linked plugins:
+
+```json
+{"id":"req_plugin_list","method":"plugin.list","params":{}}
+{"id":"req_plugin_unlink","method":"plugin.unlink","params":{"plugin_id":"example.worktree-bootstrap"}}
+```
+
+In this early slice, linking validates and records manifest metadata. Manifest actions and event hooks are not executed until the runner work lands.
 
 Register an action:
 

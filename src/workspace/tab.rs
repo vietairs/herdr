@@ -303,6 +303,32 @@ impl Tab {
         )
     }
 
+    pub fn split_focused_argv_command_with_ratio(
+        &mut self,
+        direction: Direction,
+        ratio: f32,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        argv: &[String],
+        launch_env: &PaneLaunchEnv,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<NewPane> {
+        self.split_focused_with_runtime(
+            direction,
+            Some(ratio),
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            launch_env,
+            Some(SplitCommand::Argv { argv, launch_env }),
+        )
+    }
+
     fn split_focused_with_runtime(
         &mut self,
         direction: Direction,

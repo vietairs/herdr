@@ -743,6 +743,37 @@ impl Workspace {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn split_pane_argv_command_with_ratio(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        ratio: f32,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        argv: &[String],
+        extra_env: Vec<(String, String)>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        focus_new_pane: bool,
+    ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
+        self.split_pane_with_runtime(
+            pane_id,
+            direction,
+            Some(ratio),
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            extra_env,
+            focus_new_pane,
+            Some(argv),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn split_pane_with_runtime(
         &mut self,
         pane_id: PaneId,
@@ -766,16 +797,29 @@ impl Workspace {
         let previous_focus = tab.layout.focused();
         tab.layout.focus_pane(pane_id);
         let new_pane = match if let Some(argv) = argv {
-            tab.split_focused_argv_command(
-                direction,
-                rows,
-                cols,
-                cwd,
-                argv,
-                &launch_env,
-                scrollback_limit_bytes,
-                host_terminal_theme,
-            )
+            match ratio {
+                Some(ratio) => tab.split_focused_argv_command_with_ratio(
+                    direction,
+                    ratio,
+                    rows,
+                    cols,
+                    cwd,
+                    argv,
+                    &launch_env,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                ),
+                None => tab.split_focused_argv_command(
+                    direction,
+                    rows,
+                    cols,
+                    cwd,
+                    argv,
+                    &launch_env,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                ),
+            }
         } else {
             match ratio {
                 Some(ratio) => tab.split_focused_with_ratio(
