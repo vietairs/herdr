@@ -42,11 +42,15 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            kind: unix
             nextest_filter: all()
           - os: macos-latest
+            kind: unix
             nextest_filter: not binary(live_handoff)
+          - os: windows-latest
+            kind: windows
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -54,9 +58,17 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
+        if: matrix.kind == 'unix'
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Rust
+        if: matrix.kind == 'windows'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
       - name: Install Rust tools
+        if: matrix.kind == 'unix'
         uses: taiki-e/install-action@b550161ef8a7bc4f2a671c0b03a18ac9ccedea1e # v2
         with:
           tool: just,cargo-nextest
@@ -74,37 +86,14 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          key: ${{ matrix.os }}
 
       - name: Run checks
+        if: matrix.kind == 'unix'
         run: just ci '${{ matrix.nextest_filter }}'
 
-  check-windows:
-    name: check (windows)
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.15.2
-
-      - name: Restore cargo cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-          key: windows-x86_64-pc-windows-msvc
-
       - name: Run Windows checks
+        if: matrix.kind == 'windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -122,6 +111,7 @@ jobs:
           Invoke-Checked cargo @("build", "--locked", "--target", "x86_64-pc-windows-msvc")
 
       - name: Smoke ConPTY pane
+        if: matrix.kind == 'windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -150,7 +140,7 @@ jobs:
             Start-Sleep -Seconds 2
             $read = & $exe agent read smoke --source recent --lines 40 --format text
             $text = $read -join "`n"
-            if ($text -notmatch "Directory of") {
+            if ($text -notmatch "File\(s\)" -or $text -notmatch "Dir\(s\)") {
               throw "pane read did not include cmd.exe directory output: $text"
             }
           } finally {

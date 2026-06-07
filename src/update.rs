@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::env;
+#[cfg(not(windows))]
 use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -519,11 +520,13 @@ fn check_homebrew_latest() -> Result<Option<Version>, String> {
 // Download + install
 // ---------------------------------------------------------------------------
 
+#[cfg(not(windows))]
 struct DownloadedUpdate {
     current_exe: PathBuf,
     tmp_path: Option<PathBuf>,
 }
 
+#[cfg(not(windows))]
 impl Drop for DownloadedUpdate {
     fn drop(&mut self) {
         if let Some(tmp_path) = self.tmp_path.take() {
@@ -533,6 +536,7 @@ impl Drop for DownloadedUpdate {
 }
 
 /// Download a release to a prepared executable temp file without touching the running server.
+#[cfg(not(windows))]
 fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
     let current_exe = env::current_exe().map_err(|e| format!("can't find current binary: {e}"))?;
 
@@ -592,6 +596,7 @@ fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
     })
 }
 
+#[cfg(not(windows))]
 fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String> {
     let tmp_path = update
         .tmp_path
@@ -1955,6 +1960,9 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
             "installing {} with the Windows installer...",
             release.label()
         );
+        if let Some(sha256) = &release.sha256 {
+            tracing::debug!(sha256 = %sha256, "selected Windows update asset has checksum");
+        }
         install_windows_update_with_installer(channel)?;
         let updated_exe = windows_installed_herdr_exe_path()?;
         eprintln!("installed {}", release.label());
@@ -1971,8 +1979,6 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
         print_outdated_integration_notice_with_updated_binary(&updated_exe);
 
         print_running_session_update_outcomes(&server_update_outcomes, &release);
-
-        return Ok(release.version);
     }
 
     #[cfg(not(windows))]
