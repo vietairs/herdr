@@ -1,13 +1,13 @@
 use super::super::{has_confirmation_prompt, has_interrupt_pattern, AgentState};
 
 pub(super) fn detect(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
     // Strong blocked patterns are structural Codex UI chrome, so they can win
     // even when the prompt region is visible.
-    if has_codex_strong_blocked_prompt(&lower) {
+    if has_codex_strong_blocked_prompt(content) {
         return AgentState::Blocked;
     }
+
+    let lower = content.to_lowercase();
 
     // Working
     if has_codex_working_status_at_current_prompt(content) {
@@ -35,8 +35,7 @@ pub(super) fn detect(content: &str) -> AgentState {
 }
 
 pub(super) fn has_visible_blocker(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    has_codex_strong_blocked_prompt(&lower)
+    has_codex_strong_blocked_prompt(content)
 }
 
 pub(super) fn has_prompt(content: &str) -> bool {
@@ -84,7 +83,15 @@ fn has_codex_visible_working_without_prompt(content: &str) -> bool {
             .is_some_and(codex_live_working_line)
 }
 
-fn has_codex_strong_blocked_prompt(lower_content: &str) -> bool {
+fn has_codex_strong_blocked_prompt(content: &str) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    let live_region = lines
+        .iter()
+        .rposition(|line| codex_prompt_line(line))
+        .map(|prompt_index| lines[prompt_index + 1..].join("\n"))
+        .unwrap_or_else(|| content.to_string());
+    let lower_content = live_region.to_lowercase();
+
     lower_content.contains("press enter to confirm or esc to cancel")
         || lower_content.contains("enter to submit answer")
         || lower_content.contains("enter to submit all")

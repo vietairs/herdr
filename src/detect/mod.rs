@@ -1472,6 +1472,16 @@ mod tests {
     }
 
     #[test]
+    fn codex_replayed_allow_command_text_above_prompt_is_idle() {
+        let screen = "• Ran grep for blockers\n  └ The phrase allow command? appears in our discussion above.\n\n■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.\n\n\n› Write tests for @filename\n\n  gpt-5.5 high · ~/.herdr/worktrees/herdr/plugin-v1 · plugin-v1 · Context 18% used · 5h 93% left · weekly 71% left";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
     fn codex_generic_confirmation_prompt_is_not_visible_blocker() {
         let detection = detect_agent(
             Some(Agent::Codex),
