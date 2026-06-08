@@ -21,6 +21,7 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 
+mod agent_detection;
 mod input;
 mod kitty_keyboard;
 mod osc;
@@ -28,6 +29,14 @@ mod state;
 mod terminal;
 mod xtgettcap;
 
+use self::agent_detection::{
+    agent_caused_pty_activity_active, baseline_pty_causality, decide_detection_screen_read,
+    decide_screen_detection_publish, detection_update_for_publish, handle_skipped_detection_update,
+    observe_pty_output_activity, DetectionPublishDecision, DetectionScreenReadDecision,
+    DetectionScreenReadInput, PendingIdleConfirmation, PendingWorkingConfirmation,
+    PostTaintWorkingLease, PtyCausalityTracker, ScreenDetectionPublishInput,
+    AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
+};
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub(crate) use self::terminal::{TerminalDirtyPatch, TerminalDirtyPatchOutcome};
 pub use self::{
@@ -108,6 +117,50 @@ async fn publish_state_changed_event(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AgentDetectionPublishUpdate {
+    state: AgentState,
+    visible_blocker: bool,
+    visible_working: bool,
+    process_exited: bool,
+}
+
+async fn apply_agent_detection_publish_update(
+    state_events: mpsc::Sender<AppEvent>,
+    pane_id: PaneId,
+    agent: Option<Agent>,
+    update: AgentDetectionPublishUpdate,
+    observed_at: std::time::Instant,
+    state: &mut AgentState,
+    last_visible_blocker: &mut bool,
+    last_visible_working: &mut bool,
+    last_visible_signal_refresh: &mut Option<std::time::Instant>,
+    foreground_shell_exit_reported: &mut bool,
+) {
+    *state = update.state;
+    *last_visible_blocker = update.visible_blocker;
+    *last_visible_working = update.visible_working;
+    *last_visible_signal_refresh = if update.visible_blocker || update.visible_working {
+        Some(observed_at)
+    } else {
+        None
+    };
+    if update.process_exited {
+        *foreground_shell_exit_reported = true;
+    }
+    publish_state_changed_event(
+        state_events,
+        pane_id,
+        agent,
+        update.state,
+        update.visible_blocker,
+        update.visible_working,
+        update.process_exited,
+        observed_at,
+    )
+    .await;
+}
+
 const AGENT_MISS_CONFIRMATION_ATTEMPTS: u8 = 6;
 const PROCESS_RECHECK_IDENTIFIED: std::time::Duration = std::time::Duration::from_secs(5);
 const PROCESS_RECHECK_MISSING_FOREGROUND_GROUP: std::time::Duration =
@@ -117,22 +170,6 @@ const PROCESS_ACQUISITION_FAST_WINDOW: std::time::Duration = std::time::Duration
 const PROCESS_ACQUISITION_FAST_RECHECK: std::time::Duration = std::time::Duration::from_millis(500);
 const PROCESS_ACQUISITION_SLOW_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
 const PROCESS_ACQUISITION_IDLE_RESET: std::time::Duration = std::time::Duration::from_secs(2);
-const STABLE_VISIBLE_SIGNAL_REFRESH: std::time::Duration = std::time::Duration::from_millis(800);
-const AGENT_PTY_ACTIVITY_WINDOW: std::time::Duration = std::time::Duration::from_millis(1800);
-const AGENT_INPUT_TAINT_WINDOW: std::time::Duration = std::time::Duration::from_millis(1200);
-const AGENT_STARTUP_GRACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
-const AGENT_PENDING_IDLE_RECHECK: std::time::Duration = std::time::Duration::from_millis(100);
-const AGENT_PENDING_IDLE_CONFIRMATIONS: u8 = 3;
-const AGENT_PENDING_IDLE_CAP: std::time::Duration = std::time::Duration::from_millis(700);
-const AGENT_PENDING_WORKING_FAST_RECHECK: std::time::Duration =
-    std::time::Duration::from_millis(100);
-const AGENT_PENDING_WORKING_SLOW_RECHECK: std::time::Duration =
-    std::time::Duration::from_millis(250);
-const AGENT_PENDING_WORKING_FAST_WINDOW: std::time::Duration =
-    std::time::Duration::from_millis(500);
-const AGENT_PENDING_WORKING_CAP: std::time::Duration = std::time::Duration::from_secs(2);
-const AGENT_PENDING_WORKING_CONFIRM_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy)]
 struct AgentDetectionPresence {
@@ -337,307 +374,6 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DetectionPublishState {
-    state: AgentState,
-    visible_blocker: bool,
-    visible_working: bool,
-}
-
-#[derive(Debug, Default)]
-struct PendingIdleConfirmation {
-    started_at: Option<std::time::Instant>,
-    confirmations: u8,
-}
-
-impl PendingIdleConfirmation {
-    fn active(&self) -> bool {
-        self.started_at.is_some()
-    }
-
-    fn clear(&mut self) {
-        self.started_at = None;
-        self.confirmations = 0;
-    }
-
-    fn should_hold_working_to_idle(
-        &mut self,
-        previous: DetectionPublishState,
-        next: DetectionPublishState,
-        agent_changed: bool,
-        process_exited: bool,
-        pty_signal: Option<PtyActivitySignal>,
-        now: std::time::Instant,
-    ) -> bool {
-        let is_working_to_plain_idle = previous.state == AgentState::Working
-            && next.state == AgentState::Idle
-            && !next.visible_blocker
-            && !agent_changed
-            && !process_exited;
-
-        if !is_working_to_plain_idle {
-            self.clear();
-            return false;
-        }
-
-        if pty_signal.is_some_and(|signal| !signal.active && !signal.tainted) {
-            self.clear();
-            return false;
-        }
-
-        let Some(started_at) = self.started_at else {
-            self.started_at = Some(now);
-            self.confirmations = 0;
-            return true;
-        };
-
-        if now.duration_since(started_at) >= AGENT_PENDING_IDLE_CAP {
-            self.clear();
-            return false;
-        }
-
-        self.confirmations = self.confirmations.saturating_add(1);
-        if self.confirmations >= AGENT_PENDING_IDLE_CONFIRMATIONS {
-            self.clear();
-            return false;
-        }
-
-        true
-    }
-}
-
-#[derive(Debug, Default)]
-struct PendingWorkingConfirmation {
-    started_at: Option<std::time::Instant>,
-    last_observed_output_seq: u64,
-}
-
-impl PendingWorkingConfirmation {
-    fn active(&self) -> bool {
-        self.started_at.is_some()
-    }
-
-    fn clear(&mut self) {
-        self.started_at = None;
-        self.last_observed_output_seq = 0;
-    }
-
-    fn recheck_delay(&self, now: std::time::Instant) -> std::time::Duration {
-        let Some(started_at) = self.started_at else {
-            return AGENT_PENDING_WORKING_FAST_RECHECK;
-        };
-        if now.duration_since(started_at) < AGENT_PENDING_WORKING_FAST_WINDOW {
-            AGENT_PENDING_WORKING_FAST_RECHECK
-        } else {
-            AGENT_PENDING_WORKING_SLOW_RECHECK
-        }
-    }
-
-    fn should_hold_idle_to_working(
-        &mut self,
-        previous: DetectionPublishState,
-        next: DetectionPublishState,
-        agent_changed: bool,
-        process_exited: bool,
-        pty_signal: Option<PtyActivitySignal>,
-        now: std::time::Instant,
-    ) -> bool {
-        let is_idle_to_working = previous.state == AgentState::Idle
-            && next.state == AgentState::Working
-            && !next.visible_blocker
-            && !agent_changed
-            && !process_exited;
-
-        if !is_idle_to_working {
-            self.clear();
-            return false;
-        }
-
-        let Some(pty_signal) = pty_signal else {
-            self.clear();
-            return false;
-        };
-        if !pty_signal.active {
-            self.clear();
-            return false;
-        }
-
-        let Some(started_at) = self.started_at else {
-            self.started_at = Some(now);
-            self.last_observed_output_seq = pty_signal.output_seq;
-            return true;
-        };
-
-        if pty_signal.fresh_output && pty_signal.output_seq != self.last_observed_output_seq {
-            self.last_observed_output_seq = pty_signal.output_seq;
-            if now.duration_since(started_at) >= AGENT_PENDING_WORKING_CONFIRM_DELAY {
-                self.clear();
-                return false;
-            }
-        }
-
-        if now.duration_since(started_at) >= AGENT_PENDING_WORKING_CAP {
-            self.clear();
-            return true;
-        }
-
-        true
-    }
-
-    fn should_publish_held_working_before_exit(
-        &mut self,
-        previous: DetectionPublishState,
-        next: DetectionPublishState,
-        process_exited: bool,
-    ) -> bool {
-        if self.started_at.is_none()
-            || !process_exited
-            || previous.state != AgentState::Idle
-            || next.state != AgentState::Idle
-        {
-            return false;
-        }
-
-        self.clear();
-        true
-    }
-}
-
-fn pty_working_transition_is_vetoed(
-    agent: Option<Agent>,
-    previous: DetectionPublishState,
-    next: DetectionPublishState,
-    content: &str,
-) -> bool {
-    previous.state == AgentState::Idle
-        && next.state == AgentState::Working
-        && !next.visible_blocker
-        && crate::detect::agent_activity_veto(agent, content).is_some()
-}
-
-fn should_publish_detection_update(
-    previous: DetectionPublishState,
-    next: DetectionPublishState,
-    agent_changed: bool,
-    process_exited: bool,
-    stable_visible_signal_refresh_due: bool,
-) -> bool {
-    next.state != previous.state
-        || next.visible_blocker != previous.visible_blocker
-        || next.visible_working != previous.visible_working
-        || agent_changed
-        || process_exited
-        || (stable_visible_signal_refresh_due && next.visible_blocker && previous.visible_blocker)
-}
-
-fn stable_visible_signal_refresh_due(
-    previous: DetectionPublishState,
-    next: DetectionPublishState,
-    last_refresh: Option<std::time::Instant>,
-    now: std::time::Instant,
-) -> bool {
-    let stable_visible_signal = next.visible_blocker && previous.visible_blocker;
-
-    stable_visible_signal
-        && last_refresh.is_none_or(|last_refresh| {
-            now.duration_since(last_refresh) >= STABLE_VISIBLE_SIGNAL_REFRESH
-        })
-}
-
-fn detection_update_for_publish(
-    agent: Option<Agent>,
-    content: &str,
-    process_exited: bool,
-) -> Option<crate::detect::AgentDetection> {
-    if crate::detect::should_skip_state_update(agent, content) {
-        return None;
-    }
-
-    if process_exited {
-        return Some(crate::detect::AgentDetection {
-            state: AgentState::Idle,
-            skip_state_update: false,
-            visible_blocker: false,
-            visible_working: false,
-        });
-    }
-
-    let detection = crate::detect::detect_agent(agent, content);
-    (!detection.skip_state_update).then_some(detection)
-}
-
-#[derive(Debug, Default)]
-struct PtyCausalityTracker {
-    last_pty_output_seq: u64,
-    last_input_seq: u64,
-    input_tainted_until: Option<std::time::Instant>,
-    last_agent_pty_at: Option<std::time::Instant>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PtyActivitySignal {
-    active: bool,
-    tainted: bool,
-    fresh_output: bool,
-    output_seq: u64,
-}
-
-fn baseline_pty_causality(tracker: &mut PtyCausalityTracker, pty_output_seq: u64, input_seq: u64) {
-    tracker.last_pty_output_seq = pty_output_seq;
-    tracker.last_input_seq = input_seq;
-    tracker.input_tainted_until = None;
-    tracker.last_agent_pty_at = None;
-}
-
-fn agent_caused_pty_activity_active(
-    pty_output_seq: u64,
-    input_seq: u64,
-    tracker: &mut PtyCausalityTracker,
-    now: std::time::Instant,
-) -> PtyActivitySignal {
-    if input_seq != tracker.last_input_seq {
-        tracker.last_input_seq = input_seq;
-        tracker.input_tainted_until = Some(now + AGENT_INPUT_TAINT_WINDOW);
-        tracker.last_agent_pty_at = None;
-    }
-
-    let tainted = tracker.input_tainted_until.is_some_and(|until| now < until);
-
-    let mut fresh_output = false;
-    if pty_output_seq != tracker.last_pty_output_seq {
-        tracker.last_pty_output_seq = pty_output_seq;
-        if !tainted {
-            tracker.last_agent_pty_at = Some(now);
-            fresh_output = true;
-        }
-    }
-
-    if tainted {
-        return PtyActivitySignal {
-            active: false,
-            tainted: true,
-            fresh_output: false,
-            output_seq: tracker.last_pty_output_seq,
-        };
-    }
-
-    let active = tracker
-        .last_agent_pty_at
-        .is_some_and(|last| now.duration_since(last) < AGENT_PTY_ACTIVITY_WINDOW);
-    PtyActivitySignal {
-        active,
-        tainted: false,
-        fresh_output,
-        output_seq: tracker.last_pty_output_seq,
-    }
-}
-
-fn observe_pty_output_activity(bytes: &[u8], pty_output_seq: &AtomicU64) {
-    if !bytes.is_empty() {
-        pty_output_seq.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 #[cfg(unix)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
@@ -671,10 +407,12 @@ fn spawn_basic_detection_task(
         let mut foreground_shell_exit_reported = false;
         let mut release_was_active = false;
         let mut last_detection_text = String::new();
+        let mut last_screen_scan_pty_output_seq = None;
         let mut pty_causality = PtyCausalityTracker::default();
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
         let mut pending_working = PendingWorkingConfirmation::default();
+        let mut post_taint_working = PostTaintWorkingLease::default();
 
         loop {
             let now_for_sleep = std::time::Instant::now();
@@ -702,10 +440,12 @@ fn spawn_basic_detection_task(
                     foreground_shell_exit_reported = false;
                     release_was_active = false;
                     last_detection_text.clear();
+                    last_screen_scan_pty_output_seq = None;
                     pty_causality = PtyCausalityTracker::default();
                     agent_startup_grace_until = None;
                     pending_idle.clear();
                     pending_working.clear();
+                    post_taint_working.clear();
                 }
             }
 
@@ -794,6 +534,8 @@ fn spawn_basic_detection_task(
                     if agent_changed {
                         pending_idle.clear();
                         pending_working.clear();
+                        post_taint_working.clear();
+                        last_screen_scan_pty_output_seq = None;
                         if agent.is_some() {
                             agent_startup_grace_until = Some(now + AGENT_STARTUP_GRACE_WINDOW);
                             baseline_pty_causality(
@@ -832,10 +574,12 @@ fn spawn_basic_detection_task(
                     agent_startup_grace_until = None;
                     pending_idle.clear();
                     pending_working.clear();
+                    post_taint_working.clear();
                 } else {
                     if now < until {
                         pending_idle.clear();
                         pending_working.clear();
+                        post_taint_working.clear();
                         continue;
                     }
                     baseline_pty_causality(
@@ -844,16 +588,79 @@ fn spawn_basic_detection_task(
                         input_write_seq.load(Ordering::Relaxed),
                     );
                     agent_startup_grace_until = None;
+                    last_screen_scan_pty_output_seq = None;
                     pending_idle.clear();
                     pending_working.clear();
+                    post_taint_working.clear();
+                    continue;
+                }
+            }
+
+            let pty_activity = if agent.is_some() {
+                Some(agent_caused_pty_activity_active(
+                    pty_output_seq.load(Ordering::Relaxed),
+                    input_write_seq.load(Ordering::Relaxed),
+                    &mut pty_causality,
+                    now,
+                ))
+            } else {
+                None
+            };
+            match decide_detection_screen_read(DetectionScreenReadInput {
+                state,
+                agent,
+                pending_idle_active: pending_idle.active(),
+                pending_working_active: pending_working.active(),
+                post_taint_working_active: post_taint_working.active(),
+                agent_changed,
+                process_exited,
+                pty_activity,
+                last_screen_scan_pty_output_seq,
+            }) {
+                DetectionScreenReadDecision::Read => {}
+                DetectionScreenReadDecision::Skip => continue,
+                DetectionScreenReadDecision::Publish {
+                    state: new_state,
+                    visible_blocker,
+                    visible_working,
+                    process_exited: publish_process_exited,
+                } => {
+                    apply_agent_detection_publish_update(
+                        state_events.clone(),
+                        pane_id,
+                        agent,
+                        AgentDetectionPublishUpdate {
+                            state: new_state,
+                            visible_blocker,
+                            visible_working,
+                            process_exited: publish_process_exited,
+                        },
+                        now,
+                        &mut state,
+                        &mut last_visible_blocker,
+                        &mut last_visible_working,
+                        &mut last_visible_signal_refresh,
+                        &mut foreground_shell_exit_reported,
+                    )
+                    .await;
                     continue;
                 }
             }
 
             let content = terminal.detection_text();
+            last_screen_scan_pty_output_seq = pty_activity.map(|signal| signal.output_seq);
             let content_changed = content != last_detection_text;
             last_detection_text.clone_from(&content);
             if !process_exited && crate::detect::should_skip_state_update(agent, &content) {
+                handle_skipped_detection_update(
+                    state,
+                    pty_activity,
+                    &mut post_taint_working,
+                    &mut pty_causality,
+                    pty_output_seq.load(Ordering::Relaxed),
+                    input_write_seq.load(Ordering::Relaxed),
+                    now,
+                );
                 pending_idle.clear();
                 pending_working.clear();
                 continue;
@@ -871,149 +678,62 @@ fn spawn_basic_detection_task(
             let Some(screen_detection) =
                 detection_update_for_publish(agent, &content, process_exited)
             else {
-                pending_idle.clear();
-                pending_working.clear();
-                continue;
-            };
-            let pty_activity = if agent.is_some() {
-                Some(agent_caused_pty_activity_active(
+                handle_skipped_detection_update(
+                    state,
+                    pty_activity,
+                    &mut post_taint_working,
+                    &mut pty_causality,
                     pty_output_seq.load(Ordering::Relaxed),
                     input_write_seq.load(Ordering::Relaxed),
-                    &mut pty_causality,
                     now,
-                ))
-            } else {
-                None
+                );
+                pending_idle.clear();
+                pending_working.clear();
+                continue;
             };
-            let pty_signal = if let Some(signal) = pty_activity {
-                Some(crate::agent_detection_policy::PtySignal {
-                    active: signal.active,
-                    tainted: signal.tainted,
-                })
-            } else {
-                None
-            };
-            let detection = match crate::agent_detection_policy::apply_detection_policy(
-                crate::agent_detection_policy::DetectionPolicyInput {
+            match decide_screen_detection_publish(
+                ScreenDetectionPublishInput {
                     agent,
                     screen_detection,
+                    current_state: state,
+                    last_visible_blocker,
+                    last_visible_working,
+                    last_visible_signal_refresh,
                     process_exited,
-                    startup_grace_active: false,
-                    pty_signal,
-                },
-            ) {
-                crate::agent_detection_policy::DetectionPolicyDecision::Publish(detection) => {
-                    detection
-                }
-                crate::agent_detection_policy::DetectionPolicyDecision::Freeze => {
-                    pending_idle.clear();
-                    pending_working.clear();
-                    continue;
-                }
-            };
-            let new_state = crate::terminal::state::stabilize_agent_detection(detection);
-            let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
-            let visible_working = detection.visible_working && new_state == AgentState::Working;
-
-            let previous_publish = DetectionPublishState {
-                state,
-                visible_blocker: last_visible_blocker,
-                visible_working: last_visible_working,
-            };
-            let next_publish = DetectionPublishState {
-                state: new_state,
-                visible_blocker,
-                visible_working,
-            };
-            let stable_refresh_due = stable_visible_signal_refresh_due(
-                previous_publish,
-                next_publish,
-                last_visible_signal_refresh,
-                now,
-            );
-
-            if pty_working_transition_is_vetoed(agent, previous_publish, next_publish, &content) {
-                pending_idle.clear();
-                pending_working.clear();
-                continue;
-            }
-
-            if pending_working.should_publish_held_working_before_exit(
-                previous_publish,
-                next_publish,
-                process_exited,
-            ) {
-                pending_idle.clear();
-                state = AgentState::Working;
-                last_visible_blocker = false;
-                last_visible_working = false;
-                last_visible_signal_refresh = None;
-                publish_state_changed_event(
-                    state_events.clone(),
-                    pane_id,
-                    agent,
-                    AgentState::Working,
-                    false,
-                    false,
-                    false,
+                    agent_changed,
+                    pty_activity,
+                    content: &content,
                     now,
-                )
-                .await;
-                continue;
-            }
-
-            if pending_working.should_hold_idle_to_working(
-                previous_publish,
-                next_publish,
-                agent_changed,
-                process_exited,
-                pty_activity,
-                now,
+                },
+                &mut pending_idle,
+                &mut pending_working,
+                &mut post_taint_working,
             ) {
-                pending_idle.clear();
-                continue;
-            }
-
-            if pending_idle.should_hold_working_to_idle(
-                previous_publish,
-                next_publish,
-                agent_changed,
-                process_exited,
-                pty_activity,
-                now,
-            ) {
-                pending_working.clear();
-                continue;
-            }
-
-            if should_publish_detection_update(
-                previous_publish,
-                next_publish,
-                agent_changed,
-                process_exited,
-                stable_refresh_due,
-            ) {
-                state = new_state;
-                last_visible_blocker = visible_blocker;
-                last_visible_working = visible_working;
-                if visible_blocker || visible_working {
-                    last_visible_signal_refresh = Some(now);
-                } else {
-                    last_visible_signal_refresh = None;
-                }
-                publish_state_changed_event(
-                    state_events.clone(),
-                    pane_id,
-                    agent,
-                    new_state,
+                DetectionPublishDecision::NoPublish => {}
+                DetectionPublishDecision::Publish {
+                    state: new_state,
                     visible_blocker,
                     visible_working,
-                    process_exited,
-                    now,
-                )
-                .await;
-                if process_exited {
-                    foreground_shell_exit_reported = true;
+                    process_exited: publish_process_exited,
+                } => {
+                    apply_agent_detection_publish_update(
+                        state_events.clone(),
+                        pane_id,
+                        agent,
+                        AgentDetectionPublishUpdate {
+                            state: new_state,
+                            visible_blocker,
+                            visible_working,
+                            process_exited: publish_process_exited,
+                        },
+                        now,
+                        &mut state,
+                        &mut last_visible_blocker,
+                        &mut last_visible_working,
+                        &mut last_visible_signal_refresh,
+                        &mut foreground_shell_exit_reported,
+                    )
+                    .await;
                 }
             }
         }
@@ -1848,10 +1568,8 @@ impl PaneRuntime {
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
-                if result.request_render {
-                    if !render_dirty.swap(true, Ordering::AcqRel) {
-                        render_notify.notify_one();
-                    }
+                if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
+                    render_notify.notify_one();
                 }
                 if let Some(delay) = result.render_delay {
                     let render_notify = render_notify.clone();
@@ -2003,10 +1721,8 @@ impl PaneRuntime {
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
-                if result.request_render {
-                    if !render_dirty.swap(true, Ordering::AcqRel) {
-                        render_notify.notify_one();
-                    }
+                if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
+                    render_notify.notify_one();
                 }
                 if let Some(delay) = result.render_delay {
                     let render_notify = render_notify.clone();
@@ -2084,10 +1800,12 @@ impl PaneRuntime {
                 let mut last_visible_working = false;
                 let mut last_visible_signal_refresh = None;
                 let mut last_detection_text = String::new();
+                let mut last_screen_scan_pty_output_seq = None;
                 let mut pty_causality = PtyCausalityTracker::default();
                 let mut agent_startup_grace_until = None;
                 let mut pending_idle = PendingIdleConfirmation::default();
                 let mut pending_working = PendingWorkingConfirmation::default();
+                let mut post_taint_working = PostTaintWorkingLease::default();
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2124,10 +1842,12 @@ impl PaneRuntime {
                             last_visible_working = false;
                             last_visible_signal_refresh = None;
                             last_detection_text.clear();
+                            last_screen_scan_pty_output_seq = None;
                             pty_causality = PtyCausalityTracker::default();
                             agent_startup_grace_until = None;
                             pending_idle.clear();
                             pending_working.clear();
+                            post_taint_working.clear();
                         }
                     }
 
@@ -2223,6 +1943,8 @@ impl PaneRuntime {
                                 if agent != previous_agent {
                                     pending_idle.clear();
                                     pending_working.clear();
+                                    post_taint_working.clear();
+                                    last_screen_scan_pty_output_seq = None;
                                     if agent.is_some() {
                                         agent_startup_grace_until =
                                             Some(now + AGENT_STARTUP_GRACE_WINDOW);
@@ -2289,12 +2011,15 @@ impl PaneRuntime {
                     if let Some(until) = agent_startup_grace_until {
                         if process_exited {
                             agent_startup_grace_until = None;
+                            last_screen_scan_pty_output_seq = None;
                             pending_idle.clear();
                             pending_working.clear();
+                            post_taint_working.clear();
                         } else {
                             if now < until {
                                 pending_idle.clear();
                                 pending_working.clear();
+                                post_taint_working.clear();
                                 continue;
                             }
                             baseline_pty_causality(
@@ -2305,14 +2030,76 @@ impl PaneRuntime {
                             agent_startup_grace_until = None;
                             pending_idle.clear();
                             pending_working.clear();
+                            post_taint_working.clear();
+                            continue;
+                        }
+                    }
+
+                    let pty_activity = if agent.is_some() {
+                        Some(agent_caused_pty_activity_active(
+                            pty_output_seq.load(Ordering::Relaxed),
+                            input_write_seq_for_task.load(Ordering::Relaxed),
+                            &mut pty_causality,
+                            now,
+                        ))
+                    } else {
+                        None
+                    };
+                    match decide_detection_screen_read(DetectionScreenReadInput {
+                        state,
+                        agent,
+                        pending_idle_active: pending_idle.active(),
+                        pending_working_active: pending_working.active(),
+                        post_taint_working_active: post_taint_working.active(),
+                        agent_changed,
+                        process_exited,
+                        pty_activity,
+                        last_screen_scan_pty_output_seq,
+                    }) {
+                        DetectionScreenReadDecision::Read => {}
+                        DetectionScreenReadDecision::Skip => continue,
+                        DetectionScreenReadDecision::Publish {
+                            state: new_state,
+                            visible_blocker,
+                            visible_working,
+                            process_exited: publish_process_exited,
+                        } => {
+                            apply_agent_detection_publish_update(
+                                state_events.clone(),
+                                pane_id,
+                                agent,
+                                AgentDetectionPublishUpdate {
+                                    state: new_state,
+                                    visible_blocker,
+                                    visible_working,
+                                    process_exited: publish_process_exited,
+                                },
+                                now,
+                                &mut state,
+                                &mut last_visible_blocker,
+                                &mut last_visible_working,
+                                &mut last_visible_signal_refresh,
+                                &mut foreground_shell_exit_reported,
+                            )
+                            .await;
                             continue;
                         }
                     }
 
                     let content = terminal.detection_text();
+                    last_screen_scan_pty_output_seq = pty_activity.map(|signal| signal.output_seq);
                     let content_changed = content != last_detection_text;
                     last_detection_text.clone_from(&content);
                     if detect::should_skip_state_update(agent, &content) {
+                        handle_skipped_detection_update(
+                            state,
+                            pty_activity,
+                            &mut post_taint_working,
+                            &mut pty_causality,
+                            pty_output_seq.load(Ordering::Relaxed),
+                            input_write_seq_for_task.load(Ordering::Relaxed),
+                            now,
+                        );
                         pending_idle.clear();
                         pending_working.clear();
                         continue;
@@ -2330,156 +2117,62 @@ impl PaneRuntime {
                     let Some(screen_detection) =
                         detection_update_for_publish(agent, &content, process_exited)
                     else {
-                        pending_idle.clear();
-                        pending_working.clear();
-                        continue;
-                    };
-                    let pty_activity = if agent.is_some() {
-                        Some(agent_caused_pty_activity_active(
+                        handle_skipped_detection_update(
+                            state,
+                            pty_activity,
+                            &mut post_taint_working,
+                            &mut pty_causality,
                             pty_output_seq.load(Ordering::Relaxed),
                             input_write_seq_for_task.load(Ordering::Relaxed),
-                            &mut pty_causality,
                             now,
-                        ))
-                    } else {
-                        None
+                        );
+                        pending_idle.clear();
+                        pending_working.clear();
+                        continue;
                     };
-                    let pty_signal = if let Some(signal) = pty_activity {
-                        Some(crate::agent_detection_policy::PtySignal {
-                            active: signal.active,
-                            tainted: signal.tainted,
-                        })
-                    } else {
-                        None
-                    };
-                    let detection = match crate::agent_detection_policy::apply_detection_policy(
-                        crate::agent_detection_policy::DetectionPolicyInput {
+                    match decide_screen_detection_publish(
+                        ScreenDetectionPublishInput {
                             agent,
                             screen_detection,
+                            current_state: state,
+                            last_visible_blocker,
+                            last_visible_working,
+                            last_visible_signal_refresh,
                             process_exited,
-                            startup_grace_active: false,
-                            pty_signal,
-                        },
-                    ) {
-                        crate::agent_detection_policy::DetectionPolicyDecision::Publish(
-                            detection,
-                        ) => detection,
-                        crate::agent_detection_policy::DetectionPolicyDecision::Freeze => {
-                            pending_idle.clear();
-                            pending_working.clear();
-                            continue;
-                        }
-                    };
-                    let new_state = crate::terminal::state::stabilize_agent_detection(detection);
-                    let visible_blocker =
-                        detection.visible_blocker && new_state == AgentState::Blocked;
-                    let visible_working =
-                        detection.visible_working && new_state == AgentState::Working;
-
-                    let previous_publish = DetectionPublishState {
-                        state,
-                        visible_blocker: last_visible_blocker,
-                        visible_working: last_visible_working,
-                    };
-                    let next_publish = DetectionPublishState {
-                        state: new_state,
-                        visible_blocker,
-                        visible_working,
-                    };
-                    let stable_refresh_due = stable_visible_signal_refresh_due(
-                        previous_publish,
-                        next_publish,
-                        last_visible_signal_refresh,
-                        now,
-                    );
-
-                    if pty_working_transition_is_vetoed(
-                        agent,
-                        previous_publish,
-                        next_publish,
-                        &content,
-                    ) {
-                        pending_idle.clear();
-                        pending_working.clear();
-                        continue;
-                    }
-
-                    if pending_working.should_publish_held_working_before_exit(
-                        previous_publish,
-                        next_publish,
-                        process_exited,
-                    ) {
-                        pending_idle.clear();
-                        state = AgentState::Working;
-                        last_visible_blocker = false;
-                        last_visible_working = false;
-                        last_visible_signal_refresh = None;
-                        publish_state_changed_event(
-                            state_events.clone(),
-                            pane_id,
-                            agent,
-                            AgentState::Working,
-                            false,
-                            false,
-                            false,
+                            agent_changed,
+                            pty_activity,
+                            content: &content,
                             now,
-                        )
-                        .await;
-                        continue;
-                    }
-
-                    if pending_working.should_hold_idle_to_working(
-                        previous_publish,
-                        next_publish,
-                        agent_changed,
-                        process_exited,
-                        pty_activity,
-                        now,
+                        },
+                        &mut pending_idle,
+                        &mut pending_working,
+                        &mut post_taint_working,
                     ) {
-                        pending_idle.clear();
-                        continue;
-                    }
-
-                    if pending_idle.should_hold_working_to_idle(
-                        previous_publish,
-                        next_publish,
-                        agent_changed,
-                        process_exited,
-                        pty_activity,
-                        now,
-                    ) {
-                        pending_working.clear();
-                        continue;
-                    }
-
-                    if should_publish_detection_update(
-                        previous_publish,
-                        next_publish,
-                        agent_changed,
-                        process_exited,
-                        stable_refresh_due,
-                    ) {
-                        state = new_state;
-                        last_visible_blocker = visible_blocker;
-                        last_visible_working = visible_working;
-                        if visible_blocker || visible_working {
-                            last_visible_signal_refresh = Some(now);
-                        } else {
-                            last_visible_signal_refresh = None;
-                        }
-                        publish_state_changed_event(
-                            state_events.clone(),
-                            pane_id,
-                            agent,
-                            new_state,
+                        DetectionPublishDecision::NoPublish => {}
+                        DetectionPublishDecision::Publish {
+                            state: new_state,
                             visible_blocker,
                             visible_working,
-                            process_exited,
-                            now,
-                        )
-                        .await;
-                        if process_exited {
-                            foreground_shell_exit_reported = true;
+                            process_exited: publish_process_exited,
+                        } => {
+                            apply_agent_detection_publish_update(
+                                state_events.clone(),
+                                pane_id,
+                                agent,
+                                AgentDetectionPublishUpdate {
+                                    state: new_state,
+                                    visible_blocker,
+                                    visible_working,
+                                    process_exited: publish_process_exited,
+                                },
+                                now,
+                                &mut state,
+                                &mut last_visible_blocker,
+                                &mut last_visible_working,
+                                &mut last_visible_signal_refresh,
+                                &mut foreground_shell_exit_reported,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -3320,561 +3013,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_transcript_viewer_suppresses_prompt_idle_publish() {
-        let content = "/ T R A N S C R I P T /\n\n› yeah go ahead\n────────────────────────────────────────────────────────────────────────────────── 100% ─\n ↑/↓ to scroll   pgup/pgdn to page   home/end to jump\n q to quit   esc to edit prev";
-
-        assert!(detection_update_for_publish(Some(Agent::Codex), content, false).is_none());
-    }
-
-    #[test]
-    fn codex_transcript_viewer_suppresses_process_exit_idle_publish() {
-        let content = "/ T R A N S C R I P T /\n\n› yeah go ahead\n────────────────────────────────────────────────────────────────────────────────── 100% ─\n ↑/↓ to scroll   pgup/pgdn to page   home/end to jump\n q to quit   esc to edit prev";
-
-        assert!(detection_update_for_publish(Some(Agent::Codex), content, true).is_none());
-    }
-
-    #[test]
-    fn process_exit_without_transcript_still_reports_idle() {
-        let detection =
-            detection_update_for_publish(Some(Agent::Codex), "Codex finished\n› ", true)
-                .expect("process exit should publish idle outside transcript viewer");
-
-        assert_eq!(detection.state, AgentState::Idle);
-        assert!(!detection.skip_state_update);
-    }
-
-    #[test]
-    fn stable_plain_idle_does_not_republish() {
-        let now = std::time::Instant::now();
-        let previous = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let refresh_due = stable_visible_signal_refresh_due(
-            previous,
-            previous,
-            Some(now - STABLE_VISIBLE_SIGNAL_REFRESH),
-            now,
-        );
-
-        assert!(!should_publish_detection_update(
-            previous,
-            previous,
-            false,
-            false,
-            refresh_due
-        ));
-    }
-
-    #[test]
-    fn stable_visible_working_does_not_republish() {
-        let now = std::time::Instant::now();
-        let previous = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: true,
-        };
-        let refresh_due = stable_visible_signal_refresh_due(
-            previous,
-            previous,
-            Some(now - STABLE_VISIBLE_SIGNAL_REFRESH),
-            now,
-        );
-
-        assert!(!should_publish_detection_update(
-            previous,
-            previous,
-            false,
-            false,
-            refresh_due
-        ));
-    }
-
-    #[test]
-    fn stable_visible_blocker_republishes_for_hook_override_refresh() {
-        let now = std::time::Instant::now();
-        let previous = DetectionPublishState {
-            state: AgentState::Blocked,
-            visible_blocker: true,
-            visible_working: false,
-        };
-        let refresh_due = stable_visible_signal_refresh_due(
-            previous,
-            previous,
-            Some(now - STABLE_VISIBLE_SIGNAL_REFRESH),
-            now,
-        );
-
-        assert!(should_publish_detection_update(
-            previous,
-            previous,
-            false,
-            false,
-            refresh_due
-        ));
-    }
-
-    #[test]
-    fn pending_idle_holds_working_to_plain_idle_until_confirmed() {
-        let now = std::time::Instant::now();
-        let previous = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let next = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let mut pending = PendingIdleConfirmation::default();
-
-        assert!(pending.should_hold_working_to_idle(previous, next, false, false, None, now));
-        assert!(pending.should_hold_working_to_idle(
-            previous,
-            next,
-            false,
-            false,
-            None,
-            now + AGENT_PENDING_IDLE_RECHECK
-        ));
-        assert!(pending.should_hold_working_to_idle(
-            previous,
-            next,
-            false,
-            false,
-            None,
-            now + AGENT_PENDING_IDLE_RECHECK * 2
-        ));
-        assert!(!pending.should_hold_working_to_idle(
-            previous,
-            next,
-            false,
-            false,
-            None,
-            now + AGENT_PENDING_IDLE_RECHECK * 3
-        ));
-    }
-
-    #[test]
-    fn pending_idle_cap_publishes_idle_when_still_quiet() {
-        let now = std::time::Instant::now();
-        let previous = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let next = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let mut pending = PendingIdleConfirmation::default();
-
-        assert!(pending.should_hold_working_to_idle(previous, next, false, false, None, now));
-        assert!(!pending.should_hold_working_to_idle(
-            previous,
-            next,
-            false,
-            false,
-            None,
-            now + AGENT_PENDING_IDLE_CAP
-        ));
-    }
-
-    #[test]
-    fn pending_idle_clears_when_work_resumes_or_blocker_appears() {
-        let now = std::time::Instant::now();
-        let previous = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let idle = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let working = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let blocked = DetectionPublishState {
-            state: AgentState::Blocked,
-            visible_blocker: true,
-            visible_working: false,
-        };
-        let mut pending = PendingIdleConfirmation::default();
-
-        assert!(pending.should_hold_working_to_idle(previous, idle, false, false, None, now));
-        assert!(pending.active());
-        assert!(!pending.should_hold_working_to_idle(previous, working, false, false, None, now));
-        assert!(!pending.active());
-
-        assert!(pending.should_hold_working_to_idle(previous, idle, false, false, None, now));
-        assert!(!pending.should_hold_working_to_idle(previous, blocked, false, false, None, now));
-        assert!(!pending.active());
-    }
-
-    #[test]
-    fn pending_idle_does_not_extend_pty_quiet_lease() {
-        let now = std::time::Instant::now();
-        let previous = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let idle = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let mut pending = PendingIdleConfirmation::default();
-
-        assert!(!pending.should_hold_working_to_idle(
-            previous,
-            idle,
-            false,
-            false,
-            Some(pty_activity(false, false, 10)),
-            now
-        ));
-        assert!(!pending.active());
-    }
-
-    fn pty_activity(active: bool, fresh_output: bool, output_seq: u64) -> PtyActivitySignal {
-        PtyActivitySignal {
-            active,
-            tainted: false,
-            fresh_output,
-            output_seq,
-        }
-    }
-
-    #[test]
-    fn pending_working_holds_single_twitch_then_clears_when_quiet() {
-        let now = std::time::Instant::now();
-        let idle = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let working = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let mut pending = PendingWorkingConfirmation::default();
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 10)),
-            now
-        ));
-        assert!(pending.active());
-        assert!(!pending.should_hold_idle_to_working(
-            idle,
-            idle,
-            false,
-            false,
-            Some(pty_activity(false, false, 10)),
-            now + AGENT_PTY_ACTIVITY_WINDOW
-        ));
-        assert!(!pending.active());
-    }
-
-    #[test]
-    fn pending_working_confirms_after_delayed_output_observation() {
-        let now = std::time::Instant::now();
-        let idle = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let working = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let mut pending = PendingWorkingConfirmation::default();
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 10)),
-            now
-        ));
-        assert!(!pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 11)),
-            now + AGENT_PENDING_WORKING_CONFIRM_DELAY
-        ));
-        assert!(!pending.active());
-    }
-
-    #[test]
-    fn pending_working_counts_raw_sequence_jump_once() {
-        let now = std::time::Instant::now();
-        let idle = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let working = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let mut pending = PendingWorkingConfirmation::default();
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 10)),
-            now
-        ));
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 14)),
-            now + AGENT_PENDING_WORKING_FAST_RECHECK
-        ));
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, false, 14)),
-            now + AGENT_PENDING_WORKING_FAST_RECHECK * 2
-        ));
-        assert!(!pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 15)),
-            now + AGENT_PENDING_WORKING_CONFIRM_DELAY
-        ));
-    }
-
-    #[test]
-    fn pending_working_cap_suppresses_unconfirmed_activity() {
-        let now = std::time::Instant::now();
-        let idle = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let working = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let mut pending = PendingWorkingConfirmation::default();
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 10)),
-            now
-        ));
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 11)),
-            now + AGENT_PENDING_WORKING_FAST_RECHECK
-        ));
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, false, 11)),
-            now + AGENT_PENDING_WORKING_CAP
-        ));
-        assert!(!pending.active());
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 20)),
-            now
-        ));
-        assert!(!pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 21)),
-            now + AGENT_PENDING_WORKING_CONFIRM_DELAY
-        ));
-        assert!(!pending.active());
-    }
-
-    #[test]
-    fn pending_working_process_exit_publishes_held_working_first() {
-        let now = std::time::Instant::now();
-        let idle = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let working = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let mut pending = PendingWorkingConfirmation::default();
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 10)),
-            now
-        ));
-        assert!(pending.should_publish_held_working_before_exit(idle, idle, true));
-        assert!(!pending.active());
-    }
-
-    #[test]
-    fn pty_activity_distinguishes_fresh_output_from_active_hold() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let fresh = agent_caused_pty_activity_active(2, 1, &mut tracker, now);
-        assert!(fresh.active);
-        assert!(fresh.fresh_output);
-        assert_eq!(fresh.output_seq, 2);
-
-        let held = agent_caused_pty_activity_active(
-            2,
-            1,
-            &mut tracker,
-            now + AGENT_PENDING_WORKING_FAST_RECHECK,
-        );
-        assert!(held.active);
-        assert!(!held.fresh_output);
-        assert_eq!(held.output_seq, 2);
-    }
-
-    #[test]
-    fn pty_activity_lease_survives_sparse_heartbeat_jitter() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let first = agent_caused_pty_activity_active(2, 1, &mut tracker, now);
-        assert!(first.active);
-        assert!(first.fresh_output);
-
-        let held_before_next_tick = agent_caused_pty_activity_active(
-            2,
-            1,
-            &mut tracker,
-            now + std::time::Duration::from_millis(1700),
-        );
-        assert!(held_before_next_tick.active);
-        assert!(!held_before_next_tick.fresh_output);
-
-        let next_tick = agent_caused_pty_activity_active(
-            3,
-            1,
-            &mut tracker,
-            now + std::time::Duration::from_millis(1700),
-        );
-        assert!(next_tick.active);
-        assert!(next_tick.fresh_output);
-
-        let held_after_next_tick = agent_caused_pty_activity_active(
-            3,
-            1,
-            &mut tracker,
-            now + std::time::Duration::from_millis(3400),
-        );
-        assert!(held_after_next_tick.active);
-
-        let expired = agent_caused_pty_activity_active(
-            3,
-            1,
-            &mut tracker,
-            now + std::time::Duration::from_millis(3501),
-        );
-        assert!(!expired.active);
-    }
-
-    #[test]
-    fn pty_output_activity_tracks_raw_nonempty_reads() {
-        let seq = AtomicU64::new(0);
-
-        observe_pty_output_activity(b"", &seq);
-        assert_eq!(seq.load(Ordering::Relaxed), 0);
-
-        observe_pty_output_activity(b"\x1b[?2026h", &seq);
-        assert_eq!(seq.load(Ordering::Relaxed), 1);
-
-        observe_pty_output_activity(b"body bytes", &seq);
-        assert_eq!(seq.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn claude_recap_veto_only_applies_to_idle_to_working() {
-        let screen =
-            "※ recap: Done. (disable recaps in /config)\n\n─────────────\n❯ \n─────────────";
-        let idle = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let working = DetectionPublishState {
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-        };
-
-        assert!(pty_working_transition_is_vetoed(
-            Some(Agent::Claude),
-            idle,
-            working,
-            screen
-        ));
-        assert!(!pty_working_transition_is_vetoed(
-            Some(Agent::Claude),
-            working,
-            idle,
-            screen
-        ));
-        assert!(!pty_working_transition_is_vetoed(
-            Some(Agent::Codex),
-            idle,
-            working,
-            screen
-        ));
-    }
-
-    #[test]
     fn unknown_non_shell_foreground_job_is_not_immediate_clear_signal() {
         assert!(!should_clear_agent_for_foreground_shell(
             Some(Agent::Claude),
@@ -4249,81 +3387,6 @@ mod tests {
         let changed = presence.observe_process_probe(None);
         assert!(changed, "last confirmation miss should clear the agent");
         assert_eq!(presence.current_agent(), None);
-    }
-
-    #[test]
-    fn pty_activity_outside_taint_reports_active_until_hold_expires() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let active = agent_caused_pty_activity_active(2, 1, &mut tracker, now);
-        assert!(active.active);
-        assert!(!active.tainted);
-
-        let held = agent_caused_pty_activity_active(
-            2,
-            1,
-            &mut tracker,
-            now + AGENT_PTY_ACTIVITY_WINDOW - std::time::Duration::from_millis(1),
-        );
-        assert!(held.active);
-        assert!(!held.tainted);
-
-        let expired = agent_caused_pty_activity_active(
-            2,
-            1,
-            &mut tracker,
-            now + AGENT_PTY_ACTIVITY_WINDOW + std::time::Duration::from_millis(1),
-        );
-        assert!(!expired.active);
-        assert!(!expired.tainted);
-    }
-
-    #[test]
-    fn input_taint_discards_pty_activity_until_fresh_post_taint_output() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let tainted = agent_caused_pty_activity_active(2, 2, &mut tracker, now);
-        assert!(!tainted.active);
-        assert!(tainted.tainted);
-
-        let after_taint = agent_caused_pty_activity_active(
-            2,
-            2,
-            &mut tracker,
-            now + AGENT_INPUT_TAINT_WINDOW + std::time::Duration::from_millis(1),
-        );
-        assert!(!after_taint.active);
-        assert!(!after_taint.tainted);
-
-        let fresh_output = agent_caused_pty_activity_active(
-            3,
-            2,
-            &mut tracker,
-            now + AGENT_INPUT_TAINT_WINDOW + std::time::Duration::from_millis(2),
-        );
-        assert!(fresh_output.active);
-        assert!(!fresh_output.tainted);
-    }
-
-    #[test]
-    fn startup_grace_rebaseline_discards_accumulated_pty_activity() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let startup_render = agent_caused_pty_activity_active(2, 1, &mut tracker, now);
-        assert!(startup_render.active);
-
-        baseline_pty_causality(&mut tracker, 2, 1);
-        let after_grace =
-            agent_caused_pty_activity_active(2, 1, &mut tracker, now + AGENT_STARTUP_GRACE_WINDOW);
-
-        assert!(!after_grace.active);
-        assert!(!after_grace.tainted);
     }
 
     #[tokio::test]
