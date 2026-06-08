@@ -121,6 +121,9 @@ const STABLE_VISIBLE_SIGNAL_REFRESH: std::time::Duration = std::time::Duration::
 const AGENT_PTY_ACTIVITY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 const AGENT_INPUT_TAINT_WINDOW: std::time::Duration = std::time::Duration::from_millis(1200);
 const AGENT_STARTUP_GRACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+const AGENT_PENDING_IDLE_RECHECK: std::time::Duration = std::time::Duration::from_millis(100);
+const AGENT_PENDING_IDLE_CONFIRMATIONS: u8 = 3;
+const AGENT_PENDING_IDLE_CAP: std::time::Duration = std::time::Duration::from_millis(700);
 
 #[derive(Debug, Clone, Copy)]
 struct AgentDetectionPresence {
@@ -332,6 +335,74 @@ struct DetectionPublishState {
     visible_working: bool,
 }
 
+#[derive(Debug, Default)]
+struct PendingIdleConfirmation {
+    started_at: Option<std::time::Instant>,
+    confirmations: u8,
+}
+
+impl PendingIdleConfirmation {
+    fn active(&self) -> bool {
+        self.started_at.is_some()
+    }
+
+    fn clear(&mut self) {
+        self.started_at = None;
+        self.confirmations = 0;
+    }
+
+    fn should_hold_working_to_idle(
+        &mut self,
+        previous: DetectionPublishState,
+        next: DetectionPublishState,
+        agent_changed: bool,
+        process_exited: bool,
+        now: std::time::Instant,
+    ) -> bool {
+        let is_working_to_plain_idle = previous.state == AgentState::Working
+            && next.state == AgentState::Idle
+            && !next.visible_blocker
+            && !agent_changed
+            && !process_exited;
+
+        if !is_working_to_plain_idle {
+            self.clear();
+            return false;
+        }
+
+        let Some(started_at) = self.started_at else {
+            self.started_at = Some(now);
+            self.confirmations = 0;
+            return true;
+        };
+
+        if now.duration_since(started_at) >= AGENT_PENDING_IDLE_CAP {
+            self.clear();
+            return false;
+        }
+
+        self.confirmations = self.confirmations.saturating_add(1);
+        if self.confirmations >= AGENT_PENDING_IDLE_CONFIRMATIONS {
+            self.clear();
+            return false;
+        }
+
+        true
+    }
+}
+
+fn pty_working_transition_is_vetoed(
+    agent: Option<Agent>,
+    previous: DetectionPublishState,
+    next: DetectionPublishState,
+    content: &str,
+) -> bool {
+    previous.state == AgentState::Idle
+        && next.state == AgentState::Working
+        && !next.visible_blocker
+        && crate::detect::agent_activity_veto(agent, content).is_some()
+}
+
 fn should_publish_detection_update(
     previous: DetectionPublishState,
     next: DetectionPublishState,
@@ -476,10 +547,16 @@ fn spawn_basic_detection_task(
         let mut last_detection_text = String::new();
         let mut pty_causality = PtyCausalityTracker::default();
         let mut agent_startup_grace_until = None;
+        let mut pending_idle = PendingIdleConfirmation::default();
 
         loop {
+            let sleep_duration = if pending_idle.active() {
+                AGENT_PENDING_IDLE_RECHECK
+            } else {
+                std::time::Duration::from_millis(300)
+            };
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {}
+                _ = tokio::time::sleep(sleep_duration) => {}
                 _ = detect_reset.notified() => {
                     agent_presence = AgentDetectionPresence::from_agent(None);
                     state = AgentState::Unknown;
@@ -497,6 +574,7 @@ fn spawn_basic_detection_task(
                     last_detection_text.clear();
                     pty_causality = PtyCausalityTracker::default();
                     agent_startup_grace_until = None;
+                    pending_idle.clear();
                 }
             }
 
@@ -583,6 +661,7 @@ fn spawn_basic_detection_task(
                     agent = agent_presence.current_agent();
                     agent_changed = previous_agent != agent;
                     if agent_changed {
+                        pending_idle.clear();
                         if agent.is_some() {
                             agent_startup_grace_until = Some(now + AGENT_STARTUP_GRACE_WINDOW);
                             baseline_pty_causality(
@@ -619,8 +698,10 @@ fn spawn_basic_detection_task(
             if let Some(until) = agent_startup_grace_until {
                 if process_exited {
                     agent_startup_grace_until = None;
+                    pending_idle.clear();
                 } else {
                     if now < until {
+                        pending_idle.clear();
                         continue;
                     }
                     baseline_pty_causality(
@@ -629,6 +710,7 @@ fn spawn_basic_detection_task(
                         input_write_seq.load(Ordering::Relaxed),
                     );
                     agent_startup_grace_until = None;
+                    pending_idle.clear();
                     continue;
                 }
             }
@@ -637,6 +719,7 @@ fn spawn_basic_detection_task(
             let content_changed = content != last_detection_text;
             last_detection_text.clone_from(&content);
             if !process_exited && crate::detect::should_skip_state_update(agent, &content) {
+                pending_idle.clear();
                 continue;
             }
             sync_content_change_acquisition(
@@ -681,6 +764,7 @@ fn spawn_basic_detection_task(
                     detection
                 }
                 crate::agent_detection_policy::DetectionPolicyDecision::Freeze => {
+                    pending_idle.clear();
                     continue;
                 }
             };
@@ -704,6 +788,21 @@ fn spawn_basic_detection_task(
                 last_visible_signal_refresh,
                 now,
             );
+
+            if pty_working_transition_is_vetoed(agent, previous_publish, next_publish, &content) {
+                pending_idle.clear();
+                continue;
+            }
+
+            if pending_idle.should_hold_working_to_idle(
+                previous_publish,
+                next_publish,
+                agent_changed,
+                process_exited,
+                now,
+            ) {
+                continue;
+            }
 
             if should_publish_detection_update(
                 previous_publish,
@@ -1805,6 +1904,7 @@ impl PaneRuntime {
                 let mut last_detection_text = String::new();
                 let mut pty_causality = PtyCausalityTracker::default();
                 let mut agent_startup_grace_until = None;
+                let mut pending_idle = PendingIdleConfirmation::default();
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1814,6 +1914,8 @@ impl PaneRuntime {
                         || terminal.has_transient_default_color_override()
                     {
                         TICK_PENDING_RELEASE
+                    } else if pending_idle.active() {
+                        AGENT_PENDING_IDLE_RECHECK
                     } else if agent_presence.current_agent().is_none() {
                         TICK_UNIDENTIFIED
                     } else {
@@ -1838,6 +1940,7 @@ impl PaneRuntime {
                             last_detection_text.clear();
                             pty_causality = PtyCausalityTracker::default();
                             agent_startup_grace_until = None;
+                            pending_idle.clear();
                         }
                     }
 
@@ -1931,6 +2034,7 @@ impl PaneRuntime {
                             if changed {
                                 agent = agent_presence.current_agent();
                                 if agent != previous_agent {
+                                    pending_idle.clear();
                                     if agent.is_some() {
                                         agent_startup_grace_until =
                                             Some(now + AGENT_STARTUP_GRACE_WINDOW);
@@ -1997,8 +2101,10 @@ impl PaneRuntime {
                     if let Some(until) = agent_startup_grace_until {
                         if process_exited {
                             agent_startup_grace_until = None;
+                            pending_idle.clear();
                         } else {
                             if now < until {
+                                pending_idle.clear();
                                 continue;
                             }
                             baseline_pty_causality(
@@ -2007,6 +2113,7 @@ impl PaneRuntime {
                                 input_write_seq_for_task.load(Ordering::Relaxed),
                             );
                             agent_startup_grace_until = None;
+                            pending_idle.clear();
                             continue;
                         }
                     }
@@ -2015,6 +2122,7 @@ impl PaneRuntime {
                     let content_changed = content != last_detection_text;
                     last_detection_text.clone_from(&content);
                     if detect::should_skip_state_update(agent, &content) {
+                        pending_idle.clear();
                         continue;
                     }
                     sync_content_change_acquisition(
@@ -2059,6 +2167,7 @@ impl PaneRuntime {
                             detection,
                         ) => detection,
                         crate::agent_detection_policy::DetectionPolicyDecision::Freeze => {
+                            pending_idle.clear();
                             continue;
                         }
                     };
@@ -2084,6 +2193,26 @@ impl PaneRuntime {
                         last_visible_signal_refresh,
                         now,
                     );
+
+                    if pty_working_transition_is_vetoed(
+                        agent,
+                        previous_publish,
+                        next_publish,
+                        &content,
+                    ) {
+                        pending_idle.clear();
+                        continue;
+                    }
+
+                    if pending_idle.should_hold_working_to_idle(
+                        previous_publish,
+                        next_publish,
+                        agent_changed,
+                        process_exited,
+                        now,
+                    ) {
+                        continue;
+                    }
 
                     if should_publish_detection_update(
                         previous_publish,
@@ -3045,6 +3174,140 @@ mod tests {
             false,
             false,
             refresh_due
+        ));
+    }
+
+    #[test]
+    fn pending_idle_holds_working_to_plain_idle_until_confirmed() {
+        let now = std::time::Instant::now();
+        let previous = DetectionPublishState {
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+        };
+        let next = DetectionPublishState {
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+        };
+        let mut pending = PendingIdleConfirmation::default();
+
+        assert!(pending.should_hold_working_to_idle(previous, next, false, false, now));
+        assert!(pending.should_hold_working_to_idle(
+            previous,
+            next,
+            false,
+            false,
+            now + AGENT_PENDING_IDLE_RECHECK
+        ));
+        assert!(pending.should_hold_working_to_idle(
+            previous,
+            next,
+            false,
+            false,
+            now + AGENT_PENDING_IDLE_RECHECK * 2
+        ));
+        assert!(!pending.should_hold_working_to_idle(
+            previous,
+            next,
+            false,
+            false,
+            now + AGENT_PENDING_IDLE_RECHECK * 3
+        ));
+    }
+
+    #[test]
+    fn pending_idle_cap_publishes_idle_when_still_quiet() {
+        let now = std::time::Instant::now();
+        let previous = DetectionPublishState {
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+        };
+        let next = DetectionPublishState {
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+        };
+        let mut pending = PendingIdleConfirmation::default();
+
+        assert!(pending.should_hold_working_to_idle(previous, next, false, false, now));
+        assert!(!pending.should_hold_working_to_idle(
+            previous,
+            next,
+            false,
+            false,
+            now + AGENT_PENDING_IDLE_CAP
+        ));
+    }
+
+    #[test]
+    fn pending_idle_clears_when_work_resumes_or_blocker_appears() {
+        let now = std::time::Instant::now();
+        let previous = DetectionPublishState {
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+        };
+        let idle = DetectionPublishState {
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+        };
+        let working = DetectionPublishState {
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+        };
+        let blocked = DetectionPublishState {
+            state: AgentState::Blocked,
+            visible_blocker: true,
+            visible_working: false,
+        };
+        let mut pending = PendingIdleConfirmation::default();
+
+        assert!(pending.should_hold_working_to_idle(previous, idle, false, false, now));
+        assert!(pending.active());
+        assert!(!pending.should_hold_working_to_idle(previous, working, false, false, now));
+        assert!(!pending.active());
+
+        assert!(pending.should_hold_working_to_idle(previous, idle, false, false, now));
+        assert!(!pending.should_hold_working_to_idle(previous, blocked, false, false, now));
+        assert!(!pending.active());
+    }
+
+    #[test]
+    fn claude_recap_veto_only_applies_to_idle_to_working() {
+        let screen =
+            "※ recap: Done. (disable recaps in /config)\n\n─────────────\n❯ \n─────────────";
+        let idle = DetectionPublishState {
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+        };
+        let working = DetectionPublishState {
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+        };
+
+        assert!(pty_working_transition_is_vetoed(
+            Some(Agent::Claude),
+            idle,
+            working,
+            screen
+        ));
+        assert!(!pty_working_transition_is_vetoed(
+            Some(Agent::Claude),
+            working,
+            idle,
+            screen
+        ));
+        assert!(!pty_working_transition_is_vetoed(
+            Some(Agent::Codex),
+            idle,
+            working,
+            screen
         ));
     }
 

@@ -35,6 +35,12 @@ pub struct AgentDetection {
     pub visible_working: bool,
 }
 
+/// A narrow screen-derived exception that can veto PTY activity as semantic work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentActivityVeto {
+    ClaudeIdleRecap,
+}
+
 /// Which agent we detected running in a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
@@ -178,6 +184,18 @@ pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetectio
         };
     };
     agents::detect(agent, screen_content)
+}
+
+pub(crate) fn agent_activity_veto(
+    agent: Option<Agent>,
+    screen_content: &str,
+) -> Option<AgentActivityVeto> {
+    match agent {
+        Some(Agent::Claude) if agents::claude_code::has_idle_recap_notice(screen_content) => {
+            Some(AgentActivityVeto::ClaudeIdleRecap)
+        }
+        _ => None,
+    }
 }
 
 pub fn should_skip_state_update(agent: Option<Agent>, screen_content: &str) -> bool {
@@ -1269,6 +1287,33 @@ mod tests {
     fn claude_idle_prompt_box() {
         let screen = "Task complete.\n─────────────\n❯ \n─────────────";
         assert_eq!(detect_claude(screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn claude_idle_recap_notice_is_activity_veto() {
+        let screen = "✻ Churned for 9s\n\n※ recap: We’re debugging issue 494: kitty graphics render in shell panes but not inside Neovim. Next, I’m tracing the snacks.nvim inline-image path against Herdr’s placeholder\n  handling to confirm the exact failure point. (disable recaps in /config)\n\n────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────";
+
+        assert_eq!(
+            agent_activity_veto(Some(Agent::Claude), screen),
+            Some(AgentActivityVeto::ClaudeIdleRecap)
+        );
+    }
+
+    #[test]
+    fn wrapped_claude_idle_recap_notice_is_activity_veto() {
+        let screen = "※ recap: We’re debugging issue 494: kitty graphics render in shell panes but\n  not inside Neovim. Next, I’m tracing the snacks.nvim inline-image path\n  against Herdr’s placeholder handling to confirm the exact failure point…\n  and then I will inspect the redraw cache. (disable recaps in /config)\n\n────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────";
+
+        assert_eq!(
+            agent_activity_veto(Some(Agent::Claude), screen),
+            Some(AgentActivityVeto::ClaudeIdleRecap)
+        );
+    }
+
+    #[test]
+    fn stale_claude_recap_above_new_work_does_not_veto_activity() {
+        let screen = "※ recap: Old recap. (disable recaps in /config)\n\n● Reading src/pane.rs\n\n✻ Crunching…\n\n────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────";
+
+        assert_eq!(agent_activity_veto(Some(Agent::Claude), screen), None);
     }
 
     #[test]

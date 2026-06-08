@@ -59,6 +59,29 @@ pub(super) fn has_visible_blocker(content: &str) -> bool {
                 || lower.contains("ctrl+e to explain"))
 }
 
+pub(in crate::detect) fn has_idle_recap_notice(content: &str) -> bool {
+    if !has_prompt_box(content) || has_visible_blocker(content) {
+        return false;
+    }
+
+    let above_prompt = content_above_prompt_box(content);
+    let bottom_lines = bottom_non_empty_lines(above_prompt, 8);
+    let Some(last_line) = bottom_lines.last() else {
+        return false;
+    };
+    if !last_line
+        .to_ascii_lowercase()
+        .contains("(disable recaps in /config)")
+    {
+        return false;
+    }
+    let bottom = normalize_lines(&bottom_lines).to_ascii_lowercase();
+
+    bottom.contains("※ recap:")
+        && !bottom.contains("esc to interrupt")
+        && !bottom.contains("ctrl+c to interrupt")
+}
+
 pub(super) fn has_working_chrome(content: &str) -> bool {
     let above = content_above_prompt_box(content);
     let above_lower = above.to_lowercase();
