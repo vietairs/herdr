@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Numeric keypad keys that send VT100 application-keypad escape sequences now enter their digits and operators instead of being dropped. (#493)
 - Codex panes now stay marked working when the live status header uses reasoning-summary text such as `Investigating code output` instead of the literal `Working` label. (#501)
 - Native pane URL clicks now use Cmd-click on macOS and Ctrl-click on other platforms.
 - Windows beta installs now default to the preview channel, persist `channel = "preview"` during install, reject switching to stable until stable Windows builds exist, and update through the Windows installer without probing unsupported live-handoff/session status paths.
