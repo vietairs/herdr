@@ -41,25 +41,24 @@ impl ClientRenderState {
         }
     }
 
-    pub(crate) fn prepare_frame(&mut self, frame: &FrameData) -> Option<PreparedRender> {
+    pub(crate) fn prepare_frame(&mut self, frame: FrameData) -> Option<PreparedRender> {
         match self {
             Self::Semantic { last_frame } => {
-                if last_frame.as_ref() == Some(frame) {
+                if last_frame.as_ref() == Some(&frame) {
                     crate::render_prof::event("prepare_frame.semantic.skip_current");
                     return None;
                 }
                 crate::render_prof::event("prepare_frame.semantic.changed");
-                Some(PreparedRender {
-                    message: ServerMessage::Frame(frame.clone()),
-                    encoded: None,
+                Some(PreparedRender::Semantic {
+                    message: ServerMessage::Frame(frame),
                 })
             }
             Self::TerminalAnsi { blit_encoder, seq } => {
-                if blit_encoder.is_current(frame) {
+                if blit_encoder.is_current(&frame) {
                     crate::render_prof::event("prepare_frame.ansi.skip_current");
                     return None;
                 }
-                let mut encoded = blit_encoder.encode(frame, false);
+                let mut encoded = blit_encoder.encode(&frame, false);
                 crate::render_prof::event("prepare_frame.ansi.changed");
                 crate::render_prof::counter("prepare_frame.ansi.bytes", encoded.bytes.len() as u64);
                 if encoded.full {
@@ -72,7 +71,7 @@ impl ClientRenderState {
                     "prepare_frame.graphics.bytes",
                     frame.graphics.len() as u64,
                 );
-                Some(PreparedRender {
+                Some(PreparedRender::TerminalAnsi {
                     message: ServerMessage::Terminal(TerminalFrame {
                         seq: *seq + 1,
                         width: frame.width,
@@ -80,6 +79,7 @@ impl ClientRenderState {
                         full: encoded.full,
                         bytes: encoded.bytes.clone(),
                     }),
+                    frame,
                     encoded: Some(encoded),
                 })
             }
@@ -93,10 +93,22 @@ impl ClientRenderState {
         }
     }
 
-    pub(crate) fn commit_sent_frame(&mut self, frame: FrameData, prepared: PreparedRender) {
-        match (self, prepared.encoded) {
-            (Self::Semantic { last_frame }, None) => *last_frame = Some(frame),
-            (Self::TerminalAnsi { blit_encoder, seq }, Some(encoded)) => {
+    pub(crate) fn commit_sent_frame(&mut self, prepared: PreparedRender) {
+        match (self, prepared) {
+            (
+                Self::Semantic { last_frame },
+                PreparedRender::Semantic {
+                    message: ServerMessage::Frame(frame),
+                },
+            ) => *last_frame = Some(frame),
+            (
+                Self::TerminalAnsi { blit_encoder, seq },
+                PreparedRender::TerminalAnsi {
+                    frame,
+                    encoded: Some(encoded),
+                    ..
+                },
+            ) => {
                 blit_encoder.commit(frame, encoded);
                 *seq += 1;
             }
@@ -138,14 +150,32 @@ fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// A prepared client render message plus any baseline state needed after send.
-pub(crate) struct PreparedRender {
-    message: ServerMessage,
-    encoded: Option<EncodedBlit>,
+pub(crate) enum PreparedRender {
+    Semantic {
+        message: ServerMessage,
+    },
+    TerminalAnsi {
+        message: ServerMessage,
+        frame: FrameData,
+        encoded: Option<EncodedBlit>,
+    },
 }
 
 impl PreparedRender {
     pub(crate) fn message(&self) -> &ServerMessage {
-        &self.message
+        match self {
+            Self::Semantic { message } | Self::TerminalAnsi { message, .. } => message,
+        }
+    }
+
+    pub(crate) fn into_frame(self) -> Option<FrameData> {
+        match self {
+            Self::Semantic {
+                message: ServerMessage::Frame(frame),
+            } => Some(frame),
+            Self::TerminalAnsi { frame, .. } => Some(frame),
+            _ => None,
+        }
     }
 }
 

@@ -1547,10 +1547,7 @@ impl AppState {
         else {
             return false;
         };
-        if !rt
-            .input_state()
-            .is_some_and(crate::pane::InputState::mouse_reporting_enabled)
-        {
+        if rt.wheel_routing() != Some(crate::pane::WheelRouting::MouseReport) {
             return false;
         }
         rt.scroll_reset();
