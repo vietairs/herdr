@@ -1579,6 +1579,38 @@ mod tests {
     }
 
     #[test]
+    fn codex_truncated_status_with_arbitrary_label_is_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Ran git diff -- src/detect/mod.rs\n  └ diff output...\n\n• Considering patch updates (2m 26s • esc …\n\n\n› Fix Codex detection\n\n  ~/Projects/herdr · master",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_truncated_status_without_prompt_is_working() {
+        assert_eq!(
+            detect_codex("• Considering patch updates (2m 26s • esc …"),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn codex_bullet_with_esc_text_without_timer_is_not_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Notes mention esc to interrupt as a phrase\n\n› Fix Codex detection\n\n  ~/Projects/herdr · master",
+        );
+
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        assert!(!detection.visible_working);
+    }
+
+    #[test]
     fn codex_background_terminal_status_above_current_prompt_stays_working() {
         let detection = detect_agent(
             Some(Agent::Codex),
