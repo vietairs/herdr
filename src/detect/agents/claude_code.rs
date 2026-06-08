@@ -27,6 +27,10 @@ pub(super) fn detect(content: &str) -> AgentState {
         return AgentState::Blocked;
     }
 
+    if has_dynamic_workflow_prompt(&lower) {
+        return AgentState::Blocked;
+    }
+
     if has_working_chrome(content) {
         return AgentState::Working;
     }
@@ -45,6 +49,7 @@ pub(super) fn detect(content: &str) -> AgentState {
 pub(super) fn has_visible_blocker(content: &str) -> bool {
     let lower = content.to_lowercase();
     has_live_blocked_form(content)
+        || has_dynamic_workflow_prompt(&lower)
         || lower.contains("do you want to proceed?")
             && has_claude_yes_no_choice(content)
             && (lower.contains("bash command")
@@ -96,6 +101,7 @@ fn has_claude_blocked_prompt(content: &str, lower_content: &str) -> bool {
     has_confirmation_prompt(lower_content)
         || lower_content.contains("do you want to proceed?")
         || lower_content.contains("would you like to proceed?")
+        || has_dynamic_workflow_prompt(lower_content)
         || lower_content.contains("waiting for permission")
         || lower_content.contains("do you want to allow this connection?")
         || lower_content.contains("tab to amend")
@@ -103,6 +109,10 @@ fn has_claude_blocked_prompt(content: &str, lower_content: &str) -> bool {
         || lower_content.contains("review your answers")
         || lower_content.contains("skip interview and plan immediately")
         || (has_selection_prompt(content) && has_claude_yes_no_choice(content))
+}
+
+fn has_dynamic_workflow_prompt(lower_content: &str) -> bool {
+    lower_content.contains("run a dynamic workflow?") && lower_content.contains("esc to cancel")
 }
 
 fn has_live_blocked_form(content: &str) -> bool {

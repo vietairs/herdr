@@ -38,10 +38,6 @@ pub(super) fn has_visible_blocker(content: &str) -> bool {
     has_codex_strong_blocked_prompt(content)
 }
 
-pub(super) fn has_prompt(content: &str) -> bool {
-    has_codex_current_prompt(content) || content.lines().any(codex_prompt_line)
-}
-
 pub(super) fn has_visible_working(content: &str) -> bool {
     has_codex_live_working_at_current_prompt(content)
         || (!has_codex_current_prompt(content) && has_codex_visible_working_without_prompt(content))

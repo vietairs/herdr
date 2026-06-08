@@ -15,7 +15,7 @@ pub(super) fn detect(content: &str) -> AgentState {
         return AgentState::Idle;
     }
 
-    if has_qodercli_blocked_prompt(&lower) {
+    if has_visible_blocker(content) {
         return AgentState::Blocked;
     }
 
@@ -87,9 +87,15 @@ fn has_qodercli_spinner_row(content: &str) -> bool {
 ///   defensive fallbacks in case the title row scrolls off-screen.
 /// * The interactive shell waiting hint emitted by qodercli when an agent
 ///   spawns a shell that is now parked for user keystrokes.
-fn has_qodercli_blocked_prompt(lower_content: &str) -> bool {
-    lower_content.contains("waiting for user confirmation")
-        || lower_content.contains("awaiting approval")
+pub(super) fn has_visible_blocker(content: &str) -> bool {
+    let lower_content = content.to_lowercase();
+    (lower_content.contains("waiting for user confirmation")
+        && (lower_content.contains("yes")
+            || lower_content.contains("no")
+            || lower_content.contains("allow")
+            || lower_content.contains("reject")))
+        || (lower_content.contains("awaiting approval")
+            && (lower_content.contains("allow") || lower_content.contains("reject")))
         || lower_content.contains("permission required")
         || lower_content.contains("allow once or always?")
         || lower_content.contains("asking user")

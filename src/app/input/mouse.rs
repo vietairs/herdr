@@ -2260,7 +2260,6 @@ mod tests {
                 agent: Some(Agent::Pi),
                 state: AgentState::Idle,
                 visible_blocker: false,
-                visible_idle: false,
                 visible_working: false,
                 process_exited: false,
                 observed_at: std::time::Instant::now(),

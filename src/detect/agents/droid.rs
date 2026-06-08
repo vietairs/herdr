@@ -9,19 +9,7 @@ use super::super::{has_braille_spinner, AgentState};
 pub(super) fn detect(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Blocked: EXECUTE approval prompt with selection UI chrome
-    // Primary (AND): structural keyword + chrome text = certain
-    let has_execute = content.contains("EXECUTE");
-    let has_selection_chrome = lower.contains("enter to select")
-        || lower.contains("↑↓ to navigate")
-        || lower.contains("esc to cancel");
-    let has_selection_options = lower.contains("> yes, allow") || lower.contains("> no, cancel");
-
-    if has_execute && (has_selection_chrome || has_selection_options) {
-        return AgentState::Blocked;
-    }
-    // Secondary: selection chrome + options together (no EXECUTE needed)
-    if has_selection_chrome && has_selection_options {
+    if has_visible_blocker(content) {
         return AgentState::Blocked;
     }
 
@@ -36,4 +24,17 @@ pub(super) fn detect(content: &str) -> AgentState {
     }
 
     AgentState::Idle
+}
+
+pub(super) fn has_visible_blocker(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    // Primary (AND): structural keyword + chrome text = certain
+    let has_execute = content.contains("EXECUTE");
+    let has_selection_chrome = lower.contains("enter to select")
+        || lower.contains("↑↓ to navigate")
+        || lower.contains("esc to cancel");
+    let has_selection_options = lower.contains("> yes, allow") || lower.contains("> no, cancel");
+
+    (has_execute && (has_selection_chrome || has_selection_options))
+        || (has_selection_chrome && has_selection_options)
 }

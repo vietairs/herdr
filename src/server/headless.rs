@@ -1395,6 +1395,89 @@ impl HeadlessServer {
             .unwrap_or(crate::detect::AgentState::Unknown)
     }
 
+    fn pane_effective_agent_label(&self, pane_id: crate::layout::PaneId) -> Option<String> {
+        self.app.state.workspaces.iter().find_map(|ws| {
+            ws.tabs.iter().find_map(|tab| {
+                let pane = tab.panes.get(&pane_id)?;
+                self.app
+                    .state
+                    .terminals
+                    .get(&pane.attached_terminal_id)
+                    .and_then(|terminal| terminal.effective_agent_label())
+                    .map(str::to_string)
+            })
+        })
+    }
+
+    fn forward_pane_state_update_notifications_to_clients(
+        &mut self,
+        update: &crate::app::actions::PaneStateUpdate,
+    ) {
+        if self.app.state.toast_config.delay_seconds != 0 {
+            return;
+        }
+
+        let is_active_tab = self
+            .app
+            .state
+            .pane_is_in_active_tab(update.ws_idx, update.pane_id);
+        let suppress_active_tab_notifications =
+            self.active_tab_suppresses_notifications(is_active_tab);
+
+        if self.app.state.sound.allows(update.known_agent) {
+            if let Some(sound) =
+                crate::app::actions::notification_sound_for_state_change_with_agent_labels(
+                    suppress_active_tab_notifications,
+                    update.previous_state,
+                    update.state,
+                    update.previous_agent_label.as_deref(),
+                    update.agent_label.as_deref(),
+                )
+            {
+                self.send_notify_to_foreground_client(
+                    protocol::NotifyKind::Sound,
+                    sound_notify_message(sound),
+                    None,
+                );
+            }
+        }
+
+        if !should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
+            return;
+        }
+        let Some(kind) = crate::app::actions::notification_toast_for_pane_state_update(
+            suppress_active_tab_notifications,
+            update,
+        ) else {
+            return;
+        };
+        let Some(ws) = self.app.state.workspaces.get(update.ws_idx) else {
+            return;
+        };
+        let Some(agent_label) = update.agent_label.as_deref() else {
+            return;
+        };
+        let event_text = match kind {
+            crate::app::state::ToastKind::NeedsAttention => "needs attention",
+            crate::app::state::ToastKind::Finished => "finished",
+            crate::app::state::ToastKind::UpdateInstalled => "updated",
+        };
+        let workspace_label =
+            ws.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
+        let context = crate::app::actions::notification_context(
+            ws,
+            &workspace_label,
+            update.ws_idx,
+            update.pane_id,
+        );
+        self.send_notify_to_foreground_client(
+            toast_notify_kind(self.app.state.toast_config.delivery)
+                .expect("toast forwarding requires a client notification kind"),
+            format!("{agent_label} {event_text}"),
+            non_empty_body(&context),
+        );
+    }
+
     fn forward_agent_notification_delivery(
         &mut self,
         delivery: &crate::app::state::AgentNotificationDelivery,
@@ -1561,6 +1644,7 @@ impl HeadlessServer {
                 // is processed. Notifications must follow effective state changes,
                 // not raw fallback reports that may be masked by hook authority.
                 let prev_state = self.pane_effective_state(pane_id_val);
+                let prev_agent_label = self.pane_effective_agent_label(pane_id_val);
 
                 // Handle the state change (updates pane state, sets toast on AppState).
                 // Headless mode disables local sound playback separately from the
@@ -1583,15 +1667,20 @@ impl HeadlessServer {
                     self.active_tab_suppresses_notifications(is_active_tab);
 
                 let next_state = self.pane_effective_state(pane_id_val);
+                let next_agent_label = self.pane_effective_agent_label(pane_id_val);
 
                 if self.app.state.toast_config.delay_seconds == 0
                     && self.app.state.sound.allows(agent_val)
                 {
-                    if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
-                        suppress_active_tab_notifications,
-                        prev_state,
-                        next_state,
-                    ) {
+                    if let Some(sound) =
+                        crate::app::actions::notification_sound_for_state_change_with_agent_labels(
+                            suppress_active_tab_notifications,
+                            prev_state,
+                            next_state,
+                            prev_agent_label.as_deref(),
+                            next_agent_label.as_deref(),
+                        )
+                    {
                         self.send_notify_to_foreground_client(
                             protocol::NotifyKind::Sound,
                             sound_notify_message(sound),
@@ -1617,6 +1706,7 @@ impl HeadlessServer {
                             suppress_active_tab_notifications,
                             prev_state,
                             next_state,
+                            prev_agent_label.as_deref(),
                         )
                     }
                 } else {
@@ -1648,6 +1738,7 @@ impl HeadlessServer {
                 // are already folded into pane.state; raw hook transitions must not
                 // produce a second notification path.
                 let prev_state = self.pane_effective_state(pane_id_val);
+                let prev_agent_label = self.pane_effective_agent_label(pane_id_val);
 
                 self.sync_foreground_client_state();
                 self.app.handle_internal_event(ev);
@@ -1668,15 +1759,20 @@ impl HeadlessServer {
                     self.active_tab_suppresses_notifications(is_active_tab);
 
                 let next_state = self.pane_effective_state(pane_id_val);
+                let next_agent_label = self.pane_effective_agent_label(pane_id_val);
 
                 if self.app.state.toast_config.delay_seconds == 0
                     && self.app.state.sound.allows(agent_val)
                 {
-                    if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
-                        suppress_active_tab_notifications,
-                        prev_state,
-                        next_state,
-                    ) {
+                    if let Some(sound) =
+                        crate::app::actions::notification_sound_for_state_change_with_agent_labels(
+                            suppress_active_tab_notifications,
+                            prev_state,
+                            next_state,
+                            prev_agent_label.as_deref(),
+                            next_agent_label.as_deref(),
+                        )
+                    {
                         self.send_notify_to_foreground_client(
                             protocol::NotifyKind::Sound,
                             sound_notify_message(sound),
@@ -1702,6 +1798,7 @@ impl HeadlessServer {
                             suppress_active_tab_notifications,
                             prev_state,
                             next_state,
+                            prev_agent_label.as_deref(),
                         )
                     }
                 } else {
@@ -1765,6 +1862,14 @@ impl HeadlessServer {
                             .map(|pane| pane.attached_terminal_id.to_string())
                     })
                 });
+                if let Some(update) = self
+                    .app
+                    .state
+                    .publish_pane_process_exit_if_agent(pane_id_val)
+                {
+                    self.app.emit_pane_state_update(&update);
+                    self.forward_pane_state_update_notifications_to_clients(&update);
+                }
 
                 self.app.handle_internal_event(ev);
 
@@ -2419,7 +2524,12 @@ impl HeadlessServer {
         // bypasses drain_internal_events_with_forwarding. Headless mode disables
         // local sound playback, so sound notifications need to be forwarded here.
         let toast_before = self.app.state.toast.clone();
-        let pane_states_before: Vec<(usize, crate::layout::PaneId, crate::detect::AgentState)> = {
+        let pane_states_before: Vec<(
+            usize,
+            crate::layout::PaneId,
+            crate::detect::AgentState,
+            Option<String>,
+        )> = {
             let terminals = &self.app.state.terminals;
             self.app
                 .state
@@ -2429,9 +2539,14 @@ impl HeadlessServer {
                 .flat_map(|(ws_idx, ws)| {
                     ws.tabs.iter().flat_map(move |tab| {
                         tab.panes.iter().filter_map(move |(&pane_id, pane)| {
-                            terminals
-                                .get(&pane.attached_terminal_id)
-                                .map(|terminal| (ws_idx, pane_id, terminal.state))
+                            terminals.get(&pane.attached_terminal_id).map(|terminal| {
+                                (
+                                    ws_idx,
+                                    pane_id,
+                                    terminal.state,
+                                    terminal.effective_agent_label().map(str::to_string),
+                                )
+                            })
                         })
                     })
                 })
@@ -2495,7 +2610,7 @@ impl HeadlessServer {
         // Forward notifications for effective pane state changes that occurred
         // during the API request. Hook authority is already folded into
         // pane.state, so raw hook transitions must not produce separate sounds.
-        for (ws_idx, pane_id, prev_state) in &pane_states_before {
+        for (ws_idx, pane_id, prev_state, prev_agent_label) in &pane_states_before {
             let pane_after = self
                 .app
                 .state
@@ -2526,6 +2641,7 @@ impl HeadlessServer {
                 self.active_tab_suppresses_notifications(is_active_tab);
 
             let agent = terminal_after.effective_known_agent();
+            let agent_label = terminal_after.effective_agent_label().map(str::to_string);
 
             debug!(
                 ws_idx,
@@ -2540,11 +2656,15 @@ impl HeadlessServer {
                 && self.app.state.toast_config.delay_seconds == 0
                 && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
             {
-                if let Some(kind) = crate::app::actions::notification_toast_for_state_change(
-                    suppress_active_tab_notifications,
-                    *prev_state,
-                    new_state,
-                ) {
+                if let Some(kind) =
+                    crate::app::actions::notification_toast_for_state_change_with_agent_labels(
+                        suppress_active_tab_notifications,
+                        *prev_state,
+                        new_state,
+                        prev_agent_label.as_deref(),
+                        agent_label.as_deref(),
+                    )
+                {
                     if let Some(agent_label) = self
                         .app
                         .state
@@ -2581,11 +2701,15 @@ impl HeadlessServer {
             // Clients still decide locally whether they can execute the side effect.
             if self.app.state.toast_config.delay_seconds == 0 && self.app.state.sound.allows(agent)
             {
-                if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
-                    suppress_active_tab_notifications,
-                    *prev_state,
-                    new_state,
-                ) {
+                if let Some(sound) =
+                    crate::app::actions::notification_sound_for_state_change_with_agent_labels(
+                        suppress_active_tab_notifications,
+                        *prev_state,
+                        new_state,
+                        prev_agent_label.as_deref(),
+                        agent_label.as_deref(),
+                    )
+                {
                     debug!(sound = ?sound, "forwarding sound notification from API request");
                     self.send_notify_to_foreground_client(
                         protocol::NotifyKind::Sound,
@@ -7207,7 +7331,6 @@ next_tab = ""
             agent: Some(crate::detect::Agent::Pi),
             state: crate::detect::AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: Instant::now(),
@@ -7297,7 +7420,6 @@ next_tab = ""
                 agent: Some(crate::detect::Agent::Pi),
                 state: crate::detect::AgentState::Blocked,
                 visible_blocker: false,
-                visible_idle: false,
                 visible_working: false,
                 process_exited: false,
                 observed_at: Instant::now(),

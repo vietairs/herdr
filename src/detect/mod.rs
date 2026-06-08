@@ -29,13 +29,9 @@ pub struct AgentDetection {
     /// human input. This is stronger than arbitrary prompt-like text in the
     /// scrollback and may override a non-blocked integration state.
     pub visible_blocker: bool,
-    /// True when the current screen visibly shows the agent's idle input UI.
-    /// This lets Herdr recover from integrations that miss an interrupt/stop
-    /// event without treating an empty or ambiguous screen as idle authority.
-    pub visible_idle: bool,
-    /// True when the current screen visibly shows live working chrome. This is
-    /// narrower than a fallback `Working` heuristic and may guard against stale
-    /// hook idle reports.
+    /// True when the current screen visibly shows live working chrome. PTY
+    /// activity is the normal working authority; this remains diagnostic
+    /// metadata and for non-PTY fallback paths.
     pub visible_working: bool,
 }
 
@@ -178,7 +174,6 @@ pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetectio
             state: AgentState::Unknown,
             skip_state_update: false,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
         };
     };
@@ -1135,7 +1130,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert!(detection.skip_state_update);
-        assert!(!detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1162,7 +1156,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert!(!detection.skip_state_update);
-        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1196,7 +1189,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1216,13 +1208,31 @@ mod tests {
     }
 
     #[test]
+    fn claude_dynamic_workflow_prompt_is_visible_blocker() {
+        let screen = "● Workflow(Review the current worktree diff and verify the resulting findings)\n\n─────────────────────────────────────────────────────────────────────────────────────────\n Run a dynamic workflow?\n\n  Review the current worktree diff and verify the resulting findings\n\n  This dynamic workflow will spin up multiple subagents across the following phases:\n    1. Overview — map the diff and identify coupled subsystems\n    2. Review — review each changed file in parallel\n    3. Verify — adversarially verify each finding\n    4. Synthesize — summarize confirmed issues and residual risk\n\n  Dynamic workflows can use a lot of tokens quickly by running many subagents in parallel — which counts against your usage limit. Stop a running workflow at any time with\n  /workflows, or disable dynamic workflows in /config.\n\n  ❯ 1. Yes, run it\n    2. View raw script\n    3. No\n\n  Esc to cancel · Tab to amend\n  ctrl+g to edit script in $EDITOR";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+        assert!(!detection.visible_working);
+    }
+
+    #[test]
+    fn claude_dynamic_workflow_prompt_uses_stable_modal_gate() {
+        let screen = "● Workflow(Evaluate changes)\n\n─────────────────────────────────────────────────────────────────────────────────────────\n Run a dynamic workflow?\n\n  1. Scope\n  2. Review\n  3. Synthesize\n\n  Esc to cancel · Tab to amend";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+    }
+
+    #[test]
     fn claude_question_form_selected_top_is_visible_blocker() {
         let screen = "❯ ask again\n─────────────────────────────────────────────────────────────────────────────────────────\n←  ☐ Subject  ☐ Tone  ✔ Submit  →\n\nWhat should I ask you about?\n\n❯ 1. Today\n     Your current plan or priority.\n  2. Project\n     A codebase, feature, bug, or PR.\n  3. Preference\n     How you want me to work with you.\n  4. Random\n     A casual question with no work context.\n  5. Type something.\n─────────────────────────────────────────────────────────────────────────────────────────\n  6. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1232,7 +1242,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1242,7 +1251,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1264,31 +1272,28 @@ mod tests {
     }
 
     #[test]
-    fn claude_prompt_box_is_visible_idle() {
+    fn claude_prompt_box_does_not_set_screen_idle_signal() {
         let screen = "Interrupted.\n─────────────\n❯ \n─────────────";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
     }
 
     #[test]
-    fn claude_prompt_box_with_status_text_and_custom_status_is_visible_idle() {
+    fn claude_prompt_box_with_status_text_and_custom_status_does_not_set_screen_idle_signal() {
         let screen = "──────────────────────────────────────────── ◐ medium · /effort\n❯ \n────────────────────────────────────────────\n  thommie-backend | refactor/cleanup-codebase | Opus 4.8 (1M context)\nIppy Tippy\n/coach-dive to chat about this\n▸▸ auto mode on (shift+tab to cycle) · ← for agents";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_blocker);
     }
 
     #[test]
-    fn claude_interrupted_permission_prompt_box_is_visible_idle() {
+    fn claude_interrupted_permission_prompt_box_does_not_set_screen_idle_signal() {
         let screen = "❯ this is a test, create some dummy files on /tmp and -rm rf them i wanna test\n    permissions\n\n  Thought for 7s (ctrl+o to expand)\n\n● Bash(tmpdir=$(mktemp -d /tmp/claude-perm-test.XXXXXX) && touch \"$tmpdir/file1.txt\"\n      \"$tmpdir/file2.log\" && mkdir \"$tmpdir/subdir\" && touch\n      \"$tmpdir/subdir/nested.txt\"…)\n  ⎿  Interrupted · What should Claude do instead?\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1299,7 +1304,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1310,7 +1314,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1322,17 +1325,15 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
         assert!(!detection.visible_blocker);
     }
 
     #[test]
-    fn claude_separators_without_prompt_are_not_visible_idle() {
+    fn claude_separators_without_prompt_do_not_set_screen_idle_signal() {
         let screen = "Task complete.\n─────────────\nplain text\n─────────────";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1342,7 +1343,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1352,7 +1352,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
         assert!(!detection.visible_blocker);
     }
 
@@ -1363,7 +1362,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1372,7 +1370,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1383,7 +1380,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1394,7 +1390,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
     }
 
@@ -1404,7 +1399,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
     }
 
@@ -1467,7 +1461,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_blocker);
     }
 
@@ -1477,7 +1470,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_blocker);
     }
 
@@ -1493,11 +1485,11 @@ mod tests {
     }
 
     #[test]
-    fn non_codex_blocked_heuristics_are_not_strong_visible_blockers_by_default() {
+    fn gemini_confirmation_prompt_is_visible_blocker() {
         let detection = detect_agent(Some(Agent::Gemini), "Do you want to proceed?\n\nYes  No");
 
         assert_eq!(detection.state, AgentState::Blocked);
-        assert!(!detection.visible_blocker);
+        assert!(detection.visible_blocker);
     }
 
     #[test]
@@ -1517,16 +1509,14 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
-    fn codex_interrupted_prompt_is_visible_idle() {
+    fn codex_interrupted_prompt_does_not_set_screen_idle_signal() {
         let screen = "■ Conversation interrupted - tell the model what to do differently. Something went\nwrong? Hit `/feedback` to report the issue.\n\n\n› Run /review on my current changes\n\n  gpt-5.5 high · ~/Projects/herdr-worktrees/issue-249-state-arbitration";
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1551,7 +1541,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1563,7 +1552,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1575,7 +1563,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1587,7 +1574,7 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
+        assert!(!detection.visible_blocker);
     }
 
     #[test]
@@ -1606,7 +1593,7 @@ mod tests {
         );
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
+        assert!(!detection.visible_blocker);
         assert!(!detection.visible_working);
     }
 
@@ -1619,7 +1606,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1631,7 +1617,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1643,7 +1628,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1655,7 +1639,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1667,7 +1650,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1678,7 +1660,6 @@ mod tests {
         );
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
     }
 
@@ -1690,7 +1671,6 @@ mod tests {
         );
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
     }
 
@@ -1703,7 +1683,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1726,7 +1705,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_working);
-        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1738,7 +1716,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_working);
-        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1755,7 +1732,6 @@ mod tests {
 
             assert_eq!(detection.state, AgentState::Working);
             assert!(detection.visible_working);
-            assert!(!detection.visible_idle);
         }
     }
 
@@ -1770,7 +1746,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert!(detection.skip_state_update);
-        assert!(!detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1781,7 +1756,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert!(detection.skip_state_update);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1790,7 +1764,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert!(detection.skip_state_update);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1799,7 +1772,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert!(!detection.skip_state_update);
-        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1815,8 +1787,16 @@ mod tests {
     #[test]
     fn gemini_waiting_confirmation() {
         assert_eq!(
-            detect_gemini("waiting for user confirmation"),
+            detect_gemini("waiting for user confirmation\nYes  No"),
             AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn gemini_waiting_text_without_choices_is_idle() {
+        assert_eq!(
+            detect_gemini("waiting for user confirmation"),
+            AgentState::Idle
         );
     }
 
@@ -1890,6 +1870,14 @@ mod tests {
         let screen =
             "Waiting for approval...\nRun this command?\n→ Run (once) (y)\nSkip (esc or n)";
         assert_eq!(detect_cursor(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn cursor_approval_words_without_visible_controls_are_idle() {
+        assert_eq!(
+            detect_cursor("previous output: waiting for approval"),
+            AgentState::Idle
+        );
     }
 
     #[test]
@@ -1988,6 +1976,14 @@ mod tests {
         assert_eq!(
             detect_cline("[act mode] execute command?\nyes"),
             AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn cline_mode_text_with_unrelated_yes_is_not_blocked() {
+        assert_eq!(
+            detect_cline("[act mode]\nPrevious answer was yes."),
+            AgentState::Working
         );
     }
 
@@ -2322,7 +2318,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -2332,7 +2327,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -2363,7 +2357,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -2397,12 +2390,11 @@ mod tests {
     }
 
     #[test]
-    fn kimi_current_editor_box_is_visible_idle() {
+    fn kimi_current_editor_box_does_not_set_screen_idle_signal() {
         let screen = "╭──────────────────────────────────────────────────╮\n│  >                                               │\n╰──────────────────────────────────────────────────╯\nk2  ~/Projects/herdr                    /help: show commands\n                                      context: 0.0%";
         let detection = detect_agent(Some(Agent::Kimi), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -2587,8 +2579,14 @@ mod tests {
 
     #[test]
     fn grok_blocked_wins_over_spinner() {
-        let screen = "⠹ Run git 30s\nYes, proceed\nNo, reject (type to add feedback)";
+        let screen = "⠹ Run git 30s\nUse ← → to choose permission whitelist scope\nYes, proceed\nNo, reject (type to add feedback)";
         assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn grok_choice_words_without_scope_selector_are_not_blocked() {
+        let screen = "Yes, proceed\nNo, reject (type to add feedback)";
+        assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Idle);
     }
 
     #[test]
@@ -2666,8 +2664,16 @@ mod tests {
     #[test]
     fn qodercli_blocked_on_confirmation() {
         assert_eq!(
-            detect_qodercli("Waiting for user confirmation..."),
+            detect_qodercli("Waiting for user confirmation...\nAllow\nReject"),
             AgentState::Blocked,
+        );
+    }
+
+    #[test]
+    fn qodercli_waiting_confirmation_without_choices_is_idle() {
+        assert_eq!(
+            detect_qodercli("Waiting for user confirmation..."),
+            AgentState::Idle,
         );
     }
 

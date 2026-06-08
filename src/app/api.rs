@@ -67,6 +67,12 @@ impl App {
         }
 
         if let AppEvent::PaneDied { pane_id } = &ev {
+            let previous_toast = self.state.toast.clone();
+            if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
+                self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+                self.emit_pane_state_update(&update);
+                self.emit_terminal_or_system_agent_notifications(std::slice::from_ref(&update));
+            }
             if self.runtime_exit_action(*pane_id) == RuntimeExitAction::RespawnShell
                 && self.respawn_shell_for_launch_pane(*pane_id)
             {
@@ -161,57 +167,7 @@ impl App {
                 let instruction = crate::update::update_install_instruction(&install_command);
                 let _ = notify(&format!("v{version} available"), Some(&instruction));
             } else if self.state.toast_config.delay_seconds == 0 {
-                for update in &pane_updates {
-                    let is_active_tab = self
-                        .state
-                        .pane_is_in_active_tab(update.ws_idx, update.pane_id);
-                    let suppress_active_tab_notifications =
-                        crate::app::actions::active_tab_suppresses_notifications(
-                            is_active_tab,
-                            self.state.outer_terminal_focus,
-                        );
-                    let Some(kind) = crate::app::actions::notification_toast_for_state_change(
-                        suppress_active_tab_notifications,
-                        update.previous_state,
-                        update.state,
-                    ) else {
-                        continue;
-                    };
-                    let Some(ws) = self.state.workspaces.get(update.ws_idx) else {
-                        continue;
-                    };
-                    let Some(pane) = ws
-                        .tabs
-                        .iter()
-                        .find_map(|tab| tab.panes.get(&update.pane_id))
-                    else {
-                        continue;
-                    };
-                    let Some(agent_label) = self
-                        .state
-                        .terminals
-                        .get(&pane.attached_terminal_id)
-                        .and_then(|terminal| terminal.effective_agent_label())
-                    else {
-                        continue;
-                    };
-                    let event_text = match kind {
-                        ToastKind::NeedsAttention => "needs attention",
-                        ToastKind::Finished => "finished",
-                        ToastKind::UpdateInstalled => "updated",
-                    };
-                    let workspace_label =
-                        ws.display_name_from(&self.state.terminals, &self.terminal_runtimes);
-                    let _ = notify(
-                        &format!("{} {}", agent_label, event_text),
-                        Some(&crate::app::actions::notification_context(
-                            ws,
-                            &workspace_label,
-                            update.ws_idx,
-                            update.pane_id,
-                        )),
-                    );
-                }
+                self.emit_terminal_or_system_agent_notifications(&pane_updates);
             }
         }
 
@@ -404,6 +360,78 @@ impl App {
                     state_labels: presentation.state_labels,
                 },
             });
+        }
+    }
+
+    fn emit_terminal_or_system_agent_notifications(
+        &self,
+        pane_updates: &[crate::app::actions::PaneStateUpdate],
+    ) {
+        if !self.local_terminal_notifications
+            || self.state.toast_config.delay_seconds != 0
+            || !matches!(
+                self.state.toast_config.delivery,
+                crate::config::ToastDelivery::Terminal | crate::config::ToastDelivery::System
+            )
+        {
+            return;
+        }
+
+        let notify = match self.state.toast_config.delivery {
+            crate::config::ToastDelivery::Terminal => crate::terminal_notify::show_notification,
+            crate::config::ToastDelivery::System => crate::platform::show_desktop_notification,
+            _ => return,
+        };
+
+        for update in pane_updates {
+            let is_active_tab = self
+                .state
+                .pane_is_in_active_tab(update.ws_idx, update.pane_id);
+            let suppress_active_tab_notifications =
+                crate::app::actions::active_tab_suppresses_notifications(
+                    is_active_tab,
+                    self.state.outer_terminal_focus,
+                );
+            let Some(kind) = crate::app::actions::notification_toast_for_pane_state_update(
+                suppress_active_tab_notifications,
+                update,
+            ) else {
+                continue;
+            };
+            let Some(ws) = self.state.workspaces.get(update.ws_idx) else {
+                continue;
+            };
+            let Some(pane) = ws
+                .tabs
+                .iter()
+                .find_map(|tab| tab.panes.get(&update.pane_id))
+            else {
+                continue;
+            };
+            let Some(agent_label) = self
+                .state
+                .terminals
+                .get(&pane.attached_terminal_id)
+                .and_then(|terminal| terminal.effective_agent_label())
+            else {
+                continue;
+            };
+            let event_text = match kind {
+                ToastKind::NeedsAttention => "needs attention",
+                ToastKind::Finished => "finished",
+                ToastKind::UpdateInstalled => "updated",
+            };
+            let workspace_label =
+                ws.display_name_from(&self.state.terminals, &self.terminal_runtimes);
+            let _ = notify(
+                &format!("{} {}", agent_label, event_text),
+                Some(&crate::app::actions::notification_context(
+                    ws,
+                    &workspace_label,
+                    update.ws_idx,
+                    update.pane_id,
+                )),
+            );
         }
     }
 
@@ -891,7 +919,6 @@ mod tests {
             agent: Some(Agent::Codex),
             state: AgentState::Working,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -901,7 +928,6 @@ mod tests {
             agent: Some(Agent::Codex),
             state: AgentState::Idle,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -984,7 +1010,6 @@ mod tests {
             agent: Some(Agent::Codex),
             state: AgentState::Working,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -994,7 +1019,6 @@ mod tests {
             agent: Some(Agent::Codex),
             state: AgentState::Idle,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -1096,7 +1120,6 @@ mod tests {
             agent: Some(Agent::Codex),
             state: AgentState::Working,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -1117,7 +1140,6 @@ mod tests {
             agent: Some(Agent::Codex),
             state: AgentState::Idle,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),

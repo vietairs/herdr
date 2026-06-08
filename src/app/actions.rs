@@ -22,6 +22,28 @@ fn is_background_completion_transition(prev_state: AgentState, new_state: AgentS
         && matches!(prev_state, AgentState::Working | AgentState::Blocked)
 }
 
+fn is_completion_transition(change: &EffectiveStateChange) -> bool {
+    is_completion_transition_parts(
+        change.previous_state,
+        change.state,
+        change.previous_agent_label.as_deref(),
+        change.agent_label.as_deref(),
+    )
+}
+
+pub fn is_completion_transition_parts(
+    previous_state: AgentState,
+    state: AgentState,
+    previous_agent_label: Option<&str>,
+    agent_label: Option<&str>,
+) -> bool {
+    is_background_completion_transition(previous_state, state)
+        || (previous_state == AgentState::Unknown
+            && state == AgentState::Idle
+            && previous_agent_label.is_some()
+            && previous_agent_label == agent_label)
+}
+
 pub fn active_tab_suppresses_notifications(
     is_active_tab: bool,
     outer_terminal_focus: Option<bool>,
@@ -29,6 +51,7 @@ pub fn active_tab_suppresses_notifications(
     is_active_tab && outer_terminal_focus != Some(false)
 }
 
+#[cfg(test)]
 pub fn notification_sound_for_state_change(
     suppress_active_tab_notifications: bool,
     prev_state: AgentState,
@@ -50,10 +73,58 @@ pub fn notification_sound_for_state_change(
     }
 }
 
-pub fn notification_toast_for_state_change(
+pub fn notification_sound_for_state_change_with_agent_labels(
     suppress_active_tab_notifications: bool,
     prev_state: AgentState,
     new_state: AgentState,
+    previous_agent_label: Option<&str>,
+    agent_label: Option<&str>,
+) -> Option<crate::sound::Sound> {
+    if new_state == prev_state {
+        return None;
+    }
+
+    match new_state {
+        AgentState::Blocked => Some(crate::sound::Sound::Request),
+        AgentState::Idle
+            if is_completion_transition_parts(
+                prev_state,
+                new_state,
+                previous_agent_label,
+                agent_label,
+            ) && !suppress_active_tab_notifications =>
+        {
+            Some(crate::sound::Sound::Done)
+        }
+        _ => None,
+    }
+}
+
+fn notification_sound_for_effective_state_change(
+    suppress_active_tab_notifications: bool,
+    change: &EffectiveStateChange,
+) -> Option<crate::sound::Sound> {
+    if change.state == change.previous_state {
+        return None;
+    }
+
+    match change.state {
+        AgentState::Blocked => Some(crate::sound::Sound::Request),
+        AgentState::Idle
+            if is_completion_transition(change) && !suppress_active_tab_notifications =>
+        {
+            Some(crate::sound::Sound::Done)
+        }
+        _ => None,
+    }
+}
+
+pub fn notification_toast_for_state_change_with_agent_labels(
+    suppress_active_tab_notifications: bool,
+    prev_state: AgentState,
+    new_state: AgentState,
+    previous_agent_label: Option<&str>,
+    agent_label: Option<&str>,
 ) -> Option<ToastKind> {
     if suppress_active_tab_notifications || new_state == prev_state {
         return None;
@@ -61,11 +132,50 @@ pub fn notification_toast_for_state_change(
 
     match new_state {
         AgentState::Blocked => Some(ToastKind::NeedsAttention),
-        AgentState::Idle if is_background_completion_transition(prev_state, new_state) => {
+        AgentState::Idle
+            if is_completion_transition_parts(
+                prev_state,
+                new_state,
+                previous_agent_label,
+                agent_label,
+            ) =>
+        {
             Some(ToastKind::Finished)
         }
         _ => None,
     }
+}
+
+fn notification_toast_for_effective_state_change(
+    suppress_active_tab_notifications: bool,
+    change: &EffectiveStateChange,
+) -> Option<ToastKind> {
+    if suppress_active_tab_notifications || change.state == change.previous_state {
+        return None;
+    }
+
+    match change.state {
+        AgentState::Blocked => Some(ToastKind::NeedsAttention),
+        AgentState::Idle if is_completion_transition(change) => Some(ToastKind::Finished),
+        _ => None,
+    }
+}
+
+pub fn notification_toast_for_pane_state_update(
+    suppress_active_tab_notifications: bool,
+    update: &PaneStateUpdate,
+) -> Option<ToastKind> {
+    if suppress_active_tab_notifications || update.state == update.previous_state {
+        return None;
+    }
+
+    notification_toast_for_state_change_with_agent_labels(
+        suppress_active_tab_notifications,
+        update.previous_state,
+        update.state,
+        update.previous_agent_label.as_deref(),
+        update.agent_label.as_deref(),
+    )
 }
 
 fn toast_agent_label(agent_label: &str) -> &str {
@@ -2207,7 +2317,6 @@ impl AppState {
                 agent,
                 state,
                 visible_blocker,
-                visible_idle,
                 visible_working,
                 process_exited,
                 observed_at,
@@ -2217,7 +2326,7 @@ impl AppState {
                         agent,
                         state,
                         visible_blocker,
-                        visible_idle,
+                        false,
                         visible_working,
                         process_exited,
                         observed_at,
@@ -2405,6 +2514,27 @@ impl AppState {
         Some(update)
     }
 
+    pub(crate) fn publish_pane_process_exit_if_agent(
+        &mut self,
+        pane_id: PaneId,
+    ) -> Option<PaneStateUpdate> {
+        let observed_at = std::time::Instant::now();
+        self.update_terminal_state(pane_id, |terminal| {
+            let agent = terminal
+                .effective_known_agent()
+                .or(terminal.detected_agent)?;
+            Some(terminal.set_detected_state_with_screen_signals_at(
+                Some(agent),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                true,
+                observed_at,
+            ))
+        })
+    }
+
     fn apply_pane_state_change(
         &mut self,
         ws_idx: usize,
@@ -2421,7 +2551,7 @@ impl AppState {
 
         if change.state != AgentState::Idle {
             pane.seen = true;
-        } else if is_background_completion_transition(change.previous_state, change.state) {
+        } else if is_completion_transition(change) {
             pane.seen = suppress_active_tab_notifications;
         }
         let seen = pane.seen;
@@ -2445,15 +2575,13 @@ impl AppState {
         let suppress_active_tab_notifications =
             active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
 
-        let client_notification_kind = notification_toast_for_state_change(
+        let client_notification_kind = notification_toast_for_effective_state_change(
             suppress_active_tab_notifications,
-            change.previous_state,
-            change.state,
+            change,
         );
-        let sound = notification_sound_for_state_change(
+        let sound = notification_sound_for_effective_state_change(
             suppress_active_tab_notifications,
-            change.previous_state,
-            change.state,
+            change,
         );
         if client_notification_kind.is_none() && sound.is_none() {
             return None;
@@ -3834,7 +3962,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Working,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -3854,6 +3981,7 @@ mod tests {
     #[test]
     fn state_changed_idle_in_background_marks_unseen() {
         let mut state = app_with_workspaces(&["active", "background"]);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         state.active = Some(0);
         let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
 
@@ -3872,7 +4000,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -3880,6 +4007,10 @@ mod tests {
 
         let pane = state.workspaces[1].panes.get(&bg_pane_id).unwrap();
         assert!(!pane.seen);
+        assert!(matches!(
+            state.toast.as_ref().map(|toast| toast.kind),
+            Some(ToastKind::Finished)
+        ));
     }
 
     #[test]
@@ -3902,7 +4033,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -3925,7 +4055,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Idle,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -3933,6 +4062,36 @@ mod tests {
 
         let pane = state.workspaces[1].panes.get(&bg_pane_id).unwrap();
         assert!(pane.seen);
+    }
+
+    #[test]
+    fn idle_after_known_unknown_agent_in_background_marks_done() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.active = Some(0);
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Unknown,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        let pane = state.workspaces[1].panes.get(&bg_pane_id).unwrap();
+        assert!(!pane.seen);
     }
 
     #[test]
@@ -3971,7 +4130,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -3996,7 +4154,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4029,7 +4186,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4041,7 +4197,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Working,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: true,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4065,7 +4220,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4091,7 +4245,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4119,7 +4272,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4176,7 +4328,6 @@ mod tests {
             agent: Some(Agent::Codex),
             state: AgentState::Idle,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4196,7 +4347,6 @@ mod tests {
             agent: Some(Agent::Codex),
             state: AgentState::Blocked,
             visible_blocker: true,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4227,7 +4377,6 @@ mod tests {
             agent: Some(Agent::Claude),
             state: AgentState::Working,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4252,7 +4401,6 @@ mod tests {
             agent: Some(Agent::Claude),
             state: AgentState::Idle,
             visible_blocker: false,
-            visible_idle: true,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4279,7 +4427,6 @@ mod tests {
             agent: Some(Agent::Claude),
             state: AgentState::Working,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: true,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4298,7 +4445,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_session_ref_only_update_marks_session_dirty_without_visible_update() {
+    fn hidden_custom_session_ref_only_update_marks_session_dirty_without_visible_update() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
         let test_dir = std::env::current_dir().unwrap();
@@ -4307,7 +4454,7 @@ mod tests {
 
         let first_updates = state.handle_app_event(AppEvent::HookStateReported {
             pane_id,
-            source: "herdr:pi".into(),
+            source: "custom:pi".into(),
             agent_label: "pi".into(),
             state: AgentState::Working,
             message: None,
@@ -4320,7 +4467,7 @@ mod tests {
 
         let second_updates = state.handle_app_event(AppEvent::HookStateReported {
             pane_id,
-            source: "herdr:pi".into(),
+            source: "custom:pi".into(),
             agent_label: "pi".into(),
             state: AgentState::Working,
             message: None,
@@ -4377,7 +4524,6 @@ mod tests {
             agent: Some(Agent::Droid),
             state: AgentState::Idle,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4407,7 +4553,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4434,7 +4579,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4458,7 +4602,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4480,7 +4623,6 @@ mod tests {
             agent: Some(Agent::Pi),
             state: AgentState::Blocked,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
             process_exited: false,
             observed_at: std::time::Instant::now(),
@@ -4675,6 +4817,39 @@ mod tests {
 
         state.close_pane();
         assert_eq!(state.workspaces[0].panes.len(), 1);
+    }
+
+    #[test]
+    fn pane_process_exit_publish_marks_agent_idle_before_pane_removal() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.active = Some(1);
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.terminal_id_for_pane(0, pane_id).unwrap();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Pi), AgentState::Working);
+        assert_eq!(
+            state.terminals.get(&terminal_id).unwrap().state,
+            AgentState::Working
+        );
+
+        let update = state
+            .publish_pane_process_exit_if_agent(pane_id)
+            .expect("process exit update");
+
+        assert!(!state.pane_is_in_active_tab(update.ws_idx, pane_id));
+        assert_eq!(update.previous_state, AgentState::Working);
+        assert_eq!(update.state, AgentState::Idle);
+        assert_eq!(update.agent_label.as_deref(), Some("pi"));
+        assert_eq!(update.known_agent, Some(Agent::Pi));
+        assert!(matches!(
+            state.toast.as_ref().map(|toast| toast.kind),
+            Some(ToastKind::Finished)
+        ));
     }
 
     #[test]
