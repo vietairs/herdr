@@ -13,18 +13,18 @@ Automatic detection works out of the box for common coding agents. The important
 | --- | --- | --- |
 | Pi | lifecycle hooks when installed; otherwise PTY/screen | state and session |
 | OMP | lifecycle hooks when installed | state |
-| GitHub Copilot CLI | lifecycle hooks when installed; otherwise PTY/screen | state and session |
-| Kimi Code CLI | lifecycle hooks when installed; otherwise PTY/screen | state |
+| GitHub Copilot CLI | PTY/screen | session |
+| Kimi Code CLI | PTY/screen | session |
 | Hermes Agent | lifecycle hooks when installed; otherwise PTY/screen | state and session |
-| Qoder CLI | lifecycle hooks when installed; otherwise PTY/screen | state |
+| Qoder CLI | PTY/screen | session |
+| Droid | PTY/screen | session |
+| OpenCode | lifecycle plugin when installed; otherwise PTY/screen | state and session |
+| Kilo Code CLI | lifecycle plugin when installed; otherwise PTY/screen | state and session |
 | Claude Code | PTY/screen | session |
 | Codex | PTY/screen | session |
 | Cursor Agent CLI | PTY/screen | session |
-| Droid | PTY/screen | session |
-| OpenCode | PTY/screen | session |
 | Amp | PTY/screen | none |
 | Grok CLI | PTY/screen | none |
-| Kilo Code CLI | PTY/screen | none |
 | Antigravity CLI | PTY/screen | none |
 | Kiro CLI | PTY/screen | none |
 
@@ -40,7 +40,7 @@ For agents without complete lifecycle hooks, Herdr uses PTY-first detection. Ter
 
 Herdr briefly ignores detection after a new agent process appears, and after input, mouse events, or pane resize. Those events can make a terminal UI redraw even when the agent did not resume work. Once the quiet window passes, normal detection starts again from fresh PTY activity.
 
-Claude Code, Codex, Cursor Agent CLI, Droid, and OpenCode integrations are intentionally not lifecycle authorities. They provide native session identity for restore, but their hooks do not cover the whole lifecycle. They can miss permission approval results, escape interrupts, or other transitions. For those agents, Herdr still uses PTY/screen state detection.
+Claude Code, Codex, GitHub Copilot CLI, Droid, Kimi Code CLI, Qoder CLI, and Cursor Agent CLI integrations are intentionally not lifecycle authorities. They provide native session identity for restore, but their hooks do not cover the whole lifecycle. They can miss permission approval results, escape interrupts, or other transitions. For those agents, Herdr still uses PTY/screen state detection.
 
 ## Blocked state
 
@@ -72,6 +72,7 @@ herdr integration install cursor
 herdr integration install droid
 herdr integration install kimi
 herdr integration install opencode
+herdr integration install kilo
 herdr integration install hermes
 herdr integration install qodercli
 ```

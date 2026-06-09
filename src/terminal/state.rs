@@ -1539,10 +1539,10 @@ mod tests {
     fn fallback_idle_does_not_override_full_lifecycle_hook_working() {
         let now = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Working);
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Working);
         terminal.set_hook_authority_with_custom_status_at(
-            "herdr:kimi".into(),
-            "kimi".into(),
+            "herdr:opencode".into(),
+            "opencode".into(),
             AgentState::Working,
             None,
             Some("thinking".into()),
@@ -1551,7 +1551,7 @@ mod tests {
             now,
         );
         terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Kimi),
+            Some(Agent::OpenCode),
             AgentState::Idle,
             false,
             true,
@@ -1634,10 +1634,10 @@ mod tests {
     fn pty_working_fallback_is_ignored_under_full_lifecycle_hook_authority() {
         let now = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Qodercli), AgentState::Idle);
+        terminal.set_detected_state(Some(Agent::Kilo), AgentState::Idle);
         terminal.set_hook_authority_with_custom_status_at(
-            "herdr:qodercli".into(),
-            "qodercli".into(),
+            "herdr:kilo".into(),
+            "kilo".into(),
             AgentState::Idle,
             None,
             None,
@@ -1647,7 +1647,7 @@ mod tests {
         );
 
         let change = terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Qodercli),
+            Some(Agent::Kilo),
             AgentState::Working,
             false,
             false,
@@ -1881,10 +1881,10 @@ mod tests {
     #[test]
     fn detected_agent_clear_clears_matching_hook_authority() {
         let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        terminal.set_detected_state(Some(Agent::Cursor), AgentState::Idle);
         terminal.set_hook_authority(
-            "herdr:opencode".into(),
-            "opencode".into(),
+            "herdr:cursor".into(),
+            "cursor".into(),
             AgentState::Idle,
             None,
             None,
@@ -2287,20 +2287,20 @@ mod tests {
         let mut terminal = test_terminal();
         terminal
             .set_hook_authority_with_session_ref(
-                "herdr:copilot".into(),
-                "copilot".into(),
+                "herdr:opencode".into(),
+                "opencode".into(),
                 AgentState::Working,
                 None,
                 None,
-                crate::agent_resume::AgentSessionRef::id("copilot-session"),
+                crate::agent_resume::AgentSessionRef::id("opencode-session"),
                 Some(20),
             )
             .expect("initial session should be accepted");
 
         let mutation = terminal
             .set_hook_authority_with_session_ref(
-                "herdr:copilot".into(),
-                "copilot".into(),
+                "herdr:opencode".into(),
+                "opencode".into(),
                 AgentState::Blocked,
                 Some("needs approval".into()),
                 None,
@@ -2317,7 +2317,7 @@ mod tests {
                 .as_ref()
                 .and_then(|authority| authority.session_ref.as_ref())
                 .map(|session_ref| session_ref.value.as_str()),
-            Some("copilot-session")
+            Some("opencode-session")
         );
     }
 

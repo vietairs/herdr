@@ -43,7 +43,7 @@ fn screen_blocked_or_idle_fallback(detection: AgentDetection) -> AgentDetection 
 pub(crate) fn full_lifecycle_detected_agent(agent: Agent) -> bool {
     matches!(
         agent,
-        Agent::Pi | Agent::GithubCopilot | Agent::Kimi | Agent::Hermes | Agent::Qodercli
+        Agent::Pi | Agent::Hermes | Agent::OpenCode | Agent::Kilo
     )
 }
 
@@ -52,10 +52,9 @@ pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> 
         (source, agent_label),
         ("herdr:pi", "pi")
             | ("herdr:omp", "omp")
-            | ("herdr:kimi", "kimi")
-            | ("herdr:copilot", "copilot")
             | ("herdr:hermes", "hermes")
-            | ("herdr:qodercli", "qodercli")
+            | ("herdr:opencode", "opencode")
+            | ("herdr:kilo", "kilo")
     )
 }
 
@@ -122,23 +121,29 @@ mod tests {
     fn classifies_full_lifecycle_hook_sources() {
         assert!(full_lifecycle_hook_authority("herdr:pi", "pi"));
         assert!(full_lifecycle_hook_authority("herdr:omp", "omp"));
-        assert!(full_lifecycle_hook_authority("herdr:kimi", "kimi"));
-        assert!(full_lifecycle_hook_authority("herdr:copilot", "copilot"));
         assert!(full_lifecycle_hook_authority("herdr:hermes", "hermes"));
-        assert!(full_lifecycle_hook_authority("herdr:qodercli", "qodercli"));
+        assert!(full_lifecycle_hook_authority("herdr:opencode", "opencode"));
+        assert!(full_lifecycle_hook_authority("herdr:kilo", "kilo"));
+        assert!(!full_lifecycle_hook_authority("herdr:copilot", "copilot"));
         assert!(!full_lifecycle_hook_authority("herdr:codex", "codex"));
         assert!(!full_lifecycle_hook_authority("herdr:claude", "claude"));
-        assert!(!full_lifecycle_hook_authority("herdr:opencode", "opencode"));
+        assert!(!full_lifecycle_hook_authority("herdr:cursor", "cursor"));
+        assert!(!full_lifecycle_hook_authority("herdr:kimi", "kimi"));
+        assert!(!full_lifecycle_hook_authority("herdr:droid", "droid"));
+        assert!(!full_lifecycle_hook_authority("herdr:qodercli", "qodercli"));
         assert!(!full_lifecycle_hook_authority("custom", "pi"));
     }
 
     #[test]
     fn classifies_full_lifecycle_detected_agents_without_omp_variant() {
         assert!(full_lifecycle_detected_agent(Agent::Pi));
-        assert!(full_lifecycle_detected_agent(Agent::Kimi));
-        assert!(full_lifecycle_detected_agent(Agent::GithubCopilot));
         assert!(full_lifecycle_detected_agent(Agent::Hermes));
-        assert!(full_lifecycle_detected_agent(Agent::Qodercli));
+        assert!(full_lifecycle_detected_agent(Agent::OpenCode));
+        assert!(full_lifecycle_detected_agent(Agent::Kilo));
+        assert!(!full_lifecycle_detected_agent(Agent::GithubCopilot));
+        assert!(!full_lifecycle_detected_agent(Agent::Kimi));
+        assert!(!full_lifecycle_detected_agent(Agent::Droid));
+        assert!(!full_lifecycle_detected_agent(Agent::Qodercli));
         assert!(!full_lifecycle_detected_agent(Agent::Codex));
         assert!(!full_lifecycle_detected_agent(Agent::Claude));
     }

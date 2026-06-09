@@ -447,6 +447,7 @@ pub enum IntegrationTarget {
     Droid,
     Kimi,
     Opencode,
+    Kilo,
     Hermes,
     Qodercli,
     Cursor,
