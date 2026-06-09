@@ -31,10 +31,11 @@ mod xtgettcap;
 
 use self::agent_detection::{
     agent_caused_pty_activity_active, baseline_pty_causality, decide_detection_screen_read,
-    decide_screen_detection_publish, detection_update_for_publish, handle_skipped_detection_update,
-    observe_pty_output_activity, DetectionPublishDecision, DetectionScreenReadDecision,
-    DetectionScreenReadInput, PendingIdleConfirmation, PendingWorkingConfirmation,
-    PostTaintWorkingLease, PtyCausalityTracker, ScreenDetectionPublishInput,
+    decide_pty_working_publish_without_screen, decide_screen_detection_publish,
+    detection_update_for_publish, handle_skipped_detection_update, observe_pty_output_activity,
+    DetectionPublishDecision, DetectionScreenReadDecision, DetectionScreenReadInput,
+    PendingIdleConfirmation, PendingWorkingConfirmation, PostTaintWorkingLease,
+    PtyCausalityTracker, PtyWorkingPublishInput, ScreenDetectionPublishInput,
     AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
 };
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
@@ -619,6 +620,50 @@ fn spawn_basic_detection_task(
             }) {
                 DetectionScreenReadDecision::Read => {}
                 DetectionScreenReadDecision::Skip => continue,
+                DetectionScreenReadDecision::EvaluatePtyWorking => {
+                    match decide_pty_working_publish_without_screen(
+                        PtyWorkingPublishInput {
+                            agent,
+                            current_state: state,
+                            last_visible_blocker,
+                            last_visible_working,
+                            last_visible_signal_refresh,
+                            pty_activity,
+                            now,
+                        },
+                        &mut pending_idle,
+                        &mut pending_working,
+                        &mut post_taint_working,
+                    ) {
+                        DetectionPublishDecision::NoPublish => {}
+                        DetectionPublishDecision::Publish {
+                            state: new_state,
+                            visible_blocker,
+                            visible_working,
+                            process_exited: publish_process_exited,
+                        } => {
+                            apply_agent_detection_publish_update(
+                                state_events.clone(),
+                                pane_id,
+                                agent,
+                                AgentDetectionPublishUpdate {
+                                    state: new_state,
+                                    visible_blocker,
+                                    visible_working,
+                                    process_exited: publish_process_exited,
+                                },
+                                now,
+                                &mut state,
+                                &mut last_visible_blocker,
+                                &mut last_visible_working,
+                                &mut last_visible_signal_refresh,
+                                &mut foreground_shell_exit_reported,
+                            )
+                            .await;
+                        }
+                    }
+                    continue;
+                }
                 DetectionScreenReadDecision::Publish {
                     state: new_state,
                     visible_blocker,
@@ -2058,6 +2103,50 @@ impl PaneRuntime {
                     }) {
                         DetectionScreenReadDecision::Read => {}
                         DetectionScreenReadDecision::Skip => continue,
+                        DetectionScreenReadDecision::EvaluatePtyWorking => {
+                            match decide_pty_working_publish_without_screen(
+                                PtyWorkingPublishInput {
+                                    agent,
+                                    current_state: state,
+                                    last_visible_blocker,
+                                    last_visible_working,
+                                    last_visible_signal_refresh,
+                                    pty_activity,
+                                    now,
+                                },
+                                &mut pending_idle,
+                                &mut pending_working,
+                                &mut post_taint_working,
+                            ) {
+                                DetectionPublishDecision::NoPublish => {}
+                                DetectionPublishDecision::Publish {
+                                    state: new_state,
+                                    visible_blocker,
+                                    visible_working,
+                                    process_exited: publish_process_exited,
+                                } => {
+                                    apply_agent_detection_publish_update(
+                                        state_events.clone(),
+                                        pane_id,
+                                        agent,
+                                        AgentDetectionPublishUpdate {
+                                            state: new_state,
+                                            visible_blocker,
+                                            visible_working,
+                                            process_exited: publish_process_exited,
+                                        },
+                                        now,
+                                        &mut state,
+                                        &mut last_visible_blocker,
+                                        &mut last_visible_working,
+                                        &mut last_visible_signal_refresh,
+                                        &mut foreground_shell_exit_reported,
+                                    )
+                                    .await;
+                                }
+                            }
+                            continue;
+                        }
                         DetectionScreenReadDecision::Publish {
                             state: new_state,
                             visible_blocker,

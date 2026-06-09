@@ -297,6 +297,7 @@ pub(super) fn should_skip_idle_screen_scan(input: IdleScreenScanSkipInput) -> bo
 pub(super) enum DetectionScreenReadDecision {
     Read,
     Skip,
+    EvaluatePtyWorking,
     Publish {
         state: AgentState,
         visible_blocker: bool,
@@ -318,13 +319,16 @@ pub(super) struct DetectionScreenReadInput {
     pub(super) last_screen_scan_pty_output_seq: Option<u64>,
 }
 
+fn agent_activity_veto_requires_screen(agent: Option<Agent>) -> bool {
+    matches!(agent, Some(Agent::Claude))
+}
+
 pub(super) fn decide_detection_screen_read(
     input: DetectionScreenReadInput,
 ) -> DetectionScreenReadDecision {
     if !input.agent_changed
         && !input.process_exited
         && !input.pending_idle_active
-        && !input.pending_working_active
         && !input.post_taint_working_active
         && input.agent.is_some()
         && input
@@ -339,7 +343,15 @@ pub(super) fn decide_detection_screen_read(
                 visible_working: false,
                 process_exited: false,
             },
-            AgentState::Idle | AgentState::Unknown => DetectionScreenReadDecision::Read,
+            AgentState::Idle | AgentState::Unknown
+                if agent_activity_veto_requires_screen(input.agent)
+                    && !input.pending_working_active =>
+            {
+                DetectionScreenReadDecision::Read
+            }
+            AgentState::Idle | AgentState::Unknown => {
+                DetectionScreenReadDecision::EvaluatePtyWorking
+            }
         };
     }
 
@@ -525,6 +537,74 @@ pub(super) struct ScreenDetectionPublishInput<'a> {
     pub(super) pty_activity: Option<PtyActivitySignal>,
     pub(super) content: &'a str,
     pub(super) now: std::time::Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PtyWorkingPublishInput {
+    pub(super) agent: Option<Agent>,
+    pub(super) current_state: AgentState,
+    pub(super) last_visible_blocker: bool,
+    pub(super) last_visible_working: bool,
+    pub(super) last_visible_signal_refresh: Option<std::time::Instant>,
+    pub(super) pty_activity: Option<PtyActivitySignal>,
+    pub(super) now: std::time::Instant,
+}
+
+pub(super) fn decide_pty_working_publish_without_screen(
+    input: PtyWorkingPublishInput,
+    pending_idle: &mut PendingIdleConfirmation,
+    pending_working: &mut PendingWorkingConfirmation,
+    post_taint_working: &mut PostTaintWorkingLease,
+) -> DetectionPublishDecision {
+    let previous_publish = DetectionPublishState {
+        state: input.current_state,
+        visible_blocker: input.last_visible_blocker,
+        visible_working: input.last_visible_working,
+    };
+    let next_publish = DetectionPublishState {
+        state: AgentState::Working,
+        visible_blocker: false,
+        visible_working: false,
+    };
+    let stable_refresh_due = stable_visible_signal_refresh_due(
+        previous_publish,
+        next_publish,
+        input.last_visible_signal_refresh,
+        input.now,
+    );
+
+    match decide_detection_transition(
+        DetectionTransitionInput {
+            agent: input.agent,
+            previous_publish,
+            next_publish,
+            agent_changed: false,
+            process_exited: false,
+            pty_activity: input.pty_activity,
+            stable_refresh_due,
+            content: "",
+            now: input.now,
+        },
+        pending_idle,
+        pending_working,
+        post_taint_working,
+    ) {
+        DetectionTransitionDecision::NoPublish => DetectionPublishDecision::NoPublish,
+        DetectionTransitionDecision::PublishHeldWorkingBeforeExit => {
+            DetectionPublishDecision::Publish {
+                state: AgentState::Working,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited: false,
+            }
+        }
+        DetectionTransitionDecision::PublishNext => DetectionPublishDecision::Publish {
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+        },
+    }
 }
 
 pub(super) fn decide_screen_detection_publish(
@@ -844,9 +924,17 @@ mod tests {
         state: AgentState,
         pty_activity: PtyActivitySignal,
     ) -> DetectionScreenReadInput {
+        screen_read_input_for_agent(Some(Agent::Codex), state, pty_activity)
+    }
+
+    fn screen_read_input_for_agent(
+        agent: Option<Agent>,
+        state: AgentState,
+        pty_activity: PtyActivitySignal,
+    ) -> DetectionScreenReadInput {
         DetectionScreenReadInput {
             state,
-            agent: Some(Agent::Codex),
+            agent,
             pending_idle_active: false,
             pending_working_active: false,
             post_taint_working_active: false,
@@ -879,7 +967,7 @@ mod tests {
                 AgentState::Idle,
                 pty_activity(true, true, 10),
             )),
-            DetectionScreenReadDecision::Read
+            DetectionScreenReadDecision::EvaluatePtyWorking
         );
         assert_eq!(
             decide_detection_screen_read(screen_read_input(
@@ -918,6 +1006,15 @@ mod tests {
                 AgentState::Idle,
                 pty_activity(true, true, 11),
             )),
+            DetectionScreenReadDecision::EvaluatePtyWorking
+        );
+
+        assert_eq!(
+            decide_detection_screen_read(screen_read_input_for_agent(
+                Some(Agent::Claude),
+                AgentState::Idle,
+                pty_activity(true, true, 11),
+            )),
             DetectionScreenReadDecision::Read
         );
     }
@@ -943,6 +1040,27 @@ mod tests {
         assert_eq!(
             decide_detection_screen_read(input),
             DetectionScreenReadDecision::Read
+        );
+    }
+
+    #[test]
+    fn screen_read_decision_keeps_active_pty_pending_working_screenless() {
+        let mut input = screen_read_input(AgentState::Idle, pty_activity(true, true, 11));
+        input.pending_working_active = true;
+        assert_eq!(
+            decide_detection_screen_read(input),
+            DetectionScreenReadDecision::EvaluatePtyWorking
+        );
+
+        let mut input = screen_read_input_for_agent(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            pty_activity(true, true, 11),
+        );
+        input.pending_working_active = true;
+        assert_eq!(
+            decide_detection_screen_read(input),
+            DetectionScreenReadDecision::EvaluatePtyWorking
         );
     }
 
