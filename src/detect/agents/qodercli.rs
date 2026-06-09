@@ -7,14 +7,6 @@ use super::super::AgentState;
 pub(super) fn detect(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Idle short-circuit: double-press confirmation hints render *over* the
-    // input prompt while the user briefly holds Ctrl+C / Esc. The pane is
-    // effectively idle there — without this, a stale spinner row above could
-    // still flip it to Working.
-    if has_qodercli_idle_override(&lower) {
-        return AgentState::Idle;
-    }
-
     if has_visible_blocker(content) {
         return AgentState::Blocked;
     }
@@ -25,17 +17,6 @@ pub(super) fn detect(content: &str) -> AgentState {
     }
 
     AgentState::Idle
-}
-
-/// Idle override hints. Mirrors the `⌕ Search…` / `ctrl+r to toggle` shortcut
-/// in Claude detection: when these UI bits are visible the pane is sitting at
-/// a static prompt and should not be classified as Working or Blocked.
-///
-/// Covers qodercli's "press again" exit/rewind banners.
-fn has_qodercli_idle_override(lower_content: &str) -> bool {
-    lower_content.contains("press ctrl+c again to exit")
-        || lower_content.contains("press ctrl+d again to exit")
-        || lower_content.contains("press esc again to rewind")
 }
 
 /// Working hints qodercli prints alongside the spinner while the model is

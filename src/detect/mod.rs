@@ -1364,6 +1364,34 @@ mod tests {
     }
 
     #[test]
+    fn claude_old_permission_prompt_above_wrapped_live_prompt_is_not_visible_blocker() {
+        let screen = "● Bash(rm -rf /tmp/test)\n  ⎿  Waiting…\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend · ctrl+e to explain\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ explain why this stale approval prompt should not be considered live anymore because\n  my current prompt wrapped onto a second line\n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert!(!detection.visible_blocker);
+        assert_eq!(
+            crate::agent_detection_policy::apply_detection_policy(
+                crate::agent_detection_policy::DetectionPolicyInput {
+                    agent: Some(Agent::Claude),
+                    screen_detection: detection,
+                    process_exited: false,
+                    startup_grace_active: false,
+                    pty_signal: Some(crate::agent_detection_policy::PtySignal {
+                        active: false,
+                        tainted: false,
+                    }),
+                },
+            ),
+            crate::agent_detection_policy::DetectionPolicyDecision::Publish(AgentDetection {
+                state: AgentState::Idle,
+                skip_state_update: false,
+                visible_blocker: false,
+                visible_working: false,
+            })
+        );
+    }
+
+    #[test]
     fn claude_spinner_after_interrupted_permission_is_visible_working() {
         let screen = "❯ this is a test, create some dummy files on /tmp and -rm rf them i wanna test\n    permissions\n\n  Thought for 7s (ctrl+o to expand)\n\n● Bash(tmpdir=$(mktemp -d /tmp/claude-perm-test.XXXXXX) && touch \"$tmpdir/file1.txt\"\n      \"$tmpdir/file2.log\" && mkdir \"$tmpdir/subdir\" && touch\n      \"$tmpdir/subdir/nested.txt\"…)\n  ⎿  Interrupted · What should Claude do instead?\n\n❯ test\n\n✢ Garnishing… (1s · thinking with high effort)\n  ⎿  Tip: Run claude --continue or claude --resume to resume a conversation\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
         let detection = detect_agent(Some(Agent::Claude), screen);
@@ -1448,12 +1476,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_idle_search() {
-        let screen = "⌕ Search…\nsome content";
-        assert_eq!(detect_claude(screen), AgentState::Idle);
-    }
-
-    #[test]
     fn claude_working_not_confused_by_old_prompt() {
         // The "esc to interrupt" is ABOVE the prompt box — should be working
         let screen = "✽ Writing…\nesc to interrupt\n──────\n❯ \n──────";
@@ -1501,11 +1523,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_replayed_transcript_weak_blocked_text_above_prompt_is_idle() {
+    fn codex_replayed_transcript_weak_blocked_text_above_prompt_is_not_visible_blocker() {
         let screen = "Codex\nBlocked signals in src/detect/agents/codex.rs:6: confirm footer, submit answer/all, allow command, [y/n], yes (y), or generic confirmation.\n\nLikely false positives: [y/n] and generic confirmation prose still mark Blocked.\n\n• Agent thread 019e7670-ba31-7641-b6e0-545c101de8c3 is closed. Replaying saved transcript.\n\n\n› Summarize recent commits\n\n  ~/Projects/herdr · master · gpt-5.5 default · Context 37% used";
         let detection = detect_agent(Some(Agent::Codex), screen);
 
-        assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_blocker);
     }
 
@@ -1637,7 +1658,6 @@ mod tests {
             "• Notes mention esc to interrupt as a phrase\n\n› Fix Codex detection\n\n  ~/Projects/herdr · master",
         );
 
-        assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_blocker);
         assert!(!detection.visible_working);
     }
@@ -1698,13 +1718,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_stale_working_status_above_current_idle_prompt_is_idle() {
+    fn codex_stale_working_status_above_current_prompt_is_not_visible_working() {
         let detection = detect_agent(
             Some(Agent::Codex),
             "■ Conversation interrupted - tell the model what to do differently. Something went wrong?\nHit `/feedback` to report the issue.\n\n\n› `/feedback` to report the issue.\n\n\n  › Working\n\n\n  • Working (2s • esc to interrupt)\n\n\n  › Run /review on my current changes\n\n    ~/Projects/herdr · master · gpt-5.5 high · Context 7% used\n\n\n■ Conversation interrupted - tell the model what to do differently. Something went wrong?\nHit `/feedback` to report the issue.\n\n\n› Run /review on my current changes\n\n  ~/Projects/herdr · master · gpt-5.5 high · Context 7% used · 5h 95% left",
         );
 
-        assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_working);
     }
 
@@ -1715,7 +1734,6 @@ mod tests {
             "› so there is a problem\n\n\n\n\n  • Working (2s • esc to interrupt)\n\n\n  › Run /review on my current changes\n\n    ~/Projects/herdr · master · gpt-5.5 high · Context 0% used · 5h 94% left · weekly\n  36% …\n\n  wdyt\n\n\n\n  ~/Projects/herdr · master · gpt-5.5 high · Context 0% used · 5h 94% left · weekly 36% …",
         );
 
-        assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_working);
     }
 
@@ -1748,7 +1766,6 @@ mod tests {
             "• Working (17s • esc to interrupt)\n\n• Ran git status --short\n  └ M src/detect.rs\n\n› Implement {feature}",
         );
 
-        assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_working);
     }
 
@@ -1759,7 +1776,6 @@ mod tests {
             "• Waiting for background terminal (0s • esc to …\n  └ cargo test -p codex-core\n\n• Ran git status --short\n  └ M src/detect.rs\n\n› Implement {feature}",
         );
 
-        assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_working);
     }
 
@@ -2033,11 +2049,10 @@ mod tests {
     }
 
     #[test]
-    fn cline_idle_ready() {
-        assert_eq!(
-            detect_cline("cline is ready for your message"),
-            AgentState::Idle
-        );
+    fn cline_ready_text_is_not_visible_blocker() {
+        let detection = detect_agent(Some(Agent::Cline), "cline is ready for your message");
+
+        assert!(!detection.visible_blocker);
     }
 
     #[test]
@@ -2773,20 +2788,21 @@ fix: keep working set warm across reloads\n\
     }
 
     #[test]
-    fn qodercli_idle_override_wins_over_spinner_row() {
-        // While the user is holding Ctrl+C, qodercli flashes a "press again"
-        // banner over the prompt. The pane is effectively idle there even if
-        // a stale spinner row is still in the buffer.
+    fn qodercli_exit_hint_is_not_visible_blocker() {
         let screen = "\
 \u{280B} Thinking...\n\
 Press Ctrl+C again to exit.\n";
-        assert_eq!(detect_qodercli(screen), AgentState::Idle);
+        let detection = detect_agent(Some(Agent::Qodercli), screen);
+
+        assert!(!detection.visible_blocker);
     }
 
     #[test]
-    fn qodercli_idle_override_wins_over_esc_rewind() {
+    fn qodercli_esc_rewind_is_not_visible_blocker() {
         let screen = "Press Esc again to rewind.\n";
-        assert_eq!(detect_qodercli(screen), AgentState::Idle);
+        let detection = detect_agent(Some(Agent::Qodercli), screen);
+
+        assert!(!detection.visible_blocker);
     }
 
     #[test]

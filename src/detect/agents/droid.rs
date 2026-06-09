@@ -5,7 +5,6 @@ use super::super::{has_braille_spinner, AgentState};
 /// Working: braille spinner line (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) + "Thinking..." + "(Press ESC to stop)"
 /// Blocked: EXECUTE prompt with selection box ("Yes, allow" / "No, cancel") +
 ///          "Use ↑↓ to navigate, Enter to select"
-/// Idle: prompt box visible, no spinner, no selection prompt
 pub(super) fn detect(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 

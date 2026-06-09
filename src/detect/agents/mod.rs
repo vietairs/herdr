@@ -52,7 +52,7 @@ pub(super) fn detect(agent: Agent, screen_content: &str) -> AgentDetection {
     AgentDetection {
         state,
         skip_state_update: false,
-        visible_blocker: has_visible_blocker(agent, screen_content, state),
+        visible_blocker: has_visible_blocker(agent, screen_content),
         visible_working: has_visible_working(agent, screen_content, state),
     }
 }
@@ -65,11 +65,7 @@ pub(super) fn should_skip_state_update(agent: Agent, content: &str) -> bool {
     }
 }
 
-fn has_visible_blocker(agent: Agent, content: &str, state: AgentState) -> bool {
-    if state != AgentState::Blocked {
-        return false;
-    }
-
+fn has_visible_blocker(agent: Agent, content: &str) -> bool {
     match agent {
         // Strong visible blockers are opt-in because this flag can override
         // hook authority. Plain blocked heuristics remain valid fallback state,

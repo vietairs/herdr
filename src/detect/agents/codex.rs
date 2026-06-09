@@ -14,13 +14,8 @@ pub(super) fn detect(content: &str) -> AgentState {
         return AgentState::Working;
     }
 
-    // Idle
-    if has_codex_current_prompt(content) {
-        return AgentState::Idle;
-    }
-
-    // Weak blocked patterns are too broad to scan above a visible prompt. They
-    // only apply when Codex does not currently show an idle prompt region.
+    // Weak blocked patterns are too broad to become visible blockers, but the
+    // legacy state detector still reports them as blocked for compatibility.
     if has_codex_weak_blocked_prompt(&lower) {
         return AgentState::Blocked;
     }
