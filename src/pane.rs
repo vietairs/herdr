@@ -14,7 +14,9 @@ use ratatui::{layout::Rect, Frame};
 #[cfg(test)]
 use tokio::sync::watch;
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, error, info, warn};
+#[cfg(not(windows))]
+use tracing::debug;
+use tracing::{error, info, warn};
 
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
