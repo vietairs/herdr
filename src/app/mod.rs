@@ -1326,7 +1326,7 @@ impl App {
                                 self.handle_terminal_key_headless(key);
                             } else {
                                 self.suppressed_repeat_keys.insert(key_id);
-                                self.handle_non_terminal_key(key);
+                                self.handle_non_terminal_key_headless(key);
                             }
                         }
                         crossterm::event::KeyEventKind::Repeat => {
@@ -1352,7 +1352,9 @@ impl App {
                     }
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
-                    if self.state.mode == Mode::Terminal {
+                    if self.state.mode != Mode::Terminal {
+                        self.paste_into_active_text_input(&text);
+                    } else {
                         if let Some(ws_idx) = self.state.active {
                             if let Some(ws) = self.state.workspaces.get(ws_idx) {
                                 if let Some(focused) = ws.focused_pane_id() {
@@ -1395,8 +1397,17 @@ impl App {
     ///
     /// Uses the standalone handler functions that work on `&mut AppState`
     /// since the server doesn't have the async context of the monolithic App.
-    fn handle_non_terminal_key(&mut self, key: crate::input::TerminalKey) {
+    fn handle_non_terminal_key_headless(&mut self, key: crate::input::TerminalKey) {
         let key_event = key.as_key_event();
+        if input::modal_paste_target_active(&self.state)
+            && input::is_modal_paste_shortcut(&key_event)
+        {
+            if let Some(text) = crate::platform::read_clipboard_text() {
+                self.paste_into_active_text_input(&text);
+            }
+            return;
+        }
+
         match self.state.mode {
             Mode::Prefix => {
                 self.handle_prefix_key(key);
@@ -3965,6 +3976,68 @@ last_pane = "prefix+tab"
         assert_eq!(
             app.state.settings.section,
             state::SettingsSection::Integrations
+        );
+    }
+
+    #[test]
+    fn route_client_input_pastes_bracketed_text_into_rename_modal() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::RenameTab;
+        app.state.name_input = "2".into();
+        app.state.name_input_replace_on_type = true;
+
+        app.route_client_input(b"\x1b[200~feature/logs\x1b[201~".to_vec());
+
+        assert_eq!(app.state.name_input, "feature/logs");
+        assert!(!app.state.name_input_replace_on_type);
+    }
+
+    #[test]
+    fn raw_ctrl_v_decodes_as_modal_paste_shortcut() {
+        let events = crate::raw_input::parse_raw_input_bytes_sync(&[0x16]);
+        let Some(crate::raw_input::RawInputEvent::Key(key)) = events.first() else {
+            panic!("expected ctrl-v key event");
+        };
+
+        assert!(input::is_modal_paste_shortcut(&key.as_key_event()));
+    }
+
+    #[test]
+    fn route_client_events_pastes_text_into_new_linked_worktree_modal() {
+        let mut app = test_app();
+        app.state.mode = Mode::NewLinkedWorktree;
+        app.state.name_input = "generated-branch".into();
+        app.state.name_input_replace_on_type = true;
+        app.state.worktree_create = Some(state::WorktreeCreateState {
+            source_workspace_id: "source".into(),
+            source_checkout_path: "/repo/herdr".into(),
+            source_existing_membership: None,
+            source_repo_root: "/repo/herdr".into(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            branch: "generated-branch".into(),
+            checkout_path: "/repo/herdr-generated-branch".into(),
+            error: None,
+            creating: false,
+        });
+
+        app.route_client_events(
+            vec![crate::raw_input::RawInputEvent::Paste(
+                "feature/linear-302".into(),
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.name_input, "feature/linear-302");
+        assert_eq!(
+            app.state
+                .worktree_create
+                .as_ref()
+                .map(|create| create.branch.as_str()),
+            Some("feature/linear-302")
         );
     }
 
