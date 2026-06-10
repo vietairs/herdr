@@ -648,18 +648,17 @@ fn codex_osc_title_plain_is_idle() {
 }
 
 #[test]
-fn codex_background_terminal_screen_beats_osc_idle() {
-    // Codex doesn't set is_task_running() for background terminals, so title is
-    // plain (idle). The screen rule background_terminal_working at priority 800
-    // beats osc_title_idle at priority 100.
+fn codex_background_terminal_screen_does_not_override_osc_idle() {
+    // Background terminal tasks can be long-lived helpers such as dev servers.
+    // They should not make Codex look busy once the foreground turn is idle.
     let screen = "background terminal running · /ps to view · /stop to close\n";
     let result = osc_explain(Agent::Codex, screen, "llm-proxy", "");
-    assert_eq!(result.state, AgentState::Working);
+    assert_eq!(result.state, AgentState::Idle);
     assert_eq!(
         result.matched_rule.as_ref().map(|r| r.id.as_str()),
-        Some("background_terminal_working")
+        Some("osc_title_idle")
     );
-    assert!(result.visible_working);
+    assert!(result.visible_idle);
 }
 
 #[test]

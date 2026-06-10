@@ -4,6 +4,7 @@
 
 ### Fixed
 - Agent state detection for non-authoritative agents now comes from screen manifests instead of PTY-first semantic arbitration, so terminal output activity no longer publishes `working`, vetoes visible blockers, or decides idle fallback.
+- Codex background terminal status text no longer overrides Codex's foreground idle OSC status, so long-running helpers such as dev servers do not keep the pane marked working.
 - Removed the remaining PTY input-taint debounce from agent detection, so user input, pane resizes, and redraw nudges no longer delay screen/OSC manifest state updates.
 - Numeric keypad keys that send VT100 application-keypad escape sequences now enter their digits and operators instead of being dropped. (#493)
 - Codex panes now stay marked working when the live status header uses reasoning-summary text such as `Investigating code output` instead of the literal `Working` label. (#501)
