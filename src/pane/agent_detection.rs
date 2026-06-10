@@ -2,24 +2,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::detect::{Agent, AgentDetection, AgentState};
 
-pub(super) const AGENT_PTY_ACTIVITY_WINDOW: std::time::Duration =
-    std::time::Duration::from_millis(1800);
-pub(super) const AGENT_INPUT_TAINT_WINDOW: std::time::Duration =
-    std::time::Duration::from_millis(1200);
 pub(super) const AGENT_PENDING_IDLE_RECHECK: std::time::Duration =
     std::time::Duration::from_millis(100);
 const AGENT_PENDING_IDLE_CONFIRMATIONS: u8 = 3;
 pub(super) const AGENT_PENDING_IDLE_CAP: std::time::Duration =
     std::time::Duration::from_millis(700);
-pub(super) const AGENT_PENDING_WORKING_FAST_RECHECK: std::time::Duration =
-    std::time::Duration::from_millis(100);
-const AGENT_PENDING_WORKING_SLOW_RECHECK: std::time::Duration =
-    std::time::Duration::from_millis(250);
-const AGENT_PENDING_WORKING_FAST_WINDOW: std::time::Duration =
-    std::time::Duration::from_millis(500);
-pub(super) const AGENT_PENDING_WORKING_CAP: std::time::Duration = std::time::Duration::from_secs(2);
-pub(super) const AGENT_PENDING_WORKING_CONFIRM_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(250);
 pub(super) const STABLE_VISIBLE_SIGNAL_REFRESH: std::time::Duration =
     std::time::Duration::from_millis(800);
 pub(super) const AGENT_STARTUP_GRACE_WINDOW: std::time::Duration =
@@ -55,7 +42,6 @@ impl PendingIdleConfirmation {
         next: DetectionPublishState,
         agent_changed: bool,
         process_exited: bool,
-        _pty_signal: Option<PtyActivitySignal>,
         now: std::time::Instant,
     ) -> bool {
         let is_working_to_plain_idle = previous.state == AgentState::Working
@@ -91,169 +77,29 @@ impl PendingIdleConfirmation {
     }
 }
 
-#[derive(Debug, Default)]
-pub(super) struct PendingWorkingConfirmation {
-    started_at: Option<std::time::Instant>,
-    last_observed_output_seq: u64,
-}
-
-impl PendingWorkingConfirmation {
-    pub(super) fn active(&self) -> bool {
-        self.started_at.is_some()
-    }
-
-    pub(super) fn clear(&mut self) {
-        self.started_at = None;
-        self.last_observed_output_seq = 0;
-    }
-
-    pub(super) fn recheck_delay(&self, now: std::time::Instant) -> std::time::Duration {
-        let Some(started_at) = self.started_at else {
-            return AGENT_PENDING_WORKING_FAST_RECHECK;
-        };
-        if now.duration_since(started_at) < AGENT_PENDING_WORKING_FAST_WINDOW {
-            AGENT_PENDING_WORKING_FAST_RECHECK
-        } else {
-            AGENT_PENDING_WORKING_SLOW_RECHECK
-        }
-    }
-
-    pub(super) fn should_hold_idle_to_working(
-        &mut self,
-        previous: DetectionPublishState,
-        next: DetectionPublishState,
-        agent_changed: bool,
-        process_exited: bool,
-        pty_signal: Option<PtyActivitySignal>,
-        now: std::time::Instant,
-    ) -> bool {
-        let is_idle_to_working = previous.state == AgentState::Idle
-            && next.state == AgentState::Working
-            && !next.visible_blocker
-            && !agent_changed
-            && !process_exited;
-
-        if !is_idle_to_working {
-            self.clear();
-            return false;
-        }
-
-        if next.visible_working {
-            self.clear();
-            return false;
-        }
-
-        let Some(pty_signal) = pty_signal else {
-            self.clear();
-            return false;
-        };
-        if !pty_signal.active {
-            self.clear();
-            return false;
-        }
-
-        let Some(started_at) = self.started_at else {
-            self.started_at = Some(now);
-            self.last_observed_output_seq = pty_signal.output_seq;
-            return true;
-        };
-
-        if pty_signal.fresh_output && pty_signal.output_seq != self.last_observed_output_seq {
-            self.last_observed_output_seq = pty_signal.output_seq;
-            if now.duration_since(started_at) >= AGENT_PENDING_WORKING_CONFIRM_DELAY {
-                self.clear();
-                return false;
-            }
-        }
-
-        if now.duration_since(started_at) >= AGENT_PENDING_WORKING_CAP {
-            self.clear();
-            return true;
-        }
-
-        true
-    }
-
-    pub(super) fn should_publish_held_working_before_exit(
-        &mut self,
-        previous: DetectionPublishState,
-        next: DetectionPublishState,
-        process_exited: bool,
-    ) -> bool {
-        if self.started_at.is_none()
-            || !process_exited
-            || previous.state != AgentState::Idle
-            || next.state != AgentState::Idle
-        {
-            return false;
-        }
-
-        self.clear();
-        true
-    }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct PostTaintWorkingLease {
-    until: Option<std::time::Instant>,
-}
-
-impl PostTaintWorkingLease {
-    pub(super) fn active(&self) -> bool {
-        self.until.is_some()
-    }
-
-    pub(super) fn clear(&mut self) {
-        self.until = None;
-    }
-
-    pub(super) fn should_hold_working_to_idle(
-        &mut self,
-        _previous: DetectionPublishState,
-        _next: DetectionPublishState,
-        _agent_changed: bool,
-        _process_exited: bool,
-        _pty_signal: Option<PtyActivitySignal>,
-        _now: std::time::Instant,
-    ) -> bool {
-        self.clear();
-        false
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(super) struct IdleScreenScanSkipInput {
     pub(super) state: AgentState,
     pub(super) agent: Option<Agent>,
     pub(super) pending_idle_active: bool,
-    pub(super) pending_working_active: bool,
-    pub(super) post_taint_working_active: bool,
     pub(super) agent_changed: bool,
     pub(super) process_exited: bool,
-    pub(super) pty_signal: Option<PtyActivitySignal>,
-    pub(super) last_screen_scan_pty_output_seq: Option<u64>,
+    pub(super) current_detection_content_seq: Option<u64>,
+    pub(super) last_screen_scan_detection_content_seq: Option<u64>,
 }
 
 pub(super) fn should_skip_idle_screen_scan(input: IdleScreenScanSkipInput) -> bool {
     if input.state != AgentState::Idle
         || input.agent.is_none()
         || input.pending_idle_active
-        || input.pending_working_active
-        || input.post_taint_working_active
         || input.agent_changed
         || input.process_exited
     {
         return false;
     }
 
-    let Some(pty_signal) = input.pty_signal else {
-        return false;
-    };
-
-    !pty_signal.active
-        && !pty_signal.tainted
-        && !pty_signal.taint_just_ended
-        && input.last_screen_scan_pty_output_seq == Some(pty_signal.output_seq)
+    input.current_detection_content_seq.is_some()
+        && input.last_screen_scan_detection_content_seq == input.current_detection_content_seq
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,12 +113,10 @@ pub(super) struct DetectionScreenReadInput {
     pub(super) state: AgentState,
     pub(super) agent: Option<Agent>,
     pub(super) pending_idle_active: bool,
-    pub(super) pending_working_active: bool,
-    pub(super) post_taint_working_active: bool,
     pub(super) agent_changed: bool,
     pub(super) process_exited: bool,
-    pub(super) pty_activity: Option<PtyActivitySignal>,
-    pub(super) last_screen_scan_pty_output_seq: Option<u64>,
+    pub(super) current_detection_content_seq: Option<u64>,
+    pub(super) last_screen_scan_detection_content_seq: Option<u64>,
 }
 
 pub(super) fn decide_detection_screen_read(
@@ -282,12 +126,10 @@ pub(super) fn decide_detection_screen_read(
         state: input.state,
         agent: input.agent,
         pending_idle_active: input.pending_idle_active,
-        pending_working_active: input.pending_working_active,
-        post_taint_working_active: input.post_taint_working_active,
         agent_changed: input.agent_changed,
         process_exited: input.process_exited,
-        pty_signal: input.pty_activity,
-        last_screen_scan_pty_output_seq: input.last_screen_scan_pty_output_seq,
+        current_detection_content_seq: input.current_detection_content_seq,
+        last_screen_scan_detection_content_seq: input.last_screen_scan_detection_content_seq,
     }) {
         DetectionScreenReadDecision::Skip
     } else {
@@ -328,7 +170,6 @@ pub(super) fn stable_visible_signal_refresh_due(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DetectionTransitionDecision {
     NoPublish,
-    PublishHeldWorkingBeforeExit,
     PublishNext,
 }
 
@@ -338,7 +179,6 @@ pub(super) struct DetectionTransitionInput {
     pub(super) next_publish: DetectionPublishState,
     pub(super) agent_changed: bool,
     pub(super) process_exited: bool,
-    pub(super) pty_activity: Option<PtyActivitySignal>,
     pub(super) stable_refresh_due: bool,
     pub(super) now: std::time::Instant,
 }
@@ -346,55 +186,14 @@ pub(super) struct DetectionTransitionInput {
 pub(super) fn decide_detection_transition(
     input: DetectionTransitionInput,
     pending_idle: &mut PendingIdleConfirmation,
-    pending_working: &mut PendingWorkingConfirmation,
-    post_taint_working: &mut PostTaintWorkingLease,
 ) -> DetectionTransitionDecision {
-    if pending_working.should_publish_held_working_before_exit(
-        input.previous_publish,
-        input.next_publish,
-        input.process_exited,
-    ) {
-        pending_idle.clear();
-        post_taint_working.clear();
-        return DetectionTransitionDecision::PublishHeldWorkingBeforeExit;
-    }
-
-    if pending_working.should_hold_idle_to_working(
-        input.previous_publish,
-        input.next_publish,
-        input.agent_changed,
-        input.process_exited,
-        input.pty_activity,
-        input.now,
-    ) {
-        pending_idle.clear();
-        post_taint_working.clear();
-        return DetectionTransitionDecision::NoPublish;
-    }
-
-    if post_taint_working.should_hold_working_to_idle(
-        input.previous_publish,
-        input.next_publish,
-        input.agent_changed,
-        input.process_exited,
-        input.pty_activity,
-        input.now,
-    ) {
-        pending_idle.clear();
-        pending_working.clear();
-        return DetectionTransitionDecision::NoPublish;
-    }
-
     if pending_idle.should_hold_working_to_idle(
         input.previous_publish,
         input.next_publish,
         input.agent_changed,
         input.process_exited,
-        input.pty_activity,
         input.now,
     ) {
-        pending_working.clear();
-        post_taint_working.clear();
         return DetectionTransitionDecision::NoPublish;
     }
 
@@ -433,31 +232,18 @@ pub(super) struct ScreenDetectionPublishInput {
     pub(super) screen_detection: AgentDetection,
     pub(super) process_exited: bool,
     pub(super) agent_changed: bool,
-    pub(super) pty_activity: Option<PtyActivitySignal>,
     pub(super) now: std::time::Instant,
 }
 
 pub(super) fn decide_screen_detection_publish(
     input: ScreenDetectionPublishInput,
     pending_idle: &mut PendingIdleConfirmation,
-    pending_working: &mut PendingWorkingConfirmation,
-    post_taint_working: &mut PostTaintWorkingLease,
 ) -> DetectionPublishDecision {
     let detection = input.screen_detection;
     let new_state = crate::terminal::state::stabilize_agent_detection(detection);
     let visible_idle = detection.visible_idle && new_state == AgentState::Idle;
     let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
     let visible_working = detection.visible_working && new_state == AgentState::Working;
-
-    if input.pty_activity.is_some_and(|signal| signal.tainted)
-        && new_state == AgentState::Idle
-        && !input.process_exited
-    {
-        pending_idle.clear();
-        pending_working.clear();
-        post_taint_working.clear();
-        return DetectionPublishDecision::NoPublish;
-    }
 
     let previous_publish = DetectionPublishState {
         state: input.current_state,
@@ -484,24 +270,12 @@ pub(super) fn decide_screen_detection_publish(
             next_publish,
             agent_changed: input.agent_changed,
             process_exited: input.process_exited,
-            pty_activity: input.pty_activity,
             stable_refresh_due,
             now: input.now,
         },
         pending_idle,
-        pending_working,
-        post_taint_working,
     ) {
         DetectionTransitionDecision::NoPublish => DetectionPublishDecision::NoPublish,
-        DetectionTransitionDecision::PublishHeldWorkingBeforeExit => {
-            DetectionPublishDecision::Publish {
-                state: AgentState::Working,
-                visible_idle: false,
-                visible_blocker: false,
-                visible_working: false,
-                process_exited: false,
-            }
-        }
         DetectionTransitionDecision::PublishNext => DetectionPublishDecision::Publish {
             state: new_state,
             visible_idle,
@@ -542,117 +316,14 @@ pub(super) fn detection_update_for_publish_with_osc(
     (!detection.skip_state_update).then_some(detection)
 }
 
-#[derive(Debug, Default)]
-pub(super) struct PtyCausalityTracker {
-    last_pty_output_seq: u64,
-    last_input_seq: u64,
-    input_tainted_until: Option<std::time::Instant>,
-    last_agent_pty_at: Option<std::time::Instant>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct PtyActivitySignal {
-    pub(super) active: bool,
-    pub(super) tainted: bool,
-    pub(super) taint_just_ended: bool,
-    pub(super) fresh_output: bool,
-    pub(super) output_seq: u64,
-}
-
-pub(super) fn baseline_pty_causality(
-    tracker: &mut PtyCausalityTracker,
-    pty_output_seq: u64,
-    input_seq: u64,
-) {
-    tracker.last_pty_output_seq = pty_output_seq;
-    tracker.last_input_seq = input_seq;
-    tracker.input_tainted_until = None;
-    tracker.last_agent_pty_at = None;
-}
-
-pub(super) fn agent_caused_pty_activity_active(
-    pty_output_seq: u64,
-    input_seq: u64,
-    tracker: &mut PtyCausalityTracker,
-    now: std::time::Instant,
-) -> PtyActivitySignal {
-    if input_seq != tracker.last_input_seq {
-        tracker.last_input_seq = input_seq;
-        tracker.input_tainted_until = Some(now + AGENT_INPUT_TAINT_WINDOW);
-        tracker.last_agent_pty_at = None;
-    }
-
-    let mut taint_just_ended = false;
-    let tainted = match tracker.input_tainted_until {
-        Some(until) if now < until => true,
-        Some(_) => {
-            tracker.input_tainted_until = None;
-            taint_just_ended = true;
-            false
-        }
-        None => false,
-    };
-
-    let mut fresh_output = false;
-    if pty_output_seq != tracker.last_pty_output_seq {
-        tracker.last_pty_output_seq = pty_output_seq;
-        if !tainted {
-            tracker.last_agent_pty_at = Some(now);
-            fresh_output = true;
-        }
-    }
-
-    if tainted {
-        return PtyActivitySignal {
-            active: false,
-            tainted: true,
-            taint_just_ended: false,
-            fresh_output: false,
-            output_seq: tracker.last_pty_output_seq,
-        };
-    }
-
-    let active = tracker
-        .last_agent_pty_at
-        .is_some_and(|last| now.duration_since(last) < AGENT_PTY_ACTIVITY_WINDOW);
-    PtyActivitySignal {
-        active,
-        tainted: false,
-        taint_just_ended,
-        fresh_output,
-        output_seq: tracker.last_pty_output_seq,
-    }
-}
-
-pub(super) fn observe_pty_output_activity(bytes: &[u8], pty_output_seq: &AtomicU64) {
+pub(super) fn observe_detection_content_change(bytes: &[u8], detection_content_seq: &AtomicU64) {
     if !bytes.is_empty() {
-        pty_output_seq.fetch_add(1, Ordering::Relaxed);
+        detection_content_seq.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-fn consume_skipped_pty_causality(
-    tracker: &mut PtyCausalityTracker,
-    pty_output_seq: u64,
-    input_seq: u64,
-) {
-    baseline_pty_causality(tracker, pty_output_seq, input_seq);
-}
-
-pub(super) fn handle_skipped_detection_update(
-    state: AgentState,
-    _pty_signal: Option<PtyActivitySignal>,
-    post_taint_working: &mut PostTaintWorkingLease,
-    tracker: &mut PtyCausalityTracker,
-    pty_output_seq: u64,
-    input_seq: u64,
-    _now: std::time::Instant,
-) {
-    if state == AgentState::Working {
-        return;
-    }
-
-    post_taint_working.clear();
-    consume_skipped_pty_causality(tracker, pty_output_seq, input_seq);
+pub(super) fn mark_detection_content_changed(detection_content_seq: &AtomicU64) {
+    detection_content_seq.fetch_add(1, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -665,53 +336,6 @@ mod tests {
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
-        }
-    }
-
-    fn pty_activity(active: bool, fresh_output: bool, output_seq: u64) -> PtyActivitySignal {
-        PtyActivitySignal {
-            active,
-            tainted: false,
-            taint_just_ended: false,
-            fresh_output,
-            output_seq,
-        }
-    }
-
-    fn pty_activity_after_taint(output_seq: u64) -> PtyActivitySignal {
-        PtyActivitySignal {
-            active: false,
-            tainted: false,
-            taint_just_ended: true,
-            fresh_output: false,
-            output_seq,
-        }
-    }
-
-    fn tainted_pty_activity(output_seq: u64) -> PtyActivitySignal {
-        PtyActivitySignal {
-            active: false,
-            tainted: true,
-            taint_just_ended: false,
-            fresh_output: false,
-            output_seq,
-        }
-    }
-
-    fn transition_input(
-        previous_publish: DetectionPublishState,
-        next_publish: DetectionPublishState,
-        pty_activity: Option<PtyActivitySignal>,
-        now: std::time::Instant,
-    ) -> DetectionTransitionInput {
-        DetectionTransitionInput {
-            previous_publish,
-            next_publish,
-            agent_changed: false,
-            process_exited: false,
-            pty_activity,
-            stable_refresh_due: false,
-            now,
         }
     }
 
@@ -728,7 +352,6 @@ mod tests {
     fn screen_publish_input(
         current_state: AgentState,
         screen_detection: AgentDetection,
-        pty_activity: Option<PtyActivitySignal>,
         now: std::time::Instant,
     ) -> ScreenDetectionPublishInput {
         ScreenDetectionPublishInput {
@@ -740,251 +363,67 @@ mod tests {
             screen_detection,
             process_exited: false,
             agent_changed: false,
-            pty_activity,
             now,
         }
     }
 
-    fn screen_read_input(
-        state: AgentState,
-        pty_activity: PtyActivitySignal,
-    ) -> DetectionScreenReadInput {
-        screen_read_input_for_agent(Some(Agent::Codex), state, pty_activity)
-    }
-
-    fn screen_read_input_for_agent(
-        agent: Option<Agent>,
-        state: AgentState,
-        pty_activity: PtyActivitySignal,
-    ) -> DetectionScreenReadInput {
+    fn screen_read_input(state: AgentState, current_seq: u64) -> DetectionScreenReadInput {
         DetectionScreenReadInput {
             state,
-            agent,
+            agent: Some(Agent::Codex),
             pending_idle_active: false,
-            pending_working_active: false,
-            post_taint_working_active: false,
             agent_changed: false,
             process_exited: false,
-            pty_activity: Some(pty_activity),
-            last_screen_scan_pty_output_seq: Some(10),
+            current_detection_content_seq: Some(current_seq),
+            last_screen_scan_detection_content_seq: Some(10),
         }
     }
 
     #[test]
-    fn screen_read_decision_skips_only_stable_idle_quiet_output() {
+    fn screen_read_skips_unchanged_idle_bottom_buffer() {
         assert_eq!(
-            decide_detection_screen_read(screen_read_input(
-                AgentState::Idle,
-                pty_activity(false, false, 10),
-            )),
+            decide_detection_screen_read(screen_read_input(AgentState::Idle, 10)),
             DetectionScreenReadDecision::Skip
         );
+    }
 
+    #[test]
+    fn screen_read_reads_when_idle_bottom_buffer_changes() {
         assert_eq!(
-            decide_detection_screen_read(screen_read_input(
-                AgentState::Idle,
-                pty_activity(false, false, 11),
-            )),
-            DetectionScreenReadDecision::Read
-        );
-        assert_eq!(
-            decide_detection_screen_read(screen_read_input(
-                AgentState::Idle,
-                pty_activity(true, true, 10),
-            )),
-            DetectionScreenReadDecision::Read
-        );
-        assert_eq!(
-            decide_detection_screen_read(screen_read_input(
-                AgentState::Working,
-                pty_activity(false, false, 10),
-            )),
+            decide_detection_screen_read(screen_read_input(AgentState::Idle, 11)),
             DetectionScreenReadDecision::Read
         );
     }
 
     #[test]
-    fn screen_read_decision_reads_screen_for_active_pty() {
-        assert_eq!(
-            decide_detection_screen_read(screen_read_input(
-                AgentState::Working,
-                pty_activity(true, true, 11),
-            )),
-            DetectionScreenReadDecision::Read
-        );
-
-        assert_eq!(
-            decide_detection_screen_read(screen_read_input(
-                AgentState::Blocked,
-                pty_activity(true, true, 11),
-            )),
-            DetectionScreenReadDecision::Read
-        );
-
-        assert_eq!(
-            decide_detection_screen_read(screen_read_input(
-                AgentState::Idle,
-                pty_activity(true, true, 11),
-            )),
-            DetectionScreenReadDecision::Read
-        );
-
-        assert_eq!(
-            decide_detection_screen_read(screen_read_input_for_agent(
-                Some(Agent::Claude),
-                AgentState::Idle,
-                pty_activity(true, true, 11),
-            )),
-            DetectionScreenReadDecision::Read
-        );
-    }
-
-    #[test]
-    fn screen_read_decision_reads_during_pending_transitions() {
-        let mut input = screen_read_input(AgentState::Idle, pty_activity(false, false, 10));
-        input.pending_working_active = true;
-        assert_eq!(
-            decide_detection_screen_read(input),
-            DetectionScreenReadDecision::Read
-        );
-
-        let mut input = screen_read_input(AgentState::Idle, pty_activity(false, false, 10));
+    fn screen_read_reads_for_transitions_and_missing_agent() {
+        let mut input = screen_read_input(AgentState::Idle, 10);
         input.pending_idle_active = true;
         assert_eq!(
             decide_detection_screen_read(input),
             DetectionScreenReadDecision::Read
         );
 
-        let mut input = screen_read_input(AgentState::Idle, pty_activity(false, false, 10));
-        input.post_taint_working_active = true;
-        assert_eq!(
-            decide_detection_screen_read(input),
-            DetectionScreenReadDecision::Read
-        );
-    }
-
-    #[test]
-    fn screen_read_decision_reads_during_active_pty_pending_working() {
-        let mut input = screen_read_input(AgentState::Idle, pty_activity(true, true, 11));
-        input.pending_working_active = true;
+        let mut input = screen_read_input(AgentState::Idle, 10);
+        input.agent_changed = true;
         assert_eq!(
             decide_detection_screen_read(input),
             DetectionScreenReadDecision::Read
         );
 
-        let mut input = screen_read_input_for_agent(
-            Some(Agent::Claude),
-            AgentState::Idle,
-            pty_activity(true, true, 11),
-        );
-        input.pending_working_active = true;
+        let mut input = screen_read_input(AgentState::Idle, 10);
+        input.process_exited = true;
         assert_eq!(
             decide_detection_screen_read(input),
             DetectionScreenReadDecision::Read
         );
-    }
 
-    #[test]
-    fn codex_transcript_viewer_suppresses_prompt_idle_publish() {
-        let content = "/ T R A N S C R I P T /\n\n› yeah go ahead\n────────────────────────────────────────────────────────────────────────────────── 100% ─\n ↑/↓ to scroll   pgup/pgdn to page   home/end to jump\n q to quit   esc to edit prev";
-
-        assert!(detection_update_for_publish(Some(Agent::Codex), content, false).is_none());
-    }
-
-    #[test]
-    fn process_exit_overrides_transcript_viewer_skip() {
-        let content = "/ T R A N S C R I P T /\n\n› yeah go ahead\n────────────────────────────────────────────────────────────────────────────────── 100% ─\n ↑/↓ to scroll   pgup/pgdn to page   home/end to jump\n q to quit   esc to edit prev";
-
-        let detection = detection_update_for_publish(Some(Agent::Codex), content, true)
-            .expect("process exit should publish idle even inside transcript viewer");
-        assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
-        assert!(!detection.skip_state_update);
-    }
-
-    #[test]
-    fn process_exit_without_transcript_still_reports_idle() {
-        let detection =
-            detection_update_for_publish(Some(Agent::Codex), "Codex finished\n› ", true)
-                .expect("process exit should publish idle outside transcript viewer");
-
-        assert_eq!(detection.state, AgentState::Idle);
-        assert!(!detection.skip_state_update);
-    }
-
-    #[test]
-    fn stable_plain_idle_does_not_republish() {
-        let now = std::time::Instant::now();
-        let previous = DetectionPublishState {
-            state: AgentState::Idle,
-            visible_idle: false,
-            visible_blocker: false,
-            visible_working: false,
-        };
-        let refresh_due = stable_visible_signal_refresh_due(
-            previous,
-            previous,
-            Some(now - STABLE_VISIBLE_SIGNAL_REFRESH),
-            now,
+        let mut input = screen_read_input(AgentState::Idle, 10);
+        input.agent = None;
+        assert_eq!(
+            decide_detection_screen_read(input),
+            DetectionScreenReadDecision::Read
         );
-
-        assert!(!should_publish_detection_update(
-            previous,
-            previous,
-            false,
-            false,
-            refresh_due
-        ));
-    }
-
-    #[test]
-    fn stable_visible_working_does_not_republish() {
-        let now = std::time::Instant::now();
-        let previous = DetectionPublishState {
-            state: AgentState::Working,
-            visible_idle: false,
-            visible_blocker: false,
-            visible_working: true,
-        };
-        let refresh_due = stable_visible_signal_refresh_due(
-            previous,
-            previous,
-            Some(now - STABLE_VISIBLE_SIGNAL_REFRESH),
-            now,
-        );
-
-        assert!(!should_publish_detection_update(
-            previous,
-            previous,
-            false,
-            false,
-            refresh_due
-        ));
-    }
-
-    #[test]
-    fn stable_visible_blocker_republishes_for_hook_override_refresh() {
-        let now = std::time::Instant::now();
-        let previous = DetectionPublishState {
-            state: AgentState::Blocked,
-            visible_idle: false,
-            visible_blocker: true,
-            visible_working: false,
-        };
-        let refresh_due = stable_visible_signal_refresh_due(
-            previous,
-            previous,
-            Some(now - STABLE_VISIBLE_SIGNAL_REFRESH),
-            now,
-        );
-
-        assert!(should_publish_detection_update(
-            previous,
-            previous,
-            false,
-            false,
-            refresh_due
-        ));
     }
 
     #[test]
@@ -994,13 +433,12 @@ mod tests {
         let next = publish_state(AgentState::Idle);
         let mut pending = PendingIdleConfirmation::default();
 
-        assert!(pending.should_hold_working_to_idle(previous, next, false, false, None, now));
+        assert!(pending.should_hold_working_to_idle(previous, next, false, false, now));
         assert!(pending.should_hold_working_to_idle(
             previous,
             next,
             false,
             false,
-            None,
             now + AGENT_PENDING_IDLE_RECHECK
         ));
         assert!(pending.should_hold_working_to_idle(
@@ -1008,7 +446,6 @@ mod tests {
             next,
             false,
             false,
-            None,
             now + AGENT_PENDING_IDLE_RECHECK * 2
         ));
         assert!(!pending.should_hold_working_to_idle(
@@ -1016,716 +453,78 @@ mod tests {
             next,
             false,
             false,
-            None,
             now + AGENT_PENDING_IDLE_RECHECK * 3
         ));
     }
 
     #[test]
-    fn pending_idle_cap_publishes_idle_when_still_quiet() {
+    fn visible_idle_bypasses_plain_idle_hold() {
         let now = std::time::Instant::now();
         let previous = publish_state(AgentState::Working);
-        let next = publish_state(AgentState::Idle);
+        let mut next = publish_state(AgentState::Idle);
+        next.visible_idle = true;
         let mut pending = PendingIdleConfirmation::default();
 
-        assert!(pending.should_hold_working_to_idle(previous, next, false, false, None, now));
-        assert!(!pending.should_hold_working_to_idle(
-            previous,
-            next,
-            false,
-            false,
-            None,
-            now + AGENT_PENDING_IDLE_CAP
-        ));
+        assert!(!pending.should_hold_working_to_idle(previous, next, false, false, now));
     }
 
     #[test]
-    fn pending_idle_clears_when_work_resumes_or_blocker_appears() {
-        let now = std::time::Instant::now();
-        let previous = publish_state(AgentState::Working);
-        let idle = publish_state(AgentState::Idle);
-        let working = publish_state(AgentState::Working);
-        let mut blocked = publish_state(AgentState::Blocked);
-        blocked.visible_blocker = true;
-        let mut pending = PendingIdleConfirmation::default();
-
-        assert!(pending.should_hold_working_to_idle(previous, idle, false, false, None, now));
-        assert!(pending.active());
-        assert!(!pending.should_hold_working_to_idle(previous, working, false, false, None, now));
-        assert!(!pending.active());
-
-        assert!(pending.should_hold_working_to_idle(previous, idle, false, false, None, now));
-        assert!(!pending.should_hold_working_to_idle(previous, blocked, false, false, None, now));
-        assert!(!pending.active());
-    }
-
-    #[test]
-    fn pending_idle_holds_plain_idle_fallback_even_when_pty_is_quiet() {
-        let now = std::time::Instant::now();
-        let previous = publish_state(AgentState::Working);
-        let idle = publish_state(AgentState::Idle);
-        let mut pending = PendingIdleConfirmation::default();
-
-        assert!(pending.should_hold_working_to_idle(
-            previous,
-            idle,
-            false,
-            false,
-            Some(pty_activity(false, false, 10)),
-            now
-        ));
-        assert!(pending.active());
-    }
-
-    #[test]
-    fn post_taint_lease_never_holds_working_to_idle() {
-        let now = std::time::Instant::now();
-        let previous = publish_state(AgentState::Working);
-        let idle = publish_state(AgentState::Idle);
-        let mut lease = PostTaintWorkingLease::default();
-
-        assert!(!lease.should_hold_working_to_idle(
-            previous,
-            idle,
-            false,
-            false,
-            Some(pty_activity_after_taint(10)),
-            now
-        ));
-        assert!(!lease.active());
-    }
-
-    #[test]
-    fn post_taint_lease_does_not_create_idle_to_working() {
-        let now = std::time::Instant::now();
-        let idle = publish_state(AgentState::Idle);
-        let working = publish_state(AgentState::Working);
-        let mut lease = PostTaintWorkingLease::default();
-
-        assert!(!lease.should_hold_working_to_idle(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity_after_taint(10)),
-            now
-        ));
-    }
-
-    fn idle_scan_skip_input(
-        state: AgentState,
-        pty_signal: PtyActivitySignal,
-    ) -> IdleScreenScanSkipInput {
-        IdleScreenScanSkipInput {
-            state,
-            agent: Some(Agent::Codex),
-            pending_idle_active: false,
-            pending_working_active: false,
-            post_taint_working_active: false,
-            agent_changed: false,
-            process_exited: false,
-            pty_signal: Some(pty_signal),
-            last_screen_scan_pty_output_seq: Some(10),
-        }
-    }
-
-    #[test]
-    fn idle_screen_scan_skip_accepts_only_idle_same_quiet_output() {
-        assert!(should_skip_idle_screen_scan(idle_scan_skip_input(
-            AgentState::Idle,
-            pty_activity(false, false, 10)
-        )));
-
-        assert!(!should_skip_idle_screen_scan(idle_scan_skip_input(
-            AgentState::Idle,
-            pty_activity(false, false, 11)
-        )));
-        assert!(!should_skip_idle_screen_scan(idle_scan_skip_input(
-            AgentState::Idle,
-            pty_activity(true, true, 10)
-        )));
-        assert!(!should_skip_idle_screen_scan(idle_scan_skip_input(
-            AgentState::Idle,
-            tainted_pty_activity(10)
-        )));
-        assert!(!should_skip_idle_screen_scan(idle_scan_skip_input(
-            AgentState::Working,
-            pty_activity(false, false, 10)
-        )));
-        assert!(!should_skip_idle_screen_scan(idle_scan_skip_input(
-            AgentState::Blocked,
-            pty_activity(false, false, 10)
-        )));
-        assert!(!should_skip_idle_screen_scan(idle_scan_skip_input(
-            AgentState::Idle,
-            pty_activity_after_taint(10)
-        )));
-    }
-
-    #[test]
-    fn idle_screen_scan_skip_respects_transitions_and_missing_agent() {
-        let mut input = idle_scan_skip_input(AgentState::Idle, pty_activity(false, false, 10));
-        input.pending_working_active = true;
-        assert!(!should_skip_idle_screen_scan(input));
-
-        let mut input = idle_scan_skip_input(AgentState::Idle, pty_activity(false, false, 10));
-        input.pending_idle_active = true;
-        assert!(!should_skip_idle_screen_scan(input));
-
-        let mut input = idle_scan_skip_input(AgentState::Idle, pty_activity(false, false, 10));
-        input.post_taint_working_active = true;
-        assert!(!should_skip_idle_screen_scan(input));
-
-        let mut input = idle_scan_skip_input(AgentState::Idle, pty_activity(false, false, 10));
-        input.agent_changed = true;
-        assert!(!should_skip_idle_screen_scan(input));
-
-        let mut input = idle_scan_skip_input(AgentState::Idle, pty_activity(false, false, 10));
-        input.process_exited = true;
-        assert!(!should_skip_idle_screen_scan(input));
-
-        let mut input = idle_scan_skip_input(AgentState::Idle, pty_activity(false, false, 10));
-        input.agent = None;
-        assert!(!should_skip_idle_screen_scan(input));
-
-        let mut input = idle_scan_skip_input(AgentState::Idle, pty_activity(false, false, 10));
-        input.pty_signal = None;
-        assert!(!should_skip_idle_screen_scan(input));
-    }
-
-    #[test]
-    fn pending_working_holds_single_twitch_then_clears_when_quiet() {
-        let now = std::time::Instant::now();
-        let idle = publish_state(AgentState::Idle);
-        let working = publish_state(AgentState::Working);
-        let mut pending = PendingWorkingConfirmation::default();
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 10)),
-            now
-        ));
-        assert!(pending.active());
-        assert!(!pending.should_hold_idle_to_working(
-            idle,
-            idle,
-            false,
-            false,
-            Some(pty_activity(false, false, 10)),
-            now + AGENT_PTY_ACTIVITY_WINDOW
-        ));
-        assert!(!pending.active());
-    }
-
-    #[test]
-    fn pending_working_confirms_after_delayed_output_observation() {
-        let now = std::time::Instant::now();
-        let idle = publish_state(AgentState::Idle);
-        let working = publish_state(AgentState::Working);
-        let mut pending = PendingWorkingConfirmation::default();
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 10)),
-            now
-        ));
-        assert!(!pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 11)),
-            now + AGENT_PENDING_WORKING_CONFIRM_DELAY
-        ));
-        assert!(!pending.active());
-    }
-
-    #[test]
-    fn pending_working_counts_raw_sequence_jump_once() {
-        let now = std::time::Instant::now();
-        let idle = publish_state(AgentState::Idle);
-        let working = publish_state(AgentState::Working);
-        let mut pending = PendingWorkingConfirmation::default();
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 10)),
-            now
-        ));
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 14)),
-            now + AGENT_PENDING_WORKING_FAST_RECHECK
-        ));
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, false, 14)),
-            now + AGENT_PENDING_WORKING_FAST_RECHECK * 2
-        ));
-        assert!(!pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 15)),
-            now + AGENT_PENDING_WORKING_CONFIRM_DELAY
-        ));
-    }
-
-    #[test]
-    fn pending_working_cap_suppresses_unconfirmed_activity() {
-        let now = std::time::Instant::now();
-        let idle = publish_state(AgentState::Idle);
-        let working = publish_state(AgentState::Working);
-        let mut pending = PendingWorkingConfirmation::default();
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 10)),
-            now
-        ));
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 11)),
-            now + AGENT_PENDING_WORKING_FAST_RECHECK
-        ));
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, false, 11)),
-            now + AGENT_PENDING_WORKING_CAP
-        ));
-        assert!(!pending.active());
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 20)),
-            now
-        ));
-        assert!(!pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 21)),
-            now + AGENT_PENDING_WORKING_CONFIRM_DELAY
-        ));
-        assert!(!pending.active());
-    }
-
-    #[test]
-    fn pending_working_process_exit_publishes_held_working_first() {
-        let now = std::time::Instant::now();
-        let idle = publish_state(AgentState::Idle);
-        let working = publish_state(AgentState::Working);
-        let mut pending = PendingWorkingConfirmation::default();
-
-        assert!(pending.should_hold_idle_to_working(
-            idle,
-            working,
-            false,
-            false,
-            Some(pty_activity(true, true, 10)),
-            now
-        ));
-        assert!(pending.should_publish_held_working_before_exit(idle, idle, true));
-        assert!(!pending.active());
-    }
-
-    #[test]
-    fn pty_activity_distinguishes_fresh_output_from_active_hold() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let fresh = agent_caused_pty_activity_active(2, 1, &mut tracker, now);
-        assert!(fresh.active);
-        assert!(fresh.fresh_output);
-        assert_eq!(fresh.output_seq, 2);
-
-        let held = agent_caused_pty_activity_active(
-            2,
-            1,
-            &mut tracker,
-            now + AGENT_PENDING_WORKING_FAST_RECHECK,
-        );
-        assert!(held.active);
-        assert!(!held.fresh_output);
-        assert_eq!(held.output_seq, 2);
-    }
-
-    #[test]
-    fn pty_activity_lease_survives_sparse_heartbeat_jitter() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let first = agent_caused_pty_activity_active(2, 1, &mut tracker, now);
-        assert!(first.active);
-        assert!(first.fresh_output);
-
-        let held_before_next_tick = agent_caused_pty_activity_active(
-            2,
-            1,
-            &mut tracker,
-            now + std::time::Duration::from_millis(1700),
-        );
-        assert!(held_before_next_tick.active);
-        assert!(!held_before_next_tick.fresh_output);
-
-        let next_tick = agent_caused_pty_activity_active(
-            3,
-            1,
-            &mut tracker,
-            now + std::time::Duration::from_millis(1700),
-        );
-        assert!(next_tick.active);
-        assert!(next_tick.fresh_output);
-
-        let held_after_next_tick = agent_caused_pty_activity_active(
-            3,
-            1,
-            &mut tracker,
-            now + std::time::Duration::from_millis(3400),
-        );
-        assert!(held_after_next_tick.active);
-
-        let expired = agent_caused_pty_activity_active(
-            3,
-            1,
-            &mut tracker,
-            now + std::time::Duration::from_millis(3501),
-        );
-        assert!(!expired.active);
-    }
-
-    #[test]
-    fn pty_output_activity_tracks_raw_nonempty_reads() {
-        let seq = AtomicU64::new(0);
-
-        observe_pty_output_activity(b"", &seq);
-        assert_eq!(seq.load(Ordering::Relaxed), 0);
-
-        observe_pty_output_activity(b"\x1b[?2026h", &seq);
-        assert_eq!(seq.load(Ordering::Relaxed), 1);
-
-        observe_pty_output_activity(b"body bytes", &seq);
-        assert_eq!(seq.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn pty_activity_outside_taint_reports_active_until_hold_expires() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let active = agent_caused_pty_activity_active(2, 1, &mut tracker, now);
-        assert!(active.active);
-        assert!(!active.tainted);
-
-        let held = agent_caused_pty_activity_active(
-            2,
-            1,
-            &mut tracker,
-            now + AGENT_PTY_ACTIVITY_WINDOW - std::time::Duration::from_millis(1),
-        );
-        assert!(held.active);
-        assert!(!held.tainted);
-
-        let expired = agent_caused_pty_activity_active(
-            2,
-            1,
-            &mut tracker,
-            now + AGENT_PTY_ACTIVITY_WINDOW + std::time::Duration::from_millis(1),
-        );
-        assert!(!expired.active);
-        assert!(!expired.tainted);
-    }
-
-    #[test]
-    fn input_taint_discards_pty_activity_until_fresh_post_taint_output() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let tainted = agent_caused_pty_activity_active(2, 2, &mut tracker, now);
-        assert!(!tainted.active);
-        assert!(tainted.tainted);
-
-        let after_taint = agent_caused_pty_activity_active(
-            2,
-            2,
-            &mut tracker,
-            now + AGENT_INPUT_TAINT_WINDOW + std::time::Duration::from_millis(1),
-        );
-        assert!(!after_taint.active);
-        assert!(!after_taint.tainted);
-        assert!(after_taint.taint_just_ended);
-
-        let settled = agent_caused_pty_activity_active(
-            2,
-            2,
-            &mut tracker,
-            now + AGENT_INPUT_TAINT_WINDOW + std::time::Duration::from_millis(2),
-        );
-        assert!(!settled.active);
-        assert!(!settled.tainted);
-        assert!(!settled.taint_just_ended);
-
-        let fresh_output = agent_caused_pty_activity_active(
-            3,
-            2,
-            &mut tracker,
-            now + AGENT_INPUT_TAINT_WINDOW + std::time::Duration::from_millis(3),
-        );
-        assert!(fresh_output.active);
-        assert!(!fresh_output.tainted);
-    }
-
-    #[test]
-    fn skipped_update_consumes_expired_taint_edge() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        let mut lease = PostTaintWorkingLease::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let tainted = agent_caused_pty_activity_active(2, 2, &mut tracker, now);
-        assert!(tainted.tainted);
-
-        handle_skipped_detection_update(
-            AgentState::Idle,
-            Some(tainted),
-            &mut lease,
-            &mut tracker,
-            2,
-            2,
-            now,
-        );
-
-        let after_skip = agent_caused_pty_activity_active(
-            2,
-            2,
-            &mut tracker,
-            now + AGENT_INPUT_TAINT_WINDOW + std::time::Duration::from_millis(1),
-        );
-        assert!(!after_skip.active);
-        assert!(!after_skip.tainted);
-        assert!(!after_skip.taint_just_ended);
-    }
-
-    #[test]
-    fn skipped_working_update_starts_post_taint_lease_on_taint_edge() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        let mut lease = PostTaintWorkingLease::default();
-
-        handle_skipped_detection_update(
-            AgentState::Working,
-            Some(pty_activity_after_taint(10)),
-            &mut lease,
-            &mut tracker,
-            10,
-            2,
-            now,
-        );
-
-        let previous = publish_state(AgentState::Working);
-        let idle = publish_state(AgentState::Idle);
-
-        assert!(!lease.active());
-        assert!(!lease.should_hold_working_to_idle(
-            previous,
-            idle,
-            false,
-            false,
-            Some(pty_activity(false, false, 10)),
-            now + std::time::Duration::from_millis(1)
-        ));
-    }
-
-    #[test]
-    fn startup_grace_rebaseline_discards_accumulated_pty_activity() {
-        let now = std::time::Instant::now();
-        let mut tracker = PtyCausalityTracker::default();
-        baseline_pty_causality(&mut tracker, 1, 1);
-
-        let startup_render = agent_caused_pty_activity_active(2, 1, &mut tracker, now);
-        assert!(startup_render.active);
-
-        baseline_pty_causality(&mut tracker, 2, 1);
-        let after_grace =
-            agent_caused_pty_activity_active(2, 1, &mut tracker, now + AGENT_STARTUP_GRACE_WINDOW);
-
-        assert!(!after_grace.active);
-        assert!(!after_grace.tainted);
-    }
-
-    #[test]
-    fn transition_decision_publishes_next_for_plain_state_change() {
+    fn transition_decision_publishes_next_for_visible_blocker() {
         let now = std::time::Instant::now();
         let mut pending_idle = PendingIdleConfirmation::default();
-        let mut pending_working = PendingWorkingConfirmation::default();
-        let mut post_taint_working = PostTaintWorkingLease::default();
         let mut blocked = publish_state(AgentState::Blocked);
         blocked.visible_blocker = true;
 
         assert_eq!(
             decide_detection_transition(
-                transition_input(
-                    publish_state(AgentState::Idle),
-                    blocked,
-                    Some(pty_activity(false, false, 10)),
+                DetectionTransitionInput {
+                    previous_publish: publish_state(AgentState::Idle),
+                    next_publish: blocked,
+                    agent_changed: false,
+                    process_exited: false,
+                    stable_refresh_due: false,
                     now,
-                ),
+                },
                 &mut pending_idle,
-                &mut pending_working,
-                &mut post_taint_working,
             ),
             DetectionTransitionDecision::PublishNext
         );
     }
 
     #[test]
-    fn transition_decision_holds_idle_to_working_pending_confirmation() {
+    fn screen_publish_keeps_visible_working_without_pty_activity() {
         let now = std::time::Instant::now();
         let mut pending_idle = PendingIdleConfirmation::default();
-        let mut pending_working = PendingWorkingConfirmation::default();
-        let mut post_taint_working = PostTaintWorkingLease::default();
-
-        assert_eq!(
-            decide_detection_transition(
-                transition_input(
-                    publish_state(AgentState::Idle),
-                    publish_state(AgentState::Working),
-                    Some(pty_activity(true, true, 10)),
-                    now,
-                ),
-                &mut pending_idle,
-                &mut pending_working,
-                &mut post_taint_working,
-            ),
-            DetectionTransitionDecision::NoPublish
-        );
-        assert!(pending_working.active());
-    }
-
-    #[test]
-    fn transition_decision_publishes_held_working_before_exit() {
-        let now = std::time::Instant::now();
-        let mut pending_idle = PendingIdleConfirmation::default();
-        let mut pending_working = PendingWorkingConfirmation::default();
-        let mut post_taint_working = PostTaintWorkingLease::default();
-
-        assert_eq!(
-            decide_detection_transition(
-                transition_input(
-                    publish_state(AgentState::Idle),
-                    publish_state(AgentState::Working),
-                    Some(pty_activity(true, true, 10)),
-                    now,
-                ),
-                &mut pending_idle,
-                &mut pending_working,
-                &mut post_taint_working,
-            ),
-            DetectionTransitionDecision::NoPublish
-        );
-
-        let mut input = transition_input(
-            publish_state(AgentState::Idle),
-            publish_state(AgentState::Idle),
-            Some(pty_activity(false, false, 10)),
-            now + std::time::Duration::from_millis(1),
-        );
-        input.process_exited = true;
-
-        assert_eq!(
-            decide_detection_transition(
-                input,
-                &mut pending_idle,
-                &mut pending_working,
-                &mut post_taint_working,
-            ),
-            DetectionTransitionDecision::PublishHeldWorkingBeforeExit
-        );
-        assert!(!pending_working.active());
-    }
-
-    #[test]
-    fn transition_decision_holds_working_to_idle_after_taint() {
-        let now = std::time::Instant::now();
-        let mut pending_idle = PendingIdleConfirmation::default();
-        let mut pending_working = PendingWorkingConfirmation::default();
-        let mut post_taint_working = PostTaintWorkingLease::default();
-
-        assert_eq!(
-            decide_detection_transition(
-                transition_input(
-                    publish_state(AgentState::Working),
-                    publish_state(AgentState::Idle),
-                    Some(pty_activity_after_taint(10)),
-                    now,
-                ),
-                &mut pending_idle,
-                &mut pending_working,
-                &mut post_taint_working,
-            ),
-            DetectionTransitionDecision::NoPublish
-        );
-        assert!(!post_taint_working.active());
-    }
-
-    #[test]
-    fn screen_publish_keeps_visible_blocker_during_active_pty() {
-        let now = std::time::Instant::now();
-        let mut pending_idle = PendingIdleConfirmation::default();
-        let mut pending_working = PendingWorkingConfirmation::default();
-        let mut post_taint_working = PostTaintWorkingLease::default();
-        let mut blocked = screen_detection(AgentState::Blocked);
-        blocked.visible_blocker = true;
 
         assert_eq!(
             decide_screen_detection_publish(
-                screen_publish_input(
-                    AgentState::Blocked,
-                    blocked,
-                    Some(pty_activity(true, true, 10)),
-                    now,
-                ),
+                screen_publish_input(AgentState::Idle, screen_detection(AgentState::Working), now,),
                 &mut pending_idle,
-                &mut pending_working,
-                &mut post_taint_working,
             ),
             DetectionPublishDecision::Publish {
-                state: AgentState::Blocked,
+                state: AgentState::Working,
                 visible_idle: false,
-                visible_blocker: true,
+                visible_blocker: false,
+                visible_working: true,
+                process_exited: false,
+            }
+        );
+    }
+
+    #[test]
+    fn screen_publish_can_publish_idle_without_input_taint_delay() {
+        let now = std::time::Instant::now();
+        let mut pending_idle = PendingIdleConfirmation::default();
+
+        assert_eq!(
+            decide_screen_detection_publish(
+                screen_publish_input(AgentState::Blocked, screen_detection(AgentState::Idle), now,),
+                &mut pending_idle,
+            ),
+            DetectionPublishDecision::Publish {
+                state: AgentState::Idle,
+                visible_idle: true,
+                visible_blocker: false,
                 visible_working: false,
                 process_exited: false,
             }
@@ -1733,89 +532,25 @@ mod tests {
     }
 
     #[test]
-    fn screen_publish_keeps_visible_working_when_pty_is_quiet() {
-        let now = std::time::Instant::now();
-        let mut pending_idle = PendingIdleConfirmation::default();
-        let mut pending_working = PendingWorkingConfirmation::default();
-        let mut post_taint_working = PostTaintWorkingLease::default();
+    fn detection_content_change_tracks_raw_nonempty_reads_for_scan_scheduling() {
+        let seq = AtomicU64::new(0);
 
-        assert_eq!(
-            decide_screen_detection_publish(
-                screen_publish_input(
-                    AgentState::Blocked,
-                    screen_detection(AgentState::Working),
-                    Some(pty_activity(false, false, 10)),
-                    now,
-                ),
-                &mut pending_idle,
-                &mut pending_working,
-                &mut post_taint_working,
-            ),
-            DetectionPublishDecision::Publish {
-                state: AgentState::Working,
-                visible_idle: false,
-                visible_blocker: false,
-                visible_working: true,
-                process_exited: false,
-            }
-        );
+        observe_detection_content_change(b"", &seq);
+        assert_eq!(seq.load(Ordering::Relaxed), 0);
+
+        observe_detection_content_change(b"\x1b[?2026h", &seq);
+        assert_eq!(seq.load(Ordering::Relaxed), 1);
+
+        observe_detection_content_change(b"body bytes", &seq);
+        assert_eq!(seq.load(Ordering::Relaxed), 2);
     }
 
     #[test]
-    fn screen_publish_keeps_visible_working_during_active_pty() {
-        let now = std::time::Instant::now();
-        let mut pending_idle = PendingIdleConfirmation::default();
-        let mut pending_working = PendingWorkingConfirmation::default();
-        let mut post_taint_working = PostTaintWorkingLease::default();
+    fn local_terminal_mutations_can_invalidate_idle_scan_skip() {
+        let seq = AtomicU64::new(0);
 
-        assert_eq!(
-            decide_screen_detection_publish(
-                screen_publish_input(
-                    AgentState::Idle,
-                    screen_detection(AgentState::Working),
-                    Some(pty_activity(true, true, 10)),
-                    now,
-                ),
-                &mut pending_idle,
-                &mut pending_working,
-                &mut post_taint_working,
-            ),
-            DetectionPublishDecision::Publish {
-                state: AgentState::Working,
-                visible_idle: false,
-                visible_blocker: false,
-                visible_working: true,
-                process_exited: false,
-            }
-        );
-    }
+        mark_detection_content_changed(&seq);
 
-    #[test]
-    fn screen_publish_freezes_idle_during_taint() {
-        let now = std::time::Instant::now();
-        let mut pending_idle = PendingIdleConfirmation::default();
-        let mut pending_working = PendingWorkingConfirmation::default();
-        let mut post_taint_working = PostTaintWorkingLease::default();
-
-        assert_eq!(
-            decide_screen_detection_publish(
-                screen_publish_input(
-                    AgentState::Working,
-                    screen_detection(AgentState::Idle),
-                    Some(PtyActivitySignal {
-                        active: false,
-                        tainted: true,
-                        taint_just_ended: false,
-                        fresh_output: false,
-                        output_seq: 10,
-                    }),
-                    now,
-                ),
-                &mut pending_idle,
-                &mut pending_working,
-                &mut post_taint_working,
-            ),
-            DetectionPublishDecision::NoPublish
-        );
+        assert_eq!(seq.load(Ordering::Relaxed), 1);
     }
 }

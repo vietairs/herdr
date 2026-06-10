@@ -1733,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn pty_working_fallback_is_ignored_under_full_lifecycle_hook_authority() {
+    fn detected_working_fallback_is_ignored_under_full_lifecycle_hook_authority() {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Kilo), AgentState::Idle);
