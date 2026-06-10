@@ -3,28 +3,38 @@
 ## Unreleased
 
 ### Fixed
-- Agent state detection for non-authoritative agents now comes from screen manifests instead of PTY-first semantic arbitration, so terminal output activity no longer publishes `working`, vetoes visible blockers, or decides idle fallback.
-- Codex background terminal status text no longer overrides Codex's foreground idle OSC status, so long-running helpers such as dev servers do not keep the pane marked working.
-- Removed the remaining PTY input-taint debounce from agent detection, so user input, pane resizes, and redraw nudges no longer delay screen/OSC manifest state updates.
+- Copy mode page scrolling now stops at the same top and bottom boundaries as normal pane scrolling instead of overshooting or getting stuck near the edges. (#459, #460, thanks @reobin)
+- Clipboard-copy feedback no longer stays visible after the related selection state has gone stale. (#443)
+- The session navigator now uses live workspace labels, so renamed workspaces and cwd-derived labels stay current while navigating. (#377)
+- Hermes Agent integration installs now preserve flat plugin-list settings instead of rewriting them into nested lists. (#479)
+- Host-terminal focus redraws now stay pending until the client can send them, so panes refresh after focus returns even when redraw delivery was briefly busy.
 - Numeric keypad keys that send VT100 application-keypad escape sequences now enter their digits and operators instead of being dropped. (#493)
 - Codex panes now stay marked working when the live status header uses reasoning-summary text such as `Investigating code output` instead of the literal `Working` label. (#501)
-- Native pane URL clicks now use Cmd-click on macOS and Ctrl-click on other platforms.
-- Windows beta installs now default to the preview channel, persist `channel = "preview"` during install, reject switching to stable until stable Windows builds exist, and update through the Windows installer without probing unsupported live-handoff/session status paths.
+- Codex blocker detection now ignores stale prompt text outside the live prompt region, reducing false blocked states from old scrollback.
+- Native pane URL clicks now use Cmd-click on macOS and Ctrl-click on other platforms. (#307)
+- Worktree open, create, and remove actions now work from bare repositories instead of assuming a normal checkout. (#497)
+- Pane mouse handling no longer sends empty PTY writes for mouse events that produce no terminal input. (#496)
 - Pane output now renders flag emoji and other multi-codepoint grapheme clusters as complete symbols instead of blank cells. (#243)
 - Starting Herdr with no restored workspaces, or closing the last workspace, now opens a default workspace instead of leaving the client on an empty screen where direct keybindings such as `cmd+n` were shown but ignored. (#366)
 - Resizing restored panes no longer aborts the server when libghostty-vt reflows a terminal whose pre-resize cursor row is past the new height. (#465)
 - Full-screen TUIs such as Neovim now receive resize-generated terminal responses after Herdr internal pane resizes, so grown panes redraw without waiting for extra input. (#471)
+- Nested agent session reports from child terminals no longer overwrite the owning pane's restored agent session id. (#511)
+- Headless servers now avoid repeated scrollback rendering work for inactive panes, reducing CPU in large sessions. (#512)
+- Mouse-click handling now respects `ui.prompt_new_tab_name`, so mouse-created tabs follow the same naming prompt setting as keyboard-created tabs. (#521, thanks @imrajyavardhan12)
+- Pasting now works in modal text inputs, including rename prompts, command prompts, and worktree dialogs. (#302)
+- Linux clipboard image reads now validate image payloads before accepting them, preventing malformed clipboard data from reaching pane image paste flows. (#534)
 
 ### Added
 - Added remote auto-updates for agent detection manifests, with per-agent validation, local override precedence, `herdr server agent-manifests` diagnostics, and explain output showing remote manifest status.
 - Added `herdr server update-agent-manifests` to fetch remote agent detection manifests immediately, reload the running server, and print the updated manifest status.
 - Added `herdr agent explain` to show the manifest source, matched rule, evaluated matcher and region evidence, visible evidence flags, skipped-update reason, and idle fallback reason for live panes or saved screen fixtures.
+- Added `herdr integration install kimi` for Kimi Code CLI hooks that report lifecycle state and session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Kimi panes with `kimi --session <id>`. (#431, #463, thanks @wbxl2000)
 - Added `herdr integration install droid` for Factory Droid hooks that report session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Droid panes with `droid --resume <id>`.
 - Added `herdr integration install kilo` for Kilo Code CLI plugins that report lifecycle state and session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Kilo panes with `kilo --session <id>`.
-- Added directional pane swap with `prefix+shift+h/j/k/l`, a pane context-menu swap action, pane layout/neighbor/edge/focus/resize socket APIs, matching CLI commands, and optional `pane split --ratio` support.
+- Added `herdr integration install cursor` for Cursor Agent CLI hooks that report session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Cursor panes with `cursor-agent --resume <id>`. (#506, thanks @udirom)
+- Added directional pane swap with `prefix+shift+h/j/k/l`, a pane context-menu swap action, pane layout/neighbor/edge/focus/resize socket APIs, matching CLI commands, and optional `pane split --ratio` support. (#330, #421)
 - Added `herdr pane zoom` and the `pane.zoom` socket API to toggle, set, or clear tab-local pane zoom from scripts and integrations.
 - Added toast ergonomics controls for delayed agent notifications, in-app toast placement, copied-to-clipboard feedback, and the `notification.show` socket API with `herdr notification show` and optional `none`, `done`, or `request` sounds. (#486)
-- Added native Windows beta documentation, `install.ps1`, preview Windows release assets, update-channel wiring, and platform capability tracking for ConPTY panes, semantic client input, Windows agent discovery, known partial cwd behavior, and unsupported Unix-only features such as live handoff, direct terminal attach, and `herdr --remote` from the Windows binary.
 
 ### Changed
 - OpenCode installed with the current Herdr plugin now reports lifecycle state directly instead of relying on screen manifest detection. Kimi Code CLI `0.14.0` or newer now reports full lifecycle state through hooks, including interrupts. Droid and Qoder CLI now report native session identity while leaving lifecycle state to screen manifest detection.
