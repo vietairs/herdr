@@ -5,9 +5,9 @@ use crate::api::schema::{
     InstalledPluginInfo, PluginActionInfo, PluginActionInvokeParams, PluginActionListParams,
     PluginInvocationContext, PluginLinkParams, PluginListParams, PluginManifestAction,
     PluginManifestEventHook, PluginPaneCloseParams, PluginPaneFocusParams, PluginPaneInfo,
-    PluginPaneOpenParams, PluginPanePlacement, PluginStorageDeleteParams, PluginStorageEntry,
-    PluginStorageGetParams, PluginStorageListParams, PluginStorageScope, PluginStorageSetParams,
-    PluginUnlinkParams, ResponseResult,
+    PluginPaneOpenParams, PluginPanePlacement, PluginPlatform, PluginStorageDeleteParams,
+    PluginStorageEntry, PluginStorageGetParams, PluginStorageListParams, PluginStorageScope,
+    PluginStorageSetParams, PluginUnlinkParams, ResponseResult,
 };
 use crate::app::App;
 
@@ -116,6 +116,24 @@ impl App {
                 "plugin_disabled",
                 format!("plugin {} is disabled", plugin.plugin_id),
             );
+        }
+        let action_manifest = plugin.actions.iter().find(|a| a.id == action.action_id);
+        let action_platforms = action_manifest.and_then(|a| a.platforms.clone());
+        let eff_platforms = effective_platforms(&action_platforms, &plugin.platforms);
+        if let Some(platforms) = eff_platforms {
+            let host = current_platform();
+            if !platforms.contains(&host) {
+                let platform_str = platform_name(host);
+                return encode_error(
+                    id,
+                    "platform_unsupported",
+                    format!(
+                        "action '{}' does not support the current platform ({})",
+                        action.qualified_id(),
+                        platform_str
+                    ),
+                );
+            }
         }
         let context = self.merge_plugin_context(params.context, &id);
         encode_success(id, ResponseResult::PluginActionInvoked { action, context })
@@ -657,6 +675,8 @@ struct RawPluginManifest {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    platforms: Option<Vec<RawPlatform>>,
+    #[serde(default)]
     actions: Vec<RawPluginManifestAction>,
     #[serde(default)]
     events: Vec<RawPluginManifestEventHook>,
@@ -670,13 +690,37 @@ struct RawPluginManifestAction {
     description: Option<String>,
     #[serde(default)]
     contexts: Vec<crate::api::schema::PluginActionContext>,
+    #[serde(default)]
+    platforms: Option<Vec<RawPlatform>>,
     command: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
 struct RawPluginManifestEventHook {
     on: String,
+    #[serde(default)]
+    platforms: Option<Vec<RawPlatform>>,
     command: Vec<String>,
+}
+
+/// Raw string platform value from the manifest, validated before conversion.
+#[derive(serde::Deserialize)]
+#[serde(try_from = "String")]
+struct RawPlatform(PluginPlatform);
+
+impl TryFrom<String> for RawPlatform {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "linux" => Ok(RawPlatform(PluginPlatform::Linux)),
+            "macos" => Ok(RawPlatform(PluginPlatform::Macos)),
+            "windows" => Ok(RawPlatform(PluginPlatform::Windows)),
+            other => Err(format!(
+                "invalid_plugin_platform: unknown platform '{other}'"
+            )),
+        }
+    }
 }
 
 pub(crate) fn load_plugin_manifest(
@@ -717,6 +761,7 @@ pub(crate) fn load_plugin_manifest(
         .description
         .map(|description| description.trim().to_string())
         .filter(|description| !description.is_empty());
+    let platforms = normalize_platforms(raw.platforms)?;
     let mut actions = raw
         .actions
         .into_iter()
@@ -730,7 +775,10 @@ pub(crate) fn load_plugin_manifest(
         .collect::<Result<Vec<_>, _>>()?;
     events.sort_by(|a, b| a.on.cmp(&b.on).then_with(|| a.command.cmp(&b.command)));
 
-    let warnings = validate_event_names(&events);
+    let mut warnings = validate_event_names(&events);
+    if platforms.is_none() {
+        warnings.push("manifest does not declare platforms; platform support unknown".to_string());
+    }
 
     Ok(InstalledPluginInfo {
         plugin_id,
@@ -740,6 +788,7 @@ pub(crate) fn load_plugin_manifest(
         manifest_path: manifest_path.display().to_string(),
         plugin_root: plugin_root.display().to_string(),
         enabled,
+        platforms,
         actions,
         events,
         warnings,
@@ -769,12 +818,14 @@ fn normalize_manifest_action(
         .description
         .map(|description| description.trim().to_string())
         .filter(|description| !description.is_empty());
+    let platforms = normalize_platforms(action.platforms)?;
     let command = normalize_command(action.command)?;
     Ok(PluginManifestAction {
         id,
         title,
         description,
         contexts: action.contexts,
+        platforms,
         command,
     })
 }
@@ -783,8 +834,60 @@ fn normalize_manifest_event(
     event: RawPluginManifestEventHook,
 ) -> Result<PluginManifestEventHook, (&'static str, String)> {
     let on = non_empty_trimmed(&event.on, "invalid_plugin_event", "event name is required")?;
+    let platforms = normalize_platforms(event.platforms)?;
     let command = normalize_command(event.command)?;
-    Ok(PluginManifestEventHook { on, command })
+    Ok(PluginManifestEventHook {
+        on,
+        platforms,
+        command,
+    })
+}
+
+fn normalize_platforms(
+    raw: Option<Vec<RawPlatform>>,
+) -> Result<Option<Vec<PluginPlatform>>, (&'static str, String)> {
+    match raw {
+        None => Ok(None),
+        Some(list) if list.is_empty() => Err((
+            "invalid_plugin_platform",
+            "platforms must not be an empty array; omit the field to leave platforms undeclared"
+                .to_string(),
+        )),
+        Some(list) => Ok(Some(list.into_iter().map(|p| p.0).collect())),
+    }
+}
+
+/// Returns the platform the current binary was compiled for.
+fn current_platform() -> PluginPlatform {
+    if cfg!(target_os = "linux") {
+        PluginPlatform::Linux
+    } else if cfg!(target_os = "macos") {
+        PluginPlatform::Macos
+    } else {
+        PluginPlatform::Windows
+    }
+}
+
+/// Resolve the effective platforms for an action or event: use the item's own
+/// platforms if declared, otherwise inherit from the plugin-level platforms.
+/// Returns a reference to whichever `Option<Vec<PluginPlatform>>` applies.
+fn effective_platforms<'a>(
+    item_platforms: &'a Option<Vec<PluginPlatform>>,
+    plugin_platforms: &'a Option<Vec<PluginPlatform>>,
+) -> &'a Option<Vec<PluginPlatform>> {
+    if item_platforms.is_some() {
+        item_platforms
+    } else {
+        plugin_platforms
+    }
+}
+
+fn platform_name(p: PluginPlatform) -> &'static str {
+    match p {
+        PluginPlatform::Linux => "linux",
+        PluginPlatform::Macos => "macos",
+        PluginPlatform::Windows => "windows",
+    }
 }
 
 fn normalize_command(command: Vec<String>) -> Result<Vec<String>, (&'static str, String)> {
@@ -992,6 +1095,7 @@ id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
 description = "Prepare new worktrees"
+platforms = ["linux", "macos", "windows"]
 
 [[actions]]
 id = "bootstrap"
@@ -1486,5 +1590,339 @@ command = ["sh", "-c", "echo ok"]
         assert!(!reloaded[0].warnings.is_empty(), "expected load warning");
         // The stored manifest_path is preserved so the entry is still identifiable
         assert_eq!(reloaded[0].manifest_path, stored_manifest_path);
+    }
+
+    // ── Platform compatibility tests ─────────────────────────────────────────
+
+    #[test]
+    fn manifest_with_platforms_parses_correctly() {
+        let root = unique_temp_path("plugin-platforms");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("herdr-plugin.toml"),
+            r#"
+id = "example.platforms"
+name = "Platforms"
+version = "0.1.0"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "run"
+title = "Run"
+command = ["./run.sh"]
+
+[[actions]]
+id = "run-win"
+title = "Run Windows"
+platforms = ["windows"]
+command = ["run.bat"]
+"#,
+        )
+        .unwrap();
+
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        use crate::api::schema::PluginPlatform;
+        assert_eq!(
+            plugin.platforms,
+            Some(vec![PluginPlatform::Linux, PluginPlatform::Macos])
+        );
+        // Action without own platforms inherits from plugin level
+        let run = plugin.actions.iter().find(|a| a.id == "run").unwrap();
+        assert!(run.platforms.is_none());
+        // Action with own platforms has them set
+        let run_win = plugin.actions.iter().find(|a| a.id == "run-win").unwrap();
+        assert_eq!(run_win.platforms, Some(vec![PluginPlatform::Windows]));
+        // No missing-platforms warning because platforms is declared
+        assert!(
+            plugin.warnings.is_empty(),
+            "expected no warnings: {:?}",
+            plugin.warnings
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn effective_platform_resolution_inherits_from_plugin() {
+        use crate::api::schema::PluginPlatform;
+        let plugin_platforms = Some(vec![PluginPlatform::Linux, PluginPlatform::Macos]);
+        let no_override: Option<Vec<PluginPlatform>> = None;
+        let action_override = Some(vec![PluginPlatform::Windows]);
+
+        // No action-level platforms → inherit from plugin
+        assert_eq!(
+            effective_platforms(&no_override, &plugin_platforms),
+            &plugin_platforms
+        );
+        // Action-level platforms → use action's own list
+        assert_eq!(
+            effective_platforms(&action_override, &plugin_platforms),
+            &action_override
+        );
+        // Both None → None (undeclared)
+        assert_eq!(effective_platforms(&no_override, &no_override), &None);
+    }
+
+    #[test]
+    fn invoke_on_unsupported_platform_returns_error() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-platform-reject");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Declare only platforms that are NOT the current build target so the
+        // invoke is guaranteed to be rejected regardless of which OS this runs on.
+        let excluded_platforms = if cfg!(target_os = "linux") {
+            r#"platforms = ["macos", "windows"]"#
+        } else if cfg!(target_os = "macos") {
+            r#"platforms = ["linux", "windows"]"#
+        } else {
+            r#"platforms = ["linux", "macos"]"#
+        };
+
+        std::fs::write(
+            root.join("herdr-plugin.toml"),
+            format!(
+                r#"
+id = "example.reject"
+name = "Reject"
+version = "0.1.0"
+{excluded_platforms}
+
+[[actions]]
+id = "act"
+title = "Act"
+command = ["act"]
+"#
+            ),
+        )
+        .unwrap();
+
+        let link = app.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::PluginLink(PluginLinkParams {
+                path: root.display().to_string(),
+                enabled: true,
+            }),
+        });
+        assert!(link.contains("plugin_linked"), "link failed: {link}");
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: Some("example.reject".into()),
+                action_id: "act".into(),
+                context: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
+        assert_eq!(
+            value["error"]["code"], "platform_unsupported",
+            "expected platform_unsupported error: {invoke}"
+        );
+        assert!(
+            invoke.contains("example.reject.act"),
+            "error message should name the action: {invoke}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invoke_with_action_platform_override_uses_action_platforms() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-platform-action-override");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Plugin declares all platforms; action declares only the non-current platforms.
+        let excluded_platforms = if cfg!(target_os = "linux") {
+            r#"platforms = ["macos", "windows"]"#
+        } else if cfg!(target_os = "macos") {
+            r#"platforms = ["linux", "windows"]"#
+        } else {
+            r#"platforms = ["linux", "macos"]"#
+        };
+
+        std::fs::write(
+            root.join("herdr-plugin.toml"),
+            format!(
+                r#"
+id = "example.override"
+name = "Override"
+version = "0.1.0"
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "act"
+title = "Act"
+{excluded_platforms}
+command = ["act"]
+"#
+            ),
+        )
+        .unwrap();
+
+        let link = app.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::PluginLink(PluginLinkParams {
+                path: root.display().to_string(),
+                enabled: true,
+            }),
+        });
+        assert!(link.contains("plugin_linked"), "link failed: {link}");
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: Some("example.override".into()),
+                action_id: "act".into(),
+                context: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
+        assert_eq!(
+            value["error"]["code"], "platform_unsupported",
+            "expected platform_unsupported for action override: {invoke}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invoke_with_undeclared_platforms_succeeds() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-platform-undeclared");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("herdr-plugin.toml"),
+            r#"
+id = "example.nodecl"
+name = "No Decl"
+version = "0.1.0"
+
+[[actions]]
+id = "act"
+title = "Act"
+command = ["act"]
+"#,
+        )
+        .unwrap();
+
+        let link = app.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::PluginLink(PluginLinkParams {
+                path: root.display().to_string(),
+                enabled: true,
+            }),
+        });
+        let ResponseResult::PluginLinked { plugin } = response_result(&link) else {
+            panic!("expected plugin_linked: {link}");
+        };
+        // Should get the missing-platforms warning
+        assert!(
+            plugin
+                .warnings
+                .iter()
+                .any(|w| w.contains("does not declare platforms")),
+            "expected missing-platforms warning: {:?}",
+            plugin.warnings
+        );
+
+        // Invoke should succeed regardless (local dev allowance)
+        let invoke = app.handle_api_request(Request {
+            id: "invoke".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: Some("example.nodecl".into()),
+                action_id: "act".into(),
+                context: None,
+            }),
+        });
+        assert!(
+            invoke.contains("plugin_action_invoked"),
+            "expected success for undeclared platforms: {invoke}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn link_with_invalid_platform_string_fails() {
+        let root = unique_temp_path("plugin-bad-platform");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("herdr-plugin.toml"),
+            r#"
+id = "example.badplatform"
+name = "Bad Platform"
+version = "0.1.0"
+platforms = ["linux", "beos"]
+
+[[actions]]
+id = "act"
+title = "Act"
+command = ["act"]
+"#,
+        )
+        .unwrap();
+
+        let result = load_plugin_manifest(&root.display().to_string(), true);
+        assert!(result.is_err(), "expected parse error for unknown platform");
+        let (_, msg) = result.unwrap_err();
+        assert!(
+            msg.contains("beos") || msg.contains("platform"),
+            "error message should mention the bad platform: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn registry_round_trip_preserves_platforms() {
+        let root = unique_temp_path("plugin-platform-rt");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("herdr-plugin.toml"),
+            r#"
+id = "example.platform-rt"
+name = "Platform RT"
+version = "0.1.0"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "act"
+title = "Act"
+platforms = ["windows"]
+command = ["act.exe"]
+"#,
+        )
+        .unwrap();
+
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        use crate::api::schema::PluginPlatform;
+        assert_eq!(
+            plugin.platforms,
+            Some(vec![PluginPlatform::Linux, PluginPlatform::Macos])
+        );
+        assert_eq!(
+            plugin.actions[0].platforms,
+            Some(vec![PluginPlatform::Windows])
+        );
+
+        let registry_dir = unique_temp_path("platform-rt-registry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        let registry_path = registry_dir.join("plugins.json");
+        crate::persist::plugin_registry::save_to_path(&registry_path, &[plugin]).unwrap();
+
+        let loaded = crate::persist::plugin_registry::load_from_path(&registry_path);
+        assert_eq!(
+            loaded[0].platforms,
+            Some(vec![PluginPlatform::Linux, PluginPlatform::Macos])
+        );
+        assert_eq!(
+            loaded[0].actions[0].platforms,
+            Some(vec![PluginPlatform::Windows])
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(registry_dir);
     }
 }

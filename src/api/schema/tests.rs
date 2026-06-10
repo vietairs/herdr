@@ -648,15 +648,18 @@ fn plugin_link_list_unlink_round_trip() {
         manifest_path: "/plugins/worktree-bootstrap/herdr-plugin.toml".into(),
         plugin_root: "/plugins/worktree-bootstrap".into(),
         enabled: true,
+        platforms: None,
         actions: vec![PluginManifestAction {
             id: "bootstrap".into(),
             title: "Bootstrap worktree".into(),
             description: None,
             contexts: vec![PluginActionContext::Workspace],
+            platforms: None,
             command: vec!["bun".into(), "run".into(), "bootstrap.ts".into()],
         }],
         events: vec![PluginManifestEventHook {
             on: "worktree.created".into(),
+            platforms: None,
             command: vec!["bun".into(), "run".into(), "bootstrap.ts".into()],
         }],
         warnings: vec![],

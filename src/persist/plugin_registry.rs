@@ -110,6 +110,7 @@ mod tests {
             manifest_path: format!("/tmp/{id}/herdr-plugin.toml"),
             plugin_root: format!("/tmp/{id}"),
             enabled: true,
+            platforms: None,
             actions: vec![],
             events: vec![],
             warnings: vec![],
@@ -178,6 +179,7 @@ mod tests {
                 manifest_path: "/tmp/example.reload/herdr-plugin.toml".to_string(),
                 plugin_root: "/tmp/example.reload".to_string(),
                 enabled: true, // caller would pass stored enabled; fresh parse returns true
+                platforms: None,
                 actions: vec![],
                 events: vec![],
                 warnings: vec![],

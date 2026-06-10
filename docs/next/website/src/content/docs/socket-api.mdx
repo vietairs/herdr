@@ -290,6 +290,7 @@ id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
 description = "Prepare new worktrees"
+platforms = ["linux", "macos"]
 
 [[actions]]
 id = "bootstrap"
@@ -297,10 +298,19 @@ title = "Bootstrap worktree"
 contexts = ["workspace"]
 command = ["bun", "run", "bootstrap.ts"]
 
+[[actions]]
+id = "bootstrap-win"
+title = "Bootstrap worktree (Windows)"
+contexts = ["workspace"]
+platforms = ["windows"]
+command = ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", "bootstrap.ps1"]
+
 [[events]]
 on = "worktree.created"
 command = ["bun", "run", "bootstrap.ts"]
 ```
+
+Declare `platforms` at the top level with the OS identifiers (`linux`, `macos`, `windows`) your plugin supports. Omitting `platforms` is allowed for local development — `plugin.link` succeeds but the response includes a warning. Individual actions and events can declare their own `platforms` to override the plugin-level list; if omitted they inherit from the plugin. Invoking an action whose effective platforms do not include the current OS returns a `platform_unsupported` error.
 
 List or unlink linked plugins:
 
