@@ -183,6 +183,20 @@ fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
 }
 
+fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginRegistry {
+    if no_session {
+        return std::collections::HashMap::new();
+    }
+    let entries = crate::persist::plugin_registry::load();
+    let entries = crate::persist::plugin_registry::reload_manifests(entries, |path, enabled| {
+        crate::app::api::plugins::load_plugin_manifest(path, enabled).map_err(|(_, msg)| msg)
+    });
+    entries
+        .into_iter()
+        .map(|plugin| (plugin.plugin_id.clone(), plugin))
+        .collect()
+}
+
 fn agent_panel_scope_from_config(
     scope: crate::config::AgentPanelScopeConfig,
 ) -> state::AgentPanelScope {
@@ -542,7 +556,7 @@ impl App {
             agent_manifest_summaries,
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),
             integration_install_messages: Vec::new(),
-            installed_plugins: std::collections::HashMap::new(),
+            installed_plugins: load_plugin_registry(no_session),
             plugin_storage: std::collections::HashMap::new(),
             plugin_panes: std::collections::HashMap::new(),
             global_menu: state::MenuListState::new(0),

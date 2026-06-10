@@ -27,7 +27,7 @@ impl App {
         self.state
             .installed_plugins
             .insert(plugin.plugin_id.clone(), plugin.clone());
-        self.state.mark_session_dirty();
+        self.save_plugin_registry();
         encode_success(id, ResponseResult::PluginLinked { plugin })
     }
 
@@ -66,7 +66,11 @@ impl App {
         };
         let removed = self.state.installed_plugins.remove(&plugin_id).is_some();
         if removed {
-            self.state.mark_session_dirty();
+            // Drop plugin_panes records for this plugin (panes keep running).
+            self.state
+                .plugin_panes
+                .retain(|_, record| record.plugin_id != plugin_id);
+            self.save_plugin_registry();
         }
         encode_success(id, ResponseResult::PluginUnlinked { plugin_id, removed })
     }
@@ -170,7 +174,6 @@ impl App {
         self.state
             .plugin_storage
             .insert(key.clone(), params.value.clone());
-        self.state.mark_session_dirty();
         encode_success(
             id,
             ResponseResult::PluginStorageSet {
@@ -195,9 +198,6 @@ impl App {
             Err((code, message)) => return encode_error(id, code, message),
         };
         let deleted = self.state.plugin_storage.remove(&key).is_some();
-        if deleted {
-            self.state.mark_session_dirty();
-        }
         encode_success(id, ResponseResult::PluginStorageDeleted { deleted })
     }
 
@@ -637,6 +637,16 @@ impl App {
             })
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()))
     }
+
+    pub(crate) fn save_plugin_registry(&self) {
+        let plugins = self
+            .state
+            .installed_plugins
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::persist::plugin_registry::save(&plugins);
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -669,7 +679,7 @@ struct RawPluginManifestEventHook {
     command: Vec<String>,
 }
 
-fn load_plugin_manifest(
+pub(crate) fn load_plugin_manifest(
     path: &str,
     enabled: bool,
 ) -> Result<InstalledPluginInfo, (&'static str, String)> {
@@ -720,6 +730,8 @@ fn load_plugin_manifest(
         .collect::<Result<Vec<_>, _>>()?;
     events.sort_by(|a, b| a.on.cmp(&b.on).then_with(|| a.command.cmp(&b.command)));
 
+    let warnings = validate_event_names(&events);
+
     Ok(InstalledPluginInfo {
         plugin_id,
         name,
@@ -730,7 +742,17 @@ fn load_plugin_manifest(
         enabled,
         actions,
         events,
+        warnings,
     })
+}
+
+fn validate_event_names(events: &[crate::api::schema::PluginManifestEventHook]) -> Vec<String> {
+    let known = crate::api::schema::known_event_names();
+    events
+        .iter()
+        .filter(|hook| !known.contains(&hook.on.as_str()))
+        .map(|hook| format!("unknown event '{}'", hook.on))
+        .collect()
 }
 
 fn normalize_manifest_action(
@@ -1289,5 +1311,180 @@ command = ["show-ctx"]
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, "pins");
         assert_eq!(entries[0].value, serde_json::json!(["a", "b"]));
+    }
+
+    fn write_manifest_with_bad_event(root: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(root).unwrap();
+        let manifest = root.join("herdr-plugin.toml");
+        std::fs::write(
+            &manifest,
+            r#"
+id = "example.bad-event"
+name = "Bad Event Plugin"
+version = "0.1.0"
+
+[[events]]
+on = "worktree.craeted"
+command = ["sh", "-c", "echo hi"]
+
+[[events]]
+on = "worktree.created"
+command = ["sh", "-c", "echo ok"]
+"#,
+        )
+        .unwrap();
+        manifest
+    }
+
+    #[test]
+    fn link_with_unknown_event_name_succeeds_with_warning() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-bad-event");
+        write_manifest_with_bad_event(&root);
+
+        let link = app.handle_api_request(Request {
+            id: "link-bad-event".into(),
+            method: Method::PluginLink(PluginLinkParams {
+                path: root.display().to_string(),
+                enabled: true,
+            }),
+        });
+
+        let ResponseResult::PluginLinked { plugin } = response_result(&link) else {
+            panic!("expected plugin_linked: {link}");
+        };
+        assert_eq!(plugin.plugin_id, "example.bad-event");
+        assert!(
+            plugin
+                .warnings
+                .iter()
+                .any(|w| w.contains("worktree.craeted")),
+            "expected warning for misspelled event, got: {:?}",
+            plugin.warnings
+        );
+        // The correctly named event produces no extra warning
+        assert_eq!(
+            plugin
+                .warnings
+                .iter()
+                .filter(|w| w.contains("worktree.created"))
+                .count(),
+            0
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unlink_removes_plugin_pane_records_for_that_plugin() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-unlink-panes");
+        write_manifest(&root);
+        link_manifest(&mut app, &root);
+
+        // Manually insert plugin_pane records as if pane.open was called.
+        let pane_a = crate::layout::PaneId::from_raw(1001u32);
+        let pane_b = crate::layout::PaneId::from_raw(1002u32);
+        let pane_other = crate::layout::PaneId::from_raw(1003u32);
+        app.state.plugin_panes.insert(
+            pane_a,
+            crate::app::state::PluginPaneRecord {
+                plugin_id: "example.worktree-bootstrap".into(),
+                entrypoint: "main".into(),
+            },
+        );
+        app.state.plugin_panes.insert(
+            pane_b,
+            crate::app::state::PluginPaneRecord {
+                plugin_id: "example.worktree-bootstrap".into(),
+                entrypoint: "side".into(),
+            },
+        );
+        app.state.plugin_panes.insert(
+            pane_other,
+            crate::app::state::PluginPaneRecord {
+                plugin_id: "other.plugin".into(),
+                entrypoint: "other".into(),
+            },
+        );
+
+        let unlink = app.handle_api_request(Request {
+            id: "unlink-panes".into(),
+            method: Method::PluginUnlink(PluginUnlinkParams {
+                plugin_id: "example.worktree-bootstrap".into(),
+            }),
+        });
+        assert!(matches!(
+            response_result(&unlink),
+            ResponseResult::PluginUnlinked { removed: true, .. }
+        ));
+
+        // plugin_panes records for the unlinked plugin are gone
+        assert!(!app.state.plugin_panes.contains_key(&pane_a));
+        assert!(!app.state.plugin_panes.contains_key(&pane_b));
+        // other plugin's pane record survives
+        assert!(app.state.plugin_panes.contains_key(&pane_other));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn registry_round_trip_via_explicit_path() {
+        let root = unique_temp_path("plugin-registry-rt");
+        write_manifest(&root);
+
+        let registry_dir = unique_temp_path("registry-dir");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        let registry_path = registry_dir.join("plugins.json");
+
+        // link via load_plugin_manifest + save_to_path (simulating what the App does)
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        let plugins = vec![plugin.clone()];
+        crate::persist::plugin_registry::save_to_path(&registry_path, &plugins).unwrap();
+        assert!(registry_path.exists());
+
+        // load back and verify
+        let loaded = crate::persist::plugin_registry::load_from_path(&registry_path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].plugin_id, "example.worktree-bootstrap");
+        assert_eq!(loaded[0].name, "Worktree Bootstrap");
+
+        // reload_manifests with real manifest still on disk → fresh parse succeeds
+        let reloaded =
+            crate::persist::plugin_registry::reload_manifests(loaded, |path, enabled| {
+                load_plugin_manifest(path, enabled).map_err(|(_, msg)| msg)
+            });
+        assert_eq!(reloaded.len(), 1);
+        assert!(reloaded[0].warnings.is_empty());
+        assert_eq!(reloaded[0].version, "0.1.0");
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(registry_dir);
+    }
+
+    #[test]
+    fn reload_manifests_keeps_entry_with_warning_when_manifest_gone() {
+        let root = unique_temp_path("plugin-missing-manifest");
+        write_manifest(&root);
+
+        // load_plugin_manifest resolves the absolute path via canonicalize()
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        let stored_manifest_path = plugin.manifest_path.clone();
+
+        // Now delete the manifest
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Simulate registry load + reload
+        let entries = vec![plugin];
+        let reloaded =
+            crate::persist::plugin_registry::reload_manifests(entries, |path, enabled| {
+                load_plugin_manifest(path, enabled).map_err(|(_, msg)| msg)
+            });
+
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].plugin_id, "example.worktree-bootstrap");
+        assert!(!reloaded[0].warnings.is_empty(), "expected load warning");
+        // The stored manifest_path is preserved so the entry is still identifiable
+        assert_eq!(reloaded[0].manifest_path, stored_manifest_path);
     }
 }

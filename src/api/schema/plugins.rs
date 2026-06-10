@@ -39,6 +39,10 @@ pub struct InstalledPluginInfo {
     pub actions: Vec<PluginManifestAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<PluginManifestEventHook>,
+    /// Warnings collected at link time or on registry load (e.g. unknown event names,
+    /// missing manifest file). Non-fatal — the entry is kept and surfaced by plugin.list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

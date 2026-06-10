@@ -659,6 +659,7 @@ fn plugin_link_list_unlink_round_trip() {
             on: "worktree.created".into(),
             command: vec!["bun".into(), "run".into(), "bootstrap.ts".into()],
         }],
+        warnings: vec![],
     };
 
     for response in [

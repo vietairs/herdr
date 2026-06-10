@@ -273,6 +273,10 @@ Worktree commands also emit lifecycle events. `worktree.create` emits `workspace
 
 The plugin API is an early host surface for local workflow tools. A plugin can be a local executable package with a `herdr-plugin.toml` manifest, or a process that registers actions directly. A plugin process can register actions, store namespaced JSON records, and ask Herdr to open a managed terminal pane for its UI.
 
+Linked plugins persist across restarts. Herdr writes a `plugins.json` registry file alongside `session.json` on every `plugin.link` and `plugin.unlink`. On startup, Herdr re-reads each manifest from its original path; if the file is missing or unparseable the entry is kept with a `warnings` field so `plugin.list` surfaces it.
+
+Event hook `on` values are validated against the known Herdr event names at link time. An unrecognised name is not an error — the link still succeeds — but the returned plugin info includes a warning (e.g. `"unknown event 'worktree.craeted'"`). Check the `warnings` field in the `plugin.link` and `plugin.list` responses.
+
 Link a local plugin manifest:
 
 ```json

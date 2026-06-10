@@ -6,7 +6,7 @@ mod env;
 mod integrations;
 mod layouts;
 mod panes;
-mod plugins;
+pub(crate) mod plugins;
 mod responses;
 mod tabs;
 mod workspaces;
