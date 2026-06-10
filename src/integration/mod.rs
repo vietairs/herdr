@@ -365,7 +365,99 @@ pub(crate) fn apply_pane_env(cmd: &mut CommandBuilder, pane_id: PaneId) {
     cmd.env(HERDR_PANE_ID_ENV_VAR, format!("p_{}", pane_id.raw()));
 }
 
+pub(crate) const INSTALL_WARNING_PREFIX: &str = "warning:";
+
+struct AgentVersionRequirement {
+    label: &'static str,
+    binary: &'static str,
+    args: &'static [&'static str],
+    min_version: &'static str,
+}
+
+fn agent_version_requirement(
+    target: crate::api::schema::IntegrationTarget,
+) -> Option<AgentVersionRequirement> {
+    match target {
+        crate::api::schema::IntegrationTarget::Kimi => Some(AgentVersionRequirement {
+            label: "kimi code",
+            binary: "kimi",
+            args: &["--version"],
+            min_version: KIMI_MIN_VERSION,
+        }),
+        _ => None,
+    }
+}
+
+fn extract_version_triple(text: &str) -> Option<(u64, u64, u64)> {
+    text.split_whitespace().find_map(|token| {
+        let token = token.trim_start_matches('v');
+        let mut parts = token.splitn(3, '.');
+        let major: u64 = parts.next()?.parse().ok()?;
+        let minor: u64 = parts.next()?.parse().ok()?;
+        let patch: u64 = parts
+            .next()
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .and_then(|digits| digits.parse().ok())
+            .unwrap_or(0);
+        Some((major, minor, patch))
+    })
+}
+
+/// Returns `Ok(None)` when the installed agent satisfies the requirement,
+/// `Ok(Some(warning))` when the version cannot be determined (install
+/// proceeds), and `Err` when the installed agent is too old.
+fn enforce_agent_version(requirement: &AgentVersionRequirement) -> io::Result<Option<String>> {
+    let probe = format!("{} {}", requirement.binary, requirement.args.join(" "));
+    let output = match std::process::Command::new(requirement.binary)
+        .args(requirement.args)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => {
+            return Ok(Some(format!(
+                "{INSTALL_WARNING_PREFIX} could not run `{probe}` to verify the installed version; hooks require {} {} or newer",
+                requirement.label, requirement.min_version
+            )));
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(found) = extract_version_triple(&stdout) else {
+        return Ok(Some(format!(
+            "{INSTALL_WARNING_PREFIX} could not parse the {} version from `{probe}` output; hooks require {} {} or newer",
+            requirement.label, requirement.label, requirement.min_version
+        )));
+    };
+    let required = extract_version_triple(requirement.min_version)
+        .expect("static min version must be a valid version triple");
+
+    if found < required {
+        return Err(io::Error::other(format!(
+            "{label} {}.{}.{} is too old: herdr hooks require {label} {min} or newer. upgrade {label}, then re-run install",
+            found.0,
+            found.1,
+            found.2,
+            label = requirement.label,
+            min = requirement.min_version
+        )));
+    }
+    Ok(None)
+}
+
 pub(crate) fn install_target(
+    target: crate::api::schema::IntegrationTarget,
+) -> io::Result<Vec<String>> {
+    let result = install_target_inner(target);
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    crate::logging::integration_action("install", integration_target_label(target), outcome);
+    result
+}
+
+fn install_target_inner(
     target: crate::api::schema::IntegrationTarget,
 ) -> io::Result<Vec<String>> {
     if !integration_target_supported(target) {
@@ -375,7 +467,12 @@ pub(crate) fn install_target(
         )));
     }
 
-    let messages = match target {
+    let version_warning = match agent_version_requirement(target) {
+        Some(requirement) => enforce_agent_version(&requirement)?,
+        None => None,
+    };
+
+    let mut messages = match target {
         crate::api::schema::IntegrationTarget::Pi => {
             let path = install_pi()?;
             vec![format!("installed pi integration to {}", path.display())]
@@ -521,7 +618,10 @@ pub(crate) fn install_target(
         }
     };
 
-    crate::logging::integration_action("install", integration_target_label(target), "ok");
+    if let Some(warning) = version_warning {
+        messages.push(warning);
+    }
+
     Ok(messages)
 }
 
@@ -3203,6 +3303,86 @@ pub(crate) fn integration_env_lock() -> MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_version_triple_parses_common_outputs() {
+        assert_eq!(extract_version_triple("0.14.0"), Some((0, 14, 0)));
+        assert_eq!(extract_version_triple("v1.2.3"), Some((1, 2, 3)));
+        assert_eq!(
+            extract_version_triple("kimi-code 0.14.0 (linux/x64)"),
+            Some((0, 14, 0))
+        );
+        assert_eq!(extract_version_triple("0.14"), Some((0, 14, 0)));
+        assert_eq!(extract_version_triple("0.14.1-beta.2"), Some((0, 14, 1)));
+        assert_eq!(extract_version_triple("no version here"), None);
+        assert_eq!(extract_version_triple(""), None);
+    }
+
+    #[test]
+    fn extract_version_triple_orders_versions() {
+        let old = extract_version_triple("0.12.1").unwrap();
+        let min = extract_version_triple(KIMI_MIN_VERSION).unwrap();
+        let new = extract_version_triple("0.15.0").unwrap();
+        assert!(old < min);
+        assert!(min <= min);
+        assert!(min < new);
+    }
+
+    #[test]
+    fn agent_version_requirement_only_set_for_kimi() {
+        let requirement = agent_version_requirement(crate::api::schema::IntegrationTarget::Kimi)
+            .expect("kimi must have a version requirement");
+        assert_eq!(requirement.binary, "kimi");
+        assert_eq!(requirement.min_version, KIMI_MIN_VERSION);
+        assert!(agent_version_requirement(crate::api::schema::IntegrationTarget::Claude).is_none());
+        assert!(agent_version_requirement(crate::api::schema::IntegrationTarget::Codex).is_none());
+    }
+
+    #[test]
+    fn enforce_agent_version_warns_when_binary_missing() {
+        let requirement = AgentVersionRequirement {
+            label: "kimi code",
+            binary: "herdr-test-binary-that-does-not-exist",
+            args: &["--version"],
+            min_version: "0.14.0",
+        };
+        let warning = enforce_agent_version(&requirement)
+            .expect("missing binary must not fail the install")
+            .expect("missing binary must produce a warning");
+        assert!(warning.contains("could not run"));
+        assert!(warning.contains("0.14.0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_agent_version_rejects_old_version() {
+        let requirement = AgentVersionRequirement {
+            label: "kimi code",
+            binary: "echo",
+            args: &["0.12.1"],
+            min_version: "0.14.0",
+        };
+        let err = enforce_agent_version(&requirement)
+            .expect_err("old version must fail the install");
+        let message = err.to_string();
+        assert!(message.contains("0.12.1"));
+        assert!(message.contains("0.14.0"));
+        assert!(message.contains("upgrade"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_agent_version_accepts_current_version() {
+        let requirement = AgentVersionRequirement {
+            label: "kimi code",
+            binary: "echo",
+            args: &["0.14.0"],
+            min_version: "0.14.0",
+        };
+        let result = enforce_agent_version(&requirement)
+            .expect("matching version must not fail the install");
+        assert!(result.is_none(), "matching version must not warn");
+    }
 
     fn clear_integration_path_env() {
         std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);

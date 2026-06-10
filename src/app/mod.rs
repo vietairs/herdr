@@ -1089,10 +1089,16 @@ impl App {
         for target in targets {
             let label = crate::integration::integration_target_label(target);
             match crate::integration::install_target(target) {
-                Ok(_) => self
-                    .state
-                    .integration_install_messages
-                    .push(format!("installed {label}")),
+                Ok(messages) => {
+                    self.state
+                        .integration_install_messages
+                        .push(format!("installed {label}"));
+                    self.state.integration_install_messages.extend(
+                        messages.into_iter().filter(|message| {
+                            message.starts_with(crate::integration::INSTALL_WARNING_PREFIX)
+                        }),
+                    );
+                }
                 Err(err) => self
                     .state
                     .integration_install_messages
