@@ -529,11 +529,14 @@ prunable stale
     #[cfg(windows)]
     #[test]
     fn windows_tilde_expansion_normalizes_separators() {
-        let env = |key| match key {
-            "HOME" => Some("~".into()),
-            "USERPROFILE" => Some(r"C:\Users\herdr".into()),
-            _ => None,
-        };
+        fn env(key: &str) -> Option<OsString> {
+            match key {
+                "HOME" => Some("~".into()),
+                "USERPROFILE" => Some(r"C:\Users\herdr".into()),
+                _ => None,
+            }
+        }
+
         let default_path = expand_tilde_path_from_env("~/.herdr/worktrees", true, env);
         assert_eq!(
             default_path,
