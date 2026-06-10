@@ -52,7 +52,6 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneClearAgentAuthority(_)
             | Method::PaneReleaseAgent(_)
             | Method::PaneClose(_)
-            | Method::PluginActionRegister(_)
             | Method::PluginActionInvoke(_)
             | Method::PluginStorageSet(_)
             | Method::PluginStorageDelete(_)

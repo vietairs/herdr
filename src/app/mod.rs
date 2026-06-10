@@ -543,7 +543,6 @@ impl App {
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),
             integration_install_messages: Vec::new(),
             installed_plugins: std::collections::HashMap::new(),
-            plugin_actions: std::collections::HashMap::new(),
             plugin_storage: std::collections::HashMap::new(),
             plugin_panes: std::collections::HashMap::new(),
             global_menu: state::MenuListState::new(0),

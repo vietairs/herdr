@@ -183,9 +183,6 @@ pub enum ResponseResult {
         plugin_id: String,
         removed: bool,
     },
-    PluginActionRegistered {
-        action: PluginActionInfo,
-    },
     PluginActionList {
         actions: Vec<PluginActionInfo>,
     },

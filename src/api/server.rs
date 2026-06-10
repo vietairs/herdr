@@ -336,7 +336,6 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PluginLink(_) => "plugin.link",
         Method::PluginList(_) => "plugin.list",
         Method::PluginUnlink(_) => "plugin.unlink",
-        Method::PluginActionRegister(_) => "plugin.action.register",
         Method::PluginActionList(_) => "plugin.action.list",
         Method::PluginActionInvoke(_) => "plugin.action.invoke",
         Method::PluginStorageGet(_) => "plugin.storage.get",

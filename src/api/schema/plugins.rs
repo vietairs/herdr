@@ -58,19 +58,6 @@ pub struct PluginManifestEventHook {
     pub command: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginActionRegisterParams {
-    pub plugin_id: String,
-    pub action_id: String,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub contexts: Vec<PluginActionContext>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entrypoint: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PluginActionListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,8 +122,7 @@ pub struct PluginActionInfo {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contexts: Vec<PluginActionContext>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entrypoint: Option<String>,
+    pub command: Vec<String>,
 }
 
 impl PluginActionInfo {

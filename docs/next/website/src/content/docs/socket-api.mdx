@@ -305,24 +305,24 @@ List or unlink linked plugins:
 {"id":"req_plugin_unlink","method":"plugin.unlink","params":{"plugin_id":"example.worktree-bootstrap"}}
 ```
 
-In this early slice, linking validates and records manifest metadata. Manifest actions and event hooks are not executed until the runner work lands.
-
-Register an action:
+Actions are resolved from the linked manifest. `plugin.action.list` returns all actions across installed plugins; pass `plugin_id` to filter.
 
 ```json
-{"id":"req_plugin_action","method":"plugin.action.register","params":{"plugin_id":"example.issue-flow","action_id":"assign-issue","title":"Assign Issue","contexts":["workspace","pane"],"entrypoint":"assign"}}
+{"id":"req_plugin_actions","method":"plugin.action.list","params":{}}
+{"id":"req_plugin_actions_filtered","method":"plugin.action.list","params":{"plugin_id":"example.worktree-bootstrap"}}
 ```
 
-Invoke an action:
+Invoke an action by its qualified id or bare action id:
 
 ```json
-{"id":"req_plugin_invoke","method":"plugin.action.invoke","params":{"plugin_id":"example.issue-flow","action_id":"assign-issue","context":{"invocation_source":"keybinding"}}}
+{"id":"req_plugin_invoke","method":"plugin.action.invoke","params":{"action_id":"example.worktree-bootstrap.bootstrap","context":{"invocation_source":"keybinding"}}}
 ```
 
-In this early slice, `plugin.action.invoke` resolves the registered action and
-returns the Herdr-built invocation context. It does not launch the action
-entrypoint yet. Missing context fields are filled from the active workspace,
-tab, focused pane, worktree provenance, and request id.
+`plugin.action.invoke` resolves the manifest action and returns the
+Herdr-built invocation context. It does not execute the command yet.
+Missing context fields are filled from the active workspace, tab, focused
+pane, worktree provenance, and request id. Invoking an action from a
+disabled plugin returns a `plugin_disabled` error.
 
 Store a workspace-scoped JSON value:
 

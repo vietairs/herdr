@@ -842,23 +842,46 @@ fn event_wait_parses_typed_match() {
 }
 
 #[test]
-fn plugin_action_request_round_trips() {
-    let request = Request {
-        id: "req_plugin_action".into(),
-        method: Method::PluginActionRegister(PluginActionRegisterParams {
-            plugin_id: "example.issue-flow".into(),
-            action_id: "assign-issue".into(),
-            title: "Assign Issue".into(),
-            description: Some("Open the issue assignment UI".into()),
-            contexts: vec![PluginActionContext::Workspace, PluginActionContext::Pane],
-            entrypoint: Some("assign".into()),
+fn plugin_action_list_and_invoke_round_trips() {
+    let list = Request {
+        id: "req_plugin_action_list".into(),
+        method: Method::PluginActionList(PluginActionListParams {
+            plugin_id: Some("example.issue-flow".into()),
         }),
     };
-
-    let json = serde_json::to_value(&request).unwrap();
-    assert_eq!(json["method"], "plugin.action.register");
+    let json = serde_json::to_value(&list).unwrap();
+    assert_eq!(json["method"], "plugin.action.list");
     let restored: Request = serde_json::from_value(json).unwrap();
-    assert_eq!(restored, request);
+    assert_eq!(restored, list);
+
+    let invoke = Request {
+        id: "req_plugin_action_invoke".into(),
+        method: Method::PluginActionInvoke(PluginActionInvokeParams {
+            plugin_id: Some("example.issue-flow".into()),
+            action_id: "assign-issue".into(),
+            context: None,
+        }),
+    };
+    let json = serde_json::to_value(&invoke).unwrap();
+    assert_eq!(json["method"], "plugin.action.invoke");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, invoke);
+
+    let action_info = PluginActionInfo {
+        plugin_id: "example.issue-flow".into(),
+        action_id: "assign-issue".into(),
+        title: "Assign Issue".into(),
+        description: Some("Open the issue assignment UI".into()),
+        contexts: vec![PluginActionContext::Workspace, PluginActionContext::Pane],
+        command: vec!["assign".into(), "--issue".into()],
+    };
+    assert_eq!(
+        action_info.qualified_id(),
+        "example.issue-flow.assign-issue"
+    );
+    let json = serde_json::to_string(&action_info).unwrap();
+    let restored: PluginActionInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, action_info);
 }
 
 #[test]

@@ -7,9 +7,6 @@ use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
 
-pub(crate) type PluginActionRegistry =
-    std::collections::HashMap<String, crate::api::schema::PluginActionInfo>;
-
 pub(crate) type InstalledPluginRegistry =
     std::collections::HashMap<String, crate::api::schema::InstalledPluginInfo>;
 
@@ -1409,8 +1406,6 @@ pub struct AppState {
     pub integration_install_messages: Vec<String>,
     /// Installed or linked plugins known to this running Herdr instance.
     pub(crate) installed_plugins: InstalledPluginRegistry,
-    /// Runtime plugin actions registered through the socket API.
-    pub(crate) plugin_actions: PluginActionRegistry,
     /// Namespaced plugin storage records.
     pub(crate) plugin_storage: PluginStorage,
     /// Pane ids opened through the plugin pane API.
@@ -1746,7 +1741,6 @@ impl AppState {
                 crate::detect::manifest_update::ManifestUpdateStatus::default(),
             integration_install_messages: Vec::new(),
             installed_plugins: std::collections::HashMap::new(),
-            plugin_actions: std::collections::HashMap::new(),
             plugin_storage: std::collections::HashMap::new(),
             plugin_panes: std::collections::HashMap::new(),
             global_menu: MenuListState::new(0),

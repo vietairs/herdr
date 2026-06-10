@@ -3,11 +3,11 @@ use ratatui::layout::Direction;
 use super::responses::{encode_error, encode_success};
 use crate::api::schema::{
     InstalledPluginInfo, PluginActionInfo, PluginActionInvokeParams, PluginActionListParams,
-    PluginActionRegisterParams, PluginInvocationContext, PluginLinkParams, PluginListParams,
-    PluginManifestAction, PluginManifestEventHook, PluginPaneCloseParams, PluginPaneFocusParams,
-    PluginPaneInfo, PluginPaneOpenParams, PluginPanePlacement, PluginStorageDeleteParams,
-    PluginStorageEntry, PluginStorageGetParams, PluginStorageListParams, PluginStorageScope,
-    PluginStorageSetParams, PluginUnlinkParams, ResponseResult,
+    PluginInvocationContext, PluginLinkParams, PluginListParams, PluginManifestAction,
+    PluginManifestEventHook, PluginPaneCloseParams, PluginPaneFocusParams, PluginPaneInfo,
+    PluginPaneOpenParams, PluginPanePlacement, PluginStorageDeleteParams, PluginStorageEntry,
+    PluginStorageGetParams, PluginStorageListParams, PluginStorageScope, PluginStorageSetParams,
+    PluginUnlinkParams, ResponseResult,
 };
 use crate::app::App;
 
@@ -71,47 +71,6 @@ impl App {
         encode_success(id, ResponseResult::PluginUnlinked { plugin_id, removed })
     }
 
-    pub(super) fn handle_plugin_action_register(
-        &mut self,
-        id: String,
-        params: PluginActionRegisterParams,
-    ) -> String {
-        let Some(plugin_id) = normalize_plugin_id(&params.plugin_id) else {
-            return invalid_plugin_id(id);
-        };
-        let Some(action_id) = normalize_action_id(&params.action_id) else {
-            return invalid_action_id(id);
-        };
-        let title = params.title.trim().to_string();
-        if title.is_empty() {
-            return encode_error(
-                id,
-                "invalid_plugin_action_title",
-                "action title is required",
-            );
-        }
-
-        let action = PluginActionInfo {
-            plugin_id: plugin_id.clone(),
-            action_id: action_id.clone(),
-            title,
-            description: params
-                .description
-                .map(|description| description.trim().to_string())
-                .filter(|description| !description.is_empty()),
-            contexts: params.contexts,
-            entrypoint: params
-                .entrypoint
-                .map(|entrypoint| entrypoint.trim().to_string())
-                .filter(|entrypoint| !entrypoint.is_empty()),
-        };
-        self.state
-            .plugin_actions
-            .insert(plugin_action_key(&plugin_id, &action_id), action.clone());
-        self.state.mark_session_dirty();
-        encode_success(id, ResponseResult::PluginActionRegistered { action })
-    }
-
     pub(super) fn handle_plugin_action_list(
         &mut self,
         id: String,
@@ -126,16 +85,12 @@ impl App {
             }
             None => None,
         };
-        let mut actions = self
-            .state
-            .plugin_actions
-            .values()
+        let mut actions = manifest_actions(&self.state.installed_plugins)
             .filter(|action| {
                 plugin_id
                     .as_deref()
                     .is_none_or(|plugin_id| action.plugin_id == plugin_id)
             })
-            .cloned()
             .collect::<Vec<_>>();
         actions.sort_by_key(|action| action.qualified_id());
         encode_success(id, ResponseResult::PluginActionList { actions })
@@ -146,10 +101,18 @@ impl App {
         id: String,
         params: PluginActionInvokeParams,
     ) -> String {
-        let action = match self.find_plugin_action(params.plugin_id.as_deref(), &params.action_id) {
-            Ok(action) => action,
-            Err((code, message)) => return encode_error(id, code, message),
-        };
+        let (plugin, action) =
+            match self.find_plugin_action(params.plugin_id.as_deref(), &params.action_id) {
+                Ok(pair) => pair,
+                Err((code, message)) => return encode_error(id, code, message),
+            };
+        if !plugin.enabled {
+            return encode_error(
+                id,
+                "plugin_disabled",
+                format!("plugin {} is disabled", plugin.plugin_id),
+            );
+        }
         let context = self.merge_plugin_context(params.context, &id);
         encode_success(id, ResponseResult::PluginActionInvoked { action, context })
     }
@@ -520,35 +483,47 @@ impl App {
         &self,
         plugin_id: Option<&str>,
         action_id: &str,
-    ) -> Result<PluginActionInfo, (&'static str, String)> {
+    ) -> Result<(crate::api::schema::InstalledPluginInfo, PluginActionInfo), (&'static str, String)>
+    {
         if let Some(plugin_id) = plugin_id {
             let plugin_id = normalize_plugin_id(plugin_id)
                 .ok_or_else(|| ("invalid_plugin_id", "invalid plugin id".to_string()))?;
             let action_id = normalize_action_id(action_id)
                 .ok_or_else(|| ("invalid_plugin_action_id", "invalid action id".to_string()))?;
-            return self
+            let plugin = self
                 .state
-                .plugin_actions
-                .get(&plugin_action_key(&plugin_id, &action_id))
-                .cloned()
+                .installed_plugins
+                .get(&plugin_id)
+                .ok_or_else(|| ("plugin_not_found", "plugin not found".to_string()))?
+                .clone();
+            let action_info = plugin
+                .actions
+                .iter()
+                .find(|a| a.id == action_id)
+                .map(|a| manifest_action_info(&plugin_id, a))
                 .ok_or_else(|| {
                     (
                         "plugin_action_not_found",
                         "plugin action not found".to_string(),
                     )
-                });
+                })?;
+            return Ok((plugin, action_info));
         }
 
         let action_id = action_id.trim();
-        let matches = self
-            .state
-            .plugin_actions
-            .values()
+        let matches = manifest_actions(&self.state.installed_plugins)
             .filter(|action| action.action_id == action_id || action.qualified_id() == action_id)
-            .cloned()
             .collect::<Vec<_>>();
         match matches.as_slice() {
-            [action] => Ok(action.clone()),
+            [action] => {
+                let plugin = self
+                    .state
+                    .installed_plugins
+                    .get(&action.plugin_id)
+                    .cloned()
+                    .ok_or_else(|| ("plugin_not_found", "plugin not found".to_string()))?;
+                Ok((plugin, action.clone()))
+            }
             [] => Err((
                 "plugin_action_not_found",
                 "plugin action not found".to_string(),
@@ -849,16 +824,26 @@ fn invalid_plugin_id(id: String) -> String {
     )
 }
 
-fn invalid_action_id(id: String) -> String {
-    encode_error(
-        id,
-        "invalid_plugin_action_id",
-        "action id must be non-empty, <= 120 characters, and contain only ASCII letters, digits, colon, dot, underscore, or hyphen",
-    )
+fn manifest_action_info(plugin_id: &str, action: &PluginManifestAction) -> PluginActionInfo {
+    PluginActionInfo {
+        plugin_id: plugin_id.to_string(),
+        action_id: action.id.clone(),
+        title: action.title.clone(),
+        description: action.description.clone(),
+        contexts: action.contexts.clone(),
+        command: action.command.clone(),
+    }
 }
 
-fn plugin_action_key(plugin_id: &str, action_id: &str) -> String {
-    format!("{plugin_id}.{action_id}")
+fn manifest_actions(
+    plugins: &crate::app::state::InstalledPluginRegistry,
+) -> impl Iterator<Item = PluginActionInfo> + '_ {
+    plugins.values().flat_map(|plugin| {
+        plugin
+            .actions
+            .iter()
+            .map(|action| manifest_action_info(&plugin.plugin_id, action))
+    })
 }
 
 fn plugin_storage_key(
@@ -947,7 +932,7 @@ fn storage_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::schema::{Method, PluginActionContext, Request, SuccessResponse};
+    use crate::api::schema::{Method, Request, SuccessResponse};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_app() -> App {
@@ -999,6 +984,20 @@ command = ["bun", "run", "bootstrap.ts"]
         )
         .unwrap();
         manifest
+    }
+
+    fn link_manifest(app: &mut App, root: &std::path::Path) {
+        let result = app.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::PluginLink(PluginLinkParams {
+                path: root.display().to_string(),
+                enabled: true,
+            }),
+        });
+        assert!(
+            result.contains("plugin_linked"),
+            "expected plugin_linked: {result}"
+        );
     }
 
     #[test]
@@ -1065,29 +1064,31 @@ command = ["bun", "run", "bootstrap.ts"]
     }
 
     #[test]
-    fn plugin_action_registers_and_invokes_with_context() {
+    fn manifest_action_list_and_invoke_with_context() {
         let mut app = test_app();
-        let register = app.handle_api_request(Request {
-            id: "register".into(),
-            method: Method::PluginActionRegister(PluginActionRegisterParams {
-                plugin_id: "example.issue-flow".into(),
-                action_id: "assign-issue".into(),
-                title: "Assign Issue".into(),
-                description: None,
-                contexts: vec![PluginActionContext::Workspace],
-                entrypoint: Some("assign".into()),
-            }),
+        let root = unique_temp_path("plugin-action-list");
+        write_manifest(&root);
+        link_manifest(&mut app, &root);
+
+        let list = app.handle_api_request(Request {
+            id: "list".into(),
+            method: Method::PluginActionList(PluginActionListParams { plugin_id: None }),
         });
-        assert!(matches!(
-            response_result(&register),
-            ResponseResult::PluginActionRegistered { .. }
-        ));
+        let ResponseResult::PluginActionList { actions } = response_result(&list) else {
+            panic!("expected plugin action list: {list}");
+        };
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].qualified_id(),
+            "example.worktree-bootstrap.bootstrap"
+        );
+        assert_eq!(actions[0].command, ["bun", "run", "bootstrap.ts"]);
 
         let invoke = app.handle_api_request(Request {
             id: "invoke".into(),
             method: Method::PluginActionInvoke(PluginActionInvokeParams {
-                plugin_id: Some("example.issue-flow".into()),
-                action_id: "assign-issue".into(),
+                plugin_id: Some("example.worktree-bootstrap".into()),
+                action_id: "bootstrap".into(),
                 context: Some(PluginInvocationContext {
                     workspace_id: Some("1".into()),
                     workspace_label: None,
@@ -1107,19 +1108,25 @@ command = ["bun", "run", "bootstrap.ts"]
         });
         let ResponseResult::PluginActionInvoked { action, context } = response_result(&invoke)
         else {
-            panic!("expected plugin action invocation");
+            panic!("expected plugin action invocation: {invoke}");
         };
-        assert_eq!(action.qualified_id(), "example.issue-flow.assign-issue");
+        assert_eq!(
+            action.qualified_id(),
+            "example.worktree-bootstrap.bootstrap"
+        );
+        assert_eq!(action.command, ["bun", "run", "bootstrap.ts"]);
         assert_eq!(context.workspace_id.as_deref(), Some("1"));
         assert_eq!(context.invocation_source.as_deref(), Some("test"));
         assert_eq!(
             context.correlation_id.as_deref(),
             Some("external-correlation")
         );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn plugin_action_invoke_builds_default_workspace_tab_and_pane_context() {
+    fn manifest_action_invoke_builds_default_workspace_context() {
         let mut app = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("issue")];
         app.state.workspaces[0].identity_cwd = "/tmp/issue".into();
@@ -1153,17 +1160,25 @@ command = ["bun", "run", "bootstrap.ts"]
             },
         );
 
-        let _ = app.handle_api_request(Request {
-            id: "register".into(),
-            method: Method::PluginActionRegister(PluginActionRegisterParams {
-                plugin_id: "example.context".into(),
-                action_id: "show".into(),
-                title: "Show Context".into(),
-                description: None,
-                contexts: vec![PluginActionContext::Pane],
-                entrypoint: None,
-            }),
-        });
+        let root = unique_temp_path("plugin-action-context");
+        // write a manifest with a "show" action in pane context
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("herdr-plugin.toml"),
+            r#"
+id = "example.context"
+name = "Context"
+version = "0.1.0"
+
+[[actions]]
+id = "show"
+title = "Show Context"
+contexts = ["pane"]
+command = ["show-ctx"]
+"#,
+        )
+        .unwrap();
+        link_manifest(&mut app, &root);
 
         let invoke = app.handle_api_request(Request {
             id: "invoke-context".into(),
@@ -1175,7 +1190,7 @@ command = ["bun", "run", "bootstrap.ts"]
         });
 
         let ResponseResult::PluginActionInvoked { context, .. } = response_result(&invoke) else {
-            panic!("expected plugin action invocation");
+            panic!("expected plugin action invocation: {invoke}");
         };
         assert_eq!(
             context.workspace_id.as_deref(),
@@ -1203,6 +1218,41 @@ command = ["bun", "run", "bootstrap.ts"]
         assert_eq!(worktree.repo_root, "/repo/herdr");
         assert_eq!(worktree.checkout_path, "/repo/herdr-issue");
         assert!(worktree.is_linked_worktree);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_action_invoke_returns_plugin_disabled_when_disabled() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-disabled");
+        write_manifest(&root);
+
+        // link as disabled
+        let link_result = app.handle_api_request(Request {
+            id: "link-disabled".into(),
+            method: Method::PluginLink(PluginLinkParams {
+                path: root.display().to_string(),
+                enabled: false,
+            }),
+        });
+        assert!(
+            link_result.contains("plugin_linked"),
+            "expected plugin_linked: {link_result}"
+        );
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke-disabled".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: Some("example.worktree-bootstrap".into()),
+                action_id: "bootstrap".into(),
+                context: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
+        assert_eq!(value["error"]["code"], "plugin_disabled");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

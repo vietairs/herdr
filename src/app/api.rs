@@ -811,9 +811,6 @@ impl App {
             Method::PluginUnlink(params) => {
                 return self.handle_plugin_unlink(request.id, params);
             }
-            Method::PluginActionRegister(params) => {
-                return self.handle_plugin_action_register(request.id, params);
-            }
             Method::PluginActionList(params) => {
                 return self.handle_plugin_action_list(request.id, params);
             }

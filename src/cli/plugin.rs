@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use crate::api::schema::{
-    Method, PluginActionContext, PluginActionInvokeParams, PluginActionListParams,
-    PluginActionRegisterParams, PluginInvocationContext, PluginLinkParams, PluginListParams,
-    PluginPaneCloseParams, PluginPaneFocusParams, PluginPaneOpenParams, PluginPanePlacement,
-    PluginStorageDeleteParams, PluginStorageGetParams, PluginStorageListParams, PluginStorageScope,
-    PluginStorageSetParams, PluginUnlinkParams, Request, SplitDirection,
+    Method, PluginActionInvokeParams, PluginActionListParams, PluginInvocationContext,
+    PluginLinkParams, PluginListParams, PluginPaneCloseParams, PluginPaneFocusParams,
+    PluginPaneOpenParams, PluginPanePlacement, PluginStorageDeleteParams, PluginStorageGetParams,
+    PluginStorageListParams, PluginStorageScope, PluginStorageSetParams, PluginUnlinkParams,
+    Request, SplitDirection,
 };
 
 pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
@@ -97,7 +97,6 @@ fn run_plugin_action_command(args: &[String]) -> std::io::Result<i32> {
     };
 
     match subcommand {
-        "register" => plugin_action_register(&args[1..]),
         "list" => plugin_action_list(&args[1..]),
         "invoke" => plugin_action_invoke(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -109,66 +108,6 @@ fn run_plugin_action_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
-}
-
-fn plugin_action_register(args: &[String]) -> std::io::Result<i32> {
-    let mut plugin_id = None;
-    let mut action_id = None;
-    let mut title = None;
-    let mut description = None;
-    let mut contexts = Vec::new();
-    let mut entrypoint = None;
-
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--plugin" => {
-                plugin_id = Some(required_value(args, &mut index, "--plugin")?);
-            }
-            "--action" => {
-                action_id = Some(required_value(args, &mut index, "--action")?);
-            }
-            "--title" => {
-                title = Some(required_value(args, &mut index, "--title")?);
-            }
-            "--description" => {
-                description = Some(required_value(args, &mut index, "--description")?);
-            }
-            "--context" => {
-                let value = required_value(args, &mut index, "--context")?;
-                contexts.push(parse_action_context(&value)?);
-            }
-            "--entrypoint" => {
-                entrypoint = Some(required_value(args, &mut index, "--entrypoint")?);
-            }
-            other => {
-                eprintln!("unknown option: {other}");
-                return Ok(2);
-            }
-        }
-    }
-
-    let Some(plugin_id) = plugin_id else {
-        eprintln!("missing required --plugin");
-        return Ok(2);
-    };
-    let Some(action_id) = action_id else {
-        eprintln!("missing required --action");
-        return Ok(2);
-    };
-    let Some(title) = title else {
-        eprintln!("missing required --title");
-        return Ok(2);
-    };
-
-    print_plugin_response(Method::PluginActionRegister(PluginActionRegisterParams {
-        plugin_id,
-        action_id,
-        title,
-        description,
-        contexts,
-        entrypoint,
-    }))
 }
 
 fn plugin_action_list(args: &[String]) -> std::io::Result<i32> {
@@ -563,19 +502,6 @@ fn required_value(args: &[String], index: &mut usize, flag: &str) -> std::io::Re
     Ok(value.clone())
 }
 
-fn parse_action_context(value: &str) -> std::io::Result<PluginActionContext> {
-    match value {
-        "global" => Ok(PluginActionContext::Global),
-        "workspace" => Ok(PluginActionContext::Workspace),
-        "tab" => Ok(PluginActionContext::Tab),
-        "pane" => Ok(PluginActionContext::Pane),
-        "selection" => Ok(PluginActionContext::Selection),
-        _ => Err(std::io::Error::other(format!(
-            "invalid action context: {value}"
-        ))),
-    }
-}
-
 fn parse_storage_scope(value: &str) -> std::io::Result<PluginStorageScope> {
     match value {
         "global" => Ok(PluginStorageScope::Global),
@@ -620,14 +546,13 @@ fn print_plugin_help() {
     eprintln!("  herdr plugin link <path> [--disabled]");
     eprintln!("  herdr plugin list [--plugin ID]");
     eprintln!("  herdr plugin unlink <plugin_id>");
-    eprintln!("  herdr plugin action <register|list|invoke>");
+    eprintln!("  herdr plugin action <list|invoke>");
     eprintln!("  herdr plugin storage <get|set|delete|list>");
     eprintln!("  herdr plugin pane <open|focus|close>");
 }
 
 fn print_plugin_action_help() {
     eprintln!("herdr plugin action commands:");
-    eprintln!("  herdr plugin action register --plugin ID --action ID --title TEXT [--description TEXT] [--context global|workspace|tab|pane|selection] [--entrypoint ID]");
     eprintln!("  herdr plugin action list [--plugin ID]");
     eprintln!("  herdr plugin action invoke <action_id> [--plugin ID]");
 }
