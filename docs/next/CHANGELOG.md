@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.6.9] - 2026-06-10
+
 ### Fixed
 - Copy mode page scrolling now stops at the same top and bottom boundaries as normal pane scrolling instead of overshooting or getting stuck near the edges. (#459, #460, thanks @reobin)
 - Clipboard-copy feedback no longer stays visible after the related selection state has gone stale. (#443)
