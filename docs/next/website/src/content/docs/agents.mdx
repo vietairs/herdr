@@ -62,7 +62,7 @@ Local overrides always win. Without a local override, Herdr uses the newer compa
 
 Remote manifests patch detection rules for agents Herdr already knows how to identify. Adding a completely new agent still requires a Herdr binary update for process detection, labels, and integration behavior.
 
-The running server loads active manifests into memory on startup. Automatic remote manifest updates reload that in-memory cache after new rules are written. After editing a local override manually, restart Herdr or run `herdr server reload-agent-manifests` to apply the file to the running server.
+The running server loads active manifests into memory on startup. Automatic remote manifest updates reload that in-memory cache after new rules are written. Run `herdr server update-agent-manifests` to fetch remote manifest updates immediately and reload the running server. After editing a local override manually, restart Herdr or run `herdr server reload-agent-manifests` to apply the file to the running server.
 
 Use `herdr agent explain` when a pane shows the wrong state:
 
