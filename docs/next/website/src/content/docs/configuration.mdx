@@ -292,7 +292,7 @@ Set `right_click_passthrough_modifier = "ctrl"` if you want Ctrl-right-click, ho
 
 Set `redraw_on_focus_gained = false` to avoid the visible full-screen refresh when switching back to Herdr. The default is `true` because a full redraw recovers from rare stale or dirty host terminal surfaces.
 
-Set `mouse_scroll_lines` to change how many pane scrollback lines each mouse wheel notch scrolls. The default is 3. Pane apps that request mouse reporting still receive wheel events directly.
+Set `mouse_scroll_lines` to change how many pane scrollback lines each mouse wheel notch scrolls. The default is 3. Pane apps that request mouse reporting still receive wheel events directly. Alternate-screen apps have no scrollback to scroll; see [Scrollback](#scrollback).
 
 Set `show_agent_labels_on_pane_borders = true` if you want detected agent labels in split pane borders when no manual pane label is set.
 
@@ -369,6 +369,8 @@ scrollback_limit_bytes = 10485760
 ```
 
 Existing panes keep their current buffer until they are recreated.
+
+Panes only show a scrollbar when the app writes to the primary screen. Full-screen apps that switch to the alternate screen (vim, htop, Claude Code with `CLAUDE_CODE_NO_FLICKER=1`) produce no scrollback, so no scrollbar appears and wheel events are routed to the app instead. Scroll with the app's own keys or UI.
 
 ## Pane screen history
 
