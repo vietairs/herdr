@@ -512,9 +512,20 @@ pub(super) fn decide_screen_detection_publish(
     }
 }
 
+#[allow(dead_code)] // shim for tests; detection_update_for_publish_with_osc is the real path
 pub(super) fn detection_update_for_publish(
     agent: Option<Agent>,
     content: &str,
+    process_exited: bool,
+) -> Option<crate::detect::AgentDetection> {
+    detection_update_for_publish_with_osc(agent, content, "", "", process_exited)
+}
+
+pub(super) fn detection_update_for_publish_with_osc(
+    agent: Option<Agent>,
+    content: &str,
+    osc_title: &str,
+    osc_progress: &str,
     process_exited: bool,
 ) -> Option<crate::detect::AgentDetection> {
     if process_exited {
@@ -527,7 +538,7 @@ pub(super) fn detection_update_for_publish(
         });
     }
 
-    let detection = crate::detect::detect_agent(agent, content);
+    let detection = crate::detect::detect_agent_with_osc(agent, content, osc_title, osc_progress);
     (!detection.skip_state_update).then_some(detection)
 }
 

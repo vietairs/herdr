@@ -35,6 +35,7 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
     let mut file = None;
     let mut agent = None;
     let mut json = false;
+    let mut verbose = false;
     let mut target = None;
 
     let mut index = 0;
@@ -75,9 +76,15 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
                 }
                 index += 2;
             }
+            "--verbose" | "-v" => {
+                verbose = true;
+                index += 1;
+            }
             "help" | "--help" | "-h" => {
-                eprintln!("usage: herdr agent explain <target> [--json]");
-                eprintln!("usage: herdr agent explain --file PATH --agent LABEL [--json]");
+                eprintln!("usage: herdr agent explain <target> [--json|--verbose]");
+                eprintln!(
+                    "usage: herdr agent explain --file PATH --agent LABEL [--json|--verbose]"
+                );
                 return Ok(0);
             }
             value if value.starts_with('-') => {
@@ -136,30 +143,62 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
     if json {
         println!("{explain}");
     } else {
-        print_agent_explain_text(&explain);
+        print_agent_explain_text(&explain, verbose);
     }
     Ok(0)
 }
 
-fn print_agent_explain_text(explain: &serde_json::Value) {
+fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
     println!("agent: {}", explain["agent"].as_str().unwrap_or("unknown"));
     println!("state: {}", explain["state"].as_str().unwrap_or("unknown"));
     println!(
-        "screen_detection_skipped: {}",
-        explain["screen_detection_skipped"]
-            .as_bool()
-            .unwrap_or(false)
+        "manifest: {} {}",
+        explain["manifest_source"].as_str().unwrap_or("none"),
+        explain["manifest_version"].as_str().unwrap_or("unknown")
     );
+    if let Some(rule) = explain["matched_rule"].as_object() {
+        let rule_id = rule
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("-");
+        println!(
+            "rule: {} (region={} priority={})",
+            rule_id,
+            rule.get("region")
+                .and_then(|value| value.as_str())
+                .unwrap_or("-"),
+            rule.get("priority")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
+        );
+        if let Some(preview) = matched_rule_region_preview(explain, rule_id) {
+            println!("evidence: {preview:?}");
+        }
+    } else {
+        println!("rule: none");
+    }
+    if let Some(reason) = explain["fallback_reason"].as_str() {
+        println!("fallback_reason: {reason}");
+    }
     if let Some(reason) = explain["screen_detection_skip_reason"].as_str() {
         println!("screen_detection_skip_reason: {reason}");
     }
+    if let Some(reason) = explain["skipped_update_reason"].as_str() {
+        println!("skipped_update_reason: {reason}");
+    }
+    if let Some(warning) = explain["warning"].as_str() {
+        println!("warning: {warning}");
+    }
+
+    if !verbose {
+        return;
+    }
+
     println!(
-        "manifest: {}",
-        explain["manifest_source"].as_str().unwrap_or("none")
-    );
-    println!(
-        "manifest_version: {}",
-        explain["manifest_version"].as_str().unwrap_or("unknown")
+        "visible: idle={} blocker={} working={}",
+        explain["visible_idle"].as_bool().unwrap_or(false),
+        explain["visible_blocker"].as_bool().unwrap_or(false),
+        explain["visible_working"].as_bool().unwrap_or(false)
     );
     println!(
         "cached_remote_version: {}",
@@ -177,40 +216,6 @@ fn print_agent_explain_text(explain: &serde_json::Value) {
     if let Some(error) = explain["remote_update_error"].as_str() {
         println!("remote_update_error: {error}");
     }
-    if let Some(rule) = explain["matched_rule"].as_object() {
-        println!(
-            "matched_rule: {} priority={} region={} state={}",
-            rule.get("id")
-                .and_then(|value| value.as_str())
-                .unwrap_or("-"),
-            rule.get("priority")
-                .and_then(|value| value.as_i64())
-                .unwrap_or(0),
-            rule.get("region")
-                .and_then(|value| value.as_str())
-                .unwrap_or("-"),
-            rule.get("state")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown")
-        );
-    } else {
-        println!("matched_rule: none");
-    }
-    println!(
-        "visible: idle={} blocker={} working={}",
-        explain["visible_idle"].as_bool().unwrap_or(false),
-        explain["visible_blocker"].as_bool().unwrap_or(false),
-        explain["visible_working"].as_bool().unwrap_or(false)
-    );
-    if let Some(reason) = explain["fallback_reason"].as_str() {
-        println!("fallback_reason: {reason}");
-    }
-    if let Some(reason) = explain["skipped_update_reason"].as_str() {
-        println!("skipped_update_reason: {reason}");
-    }
-    if let Some(warning) = explain["warning"].as_str() {
-        println!("warning: {warning}");
-    }
     if let Some(evaluated_rules) = explain["evaluated_rules"]
         .as_array()
         .filter(|rules| !rules.is_empty())
@@ -218,9 +223,13 @@ fn print_agent_explain_text(explain: &serde_json::Value) {
         println!("evaluated_rules:");
         for rule in evaluated_rules {
             println!(
-                "  {} matched={} priority={} region={} state={}",
+                "  {} {} priority={} region={} state={}",
+                if rule["matched"].as_bool().unwrap_or(false) {
+                    "✓"
+                } else {
+                    "✗"
+                },
                 rule["id"].as_str().unwrap_or("-"),
-                rule["matched"].as_bool().unwrap_or(false),
                 rule["priority"].as_i64().unwrap_or(0),
                 rule["region"].as_str().unwrap_or("-"),
                 rule["state"].as_str().unwrap_or("unknown")
@@ -242,6 +251,18 @@ fn print_agent_explain_text(explain: &serde_json::Value) {
             );
         }
     }
+}
+
+fn matched_rule_region_preview<'a>(
+    explain: &'a serde_json::Value,
+    rule_id: &str,
+) -> Option<&'a str> {
+    explain["evaluated_rules"]
+        .as_array()?
+        .iter()
+        .find(|rule| rule["id"].as_str() == Some(rule_id))?["evidence"]["region_preview"]
+        .as_str()
+        .filter(|preview| !preview.is_empty())
 }
 
 fn agent_start(args: &[String]) -> std::io::Result<i32> {

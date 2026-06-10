@@ -51,12 +51,23 @@ const KIMI_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/kimi/herdr-agent-state.sh")
 };
-const KIMI_INTEGRATION_VERSION: u32 = 2;
+const KIMI_INTEGRATION_VERSION: u32 = 3;
 const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
 const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> herdr kimi integration";
 const KIMI_CONFIG_BLOCK_END: &str = "# <<< herdr kimi integration";
-const KIMI_MIN_VERSION: &str = "0.8.0";
-const KIMI_HOOK_EVENTS: [(&str, &str); 1] = [("SessionStart", "session")];
+const KIMI_MIN_VERSION: &str = "0.14.0";
+const KIMI_HOOK_EVENTS: [(&str, &str); 10] = [
+    ("SessionStart", "session"),
+    ("UserPromptSubmit", "working"),
+    ("PreToolUse", "working"),
+    ("SubagentStart", "working"),
+    ("PreCompact", "working"),
+    ("PermissionRequest", "blocked"),
+    ("PermissionResult", "working"),
+    ("Stop", "idle"),
+    ("Interrupt", "idle"),
+    ("SessionEnd", "release"),
+];
 const COPILOT_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {
@@ -5365,8 +5376,8 @@ mod tests {
         assert!(KIMI_HOOK_ASSET.contains("source = \"herdr:kimi\""));
         assert!(KIMI_HOOK_ASSET.contains("agent_session_id"));
         assert!(KIMI_HOOK_ASSET.contains("pane.report_agent_session"));
-        assert!(!KIMI_HOOK_ASSET.contains("\"state\": action"));
-        assert!(!KIMI_HOOK_ASSET.contains("pane.release_agent"));
+        assert!(KIMI_HOOK_ASSET.contains("\"state\": action"));
+        assert!(KIMI_HOOK_ASSET.contains("pane.release_agent"));
         assert!(COPILOT_HOOK_ASSET.contains("agent_session_id"));
         assert!(COPILOT_HOOK_ASSET.contains("pane.report_agent_session"));
         assert!(!COPILOT_HOOK_ASSET.contains("\"state\":"));

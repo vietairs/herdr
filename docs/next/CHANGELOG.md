@@ -24,7 +24,7 @@
 - Added native Windows beta documentation, `install.ps1`, preview Windows release assets, update-channel wiring, and platform capability tracking for ConPTY panes, semantic client input, Windows agent discovery, known partial cwd behavior, and unsupported Unix-only features such as live handoff, direct terminal attach, and `herdr --remote` from the Windows binary.
 
 ### Changed
-- OpenCode installed with the current Herdr plugin now reports lifecycle state directly instead of relying on screen manifest detection. Droid, Kimi Code CLI, and Qoder CLI now report native session identity while leaving lifecycle state to screen manifest detection.
+- OpenCode installed with the current Herdr plugin now reports lifecycle state directly instead of relying on screen manifest detection. Kimi Code CLI `0.14.0` or newer now reports full lifecycle state through hooks, including interrupts. Droid and Qoder CLI now report native session identity while leaving lifecycle state to screen manifest detection.
 
 ## [0.6.8] - 2026-06-04
 

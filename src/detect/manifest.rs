@@ -13,6 +13,17 @@ use super::{
 
 pub const DEFAULT_KNOWN_AGENT_IDLE_FALLBACK: &str = "default_known_agent_idle_fallback";
 
+/// Input to the detection engine, carrying the screen snapshot plus any
+/// OSC-derived strings captured from the terminal title / progress sequences.
+/// Pass empty strings for `osc_title` and `osc_progress` when the data is not
+/// available — behavior is identical to the pre-OSC engine in that case.
+#[derive(Debug, Clone, Copy)]
+pub struct DetectionInput<'a> {
+    pub screen: &'a str,
+    pub osc_title: &'a str,
+    pub osc_progress: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectionExplain {
     pub agent: Option<String>,
@@ -306,18 +317,41 @@ fn manifest_summary_from_loaded(agent: Agent, loaded: LoadedManifest) -> AgentMa
     }
 }
 
+#[allow(dead_code)] // shim for existing callers; detect_with_osc is the real path
 pub fn detect(agent: Agent, screen_content: &str) -> AgentDetection {
+    detect_with_osc(
+        agent,
+        DetectionInput {
+            screen: screen_content,
+            osc_title: "",
+            osc_progress: "",
+        },
+    )
+}
+
+pub fn detect_with_osc(agent: Agent, input: DetectionInput<'_>) -> AgentDetection {
     let Some(loaded) = load_manifest(agent) else {
         return fallback_explain(Some(agent), None, false).into_detection();
     };
-    evaluate_loaded_manifest(agent, screen_content, loaded, false).into_detection()
+    evaluate_loaded_manifest(agent, input, loaded, false).into_detection()
 }
 
 pub fn explain(agent: Agent, screen_content: &str) -> DetectionExplain {
+    explain_with_input(
+        agent,
+        DetectionInput {
+            screen: screen_content,
+            osc_title: "",
+            osc_progress: "",
+        },
+    )
+}
+
+pub fn explain_with_input(agent: Agent, input: DetectionInput<'_>) -> DetectionExplain {
     let Some(loaded) = load_manifest(agent) else {
         return fallback_explain(Some(agent), None, true);
     };
-    evaluate_loaded_manifest(agent, screen_content, loaded, true)
+    evaluate_loaded_manifest(agent, input, loaded, true)
 }
 
 pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionExplain {
@@ -350,7 +384,17 @@ pub fn should_skip_state_update(agent: Agent, screen_content: &str) -> bool {
     let Some(loaded) = load_manifest(agent) else {
         return false;
     };
-    evaluate_loaded_manifest(agent, screen_content, loaded, false).skip_state_update
+    evaluate_loaded_manifest(
+        agent,
+        DetectionInput {
+            screen: screen_content,
+            osc_title: "",
+            osc_progress: "",
+        },
+        loaded,
+        false,
+    )
+    .skip_state_update
 }
 
 impl DetectionExplain {
@@ -367,7 +411,7 @@ impl DetectionExplain {
 
 fn evaluate_loaded_manifest(
     agent: Agent,
-    screen_content: &str,
+    input: DetectionInput<'_>,
     loaded: LoadedManifest,
     include_update_status: bool,
 ) -> DetectionExplain {
@@ -375,7 +419,7 @@ fn evaluate_loaded_manifest(
     let mut evaluated_rules = Vec::new();
 
     for (rule, compiled_rule) in loaded.manifest.rules.iter().zip(&loaded.compiled_rules) {
-        let region_text = region(screen_content, &rule.region);
+        let region_text = region(input, &rule.region);
         let matched_rule = compiled_rule_matches(compiled_rule, region_text);
         evaluated_rules.push(EvaluatedRule {
             id: rule.id.clone(),
@@ -1025,7 +1069,9 @@ fn validate_region_name(spec: &str) -> Result<(), String> {
         | "prompt_box_body"
         | "above_prompt_box"
         | "last_non_empty_above_prompt_box"
-        | "after_last_horizontal_rule" => Ok(()),
+        | "after_last_horizontal_rule"
+        | "osc_title"
+        | "osc_progress" => Ok(()),
         _ if region_count(trimmed, "bottom_lines").is_some()
             || region_count(trimmed, "bottom_non_empty_lines").is_some() =>
         {
@@ -1192,8 +1238,16 @@ fn compiled_gate_matches(gate: &CompiledGate, text: &str, lower_text: &str) -> b
     true
 }
 
-fn region<'a>(content: &'a str, spec: &str) -> &'a str {
+fn region<'a>(input: DetectionInput<'a>, spec: &str) -> &'a str {
     let trimmed = spec.trim();
+    // OSC regions source from their dedicated fields, not the screen.
+    match trimmed {
+        "osc_title" => return input.osc_title,
+        "osc_progress" => return input.osc_progress,
+        _ => {}
+    }
+    // All other regions operate on the screen content as before.
+    let content = input.screen;
     match trimmed {
         "whole_recent" => content,
         "after_last_prompt_marker" => after_last_prompt_marker(content),

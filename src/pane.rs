@@ -33,11 +33,11 @@ mod xtgettcap;
 
 use self::agent_detection::{
     agent_caused_pty_activity_active, baseline_pty_causality, decide_detection_screen_read,
-    decide_screen_detection_publish, detection_update_for_publish, handle_skipped_detection_update,
-    observe_pty_output_activity, DetectionPublishDecision, DetectionScreenReadDecision,
-    DetectionScreenReadInput, PendingIdleConfirmation, PendingWorkingConfirmation,
-    PostTaintWorkingLease, PtyCausalityTracker, ScreenDetectionPublishInput,
-    AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
+    decide_screen_detection_publish, detection_update_for_publish_with_osc,
+    handle_skipped_detection_update, observe_pty_output_activity, DetectionPublishDecision,
+    DetectionScreenReadDecision, DetectionScreenReadInput, PendingIdleConfirmation,
+    PendingWorkingConfirmation, PostTaintWorkingLease, PtyCausalityTracker,
+    ScreenDetectionPublishInput, AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
 };
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub(crate) use self::terminal::{TerminalDirtyPatch, TerminalDirtyPatchOutcome};
@@ -544,6 +544,9 @@ fn spawn_basic_detection_task(
                         pending_working.clear();
                         post_taint_working.clear();
                         last_screen_scan_pty_output_seq = None;
+                        // A new foreground agent must not inherit OSC
+                        // title/progress evidence from the previous process.
+                        terminal.clear_agent_osc_state();
                         if agent.is_some() {
                             agent_startup_grace_until = Some(now + AGENT_STARTUP_GRACE_WINDOW);
                             baseline_pty_causality(
@@ -665,9 +668,15 @@ fn spawn_basic_detection_task(
                 &mut last_content_change_at,
             );
 
-            let Some(screen_detection) =
-                detection_update_for_publish(agent, &content, process_exited)
-            else {
+            let osc_title = terminal.agent_osc_title();
+            let osc_progress = terminal.agent_osc_progress();
+            let Some(screen_detection) = detection_update_for_publish_with_osc(
+                agent,
+                &content,
+                &osc_title,
+                &osc_progress,
+                process_exited,
+            ) else {
                 handle_skipped_detection_update(
                     state,
                     pty_activity,
@@ -1945,6 +1954,9 @@ impl PaneRuntime {
                                     pending_working.clear();
                                     post_taint_working.clear();
                                     last_screen_scan_pty_output_seq = None;
+                                    // A new foreground agent must not inherit OSC
+                                    // title/progress evidence from the previous process.
+                                    terminal.clear_agent_osc_state();
                                     if agent.is_some() {
                                         agent_startup_grace_until =
                                             Some(now + AGENT_STARTUP_GRACE_WINDOW);
@@ -2098,9 +2110,15 @@ impl PaneRuntime {
                         &mut last_content_change_at,
                     );
 
-                    let Some(screen_detection) =
-                        detection_update_for_publish(agent, &content, process_exited)
-                    else {
+                    let osc_title = terminal.agent_osc_title();
+                    let osc_progress = terminal.agent_osc_progress();
+                    let Some(screen_detection) = detection_update_for_publish_with_osc(
+                        agent,
+                        &content,
+                        &osc_title,
+                        &osc_progress,
+                        process_exited,
+                    ) else {
                         handle_skipped_detection_update(
                             state,
                             pty_activity,
@@ -2304,6 +2322,14 @@ impl PaneRuntime {
 
     pub fn detection_text(&self) -> String {
         self.terminal.detection_text()
+    }
+
+    pub fn agent_osc_title(&self) -> String {
+        self.terminal.agent_osc_title()
+    }
+
+    pub fn agent_osc_progress(&self) -> String {
+        self.terminal.agent_osc_progress()
     }
 
     pub fn recent_text(&self, lines: usize) -> String {

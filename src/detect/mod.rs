@@ -193,7 +193,18 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
 }
 
 /// Detect state and whether a visible blocker is present on the current screen.
+#[allow(dead_code)] // shim for existing callers; detect_agent_with_osc is the real path
 pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetection {
+    detect_agent_with_osc(agent, screen_content, "", "")
+}
+
+/// Detect state using screen content plus OSC title/progress strings.
+pub fn detect_agent_with_osc(
+    agent: Option<Agent>,
+    screen_content: &str,
+    osc_title: &str,
+    osc_progress: &str,
+) -> AgentDetection {
     let Some(agent) = agent else {
         return AgentDetection {
             state: AgentState::Unknown,
@@ -203,7 +214,14 @@ pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetectio
             visible_working: false,
         };
     };
-    manifest::detect(agent, screen_content)
+    manifest::detect_with_osc(
+        agent,
+        manifest::DetectionInput {
+            screen: screen_content,
+            osc_title,
+            osc_progress,
+        },
+    )
 }
 
 pub fn should_skip_state_update(agent: Option<Agent>, screen_content: &str) -> bool {
@@ -218,6 +236,7 @@ pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> 
             | ("herdr:hermes", "hermes")
             | ("herdr:opencode", "opencode")
             | ("herdr:kilo", "kilo")
+            | ("herdr:kimi", "kimi")
     )
 }
 

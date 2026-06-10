@@ -269,6 +269,14 @@ impl TerminalRuntime {
         self.0.detection_text()
     }
 
+    pub fn agent_osc_title(&self) -> String {
+        self.0.agent_osc_title()
+    }
+
+    pub fn agent_osc_progress(&self) -> String {
+        self.0.agent_osc_progress()
+    }
+
     pub fn recent_text(&self, lines: usize) -> String {
         self.0.recent_text(lines)
     }
