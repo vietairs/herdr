@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.6.10] - 2026-06-11
+
 This is a hotfix release for v0.6.9. See the v0.6.9 notes for the full feature release.
 
 ### Fixed
