@@ -68,6 +68,8 @@ impl App {
             error,
         } = ev
         {
+            self.state.plugin_commands_in_flight =
+                self.state.plugin_commands_in_flight.saturating_sub(1);
             if let Some(log) = self
                 .state
                 .plugin_command_logs

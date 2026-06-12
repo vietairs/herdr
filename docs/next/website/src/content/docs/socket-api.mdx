@@ -384,9 +384,10 @@ Open a managed terminal UI:
 
 `plugin.pane.open` requires an installed, enabled, platform-compatible plugin,
 then launches the requested manifest `[[panes]]` entrypoint as an argv-backed
-terminal pane. `placement` defaults to `overlay`, and can be overridden with
-`split`, `tab`, or `zoomed`. Overlay panes target the active pane. Split and
-zoomed panes target an existing pane; tab panes can target a workspace. The pane
+terminal pane. Manifest pane `placement` defaults to `overlay`; request
+`placement` overrides the manifest with `overlay`, `split`, `tab`, or `zoomed`.
+Overlay panes target the active pane. Split and zoomed panes target an existing
+pane; tab panes can target a workspace. The pane
 behaves like a normal Herdr pane, but `plugin.pane.focus` and
 `plugin.pane.close` only operate on panes opened through the plugin API. Focus
 returns `plugin_pane_focused`; close returns `plugin_pane_closed`.

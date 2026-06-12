@@ -2765,17 +2765,31 @@ command = ["sh", "-c", "echo layout"]
 [[events]]
 on = "worktree.created"
 command = ["sh", "-c", "echo worktree"]
+
+[[panes]]
+id = "board"
+title = "Board"
+placement = "tab"
+command = ["sh", "-c", "sleep 5"]
 "#,
     )
     .unwrap();
 
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));
-
-    let linked = run_cli_json(
+    let workspace = run_cli_json(
         &socket_path,
-        &["plugin", "link", plugin_dir.to_str().unwrap()],
+        &[
+            "workspace",
+            "create",
+            "--cwd",
+            base.to_str().unwrap(),
+            "--focus",
+        ],
     );
+    assert_eq!(workspace["result"]["type"], "workspace_created");
+
+    let linked = run_cli_json_in_dir(&socket_path, &["plugin", "link", "plugins/layout"], &base);
     assert_eq!(linked["result"]["type"], "plugin_linked");
     assert_eq!(linked["result"]["plugin"]["plugin_id"], "example.layout");
     assert_eq!(linked["result"]["plugin"]["actions"][0]["id"], "apply");
@@ -2783,6 +2797,7 @@ command = ["sh", "-c", "echo worktree"]
         linked["result"]["plugin"]["events"][0]["on"],
         "worktree.created"
     );
+    assert_eq!(linked["result"]["plugin"]["panes"][0]["id"], "board");
 
     let listed = run_cli_json(&socket_path, &["plugin", "list"]);
     assert_eq!(listed["result"]["type"], "plugin_list");
@@ -2790,6 +2805,65 @@ command = ["sh", "-c", "echo worktree"]
         listed["result"]["plugins"][0]["plugin_id"],
         "example.layout"
     );
+
+    let invoked = run_cli_json(
+        &socket_path,
+        &[
+            "plugin",
+            "action",
+            "invoke",
+            "apply",
+            "--plugin",
+            "example.layout",
+        ],
+    );
+    assert_eq!(invoked["result"]["type"], "plugin_action_invoked");
+    assert_eq!(invoked["result"]["action"]["action_id"], "apply");
+
+    let logs = run_cli_json(
+        &socket_path,
+        &[
+            "plugin",
+            "log",
+            "list",
+            "--plugin",
+            "example.layout",
+            "--limit",
+            "5",
+        ],
+    );
+    assert_eq!(logs["result"]["type"], "plugin_log_list");
+    assert!(!logs["result"]["logs"].as_array().unwrap().is_empty());
+
+    let pane = run_cli_json(
+        &socket_path,
+        &[
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            "example.layout",
+            "--entrypoint",
+            "board",
+            "--env",
+            "HERDR_ROLE=board",
+            "--no-focus",
+        ],
+    );
+    assert_eq!(pane["result"]["type"], "plugin_pane_opened");
+    assert_eq!(pane["result"]["plugin_pane"]["entrypoint"], "board");
+
+    let missing_plugin_value = run_cli(&socket_path, &["plugin", "list", "--plugin"]);
+    assert_eq!(missing_plugin_value.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&missing_plugin_value.stderr)
+        .contains("missing value for --plugin"));
+
+    let invalid_limit = run_cli(
+        &socket_path,
+        &["plugin", "log", "list", "--limit", "not-a-number"],
+    );
+    assert_eq!(invalid_limit.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid_limit.stderr).contains("invalid --limit value"));
 
     let unlinked = run_cli_json(&socket_path, &["plugin", "unlink", "example.layout"]);
     assert_eq!(unlinked["result"]["type"], "plugin_unlinked");

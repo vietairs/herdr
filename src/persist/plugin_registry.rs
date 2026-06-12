@@ -4,6 +4,8 @@ use tracing::warn;
 
 use crate::api::schema::InstalledPluginInfo;
 
+pub const MANIFEST_UNAVAILABLE_WARNING_PREFIX: &str = "manifest unavailable: ";
+
 fn registry_path() -> PathBuf {
     crate::session::data_dir().join("plugins.json")
 }
@@ -75,7 +77,9 @@ pub fn reload_manifests(
                 *entry = fresh;
             }
             Err(warn_msg) => {
-                entry.warnings.push(warn_msg);
+                entry
+                    .warnings
+                    .push(format!("{MANIFEST_UNAVAILABLE_WARNING_PREFIX}{warn_msg}"));
             }
         }
     }
