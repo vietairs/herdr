@@ -24,6 +24,7 @@ use crate::layout::PaneId;
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 
 mod agent_detection;
+mod cursor;
 mod input;
 mod kitty_keyboard;
 mod osc;

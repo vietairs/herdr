@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use ratatui::style::{Color, Modifier, Style};
@@ -13,6 +13,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::layout::PaneId;
 use crate::protocol::CellData;
 
+use super::cursor::{CursorPositionSettleState, DecscusrTracker, CURSOR_POSITION_SETTLE};
 use super::{
     input::{
         ghostty_key_event_from_terminal_key, ghostty_mouse_encoder_for_terminal,
@@ -32,6 +33,7 @@ use super::{
 
 const DEFAULT_DETECTION_ROWS: usize = 24;
 const KITTY_GRAPHICS_REDRAW_SETTLE: Duration = Duration::from_millis(20);
+const CURSOR_POSITION_SETTLE_ENABLED: bool = cfg!(windows);
 const MODE_MOUSE_X10: u16 = 9;
 const MODE_MOUSE_PRESS_RELEASE: u16 = 1000;
 const MODE_MOUSE_BUTTON_MOTION: u16 = 1002;
@@ -129,6 +131,8 @@ pub(crate) struct GhosttyPaneCore {
     pub osc_debug_tracker: OscDebugTracker,
     pub agent_osc_state: AgentOscStateTracker,
     pub xtgettcap_query_tracker: XtgettcapQueryTracker,
+    decscusr_tracker: DecscusrTracker,
+    cursor_settle_state: CursorPositionSettleState,
 }
 
 pub(crate) struct PaneTerminal {
@@ -385,6 +389,8 @@ impl GhosttyPaneTerminal {
                 osc_debug_tracker: OscDebugTracker::default(),
                 agent_osc_state: AgentOscStateTracker::default(),
                 xtgettcap_query_tracker: XtgettcapQueryTracker::default(),
+                decscusr_tracker: DecscusrTracker::default(),
+                cursor_settle_state: CursorPositionSettleState::default(),
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
@@ -540,6 +546,7 @@ impl GhosttyPaneTerminal {
             .observe(filtered_bytes.as_ref());
         core.xtgettcap_query_tracker
             .observe(filtered_bytes.as_ref());
+        core.decscusr_tracker.observe(filtered_bytes.as_ref());
         let default_color_events = core.default_color_event_tracker.drain_pending();
         let xtgettcap_responses = core.xtgettcap_query_tracker.drain_pending();
         let write_started = crate::render_prof::timer();
@@ -564,9 +571,20 @@ impl GhosttyPaneTerminal {
             .terminal
             .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
             .unwrap_or(false);
+        if CURSOR_POSITION_SETTLE_ENABLED {
+            let cursor_started = crate::render_prof::timer();
+            let cursor_after_write = current_cursor_state(&mut core);
+            crate::render_prof::duration_since("pty.cursor_state_update", cursor_started);
+            core.cursor_settle_state
+                .observe(cursor_after_write, Instant::now());
+        }
         let request_render = !synchronized_output && !has_kitty_graphics_sequence;
-        let render_delay = (!synchronized_output && has_kitty_graphics_sequence)
-            .then_some(KITTY_GRAPHICS_REDRAW_SETTLE);
+        let render_delay = render_delay_after_pty_write(
+            synchronized_output,
+            has_kitty_graphics_sequence,
+            cursor_position_settle_pending(&core),
+            CURSOR_POSITION_SETTLE_ENABLED,
+        );
         if request_render {
             crate::render_prof::event("pty.request_render");
         }
@@ -957,25 +975,8 @@ impl GhosttyPaneTerminal {
 
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
         let mut core = self.core.lock().ok()?;
-        let GhosttyPaneCore {
-            terminal,
-            render_state,
-            ..
-        } = &mut *core;
-        render_state.update(terminal).ok()?;
-        let cursor = render_state.cursor_viewport().ok()??;
-        let shape = render_state
-            .cursor_visual_style()
-            .ok()
-            .zip(render_state.cursor_blinking().ok())
-            .map(|(style, blinking)| decscusr_cursor_shape(style, blinking))
-            .unwrap_or(0);
-        Some(TerminalCursorState {
-            x: cursor.x,
-            y: cursor.y,
-            visible: render_state.cursor_visible().ok()?,
-            shape,
-        })
+        let current = current_cursor_state(&mut core);
+        effective_cursor_state(&mut core, current)
     }
 
     pub fn synchronized_output_active(&self) -> bool {
@@ -1168,6 +1169,7 @@ impl GhosttyPaneTerminal {
         let GhosttyPaneCore {
             terminal,
             render_state,
+            decscusr_tracker,
             ..
         } = &mut *core;
         if render_state.update(terminal).is_err() {
@@ -1253,8 +1255,11 @@ impl GhosttyPaneTerminal {
 
         ghostty_clear_render_dirty(render_state, area.height);
 
-        if show_cursor && render_state.cursor_visible().ok() == Some(true) {
-            if let Ok(Some(cursor)) = render_state.cursor_viewport() {
+        let current_cursor = cursor_state_from_render_state(render_state, decscusr_tracker);
+        if show_cursor {
+            if let Some(cursor) =
+                effective_cursor_state(&mut core, current_cursor).filter(|cursor| cursor.visible)
+            {
                 if cursor.x < area.width && cursor.y < area.height {
                     frame.set_cursor_position((area.x + cursor.x, area.y + cursor.y));
                 }
@@ -1273,6 +1278,72 @@ impl GhosttyPaneTerminal {
             .map(|mut core| ghostty_collect_dirty_patch(&mut core, area_width, area_height))
             .unwrap_or(TerminalDirtyPatchOutcome::Fallback)
     }
+}
+
+fn cursor_position_settle_pending(core: &GhosttyPaneCore) -> bool {
+    core.cursor_settle_state.pending()
+}
+
+fn effective_cursor_state(
+    core: &mut GhosttyPaneCore,
+    current: Option<TerminalCursorState>,
+) -> Option<TerminalCursorState> {
+    if !CURSOR_POSITION_SETTLE_ENABLED {
+        return current;
+    }
+    core.cursor_settle_state
+        .reported_cursor(current, Instant::now())
+}
+
+fn render_delay_after_pty_write(
+    synchronized_output: bool,
+    has_kitty_graphics_sequence: bool,
+    cursor_position_settle_pending: bool,
+    cursor_position_settle_enabled: bool,
+) -> Option<Duration> {
+    if synchronized_output {
+        None
+    } else if has_kitty_graphics_sequence {
+        Some(KITTY_GRAPHICS_REDRAW_SETTLE)
+    } else if cursor_position_settle_enabled && cursor_position_settle_pending {
+        Some(CURSOR_POSITION_SETTLE)
+    } else {
+        None
+    }
+}
+
+fn current_cursor_state(core: &mut GhosttyPaneCore) -> Option<TerminalCursorState> {
+    let GhosttyPaneCore {
+        terminal,
+        render_state,
+        decscusr_tracker,
+        ..
+    } = core;
+    render_state.update(terminal).ok()?;
+    cursor_state_from_render_state(render_state, decscusr_tracker)
+}
+
+fn cursor_state_from_render_state(
+    render_state: &mut crate::ghostty::RenderState,
+    decscusr_tracker: &DecscusrTracker,
+) -> Option<TerminalCursorState> {
+    let cursor = render_state.cursor_viewport().ok()??;
+    let shape = if decscusr_tracker.cursor_shape_overridden() {
+        render_state
+            .cursor_visual_style()
+            .ok()
+            .zip(render_state.cursor_blinking().ok())
+            .map(|(style, blinking)| decscusr_cursor_shape(style, blinking))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    Some(TerminalCursorState {
+        x: cursor.x,
+        y: cursor.y,
+        visible: render_state.cursor_visible().ok()?,
+        shape,
+    })
 }
 
 type VisibleHyperlinks = Vec<((u16, u16), String, String)>;
@@ -2096,6 +2167,110 @@ mod tests {
             decscusr_cursor_shape(crate::ghostty::CursorVisualStyle::BlockHollow, false),
             2
         );
+    }
+
+    #[test]
+    fn cursor_state_uses_terminal_default_until_child_sets_shape() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        assert_eq!(pane.cursor_state().unwrap().shape, 0);
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[6 q", &tx);
+
+        assert_eq!(pane.cursor_state().unwrap().shape, 6);
+    }
+
+    #[test]
+    fn cursor_state_returns_terminal_default_after_decscusr_reset() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[2 q", &tx);
+        assert_eq!(pane.cursor_state().unwrap().shape, 2);
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[0 q", &tx);
+
+        assert_eq!(pane.cursor_state().unwrap().shape, 0);
+    }
+
+    #[test]
+    fn cursor_shape_tracker_handles_split_decscusr_sequences() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[", &tx);
+        pane.process_pty_bytes(pane_id, 0, b"5 ", &tx);
+        pane.process_pty_bytes(pane_id, 0, b"q", &tx);
+
+        assert_eq!(pane.cursor_state().unwrap().shape, 5);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn cursor_state_holds_pty_position_change_until_settle_window() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane.process_pty_bytes(pane_id, 0, b"x", &tx);
+        assert_eq!(
+            pane.cursor_state()
+                .map(|cursor| (cursor.x, cursor.y, cursor.visible)),
+            Some((1, 0, true))
+        );
+
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b[6;21H", &tx);
+
+        assert_eq!(result.render_delay, Some(CURSOR_POSITION_SETTLE));
+        assert_eq!(
+            pane.cursor_state()
+                .map(|cursor| (cursor.x, cursor.y, cursor.visible)),
+            Some((1, 0, true))
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn cursor_state_uses_live_position_when_settle_policy_disabled() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        pane.process_pty_bytes(pane_id, 0, b"x", &tx);
+        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b[6;21H", &tx);
+
+        assert_eq!(result.render_delay, None);
+        assert_eq!(
+            pane.cursor_state()
+                .map(|cursor| (cursor.x, cursor.y, cursor.visible)),
+            Some((20, 5, true))
+        );
+    }
+
+    #[test]
+    fn cursor_settle_policy_controls_render_delay() {
+        assert_eq!(
+            render_delay_after_pty_write(false, false, true, true),
+            Some(CURSOR_POSITION_SETTLE)
+        );
+        assert_eq!(
+            render_delay_after_pty_write(false, false, true, false),
+            None
+        );
+        assert_eq!(
+            render_delay_after_pty_write(false, true, true, false),
+            Some(KITTY_GRAPHICS_REDRAW_SETTLE)
+        );
+        assert_eq!(render_delay_after_pty_write(true, false, true, true), None);
     }
 
     #[test]
