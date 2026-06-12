@@ -2,7 +2,11 @@
 
 ## Unreleased
 
+### Added
+- Added `pane.move` and `herdr pane move` to relocate a running pane into another tab, a new tab, or a new workspace without restarting its terminal process. (#299)
+
 ### Changed
+- Bumped the client/server protocol version to 14 for `pane.move` compatibility. (#299)
 - Public workspace, tab, and pane ids are now short stable handles such as `w1`, `w1:t1`, and `w1:p1`; closed tab and pane ids no longer retarget later resources. (#569)
 
 ## [0.6.10] - 2026-06-11

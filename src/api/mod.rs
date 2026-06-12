@@ -40,6 +40,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::AgentStart(_)
             | Method::PaneSplit(_)
             | Method::PaneSwap(_)
+            | Method::PaneMove(_)
             | Method::PaneZoom(_)
             | Method::PaneFocusDirection(_)
             | Method::PaneResize(_)

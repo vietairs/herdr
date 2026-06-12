@@ -85,15 +85,16 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.zoom`, `pane.layout`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 
 Some CLI commands are conveniences around these methods. For example, `herdr agent wait` resolves an agent target and then subscribes to pane agent state events.
 
-Pane control methods use public pane ids such as `w1:p1`. Omit `pane_id` to use
-the server's active focused pane.
+Pane control methods use public pane ids such as `w1:p1`. Methods whose
+schema makes `pane_id` optional use the server's active focused pane when it is
+omitted. `pane.move` always requires the source `pane_id`.
 
 ```json
 {"id":"req_layout","method":"pane.layout","params":{"pane_id":"w1:p1"}}
@@ -123,6 +124,30 @@ running processes. The response is `type: "pane_swap"` with `changed`, optional
 `layout`. Reason values are `no_neighbor`, `same_pane`, `not_found`, and
 `cross_tab`. When a tab is zoomed, swap keeps zoom active and mutates the hidden
 full-tab layout.
+
+`pane.move` moves a running pane to a different tab, a new tab, or a new
+workspace:
+
+```json
+{"id":"req_move_tab","method":"pane.move","params":{"pane_id":"w1:p2","destination":{"type":"tab","tab_id":"w1:t2","target_pane_id":"w1:p3","split":"right","ratio":0.5},"focus":true}}
+{"id":"req_move_new_tab","method":"pane.move","params":{"pane_id":"w1:p2","destination":{"type":"new_tab","workspace_id":"w1","label":"logs"},"focus":true}}
+{"id":"req_move_new_workspace","method":"pane.move","params":{"pane_id":"w1:p2","destination":{"type":"new_workspace","label":"logs","tab_label":"main"},"focus":true}}
+```
+
+Existing-tab moves require `split: "right" | "down"`. `target_pane_id` is
+optional and defaults to the target tab's focused pane. Same-tab layout changes
+remain `pane.swap`; moving to the source tab returns `changed: false` with
+`reason: "same_tab"`. Moves involving a zoomed source or target tab return
+`changed: false` with `reason: "zoomed_tab"`.
+
+The response is `type: "pane_move"` with `changed`, optional `reason`,
+`previous_pane_id`, `previous_workspace_id`, `previous_tab_id`, the moved
+`pane`, optional `source_layout`, `target_layout`, optional created workspace or
+tab records, optional closed workspace or tab ids, and `focused_pane_id`.
+Cross-workspace moves keep the internal pane and terminal alive but assign a new
+public pane id in the destination workspace. Subscribers can listen for
+`pane.moved`; Herdr does not emit fake pane close/create events for the moved
+terminal process.
 
 `pane.zoom` toggles, enables, or disables zoom for the target pane's tab:
 
@@ -319,6 +344,9 @@ Subscribe to events when you need a long-lived stream:
 The first response acknowledges the subscription. Later lines are pushed events.
 
 Workspace event subscriptions include `workspace.created`, `workspace.updated`, `workspace.renamed`, `workspace.closed`, and `workspace.focused`.
+Pane event subscriptions include `pane.created`, `pane.closed`, `pane.focused`,
+`pane.moved`, `pane.exited`, `pane.agent_detected`,
+`pane.output_matched`, and `pane.agent_status_changed`.
 
 Use `events.wait` when you want one matching event and then a response.
 

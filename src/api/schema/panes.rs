@@ -47,6 +47,39 @@ pub struct PaneSwapParams {
     pub target_pane_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneMoveParams {
+    pub pane_id: String,
+    pub destination: PaneMoveDestination,
+    #[serde(default)]
+    pub focus: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PaneMoveDestination {
+    Tab {
+        tab_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_pane_id: Option<String>,
+        split: SplitDirection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ratio: Option<f32>,
+    },
+    NewTab {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    NewWorkspace {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_label: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PaneZoomParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,6 +305,36 @@ pub enum PaneSwapReason {
     SamePane,
     NotFound,
     CrossTab,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneMoveResult {
+    pub changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<PaneMoveReason>,
+    pub previous_pane_id: String,
+    pub previous_workspace_id: String,
+    pub previous_tab_id: String,
+    pub pane: Box<PaneInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_layout: Option<Box<PaneLayoutSnapshot>>,
+    pub target_layout: Box<PaneLayoutSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_workspace: Option<super::WorkspaceInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_tab: Option<super::TabInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_tab_id: Option<String>,
+    pub focused_pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneMoveReason {
+    SameTab,
+    ZoomedTab,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

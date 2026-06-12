@@ -7,11 +7,16 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
-use crate::layout::{PaneId, TileLayout};
+use crate::layout::{Node, PaneId, TileLayout};
 use crate::pane::PaneState;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 pub(crate) type DetachedPane = (PaneId, TerminalId);
+
+pub(crate) struct MovedPane {
+    pub pane_id: PaneId,
+    pub pane_state: PaneState,
+}
 
 pub struct NewPane {
     pub pane_id: PaneId,
@@ -399,6 +404,79 @@ impl Tab {
 
     pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {
         self.detach_pane(pane_id)
+    }
+
+    pub(crate) fn from_existing_pane(
+        number: usize,
+        custom_name: Option<String>,
+        moved: MovedPane,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> Self {
+        let mut panes = HashMap::new();
+        let pane_id = moved.pane_id;
+        panes.insert(pane_id, moved.pane_state);
+        Self {
+            custom_name,
+            number,
+            root_pane: pane_id,
+            layout: TileLayout::from_saved(Node::Pane(pane_id), pane_id),
+            panes,
+            #[cfg(test)]
+            runtimes: HashMap::new(),
+            zoomed: false,
+            events,
+            render_notify,
+            render_dirty,
+        }
+    }
+
+    pub(crate) fn take_pane_for_move(&mut self, pane_id: PaneId) -> Option<MovedPane> {
+        if !self.panes.contains_key(&pane_id) {
+            return None;
+        }
+
+        if self.layout.pane_count() > 1 {
+            let next_root = self.promoted_root_if_needed(pane_id);
+            if self.layout.focused() == pane_id {
+                self.layout.close_focused();
+            } else {
+                let prev_focus = self.layout.focused();
+                self.layout.focus_pane(pane_id);
+                self.layout.close_focused();
+                self.layout.focus_pane(prev_focus);
+            }
+            if let Some(next_root) = next_root {
+                self.root_pane = next_root;
+            }
+        }
+
+        let pane_state = self.panes.remove(&pane_id)?;
+        self.zoomed = false;
+        Some(MovedPane {
+            pane_id,
+            pane_state,
+        })
+    }
+
+    pub(crate) fn insert_existing_pane(
+        &mut self,
+        target_pane_id: PaneId,
+        moved: MovedPane,
+        direction: Direction,
+        ratio: f32,
+    ) -> Result<PaneId, MovedPane> {
+        if !self
+            .layout
+            .insert_pane_near(target_pane_id, moved.pane_id, direction, ratio)
+        {
+            return Err(moved);
+        }
+        let pane_id = moved.pane_id;
+        self.panes.insert(pane_id, moved.pane_state);
+        self.zoomed = false;
+        Ok(pane_id)
     }
 
     fn detach_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {

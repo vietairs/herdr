@@ -88,6 +88,10 @@ impl App {
     }
 
     pub(super) fn parse_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
+        if let Some(alias) = self.state.public_pane_id_aliases.get(id).copied() {
+            return self.find_pane(alias).map(|(ws_idx, _)| (ws_idx, alias));
+        }
+
         if let Some(rest) = id.strip_prefix("p_") {
             if let Some((ws_raw, pane_raw)) = rest.rsplit_once('_') {
                 let ws_idx = self.parse_workspace_id(ws_raw)?;

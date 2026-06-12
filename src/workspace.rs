@@ -20,6 +20,7 @@ mod tab;
 
 #[cfg(test)]
 use self::git::git_ahead_behind;
+pub(crate) use self::tab::MovedPane;
 pub use self::{
     git::{
         derive_label_from_cwd, git_branch, git_space_metadata, git_status_cache_key,
@@ -179,6 +180,48 @@ impl DerefMut for Workspace {
 }
 
 impl Workspace {
+    fn adjust_active_tab_after_removal(&mut self, removed_idx: usize) {
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        } else if removed_idx <= self.active_tab && self.active_tab > 0 {
+            self.active_tab -= 1;
+        }
+    }
+
+    pub(crate) fn from_existing_pane(
+        label: Option<String>,
+        tab_label: Option<String>,
+        identity_cwd: PathBuf,
+        moved: MovedPane,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> Self {
+        let id = generate_workspace_id();
+        let root_pane = moved.pane_id;
+        let tab = Tab::from_existing_pane(1, tab_label, moved, events, render_notify, render_dirty);
+        let mut public_pane_numbers = HashMap::new();
+        public_pane_numbers.insert(root_pane, 1);
+        Self {
+            id,
+            custom_name: label,
+            identity_cwd: identity_cwd.clone(),
+            cached_git_branch: git_branch(&identity_cwd),
+            cached_git_ahead_behind: None,
+            cached_git_space: git_space_metadata(&identity_cwd),
+            worktree_space: None,
+            public_pane_numbers,
+            next_public_pane_number: 2,
+            next_public_tab_number: 2,
+            tabs: vec![tab],
+            active_tab: 0,
+            #[cfg(test)]
+            test_runtimes: HashMap::new(),
+        }
+    }
+
     pub fn new(
         initial_cwd: PathBuf,
         rows: u16,
@@ -710,6 +753,85 @@ impl Workspace {
         false
     }
 
+    pub(crate) fn take_pane_for_move(&mut self, pane_id: PaneId) -> Option<TakenPane> {
+        let tab_idx = self.find_tab_index_for_pane(pane_id)?;
+        let pane_count = self.tabs[tab_idx].layout.pane_count();
+        if pane_count <= 1 {
+            let mut tab = self.tabs.remove(tab_idx);
+            let moved = tab.take_pane_for_move(pane_id)?;
+            self.adjust_active_tab_after_removal(tab_idx);
+            return Some(TakenPane {
+                moved,
+                removed_tab_idx: Some(tab_idx),
+                workspace_empty: self.tabs.is_empty(),
+            });
+        }
+
+        let moved = self.tabs[tab_idx].take_pane_for_move(pane_id)?;
+        Some(TakenPane {
+            moved,
+            removed_tab_idx: None,
+            workspace_empty: false,
+        })
+    }
+
+    pub(crate) fn insert_moved_pane_into_tab(
+        &mut self,
+        tab_idx: usize,
+        target_pane_id: PaneId,
+        moved: MovedPane,
+        direction: Direction,
+        ratio: f32,
+    ) -> Result<PaneId, MovedPane> {
+        let pane_id = moved.pane_id;
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return Err(moved);
+        };
+        tab.insert_existing_pane(target_pane_id, moved, direction, ratio)?;
+        if !self.public_pane_numbers.contains_key(&pane_id) {
+            self.register_new_pane_with_number(pane_id, self.next_public_pane_number);
+        }
+        Ok(pane_id)
+    }
+
+    pub(crate) fn create_tab_from_existing_pane(
+        &mut self,
+        moved: MovedPane,
+        label: Option<String>,
+        fallback_events: mpsc::Sender<AppEvent>,
+        fallback_render_notify: Arc<Notify>,
+        fallback_render_dirty: Arc<AtomicBool>,
+    ) -> usize {
+        let number = self.next_public_tab_number;
+        self.next_public_tab_number += 1;
+        let pane_id = moved.pane_id;
+        let (events, render_notify, render_dirty) = self
+            .active_tab()
+            .map(|tab| {
+                (
+                    tab.events.clone(),
+                    tab.render_notify.clone(),
+                    tab.render_dirty.clone(),
+                )
+            })
+            .unwrap_or((
+                fallback_events,
+                fallback_render_notify,
+                fallback_render_dirty,
+            ));
+        let tab =
+            Tab::from_existing_pane(number, label, moved, events, render_notify, render_dirty);
+        if !self.public_pane_numbers.contains_key(&pane_id) {
+            self.register_new_pane_with_number(pane_id, self.next_public_pane_number);
+        }
+        self.tabs.push(tab);
+        self.tabs.len() - 1
+    }
+
+    pub(crate) fn unregister_moved_pane(&mut self, pane_id: PaneId) {
+        self.unregister_pane(pane_id);
+    }
+
     pub fn public_pane_number(&self, pane_id: PaneId) -> Option<usize> {
         self.public_pane_numbers.get(&pane_id).copied()
     }
@@ -864,6 +986,12 @@ impl Workspace {
         self.close_active_tab();
         false
     }
+}
+
+pub(crate) struct TakenPane {
+    pub moved: MovedPane,
+    pub removed_tab_idx: Option<usize>,
+    pub workspace_empty: bool,
 }
 
 #[cfg(test)]
@@ -1035,6 +1163,24 @@ mod tests {
         let fourth_tab = ws.test_add_tab(None);
         let fourth_root = ws.tabs[fourth_tab].root_pane;
         assert_eq!(ws.public_tab_number_for_pane(fourth_root), Some(4));
+    }
+
+    #[test]
+    fn failed_moved_pane_insert_returns_pane_for_recovery() {
+        let mut source = Workspace::test_new("source");
+        let source_pane = source.tabs[0].root_pane;
+        let taken = source
+            .take_pane_for_move(source_pane)
+            .expect("source pane should be movable");
+        let mut target = Workspace::test_new("target");
+        let missing_target = PaneId::alloc();
+
+        let recovered = target
+            .insert_moved_pane_into_tab(0, missing_target, taken.moved, Direction::Horizontal, 0.5)
+            .expect_err("invalid target should return the moved pane");
+
+        assert_eq!(recovered.pane_id, source_pane);
+        assert!(!target.tabs[0].panes.contains_key(&source_pane));
     }
 
     #[test]
