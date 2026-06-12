@@ -85,34 +85,14 @@ This is the main Herdr workflow: start several agents, let them work in parallel
 
 ## Direct integrations
 
-Install integrations for agents that expose hooks or plugins:
+Install the integration for each agent you use; it gives Herdr hook or plugin reports instead of screen detection alone:
 
 ```bash
-herdr integration install pi
-herdr integration install omp
 herdr integration install claude
-herdr integration install codex
-herdr integration install copilot
-herdr integration install cursor
-herdr integration install droid
-herdr integration install kimi
-herdr integration install opencode
-herdr integration install kilo
-herdr integration install hermes
-herdr integration install qodercli
-```
-
-Check installed integration versions:
-
-```bash
 herdr integration status
 ```
 
-Show only outdated integrations:
-
-```bash
-herdr integration status --outdated-only
-```
+Each supported agent has its own integration name and behavior. See [Integrations](/docs/integrations/) for the per-agent details and the full install list.
 
 ## Custom agent labels
 
