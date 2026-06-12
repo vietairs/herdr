@@ -2502,6 +2502,7 @@ impl AppState {
             }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
+            AppEvent::PluginCommandFinished { .. } => Vec::new(),
         }
     }
 
@@ -3165,7 +3166,6 @@ mod tests {
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            None,
         )
         .unwrap();
 

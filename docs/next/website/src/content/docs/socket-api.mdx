@@ -82,10 +82,11 @@ Raw socket method names use dot notation:
 | --- | --- |
 | Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
 | Notification | `notification.show` |
+| Client | `client.window_title.set`, `client.window_title.clear` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Layout | `layout.export`, `layout.apply` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
 | Events | `events.subscribe`, `events.wait` |
@@ -106,7 +107,8 @@ omitted. `pane.move` always requires the source `pane_id`.
 {"id":"req_focus","method":"pane.focus_direction","params":{"direction":"right"}}
 {"id":"req_resize","method":"pane.resize","params":{"pane_id":"w1:p1","direction":"right","amount":0.1}}
 {"id":"req_zoom","method":"pane.zoom","params":{"pane_id":"w1:p1","mode":"toggle"}}
-{"id":"req_split","method":"pane.split","params":{"direction":"right","ratio":0.333}}
+{"id":"req_split","method":"pane.split","params":{"direction":"right","ratio":0.333,"env":{"HERDR_ROLE":"tests"}}}
+{"id":"req_process","method":"pane.process_info","params":{"pane_id":"w1:p1"}}
 ```
 
 `pane.current` returns a single `PaneInfo`. When `caller_pane_id` is present,
@@ -117,6 +119,10 @@ pane.
 `zoomed`, outer `area`, `focused_pane_id`, pane rects, and split rects/ratios.
 `pane.neighbor` and `pane.edges` include that same layout snapshot so clients
 can make the next decision without private layout state.
+
+`pane.process_info` returns the pane's shell pid, foreground process group id
+when available, and foreground processes with pid, name, argv/cmdline, and cwd
+when the platform exposes them.
 
 `layout.export` returns a portable tab layout tree. Omit `tab_id` and `pane_id`
 to export the active tab, pass `tab_id` to export that tab, or pass `pane_id` to
@@ -245,6 +251,17 @@ The response reports whether anything was shown:
 
 Possible reasons are `shown`, `disabled`, `rate_limited`, `no_foreground_client`, and `busy`. `disabled` means `ui.toast.delivery = "off"`. `busy` means an existing in-app toast was not replaced. Terminal and system delivery are best-effort through the current foreground attached Herdr client.
 
+Set or clear the foreground client's outer terminal window title:
+
+```json
+{"id":"req_title","method":"client.window_title.set","params":{"title":"herdr api"}}
+{"id":"req_title_clear","method":"client.window_title.clear","params":{}}
+```
+
+`client.window_title.clear` restores Herdr's default title. The response is
+`type: "client_window_title"` with `changed` and reason `set`, `cleared`, or
+`no_foreground_client`.
+
 Worktree methods manage Git checkouts as Herdr workspaces. `worktree.create` creates a checkout and returns the new `workspace`, `tab`, `root_pane`, and `worktree` records. `worktree.open` opens an existing checkout or returns the already-open workspace. `worktree.remove` runs `git worktree remove` against a linked child workspace and never deletes the branch.
 
 Create a worktree from a source workspace:
@@ -271,7 +288,7 @@ Worktree commands also emit lifecycle events. `worktree.create` emits `workspace
 
 ## Plugin APIs
 
-The plugin API is an early host surface for local workflow tools. A plugin can be a local executable package with a `herdr-plugin.toml` manifest, or a process that registers actions directly. A plugin process can register actions, store namespaced JSON records, and ask Herdr to open a managed terminal pane for its UI.
+The plugin API is an early host surface for local workflow tools. A plugin is a local executable package with a `herdr-plugin.toml` manifest. Actions are manifest-only; runtime action registration is not part of v1.
 
 Linked plugins persist across restarts. Herdr writes a `plugins.json` registry file alongside `session.json` on every `plugin.link` and `plugin.unlink`. On startup, Herdr re-reads each manifest from its original path; if the file is missing or unparseable the entry is kept with a `warnings` field so `plugin.list` surfaces it.
 
@@ -312,10 +329,12 @@ command = ["bun", "run", "bootstrap.ts"]
 
 Declare `platforms` at the top level with the OS identifiers (`linux`, `macos`, `windows`) your plugin supports. Omitting `platforms` is allowed for local development — `plugin.link` succeeds but the response includes a warning. Individual actions and events can declare their own `platforms` to override the plugin-level list; if omitted they inherit from the plugin. Invoking an action whose effective platforms do not include the current OS returns a `platform_unsupported` error.
 
-List or unlink linked plugins:
+List, enable, disable, or unlink linked plugins:
 
 ```json
 {"id":"req_plugin_list","method":"plugin.list","params":{}}
+{"id":"req_plugin_disable","method":"plugin.disable","params":{"plugin_id":"example.worktree-bootstrap"}}
+{"id":"req_plugin_enable","method":"plugin.enable","params":{"plugin_id":"example.worktree-bootstrap"}}
 {"id":"req_plugin_unlink","method":"plugin.unlink","params":{"plugin_id":"example.worktree-bootstrap"}}
 ```
 
@@ -332,25 +351,45 @@ Invoke an action by its qualified id or bare action id:
 {"id":"req_plugin_invoke","method":"plugin.action.invoke","params":{"action_id":"example.worktree-bootstrap.bootstrap","context":{"invocation_source":"keybinding"}}}
 ```
 
-`plugin.action.invoke` resolves the manifest action and returns the
-Herdr-built invocation context. It does not execute the command yet.
-Missing context fields are filled from the active workspace, tab, focused
-pane, worktree provenance, and request id. Invoking an action from a
+`plugin.action.invoke` resolves the manifest action, starts the manifest
+command, and returns the Herdr-built invocation context plus the started command
+log record. Missing context fields are filled from the active workspace, tab,
+focused pane, worktree provenance, and request id. Invoking an action from a
 disabled plugin returns a `plugin_disabled` error.
 
-Store a workspace-scoped JSON value:
+Herdr injects `HERDR_SOCKET_PATH`, `HERDR_ENV=1`, `HERDR_PLUGIN_ID`,
+`HERDR_PLUGIN_CONTEXT_JSON`, and available `HERDR_WORKSPACE_ID`,
+`HERDR_TAB_ID`, and `HERDR_PANE_ID` values. Action commands also receive
+`HERDR_PLUGIN_ACTION_ID`; event hooks receive `HERDR_PLUGIN_EVENT` and
+`HERDR_PLUGIN_EVENT_JSON`; pane commands receive
+`HERDR_PLUGIN_ENTRYPOINT_ID`.
+
+List recent action and event command logs:
 
 ```json
-{"id":"req_plugin_store","method":"plugin.storage.set","params":{"plugin_id":"example.notes","scope":"workspace","workspace_id":"1","key":"pins","value":[{"text":"follow up"}]}}
+{"id":"req_plugin_logs","method":"plugin.log.list","params":{"plugin_id":"example.worktree-bootstrap","limit":20}}
 ```
+
+Event hooks run for enabled installed plugins when Herdr emits a matching event
+name such as `worktree.created`.
+
+There is no Herdr-managed plugin storage API in v1. Plugins that need durable
+state should own their files or database.
 
 Open a managed terminal UI:
 
 ```json
-{"id":"req_plugin_pane","method":"plugin.pane.open","params":{"plugin_id":"example.board","entrypoint":"board","placement":"zoomed","target_pane_id":"1-1","argv":["herdr-board","--workspace","1"],"focus":true}}
+{"id":"req_plugin_pane","method":"plugin.pane.open","params":{"plugin_id":"example.board","entrypoint":"board","placement":"zoomed","target_pane_id":"w1:p1","env":{"HERDR_ROLE":"board"},"focus":true}}
 ```
 
-`plugin.pane.open` launches `argv` as an argv-backed terminal pane. `placement` can be `split`, `tab`, or `zoomed`. The pane behaves like a normal Herdr pane, but `plugin.pane.focus` and `plugin.pane.close` only operate on panes opened through the plugin API.
+`plugin.pane.open` requires an installed, enabled, platform-compatible plugin,
+then launches the requested manifest `[[panes]]` entrypoint as an argv-backed
+terminal pane. `placement` defaults to `overlay`, and can be overridden with
+`split`, `tab`, or `zoomed`. Overlay panes target the active pane. Split and
+zoomed panes target an existing pane; tab panes can target a workspace. The pane
+behaves like a normal Herdr pane, but `plugin.pane.focus` and
+`plugin.pane.close` only operate on panes opened through the plugin API. Focus
+returns `plugin_pane_focused`; close returns `plugin_pane_closed`.
 
 ## Socket transport
 

@@ -1,10 +1,11 @@
 use crate::api::schema::{
     Method, PaneCurrentParams, PaneDirection, PaneEdgesParams, PaneFocusDirectionParams,
     PaneLayoutParams, PaneListParams, PaneMoveDestination, PaneMoveParams, PaneNeighborParams,
-    PaneReadParams, PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams,
-    PaneReportAgentSessionParams, PaneReportMetadataParams, PaneResizeParams, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
-    PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request, SplitDirection,
+    PaneProcessInfoParams, PaneReadParams, PaneReleaseAgentParams, PaneRenameParams,
+    PaneReportAgentParams, PaneReportAgentSessionParams, PaneReportMetadataParams,
+    PaneResizeParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams,
+    PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, ReadFormat,
+    ReadSource, Request, SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -18,6 +19,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "current" => pane_current(&args[1..]),
         "get" => pane_get(&args[1..]),
         "layout" => pane_layout(&args[1..]),
+        "process-info" => pane_process_info(&args[1..]),
         "neighbor" => pane_neighbor(&args[1..]),
         "edges" => pane_edges(&args[1..]),
         "focus" => pane_focus(&args[1..]),
@@ -147,6 +149,21 @@ fn pane_layout(args: &[String]) -> std::io::Result<i32> {
     super::print_response(&super::send_request(&Request {
         id: "cli:pane:layout".into(),
         method: Method::PaneLayout(PaneLayoutParams { pane_id }),
+    })?)
+}
+
+fn pane_process_info(args: &[String]) -> std::io::Result<i32> {
+    let pane_id = match parse_optional_current_pane_args(args) {
+        Ok(pane_id) => pane_id,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:process_info".into(),
+        method: Method::PaneProcessInfo(PaneProcessInfoParams { pane_id }),
     })?)
 }
 
@@ -1405,6 +1422,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane current [--pane ID|--current]");
     eprintln!("  herdr pane get <pane_id>");
     eprintln!("  herdr pane layout [--pane ID|--current]");
+    eprintln!("  herdr pane process-info [--pane ID|--current]");
     eprintln!("  herdr pane neighbor --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  herdr pane edges [--pane ID|--current]");
     eprintln!("  herdr pane focus --direction left|right|up|down [--pane ID|--current]");

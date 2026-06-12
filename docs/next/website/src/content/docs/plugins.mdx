@@ -1,0 +1,76 @@
+---
+title: Plugins
+description: Author local Herdr plugins with manifest actions, event hooks, and panes.
+---
+
+Herdr plugins are local executable packages. A plugin directory contains
+`herdr-plugin.toml`; Herdr links that manifest, then runs declared action,
+event, and pane commands out of process.
+
+```toml
+id = "example.layout"
+name = "Layout"
+version = "0.1.0"
+description = "Apply project layouts"
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "apply"
+title = "Apply layout"
+contexts = ["workspace"]
+command = ["herdr", "workspace", "list"]
+
+[[events]]
+on = "worktree.created"
+command = ["herdr", "workspace", "list"]
+
+[[panes]]
+id = "board"
+title = "Project board"
+placement = "overlay"
+command = ["herdr-board"]
+```
+
+Link the plugin:
+
+```bash
+herdr plugin link /path/to/plugin
+herdr plugin action list --plugin example.layout
+herdr plugin action invoke example.layout.apply
+herdr plugin pane open --plugin example.layout --entrypoint board
+herdr plugin log list --plugin example.layout
+```
+
+Actions are manifest-only. Runtime action registration is not part of plugin
+v1. Pane commands are manifest-only too; `plugin.pane.open` selects a declared
+`[[panes]]` entrypoint and does not accept runtime argv. Action ids and pane
+ids must be unique inside a plugin.
+
+Commands run with the plugin directory as their working directory. Herdr injects
+`HERDR_SOCKET_PATH`, `HERDR_ENV=1`, `HERDR_PLUGIN_ID`,
+`HERDR_PLUGIN_CONTEXT_JSON`, and any available `HERDR_WORKSPACE_ID`,
+`HERDR_TAB_ID`, and `HERDR_PANE_ID`. Action commands also receive
+`HERDR_PLUGIN_ACTION_ID`; event hooks receive `HERDR_PLUGIN_EVENT` and
+`HERDR_PLUGIN_EVENT_JSON`; pane commands receive
+`HERDR_PLUGIN_ENTRYPOINT_ID`.
+
+Pane `placement` defaults to `overlay`, which opens a temporary zoomed overlay
+over the active pane and restores the previous focus and zoom when it closes.
+Use `split`, `tab`, or `zoomed` for real Herdr panes when the UI should remain
+part of the workspace layout.
+
+Bind a key to an installed plugin action:
+
+```toml
+[[keys.command]]
+key = "prefix+l"
+type = "plugin_action"
+command = "example.layout.apply"
+description = "apply layout"
+```
+
+Use `platforms` to declare where the plugin can run. Local plugins without
+`platforms` link with a warning; marketplace plugins will require it.
+
+There is no Herdr-managed plugin storage API in v1. Plugins that need durable
+state should own their files or database.

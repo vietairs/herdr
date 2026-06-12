@@ -23,11 +23,9 @@ fn save_json_to_path<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> st
 }
 
 /// Atomically write `plugins.json` next to `session.json`.
-pub fn save(plugins: &[InstalledPluginInfo]) {
+pub fn save(plugins: &[InstalledPluginInfo]) -> std::io::Result<()> {
     let path = registry_path();
-    if let Err(err) = save_to_path(&path, plugins) {
-        warn!(path = %path.display(), err = %err, "failed to save plugin registry");
-    }
+    save_to_path(&path, plugins)
 }
 
 pub fn save_to_path(path: &Path, plugins: &[InstalledPluginInfo]) -> std::io::Result<()> {
@@ -113,6 +111,7 @@ mod tests {
             platforms: None,
             actions: vec![],
             events: vec![],
+            panes: vec![],
             warnings: vec![],
         }
     }
@@ -182,6 +181,7 @@ mod tests {
                 platforms: None,
                 actions: vec![],
                 events: vec![],
+                panes: vec![],
                 warnings: vec![],
             })
         });

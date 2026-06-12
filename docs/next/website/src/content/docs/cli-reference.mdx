@@ -113,6 +113,7 @@ herdr pane list [--workspace <workspace_id>]
 herdr pane current [--pane ID|--current]
 herdr pane get <pane_id>
 herdr pane layout [--pane ID|--current]
+herdr pane process-info [--pane ID|--current]
 herdr pane neighbor --direction left|right|up|down [--pane ID|--current]
 herdr pane edges [--pane ID|--current]
 herdr pane focus --direction left|right|up|down [--pane ID|--current]
@@ -214,9 +215,12 @@ Use `pane send-text`, `pane send-keys`, `pane run`, and `terminal attach` for or
 
 ```bash
 herdr terminal attach <terminal_id> [--takeover]
+herdr terminal title set <title>
+herdr terminal title clear
 ```
 
 Detach from direct attach with `ctrl+b q`. Send literal `ctrl+b` with `ctrl+b ctrl+b`.
+`terminal title clear` restores Herdr's default outer terminal window title.
 
 ## Waits
 
@@ -266,17 +270,19 @@ herdr integration status [--outdated-only]
 
 ## Plugins
 
-Plugin commands expose the early plugin host API. They are for local workflow tools that link manifests, register actions, store namespaced JSON records, or open managed terminal UIs.
+Plugin commands expose the early plugin host API. They are for local workflow tools that link manifests, run manifest actions, or open managed terminal UIs.
 
 Local manifests:
 
 ```bash
 herdr plugin link <path> [--disabled]
 herdr plugin list [--plugin ID]
+herdr plugin enable <plugin_id>
+herdr plugin disable <plugin_id>
 herdr plugin unlink <plugin_id>
 ```
 
-`plugin link` accepts a plugin directory containing `herdr-plugin.toml` or a direct manifest path. The first manifest slice records metadata, actions, and event hooks; manifest commands are executed by later runner work.
+`plugin link` accepts a plugin directory containing `herdr-plugin.toml` or a direct manifest path. Actions and event hooks are declared in the manifest; runtime action registration is not part of v1.
 
 Actions:
 
@@ -285,24 +291,30 @@ herdr plugin action list [--plugin ID]
 herdr plugin action invoke <action_id> [--plugin ID]
 ```
 
-Storage:
+`plugin action invoke` starts the manifest command for an installed, enabled,
+platform-compatible plugin action and prints the started command log record in
+the JSON response. Use the qualified action id (`plugin.id.action`) when more
+than one plugin uses the same action id.
+
+Logs:
 
 ```bash
-herdr plugin storage get --plugin ID --scope global|workspace|project --key KEY [--workspace ID] [--project ID]
-herdr plugin storage set --plugin ID --scope global|workspace|project --key KEY --value JSON [--workspace ID] [--project ID]
-herdr plugin storage delete --plugin ID --scope global|workspace|project --key KEY [--workspace ID] [--project ID]
-herdr plugin storage list --plugin ID --scope global|workspace|project [--workspace ID] [--project ID]
+herdr plugin log list [--plugin ID] [--limit N]
 ```
 
 Managed terminal panes:
 
 ```bash
-herdr plugin pane open --plugin ID --entrypoint ID [--placement split|tab|zoomed] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|split|tab|zoomed] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
 herdr plugin pane focus <pane_id>
 herdr plugin pane close <pane_id>
 ```
 
-`plugin pane open` starts the argv after `--` as a Herdr-managed terminal pane. It can open as a split, a new tab, or a zoomed pane. Native non-terminal plugin panes are a later surface.
+`plugin pane open` requires the plugin to be linked, enabled, and compatible
+with the current platform. It starts a manifest-declared `[[panes]]` command as
+a Herdr-managed terminal pane. The manifest default is `overlay`, which opens a
+temporary zoomed overlay over the active pane. It can also open as a split, a
+new tab, or a zoomed pane. Native non-terminal plugin panes are a later surface.
 
 `--env KEY=VALUE` can be repeated on process-launching commands. It applies to the newly launched process only. Herdr-managed variables such as `HERDR_SOCKET_PATH`, `HERDR_ENV`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID` stay authoritative when they conflict with caller-provided env.
 

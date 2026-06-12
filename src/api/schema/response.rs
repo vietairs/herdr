@@ -1,18 +1,19 @@
 use serde::{Deserialize, Serialize};
 
 use super::agents::AgentInfo;
-use super::common::NotificationShowReason;
+use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
 use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
 };
 use super::panes::{
     LayoutDescription, PaneEdgesResult, PaneFocusDirectionResult, PaneInfo, PaneLayoutSnapshot,
-    PaneNeighborResult, PaneReadResult, PaneResizeResult, PaneSwapResult, PaneZoomResult,
+    PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult, PaneSwapResult,
+    PaneZoomResult,
 };
 use super::plugins::{
-    InstalledPluginInfo, PluginActionInfo, PluginInvocationContext, PluginPaneInfo,
-    PluginStorageEntry,
+    InstalledPluginInfo, PluginActionInfo, PluginCommandLogInfo, PluginInvocationContext,
+    PluginPaneInfo,
 };
 use super::server::ServerCapabilities;
 use super::tabs::TabInfo;
@@ -117,6 +118,9 @@ pub enum ResponseResult {
     PaneLayout {
         layout: PaneLayoutSnapshot,
     },
+    PaneProcessInfo {
+        process_info: PaneProcessInfo,
+    },
     LayoutExport {
         layout: LayoutDescription,
     },
@@ -155,6 +159,10 @@ pub enum ResponseResult {
         shown: bool,
         reason: NotificationShowReason,
     },
+    ClientWindowTitle {
+        changed: bool,
+        reason: ClientWindowTitleReason,
+    },
     IntegrationInstall {
         target: IntegrationTarget,
         details: IntegrationInstallResult,
@@ -183,27 +191,31 @@ pub enum ResponseResult {
         plugin_id: String,
         removed: bool,
     },
+    PluginEnabled {
+        plugin: InstalledPluginInfo,
+    },
+    PluginDisabled {
+        plugin: InstalledPluginInfo,
+    },
     PluginActionList {
         actions: Vec<PluginActionInfo>,
     },
     PluginActionInvoked {
         action: PluginActionInfo,
         context: PluginInvocationContext,
+        log: PluginCommandLogInfo,
     },
-    PluginStorageValue {
-        entry: Option<PluginStorageEntry>,
-    },
-    PluginStorageSet {
-        entry: PluginStorageEntry,
-    },
-    PluginStorageDeleted {
-        deleted: bool,
-    },
-    PluginStorageList {
-        entries: Vec<PluginStorageEntry>,
+    PluginLogList {
+        logs: Vec<PluginCommandLogInfo>,
     },
     PluginPaneOpened {
         plugin_pane: PluginPaneInfo,
+    },
+    PluginPaneFocused {
+        plugin_pane: PluginPaneInfo,
+    },
+    PluginPaneClosed {
+        pane_id: String,
     },
     ConfigReload {
         status: crate::config::ConfigReloadStatus,

@@ -201,6 +201,13 @@ impl App {
         };
         let workspace_id = self.public_workspace_id(ws_idx);
         let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
+        let pane_ids = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.get(tab_idx))
+            .map(|tab| tab.layout.pane_ids())
+            .unwrap_or_default();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return tab_not_found(id, &target.tab_id);
         };
@@ -217,6 +224,9 @@ impl App {
                 "tab_close_failed",
                 format!("tab {} could not be closed", target.tab_id),
             );
+        }
+        for pane_id in pane_ids {
+            self.state.plugin_panes.remove(&pane_id);
         }
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();

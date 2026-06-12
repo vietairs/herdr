@@ -823,7 +823,7 @@ impl App {
         })
     }
 
-    fn emit_workspace_open_events(&self, ws_idx: usize) {
+    fn emit_workspace_open_events(&mut self, ws_idx: usize) {
         let workspace_info = self.workspace_info(ws_idx);
         let Some(tab) = self.tab_info(ws_idx, 0) else {
             return;
@@ -847,7 +847,7 @@ impl App {
         });
     }
 
-    fn emit_workspace_updated(&self, ws_idx: usize) {
+    fn emit_workspace_updated(&mut self, ws_idx: usize) {
         self.emit_event(EventEnvelope {
             event: EventKind::WorkspaceUpdated,
             data: EventData::WorkspaceUpdated {

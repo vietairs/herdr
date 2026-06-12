@@ -2470,6 +2470,11 @@ impl PaneRuntime {
         crate::platform::process_cwd(pid)
     }
 
+    pub fn child_pid(&self) -> Option<u32> {
+        let pid = self.child_pid.load(Ordering::Acquire);
+        (pid > 0).then_some(pid)
+    }
+
     /// Get the current working directory of the process group controlling the pane PTY.
     pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
         #[cfg(unix)]

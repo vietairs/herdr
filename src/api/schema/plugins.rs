@@ -26,6 +26,11 @@ pub struct PluginUnlinkParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSetEnabledParams {
+    pub plugin_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledPluginInfo {
     pub plugin_id: String,
     pub name: String,
@@ -41,6 +46,8 @@ pub struct InstalledPluginInfo {
     pub actions: Vec<PluginManifestAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<PluginManifestEventHook>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub panes: Vec<PluginManifestPane>,
     /// Warnings collected at link time or on registry load (e.g. unknown event names,
     /// missing manifest file). Non-fatal — the entry is kept and surfaced by plugin.list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -68,10 +75,31 @@ pub struct PluginManifestEventHook {
     pub command: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginManifestPane {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platforms: Option<Vec<PluginPlatform>>,
+    #[serde(default)]
+    pub placement: PluginPanePlacement,
+    pub command: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PluginActionListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PluginLogListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +109,37 @@ pub struct PluginActionInvokeParams {
     pub plugin_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<PluginInvocationContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginCommandLogInfo {
+    pub log_id: String,
+    pub plugin_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    pub command: Vec<String>,
+    pub status: PluginCommandStatus,
+    pub started_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginCommandStatus {
+    Running,
+    Succeeded,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -150,80 +209,13 @@ impl PluginActionInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginStorageGetParams {
-    pub plugin_id: String,
-    pub scope: PluginStorageScope,
-    pub key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginStorageSetParams {
-    pub plugin_id: String,
-    pub scope: PluginStorageScope,
-    pub key: String,
-    pub value: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginStorageDeleteParams {
-    pub plugin_id: String,
-    pub scope: PluginStorageScope,
-    pub key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginStorageListParams {
-    pub plugin_id: String,
-    pub scope: PluginStorageScope,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginStorageScope {
-    Global,
-    Workspace,
-    Project,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginStorageEntry {
-    pub plugin_id: String,
-    pub scope: PluginStorageScope,
-    pub key: String,
-    pub value: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginPaneOpenParams {
     pub plugin_id: String,
     pub entrypoint: String,
-    pub argv: Vec<String>,
-    #[serde(default)]
-    pub placement: PluginPanePlacement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PluginPanePlacement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tab_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_pane_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,14 +226,13 @@ pub struct PluginPaneOpenParams {
     pub focus: bool,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<PluginInvocationContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginPanePlacement {
     #[default]
+    Overlay,
     Split,
     Tab,
     Zoomed,

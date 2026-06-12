@@ -226,6 +226,9 @@ impl Workspace {
         }
     }
 
+    // Test modules construct workspaces through the default constructor; production paths
+    // use the env-aware variant so pane identity env is always explicit.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(
         initial_cwd: PathBuf,
         rows: u16,
@@ -279,6 +282,8 @@ impl Workspace {
         )
     }
 
+    // Kept for tests that do not need launch-env customization.
+    #[allow(dead_code)]
     pub fn new_argv_command(
         initial_cwd: PathBuf,
         rows: u16,

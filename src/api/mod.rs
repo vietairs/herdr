@@ -53,8 +53,6 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneReleaseAgent(_)
             | Method::PaneClose(_)
             | Method::PluginActionInvoke(_)
-            | Method::PluginStorageSet(_)
-            | Method::PluginStorageDelete(_)
             | Method::PluginPaneOpen(_)
             | Method::PluginPaneFocus(_)
             | Method::PluginPaneClose(_)

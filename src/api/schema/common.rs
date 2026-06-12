@@ -24,6 +24,11 @@ pub struct AgentTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientWindowTitleSetParams {
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SplitDirection {
     Right,
@@ -89,6 +94,14 @@ pub enum NotificationShowReason {
     RateLimited,
     NoForegroundClient,
     Busy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientWindowTitleReason {
+    Set,
+    Cleared,
+    NoForegroundClient,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -10,17 +10,6 @@ use crate::selection::Selection;
 pub(crate) type InstalledPluginRegistry =
     std::collections::HashMap<String, crate::api::schema::InstalledPluginInfo>;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PluginStorageKey {
-    pub plugin_id: String,
-    pub scope: crate::api::schema::PluginStorageScope,
-    pub workspace_id: Option<String>,
-    pub project_id: Option<String>,
-    pub key: String,
-}
-
-pub(crate) type PluginStorage = std::collections::HashMap<PluginStorageKey, serde_json::Value>;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PluginPaneRecord {
     pub plugin_id: String,
@@ -1406,10 +1395,11 @@ pub struct AppState {
     pub integration_install_messages: Vec<String>,
     /// Installed or linked plugins known to this running Herdr instance.
     pub(crate) installed_plugins: InstalledPluginRegistry,
-    /// Namespaced plugin storage records.
-    pub(crate) plugin_storage: PluginStorage,
     /// Pane ids opened through the plugin pane API.
     pub(crate) plugin_panes: std::collections::HashMap<PaneId, PluginPaneRecord>,
+    /// Recent plugin action/event command executions.
+    pub(crate) plugin_command_logs: Vec<crate::api::schema::PluginCommandLogInfo>,
+    pub(crate) next_plugin_command_log_id: u64,
     /// Highlight state for the bottom-right global launcher menu.
     pub global_menu: MenuListState,
     /// Resolved host terminal default colors for theming embedded panes.
@@ -1741,8 +1731,9 @@ impl AppState {
                 crate::detect::manifest_update::ManifestUpdateStatus::default(),
             integration_install_messages: Vec::new(),
             installed_plugins: std::collections::HashMap::new(),
-            plugin_storage: std::collections::HashMap::new(),
             plugin_panes: std::collections::HashMap::new(),
+            plugin_command_logs: Vec::new(),
+            next_plugin_command_log_id: 1,
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,

@@ -152,8 +152,22 @@ impl App {
         }
         let workspace_id = self.public_workspace_id(index);
         let workspace = self.workspace_info(index);
+        let pane_ids = self
+            .state
+            .workspaces
+            .get(index)
+            .map(|ws| {
+                ws.tabs
+                    .iter()
+                    .flat_map(|tab| tab.layout.pane_ids())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         self.state.selected = index;
         self.state.close_selected_workspace();
+        for pane_id in pane_ids {
+            self.state.plugin_panes.remove(&pane_id);
+        }
         self.shutdown_detached_terminal_runtimes();
         self.emit_event(EventEnvelope {
             event: EventKind::WorkspaceClosed,

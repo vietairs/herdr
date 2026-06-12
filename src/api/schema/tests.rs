@@ -232,6 +232,30 @@ fn notification_show_sound_defaults_to_none() {
 }
 
 #[test]
+fn client_window_title_requests_round_trip() {
+    let set = Request {
+        id: "req_title_set".into(),
+        method: Method::ClientWindowTitleSet(ClientWindowTitleSetParams {
+            title: "herdr api".into(),
+        }),
+    };
+    let json = serde_json::to_value(&set).unwrap();
+    assert_eq!(json["method"], "client.window_title.set");
+    assert_eq!(json["params"]["title"], "herdr api");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, set);
+
+    let clear = Request {
+        id: "req_title_clear".into(),
+        method: Method::ClientWindowTitleClear(EmptyParams::default()),
+    };
+    let json = serde_json::to_value(&clear).unwrap();
+    assert_eq!(json["method"], "client.window_title.clear");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, clear);
+}
+
+#[test]
 fn unknown_method_is_rejected() {
     let json = r#"{"id":"req_1","method":"nope","params":{}}"#;
     let err = serde_json::from_str::<Request>(json)
@@ -323,6 +347,22 @@ fn pane_current_request_round_trips() {
     let json = serde_json::to_value(&request).unwrap();
     assert_eq!(json["method"], "pane.current");
     assert_eq!(json["params"]["caller_pane_id"], "w1-1");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
+fn pane_process_info_request_round_trips() {
+    let request = Request {
+        id: "req_process_info".into(),
+        method: Method::PaneProcessInfo(PaneProcessInfoParams {
+            pane_id: Some("w1-1".into()),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "pane.process_info");
+    assert_eq!(json["params"]["pane_id"], "w1-1");
     let restored: Request = serde_json::from_value(json).unwrap();
     assert_eq!(restored, request);
 }
@@ -662,6 +702,14 @@ fn plugin_link_list_unlink_round_trip() {
             platforms: None,
             command: vec!["bun".into(), "run".into(), "bootstrap.ts".into()],
         }],
+        panes: vec![PluginManifestPane {
+            id: "board".into(),
+            title: "Board".into(),
+            description: None,
+            platforms: None,
+            placement: PluginPanePlacement::Overlay,
+            command: vec!["bun".into(), "run".into(), "board.ts".into()],
+        }],
         warnings: vec![],
     };
 
@@ -889,56 +937,19 @@ fn plugin_action_list_and_invoke_round_trips() {
 }
 
 #[test]
-fn plugin_storage_request_round_trips() {
-    let request = Request {
-        id: "req_plugin_storage".into(),
-        method: Method::PluginStorageSet(PluginStorageSetParams {
-            plugin_id: "example.notes".into(),
-            scope: PluginStorageScope::Workspace,
-            key: "pins".into(),
-            value: serde_json::json!([{"text": "follow up"}]),
-            workspace_id: Some("1".into()),
-            project_id: None,
-        }),
-    };
-
-    let json = serde_json::to_value(&request).unwrap();
-    assert_eq!(json["method"], "plugin.storage.set");
-    let restored: Request = serde_json::from_value(json).unwrap();
-    assert_eq!(restored, request);
-}
-
-#[test]
 fn plugin_pane_open_request_round_trips() {
     let request = Request {
         id: "req_plugin_pane".into(),
         method: Method::PluginPaneOpen(PluginPaneOpenParams {
             plugin_id: "example.board".into(),
             entrypoint: "board".into(),
-            argv: vec!["herdr-board".into(), "--workspace".into(), "1".into()],
-            placement: PluginPanePlacement::Zoomed,
-            workspace_id: Some("1".into()),
-            tab_id: None,
+            placement: Some(PluginPanePlacement::Zoomed),
+            workspace_id: None,
             target_pane_id: Some("1-1".into()),
             direction: Some(SplitDirection::Right),
             cwd: Some("/tmp".into()),
             focus: true,
             env: [("HERDR_ROLE".to_string(), "board".to_string())].into(),
-            context: Some(PluginInvocationContext {
-                workspace_id: Some("1".into()),
-                workspace_label: Some("api".into()),
-                workspace_cwd: Some("/repo".into()),
-                worktree: None,
-                tab_id: None,
-                tab_label: None,
-                focused_pane_id: Some("1-1".into()),
-                focused_pane_cwd: Some("/tmp".into()),
-                focused_pane_agent: None,
-                focused_pane_status: None,
-                selected_text: None,
-                invocation_source: Some("keybinding".into()),
-                correlation_id: Some("invoke-1".into()),
-            }),
         }),
     };
 

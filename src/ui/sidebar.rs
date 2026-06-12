@@ -1334,7 +1334,6 @@ mod tests {
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            None,
         )
         .unwrap();
 

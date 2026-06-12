@@ -6,7 +6,8 @@ use crate::api::schema::{
     PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneLayoutPane,
     PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit, PaneListParams,
     PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult, PaneNeighborParams,
-    PaneNeighborResult, PaneReadParams, PaneReadResult, PaneReleaseAgentParams, PaneRenameParams,
+    PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams, PaneProcessInfoProcess,
+    PaneReadParams, PaneReadResult, PaneReleaseAgentParams, PaneRenameParams,
     PaneReportAgentParams, PaneReportAgentSessionParams, PaneReportMetadataParams,
     PaneResizeParams, PaneResizeReason, PaneResizeResult, PaneSendInputParams, PaneSendKeysParams,
     PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
@@ -176,6 +177,54 @@ impl App {
         };
 
         encode_success(id, ResponseResult::PaneLayout { layout })
+    }
+
+    pub(super) fn handle_pane_process_info(
+        &mut self,
+        id: String,
+        params: PaneProcessInfoParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let Some((runtime, _workspace_id)) = self.lookup_runtime(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let shell_pid = runtime.child_pid();
+        let foreground_job = shell_pid.and_then(crate::detect::foreground_job);
+        let foreground_process_group_id = foreground_job.as_ref().map(|job| job.process_group_id);
+        let foreground_processes = foreground_job
+            .map(|job| {
+                job.processes
+                    .into_iter()
+                    .map(|process| PaneProcessInfoProcess {
+                        pid: process.pid,
+                        name: process.name,
+                        argv0: process.argv0,
+                        argv: process.argv,
+                        cmdline: process.cmdline,
+                        cwd: crate::platform::process_cwd(process.pid)
+                            .map(|cwd| cwd.display().to_string()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        encode_success(
+            id,
+            ResponseResult::PaneProcessInfo {
+                process_info: PaneProcessInfo {
+                    pane_id: public_pane_id,
+                    shell_pid,
+                    foreground_process_group_id,
+                    tty: None,
+                    foreground_processes,
+                },
+            },
+        )
     }
 
     pub(super) fn handle_pane_neighbor(
@@ -1400,6 +1449,7 @@ impl App {
             };
             ws.close_pane(pane_id)
         };
+        self.state.plugin_panes.remove(&pane_id);
         if should_close_workspace {
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
