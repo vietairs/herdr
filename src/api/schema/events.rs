@@ -221,6 +221,7 @@ impl EventKind {
     }
 }
 
+#[cfg(test)]
 pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceCreated,
     EventKind::WorkspaceUpdated,
@@ -244,10 +245,42 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneAgentStatusChanged,
 ];
 
-/// All event names that manifest `[[events]] on` values can reference.
-/// Kept next to `EventKind` so it stays in sync as events are added.
+pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
+    EventKind::WorkspaceCreated,
+    EventKind::WorkspaceUpdated,
+    EventKind::WorkspaceClosed,
+    EventKind::WorkspaceRenamed,
+    EventKind::WorkspaceFocused,
+    EventKind::WorktreeCreated,
+    EventKind::WorktreeOpened,
+    EventKind::WorktreeRemoved,
+    EventKind::TabCreated,
+    EventKind::TabClosed,
+    EventKind::TabRenamed,
+    EventKind::TabFocused,
+    EventKind::PaneCreated,
+    EventKind::PaneClosed,
+    EventKind::PaneFocused,
+    EventKind::PaneMoved,
+    EventKind::PaneExited,
+    EventKind::PaneAgentDetected,
+    EventKind::PaneAgentStatusChanged,
+];
+
+#[cfg(test)]
 pub fn known_event_names() -> Vec<&'static str> {
     KNOWN_EVENT_KINDS
+        .iter()
+        .copied()
+        .map(EventKind::dot_name)
+        .collect()
+}
+
+/// Event names that manifest `[[events]] on` hooks can reference. This is
+/// intentionally narrower than `EventKind` until high-volume output-change hook
+/// semantics are implemented.
+pub fn plugin_hook_event_names() -> Vec<&'static str> {
+    PLUGIN_HOOK_EVENT_KINDS
         .iter()
         .copied()
         .map(EventKind::dot_name)
@@ -271,6 +304,13 @@ mod known_event_name_tests {
             from_kind, known,
             "known_event_names() out of sync with EventKind"
         );
+    }
+
+    #[test]
+    fn plugin_hook_event_names_exclude_unemitted_output_change() {
+        let names = plugin_hook_event_names();
+        assert!(!names.contains(&"pane.output_changed"));
+        assert!(names.contains(&"pane.moved"));
     }
 }
 

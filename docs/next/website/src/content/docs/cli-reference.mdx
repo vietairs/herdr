@@ -294,7 +294,8 @@ herdr plugin action invoke <action_id> [--plugin ID]
 `plugin action invoke` starts the manifest command for an installed, enabled,
 platform-compatible plugin action and prints the started command log record in
 the JSON response. Use the qualified action id (`plugin.id.action`) when more
-than one plugin uses the same action id.
+than one plugin uses the same action id. Local action ids cannot contain dots,
+so qualified ids remain unambiguous even when plugin ids contain dots.
 
 Logs:
 

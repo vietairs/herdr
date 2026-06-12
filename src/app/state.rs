@@ -1400,6 +1400,7 @@ pub struct AppState {
     /// Recent plugin action/event command executions.
     pub(crate) plugin_command_logs: Vec<crate::api::schema::PluginCommandLogInfo>,
     pub(crate) next_plugin_command_log_id: u64,
+    pub(crate) plugin_commands_in_flight: usize,
     /// Highlight state for the bottom-right global launcher menu.
     pub global_menu: MenuListState,
     /// Resolved host terminal default colors for theming embedded panes.
@@ -1734,6 +1735,7 @@ impl AppState {
             plugin_panes: std::collections::HashMap::new(),
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
+            plugin_commands_in_flight: 0,
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,

@@ -49,8 +49,10 @@ herdr plugin log list --plugin example.layout
 
 Actions are manifest-only. Runtime action registration is not part of plugin
 v1. Pane commands are manifest-only too; `plugin.pane.open` selects a declared
-`[[panes]]` entrypoint and does not accept runtime argv. Action ids and pane
-ids must be unique inside a plugin.
+`[[panes]]` entrypoint and does not accept runtime argv. Action ids, pane ids,
+and link handler ids are local ids inside the plugin; they may use ASCII
+letters, digits, colon, underscore, and hyphen, but not dots. Each id type must
+be unique inside a plugin.
 
 Commands run with the plugin directory as their working directory. Herdr injects
 `HERDR_SOCKET_PATH`, `HERDR_ENV=1`, `HERDR_PLUGIN_ID`,
@@ -60,10 +62,10 @@ Commands run with the plugin directory as their working directory. Herdr injects
 `HERDR_PLUGIN_EVENT_JSON`; pane commands receive
 `HERDR_PLUGIN_ENTRYPOINT_ID`.
 
-Pane `placement` defaults to `overlay`, which opens a temporary zoomed overlay
-over the active pane and restores the previous focus and zoom when it closes.
-Use `split`, `tab`, or `zoomed` for real Herdr panes when the UI should remain
-part of the workspace layout.
+Manifest pane `placement` defaults to `overlay`, which opens a temporary zoomed
+overlay over the active pane and restores the previous focus and zoom when it
+closes. A `plugin.pane.open` request can override the manifest placement with
+`overlay`, `split`, `tab`, or `zoomed`.
 
 Plugin panes are normal Herdr panes after they open. Plugins can call standard
 pane APIs such as `pane.move`, `pane.swap`, `pane.resize`, and `pane.zoom`

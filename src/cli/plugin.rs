@@ -38,6 +38,7 @@ fn plugin_link(args: &[String]) -> std::io::Result<i32> {
         eprintln!("usage: herdr plugin link <path> [--disabled]");
         return Ok(2);
     };
+    let path = normalize_plugin_path_arg(path)?;
     let mut enabled = true;
     let mut index = 1;
     while index < args.len() {
@@ -56,10 +57,7 @@ fn plugin_link(args: &[String]) -> std::io::Result<i32> {
             }
         }
     }
-    print_plugin_response(Method::PluginLink(PluginLinkParams {
-        path: path.clone(),
-        enabled,
-    }))
+    print_plugin_response(Method::PluginLink(PluginLinkParams { path, enabled }))
 }
 
 fn plugin_list(args: &[String]) -> std::io::Result<i32> {
@@ -67,7 +65,12 @@ fn plugin_list(args: &[String]) -> std::io::Result<i32> {
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--plugin" => plugin_id = Some(required_value(args, &mut index, "--plugin")?),
+            "--plugin" => {
+                let Some(value) = required_value(args, &mut index, "--plugin") else {
+                    return Ok(2);
+                };
+                plugin_id = Some(value);
+            }
             other => {
                 eprintln!("unknown option: {other}");
                 return Ok(2);
@@ -123,13 +126,21 @@ fn plugin_log_list(args: &[String]) -> std::io::Result<i32> {
     while index < args.len() {
         match args[index].as_str() {
             "list" if index == 0 => index += 1,
-            "--plugin" => plugin_id = Some(required_value(args, &mut index, "--plugin")?),
+            "--plugin" => {
+                let Some(value) = required_value(args, &mut index, "--plugin") else {
+                    return Ok(2);
+                };
+                plugin_id = Some(value);
+            }
             "--limit" => {
-                let raw = required_value(args, &mut index, "--limit")?;
-                limit =
-                    Some(raw.parse::<usize>().map_err(|_| {
-                        std::io::Error::other(format!("invalid --limit value: {raw}"))
-                    })?);
+                let Some(raw) = required_value(args, &mut index, "--limit") else {
+                    return Ok(2);
+                };
+                let Ok(parsed) = raw.parse::<usize>() else {
+                    eprintln!("invalid --limit value: {raw}");
+                    return Ok(2);
+                };
+                limit = Some(parsed);
             }
             other => {
                 eprintln!("unknown option: {other}");
@@ -169,7 +180,10 @@ fn plugin_action_list(args: &[String]) -> std::io::Result<i32> {
     while index < args.len() {
         match args[index].as_str() {
             "--plugin" => {
-                plugin_id = Some(required_value(args, &mut index, "--plugin")?);
+                let Some(value) = required_value(args, &mut index, "--plugin") else {
+                    return Ok(2);
+                };
+                plugin_id = Some(value);
             }
             other => {
                 eprintln!("unknown option: {other}");
@@ -193,7 +207,10 @@ fn plugin_action_invoke(args: &[String]) -> std::io::Result<i32> {
     while index < args.len() {
         match args[index].as_str() {
             "--plugin" => {
-                plugin_id = Some(required_value(args, &mut index, "--plugin")?);
+                let Some(value) = required_value(args, &mut index, "--plugin") else {
+                    return Ok(2);
+                };
+                plugin_id = Some(value);
             }
             other => {
                 eprintln!("unknown option: {other}");
@@ -260,29 +277,58 @@ fn plugin_pane_open(args: &[String]) -> std::io::Result<i32> {
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--plugin" => plugin_id = Some(required_value(args, &mut index, "--plugin")?),
-            "--entrypoint" => entrypoint = Some(required_value(args, &mut index, "--entrypoint")?),
-            "--placement" => {
-                placement = Some(parse_pane_placement(&required_value(
-                    args,
-                    &mut index,
-                    "--placement",
-                )?)?);
+            "--plugin" => {
+                let Some(value) = required_value(args, &mut index, "--plugin") else {
+                    return Ok(2);
+                };
+                plugin_id = Some(value);
             }
-            "--workspace" => workspace_id = Some(required_value(args, &mut index, "--workspace")?),
+            "--entrypoint" => {
+                let Some(value) = required_value(args, &mut index, "--entrypoint") else {
+                    return Ok(2);
+                };
+                entrypoint = Some(value);
+            }
+            "--placement" => {
+                let Some(value) = required_value(args, &mut index, "--placement") else {
+                    return Ok(2);
+                };
+                let Some(parsed) = parse_pane_placement(&value) else {
+                    return Ok(2);
+                };
+                placement = Some(parsed);
+            }
+            "--workspace" => {
+                let Some(value) = required_value(args, &mut index, "--workspace") else {
+                    return Ok(2);
+                };
+                workspace_id = Some(value);
+            }
             "--target-pane" => {
-                target_pane_id = Some(required_value(args, &mut index, "--target-pane")?);
+                let Some(value) = required_value(args, &mut index, "--target-pane") else {
+                    return Ok(2);
+                };
+                target_pane_id = Some(value);
             }
             "--direction" => {
-                direction = Some(parse_split_direction(&required_value(
-                    args,
-                    &mut index,
-                    "--direction",
-                )?)?);
+                let Some(value) = required_value(args, &mut index, "--direction") else {
+                    return Ok(2);
+                };
+                let Some(parsed) = parse_split_direction(&value) else {
+                    return Ok(2);
+                };
+                direction = Some(parsed);
             }
-            "--cwd" => cwd = Some(required_value(args, &mut index, "--cwd")?),
+            "--cwd" => {
+                let Some(value) = required_value(args, &mut index, "--cwd") else {
+                    return Ok(2);
+                };
+                cwd = Some(value);
+            }
             "--env" => {
-                let value = required_value(args, &mut index, "--env")?;
+                let Some(value) = required_value(args, &mut index, "--env") else {
+                    return Ok(2);
+                };
                 let (key, value) = match super::parse_env_assignment(&value) {
                     Ok(pair) => pair,
                     Err(err) => {
@@ -357,35 +403,47 @@ fn plugin_pane_close(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
-fn required_value(args: &[String], index: &mut usize, flag: &str) -> std::io::Result<String> {
+fn required_value(args: &[String], index: &mut usize, flag: &str) -> Option<String> {
     let Some(value) = args.get(*index + 1) else {
         eprintln!("missing value for {flag}");
-        return Err(std::io::Error::other(format!("missing value for {flag}")));
+        return None;
     };
     *index += 2;
-    Ok(value.clone())
+    Some(value.clone())
 }
 
-fn parse_pane_placement(value: &str) -> std::io::Result<PluginPanePlacement> {
+fn parse_pane_placement(value: &str) -> Option<PluginPanePlacement> {
     match value {
-        "overlay" => Ok(PluginPanePlacement::Overlay),
-        "split" => Ok(PluginPanePlacement::Split),
-        "tab" => Ok(PluginPanePlacement::Tab),
-        "zoomed" | "fullscreen" => Ok(PluginPanePlacement::Zoomed),
-        _ => Err(std::io::Error::other(format!(
-            "invalid pane placement: {value}"
-        ))),
+        "overlay" => Some(PluginPanePlacement::Overlay),
+        "split" => Some(PluginPanePlacement::Split),
+        "tab" => Some(PluginPanePlacement::Tab),
+        "zoomed" | "fullscreen" => Some(PluginPanePlacement::Zoomed),
+        _ => {
+            eprintln!("invalid pane placement: {value}");
+            None
+        }
     }
 }
 
-fn parse_split_direction(value: &str) -> std::io::Result<SplitDirection> {
+fn parse_split_direction(value: &str) -> Option<SplitDirection> {
     match value {
-        "right" => Ok(SplitDirection::Right),
-        "down" => Ok(SplitDirection::Down),
-        _ => Err(std::io::Error::other(format!(
-            "invalid split direction: {value}"
-        ))),
+        "right" => Some(SplitDirection::Right),
+        "down" => Some(SplitDirection::Down),
+        _ => {
+            eprintln!("invalid split direction: {value}");
+            None
+        }
     }
+}
+
+fn normalize_plugin_path_arg(value: &str) -> std::io::Result<String> {
+    let path = crate::worktree::expand_tilde_path(value);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    Ok(absolute.display().to_string())
 }
 
 fn print_plugin_response(method: Method) -> std::io::Result<i32> {

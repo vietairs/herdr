@@ -17,6 +17,8 @@ use crate::app::App;
 const PLUGIN_ID_MAX_CHARS: usize = 120;
 const PLUGIN_ACTION_ID_MAX_CHARS: usize = 120;
 const PLUGIN_COMMAND_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+const MAX_PLUGIN_COMMANDS_IN_FLIGHT: usize = 32;
+const PLUGIN_COMMAND_LOG_LIMIT: usize = 200;
 impl App {
     pub(super) fn handle_plugin_link(&mut self, id: String, params: PluginLinkParams) -> String {
         let plugin = match load_plugin_manifest(&params.path, params.enabled) {
@@ -324,6 +326,13 @@ impl App {
         let Some(plugin) = self.state.installed_plugins.get(&plugin_id).cloned() else {
             return encode_error(id, "plugin_not_found", "plugin not found");
         };
+        if !plugin_manifest_available(&plugin) {
+            return encode_error(
+                id,
+                "plugin_manifest_unavailable",
+                format!("plugin {plugin_id} manifest is unavailable"),
+            );
+        }
         if !plugin.enabled {
             return encode_error(
                 id,
@@ -706,6 +715,12 @@ impl App {
                 .get(&plugin_id)
                 .ok_or_else(|| ("plugin_not_found", "plugin not found".to_string()))?
                 .clone();
+            if !plugin_manifest_available(&plugin) {
+                return Err((
+                    "plugin_manifest_unavailable",
+                    format!("plugin {plugin_id} manifest is unavailable"),
+                ));
+            }
             let action_info = plugin
                 .actions
                 .iter()
@@ -753,7 +768,7 @@ impl App {
             .state
             .installed_plugins
             .values()
-            .filter(|plugin| plugin.enabled)
+            .filter(|plugin| plugin.enabled && plugin_manifest_available(plugin))
             .cloned()
             .collect::<Vec<_>>();
         plugins.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
@@ -825,6 +840,218 @@ impl App {
             return empty_plugin_context(correlation_id);
         };
         self.plugin_context_for_workspace(ws_idx, correlation_id)
+    }
+
+    fn plugin_context_for_event(
+        &self,
+        event: &crate::api::schema::EventEnvelope,
+        correlation_id: &str,
+    ) -> PluginInvocationContext {
+        use crate::api::schema::EventData;
+
+        match &event.data {
+            EventData::WorkspaceCreated { workspace }
+            | EventData::WorkspaceUpdated { workspace }
+            | EventData::WorktreeCreated { workspace, .. }
+            | EventData::WorktreeOpened { workspace, .. } => {
+                self.plugin_context_for_workspace_info(workspace, correlation_id)
+            }
+            EventData::WorkspaceClosed {
+                workspace_id,
+                workspace,
+            } => workspace
+                .as_ref()
+                .map(|workspace| self.plugin_context_for_workspace_info(workspace, correlation_id))
+                .unwrap_or_else(|| {
+                    self.plugin_context_for_workspace_id(workspace_id, correlation_id)
+                        .unwrap_or_else(|| {
+                            let mut context = empty_plugin_context(correlation_id);
+                            context.workspace_id = Some(workspace_id.clone());
+                            context
+                        })
+                }),
+            EventData::WorkspaceRenamed { workspace_id, .. }
+            | EventData::WorkspaceFocused { workspace_id }
+            | EventData::WorktreeRemoved { workspace_id, .. } => self
+                .plugin_context_for_workspace_id(workspace_id, correlation_id)
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.workspace_id = Some(workspace_id.clone());
+                    context
+                }),
+            EventData::TabCreated { tab } => self.plugin_context_for_tab_info(tab, correlation_id),
+            EventData::TabClosed {
+                tab_id,
+                workspace_id,
+            } => {
+                let mut context = empty_plugin_context(correlation_id);
+                context.workspace_id = Some(workspace_id.clone());
+                context.tab_id = Some(tab_id.clone());
+                context
+            }
+            EventData::TabRenamed {
+                tab_id,
+                workspace_id,
+                ..
+            }
+            | EventData::TabFocused {
+                tab_id,
+                workspace_id,
+            } => self
+                .plugin_context_for_tab_id(tab_id, correlation_id)
+                .or_else(|| self.plugin_context_for_workspace_id(workspace_id, correlation_id))
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.workspace_id = Some(workspace_id.clone());
+                    context.tab_id = Some(tab_id.clone());
+                    context
+                }),
+            EventData::PaneCreated { pane } => {
+                self.plugin_context_for_pane_info(pane, correlation_id)
+            }
+            EventData::PaneMoved { pane, .. } => {
+                self.plugin_context_for_pane_info(pane.as_ref(), correlation_id)
+            }
+            EventData::PaneClosed {
+                pane_id,
+                workspace_id,
+            } => {
+                let mut context = empty_plugin_context(correlation_id);
+                context.workspace_id = Some(workspace_id.clone());
+                context.focused_pane_id = Some(pane_id.clone());
+                context
+            }
+            EventData::PaneFocused {
+                pane_id,
+                workspace_id,
+            }
+            | EventData::PaneOutputChanged {
+                pane_id,
+                workspace_id,
+                ..
+            }
+            | EventData::PaneExited {
+                pane_id,
+                workspace_id,
+            }
+            | EventData::PaneAgentDetected {
+                pane_id,
+                workspace_id,
+                ..
+            }
+            | EventData::PaneAgentStatusChanged {
+                pane_id,
+                workspace_id,
+                ..
+            } => self
+                .plugin_context_for_public_pane_id(pane_id, correlation_id)
+                .or_else(|| self.plugin_context_for_workspace_id(workspace_id, correlation_id))
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.workspace_id = Some(workspace_id.clone());
+                    context.focused_pane_id = Some(pane_id.clone());
+                    context
+                }),
+        }
+    }
+
+    fn plugin_context_for_workspace_id(
+        &self,
+        workspace_id: &str,
+        correlation_id: &str,
+    ) -> Option<PluginInvocationContext> {
+        let ws_idx = self
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(idx, _)| (self.public_workspace_id(idx) == workspace_id).then_some(idx))?;
+        Some(self.plugin_context_for_workspace(ws_idx, correlation_id))
+    }
+
+    fn plugin_context_for_workspace_info(
+        &self,
+        workspace: &crate::api::schema::WorkspaceInfo,
+        correlation_id: &str,
+    ) -> PluginInvocationContext {
+        self.plugin_context_for_workspace_id(&workspace.workspace_id, correlation_id)
+            .unwrap_or_else(|| {
+                let mut context = empty_plugin_context(correlation_id);
+                context.workspace_id = Some(workspace.workspace_id.clone());
+                context.workspace_label = Some(workspace.label.clone());
+                context.workspace_cwd = workspace
+                    .worktree
+                    .as_ref()
+                    .map(|worktree| worktree.checkout_path.clone());
+                context.worktree = workspace.worktree.clone();
+                context.tab_id = Some(workspace.active_tab_id.clone());
+                context
+            })
+    }
+
+    fn plugin_context_for_tab_id(
+        &self,
+        tab_id: &str,
+        correlation_id: &str,
+    ) -> Option<PluginInvocationContext> {
+        let (ws_idx, tab_idx) = self.parse_tab_id(tab_id)?;
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let workspace = self.workspace_info(ws_idx);
+        let tab = ws.tabs.get(tab_idx)?;
+        let pane_id = tab.layout.focused();
+        let focused_pane = self.pane_info(ws_idx, pane_id);
+        Some(self.plugin_context_from_parts(
+            ws_idx,
+            workspace,
+            self.public_tab_id(ws_idx, tab_idx),
+            Some(tab.display_name()),
+            focused_pane,
+            correlation_id,
+        ))
+    }
+
+    fn plugin_context_for_tab_info(
+        &self,
+        tab: &crate::api::schema::TabInfo,
+        correlation_id: &str,
+    ) -> PluginInvocationContext {
+        self.plugin_context_for_tab_id(&tab.tab_id, correlation_id)
+            .or_else(|| self.plugin_context_for_workspace_id(&tab.workspace_id, correlation_id))
+            .unwrap_or_else(|| {
+                let mut context = empty_plugin_context(correlation_id);
+                context.workspace_id = Some(tab.workspace_id.clone());
+                context.tab_id = Some(tab.tab_id.clone());
+                context.tab_label = Some(tab.label.clone());
+                context
+            })
+    }
+
+    fn plugin_context_for_public_pane_id(
+        &self,
+        pane_id: &str,
+        correlation_id: &str,
+    ) -> Option<PluginInvocationContext> {
+        let (ws_idx, pane_id) = self.parse_pane_id(pane_id)?;
+        Some(self.plugin_context_for_pane(ws_idx, pane_id, correlation_id))
+    }
+
+    fn plugin_context_for_pane_info(
+        &self,
+        pane: &crate::api::schema::PaneInfo,
+        correlation_id: &str,
+    ) -> PluginInvocationContext {
+        self.plugin_context_for_public_pane_id(&pane.pane_id, correlation_id)
+            .or_else(|| self.plugin_context_for_workspace_id(&pane.workspace_id, correlation_id))
+            .unwrap_or_else(|| {
+                let mut context = empty_plugin_context(correlation_id);
+                context.workspace_id = Some(pane.workspace_id.clone());
+                context.tab_id = Some(pane.tab_id.clone());
+                context.focused_pane_id = Some(pane.pane_id.clone());
+                context.focused_pane_cwd = pane.cwd.clone();
+                context.focused_pane_agent = pane.agent.clone();
+                context.focused_pane_status = Some(pane.agent_status);
+                context
+            })
     }
 
     fn plugin_context_for_workspace(
@@ -1016,6 +1243,27 @@ impl App {
                 link_handler_id.clone(),
             ));
         }
+        if self.state.plugin_commands_in_flight >= MAX_PLUGIN_COMMANDS_IN_FLIGHT {
+            let message = format!(
+                "maximum concurrent plugin commands reached ({MAX_PLUGIN_COMMANDS_IN_FLIGHT})"
+            );
+            let log = PluginCommandLogInfo {
+                log_id,
+                plugin_id: plugin.plugin_id.clone(),
+                action_id,
+                event,
+                command,
+                status: PluginCommandStatus::Failed,
+                started_unix_ms,
+                finished_unix_ms: Some(started_unix_ms),
+                exit_code: None,
+                stdout: Some(String::new()),
+                stderr: Some(String::new()),
+                error: Some(message.clone()),
+            };
+            self.push_plugin_command_log(log);
+            return Err(("plugin_command_limit_reached", message));
+        }
         let plugin_root = std::path::PathBuf::from(&plugin.plugin_root);
         let log = PluginCommandLogInfo {
             log_id: log_id.clone(),
@@ -1031,12 +1279,8 @@ impl App {
             stderr: None,
             error: None,
         };
-        self.state.plugin_command_logs.push(log.clone());
-        const MAX_PLUGIN_COMMAND_LOGS: usize = 200;
-        if self.state.plugin_command_logs.len() > MAX_PLUGIN_COMMAND_LOGS {
-            let extra = self.state.plugin_command_logs.len() - MAX_PLUGIN_COMMAND_LOGS;
-            self.state.plugin_command_logs.drain(0..extra);
-        }
+        self.push_plugin_command_log(log.clone());
+        self.state.plugin_commands_in_flight += 1;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let child = Command::new(&program)
@@ -1104,12 +1348,12 @@ impl App {
     pub(crate) fn run_plugin_event_hooks(&mut self, event: &crate::api::schema::EventEnvelope) {
         let event_name = event.event.dot_name();
         let event_json = serde_json::to_string(event).ok();
-        let context = self.current_plugin_context(event_name);
+        let context = self.plugin_context_for_event(event, event_name);
         let plugins = self
             .state
             .installed_plugins
             .values()
-            .filter(|plugin| plugin.enabled)
+            .filter(|plugin| plugin.enabled && plugin_manifest_available(plugin))
             .cloned()
             .collect::<Vec<_>>();
         for plugin in plugins {
@@ -1134,6 +1378,14 @@ impl App {
                     event_json.clone(),
                 );
             }
+        }
+    }
+
+    fn push_plugin_command_log(&mut self, log: PluginCommandLogInfo) {
+        self.state.plugin_command_logs.push(log);
+        if self.state.plugin_command_logs.len() > PLUGIN_COMMAND_LOG_LIMIT {
+            let extra = self.state.plugin_command_logs.len() - PLUGIN_COMMAND_LOG_LIMIT;
+            self.state.plugin_command_logs.drain(0..extra);
         }
     }
 
@@ -1339,7 +1591,7 @@ fn reject_duplicate_action_ids(
 }
 
 fn validate_event_names(events: &[crate::api::schema::PluginManifestEventHook]) -> Vec<String> {
-    let known = crate::api::schema::known_event_names();
+    let known = crate::api::schema::plugin_hook_event_names();
     events
         .iter()
         .filter(|hook| !known.contains(&hook.on.as_str()))
@@ -1649,7 +1901,7 @@ fn normalize_plugin_id(value: &str) -> Option<String> {
 }
 
 fn normalize_action_id(value: &str) -> Option<String> {
-    normalize_identifier(value, PLUGIN_ACTION_ID_MAX_CHARS)
+    normalize_local_identifier(value, PLUGIN_ACTION_ID_MAX_CHARS)
 }
 
 fn normalize_identifier(value: &str, max_chars: usize) -> Option<String> {
@@ -1662,12 +1914,28 @@ fn normalize_identifier(value: &str, max_chars: usize) -> Option<String> {
     .then(|| value.to_string())
 }
 
+fn normalize_local_identifier(value: &str, max_chars: usize) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.chars().count() <= max_chars
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-')))
+    .then(|| value.to_string())
+}
+
 fn invalid_plugin_id(id: String) -> String {
     encode_error(
         id,
         "invalid_plugin_id",
         "plugin id must be non-empty, <= 120 characters, and contain only ASCII letters, digits, colon, dot, underscore, or hyphen",
     )
+}
+
+fn plugin_manifest_available(plugin: &InstalledPluginInfo) -> bool {
+    !plugin.warnings.iter().any(|warning| {
+        warning.starts_with(crate::persist::plugin_registry::MANIFEST_UNAVAILABLE_WARNING_PREFIX)
+    })
 }
 
 fn manifest_action_info(plugin_id: &str, action: &PluginManifestAction) -> PluginActionInfo {
@@ -1684,12 +1952,15 @@ fn manifest_action_info(plugin_id: &str, action: &PluginManifestAction) -> Plugi
 fn manifest_actions(
     plugins: &crate::app::state::InstalledPluginRegistry,
 ) -> impl Iterator<Item = PluginActionInfo> + '_ {
-    plugins.values().flat_map(|plugin| {
-        plugin
-            .actions
-            .iter()
-            .map(|action| manifest_action_info(&plugin.plugin_id, action))
-    })
+    plugins
+        .values()
+        .filter(|plugin| plugin_manifest_available(plugin))
+        .flat_map(|plugin| {
+            plugin
+                .actions
+                .iter()
+                .map(|action| manifest_action_info(&plugin.plugin_id, action))
+        })
 }
 
 #[cfg(test)]
@@ -1876,6 +2147,29 @@ command = ["echo", "b"]
 
         let result = load_plugin_manifest(&root.display().to_string(), true);
         assert!(matches!(result, Err(("duplicate_plugin_action_id", _))));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn link_rejects_dotted_action_ids() {
+        let root = unique_temp_path("plugin-dotted-action");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.dotted-action"
+name = "Dotted Action"
+version = "0.1.0"
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "build.release"
+title = "Build"
+command = ["echo", "build"]
+"#,
+        );
+
+        let result = load_plugin_manifest(&root.display().to_string(), true);
+        assert!(matches!(result, Err(("invalid_plugin_action_id", _))));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2108,7 +2402,7 @@ command = ["sh", "-c", "sleep 1"]
             method: Method::PluginPaneOpen(PluginPaneOpenParams {
                 plugin_id: "example.tab".into(),
                 entrypoint: "board".into(),
-                placement: Some(PluginPanePlacement::Tab),
+                placement: None,
                 workspace_id: None,
                 target_pane_id: None,
                 direction: None,
@@ -2212,6 +2506,71 @@ command = ["sh", "-c", "sleep 1"]
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn stale_registry_entries_are_visible_but_not_runnable() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-stale-registry");
+        write_manifest(&root);
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let reloaded =
+            crate::persist::plugin_registry::reload_manifests(vec![plugin], |path, enabled| {
+                load_plugin_manifest(path, enabled).map_err(|(_, msg)| msg)
+            });
+        assert_eq!(reloaded.len(), 1);
+        assert!(reloaded[0].warnings.iter().any(|warning| warning
+            .starts_with(crate::persist::plugin_registry::MANIFEST_UNAVAILABLE_WARNING_PREFIX)));
+        app.state
+            .installed_plugins
+            .insert(reloaded[0].plugin_id.clone(), reloaded[0].clone());
+
+        let list = app.handle_api_request(Request {
+            id: "plugin-list".into(),
+            method: Method::PluginList(PluginListParams { plugin_id: None }),
+        });
+        let ResponseResult::PluginList { plugins } = response_result(&list) else {
+            panic!("expected plugin list: {list}");
+        };
+        assert_eq!(plugins.len(), 1);
+
+        let actions = app.handle_api_request(Request {
+            id: "action-list".into(),
+            method: Method::PluginActionList(PluginActionListParams { plugin_id: None }),
+        });
+        let ResponseResult::PluginActionList { actions } = response_result(&actions) else {
+            panic!("expected action list: {actions}");
+        };
+        assert!(actions.is_empty());
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: Some("example.worktree-bootstrap".into()),
+                action_id: "bootstrap".into(),
+                context: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
+        assert_eq!(value["error"]["code"], "plugin_manifest_unavailable");
+
+        let pane = app.handle_api_request(Request {
+            id: "pane-open".into(),
+            method: Method::PluginPaneOpen(PluginPaneOpenParams {
+                plugin_id: "example.worktree-bootstrap".into(),
+                entrypoint: "board".into(),
+                placement: None,
+                workspace_id: None,
+                target_pane_id: None,
+                direction: None,
+                cwd: None,
+                focus: true,
+                env: std::collections::HashMap::new(),
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&pane).unwrap();
+        assert_eq!(value["error"]["code"], "plugin_manifest_unavailable");
+    }
+
     #[cfg(unix)]
     #[test]
     fn manifest_action_invoke_runs_command_and_captures_log() {
@@ -2276,6 +2635,162 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_ACTION_ID\""]
         assert_eq!(finished.exit_code, Some(0));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn event_hooks_use_event_target_context() {
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("active"),
+            crate::workspace::Workspace::test_new("event-target"),
+        ];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let active_workspace_id = app.public_workspace_id(0);
+        let target_workspace = app.workspace_info(1);
+
+        let root = unique_temp_path("plugin-event-context");
+        let capture = root.join("context.json");
+        write_manifest_content(
+            &root,
+            &format!(
+                r#"
+id = "example.event-context"
+name = "Event Context"
+version = "0.1.0"
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "worktree.created"
+command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
+"#,
+                capture.display()
+            ),
+        );
+        link_manifest(&mut app, &root);
+
+        app.run_plugin_event_hooks(&crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::WorktreeCreated,
+            data: crate::api::schema::EventData::WorktreeCreated {
+                workspace: target_workspace.clone(),
+                worktree: crate::api::schema::WorktreeInfo {
+                    path: "/tmp/repo".into(),
+                    branch: Some("feature".into()),
+                    is_bare: false,
+                    is_detached: false,
+                    is_prunable: false,
+                    is_linked_worktree: true,
+                    open_workspace_id: Some(target_workspace.workspace_id.clone()),
+                    label: "feature".into(),
+                },
+            },
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !capture.exists() && std::time::Instant::now() < deadline {
+            app.drain_all_internal_events();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let context: PluginInvocationContext =
+            serde_json::from_str(&std::fs::read_to_string(&capture).unwrap()).unwrap();
+        assert_eq!(
+            context.workspace_id.as_deref(),
+            Some(target_workspace.workspace_id.as_str())
+        );
+        assert_ne!(
+            context.workspace_id.as_deref(),
+            Some(active_workspace_id.as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugin_command_limit_rejects_and_logs() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-command-limit");
+        write_manifest(&root);
+        link_manifest(&mut app, &root);
+        app.state.plugin_commands_in_flight = MAX_PLUGIN_COMMANDS_IN_FLIGHT;
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke-limit".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: Some("example.worktree-bootstrap".into()),
+                action_id: "bootstrap".into(),
+                context: None,
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
+        assert_eq!(value["error"]["code"], "plugin_command_limit_reached");
+        let log = app
+            .state
+            .plugin_command_logs
+            .last()
+            .expect("rejected command should be logged");
+        assert_eq!(log.status, PluginCommandStatus::Failed);
+        assert!(log
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("maximum concurrent plugin commands")));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn closed_event_context_uses_closed_target_ids() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("closed-events")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let active_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let active_public_pane_id = app.public_pane_id(0, active_pane_id).unwrap();
+        let workspace_id = app.public_workspace_id(0);
+        let closed_tab_id = format!("{workspace_id}:t99");
+        let closed_pane_id = format!("{workspace_id}:p99");
+
+        let tab_context = app.plugin_context_for_event(
+            &crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::TabClosed,
+                data: crate::api::schema::EventData::TabClosed {
+                    tab_id: closed_tab_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                },
+            },
+            "tab.closed",
+        );
+        assert_eq!(
+            tab_context.workspace_id.as_deref(),
+            Some(workspace_id.as_str())
+        );
+        assert_eq!(tab_context.tab_id.as_deref(), Some(closed_tab_id.as_str()));
+        assert_eq!(tab_context.focused_pane_id, None);
+
+        let pane_context = app.plugin_context_for_event(
+            &crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneClosed,
+                data: crate::api::schema::EventData::PaneClosed {
+                    pane_id: closed_pane_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                },
+            },
+            "pane.closed",
+        );
+        assert_eq!(
+            pane_context.workspace_id.as_deref(),
+            Some(workspace_id.as_str())
+        );
+        assert_eq!(
+            pane_context.focused_pane_id.as_deref(),
+            Some(closed_pane_id.as_str())
+        );
+        assert_ne!(
+            pane_context.focused_pane_id.as_deref(),
+            Some(active_public_pane_id.as_str())
+        );
     }
 
     #[cfg(unix)]
@@ -2621,6 +3136,10 @@ on = "worktree.craeted"
 command = ["sh", "-c", "echo hi"]
 
 [[events]]
+on = "pane.output_changed"
+command = ["sh", "-c", "echo too noisy"]
+
+[[events]]
 on = "worktree.created"
 command = ["sh", "-c", "echo ok"]
 "#,
@@ -2663,6 +3182,14 @@ command = ["sh", "-c", "echo ok"]
                 .filter(|w| w.contains("worktree.created"))
                 .count(),
             0
+        );
+        assert!(
+            plugin
+                .warnings
+                .iter()
+                .any(|w| w.contains("pane.output_changed")),
+            "expected warning for unemitted output-change hook, got: {:?}",
+            plugin.warnings
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -2766,6 +3293,27 @@ command = ["sh", "-c", "echo ok"]
         assert_eq!(plugin_pane.plugin_id, "example.pane");
         assert_eq!(plugin_pane.entrypoint, "board");
         assert_eq!(plugin_pane.pane.pane_id, move_result.pane.pane_id);
+    }
+
+    #[test]
+    fn pane_exit_removes_plugin_pane_record() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("plugin-exit")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.plugin_panes.insert(
+            pane_id,
+            crate::app::state::PluginPaneRecord {
+                plugin_id: "example.pane".into(),
+                entrypoint: "board".into(),
+            },
+        );
+
+        app.handle_internal_event(crate::events::AppEvent::PaneDied { pane_id });
+
+        assert!(!app.state.plugin_panes.contains_key(&pane_id));
     }
 
     #[test]
