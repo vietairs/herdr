@@ -1102,7 +1102,7 @@ impl App {
     }
 
     pub(crate) fn run_plugin_event_hooks(&mut self, event: &crate::api::schema::EventEnvelope) {
-        let event_name = event_kind_name(event.event);
+        let event_name = event.event.dot_name();
         let event_json = serde_json::to_string(event).ok();
         let context = self.current_plugin_context(event_name);
         let plugins = self
@@ -1615,31 +1615,6 @@ fn read_capped_plugin_output(mut reader: impl Read, cap: usize) -> String {
         ));
     }
     output
-}
-
-fn event_kind_name(kind: crate::api::schema::EventKind) -> &'static str {
-    match kind {
-        crate::api::schema::EventKind::WorkspaceCreated => "workspace.created",
-        crate::api::schema::EventKind::WorkspaceUpdated => "workspace.updated",
-        crate::api::schema::EventKind::WorkspaceClosed => "workspace.closed",
-        crate::api::schema::EventKind::WorkspaceRenamed => "workspace.renamed",
-        crate::api::schema::EventKind::WorkspaceFocused => "workspace.focused",
-        crate::api::schema::EventKind::WorktreeCreated => "worktree.created",
-        crate::api::schema::EventKind::WorktreeOpened => "worktree.opened",
-        crate::api::schema::EventKind::WorktreeRemoved => "worktree.removed",
-        crate::api::schema::EventKind::TabCreated => "tab.created",
-        crate::api::schema::EventKind::TabClosed => "tab.closed",
-        crate::api::schema::EventKind::TabRenamed => "tab.renamed",
-        crate::api::schema::EventKind::TabFocused => "tab.focused",
-        crate::api::schema::EventKind::PaneCreated => "pane.created",
-        crate::api::schema::EventKind::PaneClosed => "pane.closed",
-        crate::api::schema::EventKind::PaneFocused => "pane.focused",
-        crate::api::schema::EventKind::PaneMoved => "pane.moved",
-        crate::api::schema::EventKind::PaneOutputChanged => "pane.output_changed",
-        crate::api::schema::EventKind::PaneExited => "pane.exited",
-        crate::api::schema::EventKind::PaneAgentDetected => "pane.agent_detected",
-        crate::api::schema::EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
-    }
 }
 
 fn normalize_command(command: Vec<String>) -> Result<Vec<String>, (&'static str, String)> {

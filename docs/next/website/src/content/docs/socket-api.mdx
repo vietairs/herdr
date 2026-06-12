@@ -134,7 +134,7 @@ export the tab containing that pane.
 
 The response includes `workspace_id`, `tab_id`, `zoomed`, `focused_pane_id`, and
 `root`. `root` is a BSP tree of `pane` and `split` nodes. Pane nodes can include
-`pane_id`, `label`, `cwd`, `foreground_cwd`, and argv `command`. Split nodes use
+`pane_id`, `label`, `cwd`, and argv `command`. Split nodes use
 `direction` (`right` or `down`), `ratio`, `first`, and `second`.
 
 `layout.apply` creates a fresh tab from a declarative tree. If `tab_id` is

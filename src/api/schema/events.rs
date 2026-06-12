@@ -194,31 +194,64 @@ pub enum EventKind {
     PaneAgentStatusChanged,
 }
 
+impl EventKind {
+    pub fn dot_name(self) -> &'static str {
+        match self {
+            EventKind::WorkspaceCreated => "workspace.created",
+            EventKind::WorkspaceUpdated => "workspace.updated",
+            EventKind::WorkspaceClosed => "workspace.closed",
+            EventKind::WorkspaceRenamed => "workspace.renamed",
+            EventKind::WorkspaceFocused => "workspace.focused",
+            EventKind::WorktreeCreated => "worktree.created",
+            EventKind::WorktreeOpened => "worktree.opened",
+            EventKind::WorktreeRemoved => "worktree.removed",
+            EventKind::TabCreated => "tab.created",
+            EventKind::TabClosed => "tab.closed",
+            EventKind::TabRenamed => "tab.renamed",
+            EventKind::TabFocused => "tab.focused",
+            EventKind::PaneCreated => "pane.created",
+            EventKind::PaneClosed => "pane.closed",
+            EventKind::PaneFocused => "pane.focused",
+            EventKind::PaneMoved => "pane.moved",
+            EventKind::PaneOutputChanged => "pane.output_changed",
+            EventKind::PaneExited => "pane.exited",
+            EventKind::PaneAgentDetected => "pane.agent_detected",
+            EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
+        }
+    }
+}
+
+pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
+    EventKind::WorkspaceCreated,
+    EventKind::WorkspaceUpdated,
+    EventKind::WorkspaceClosed,
+    EventKind::WorkspaceRenamed,
+    EventKind::WorkspaceFocused,
+    EventKind::WorktreeCreated,
+    EventKind::WorktreeOpened,
+    EventKind::WorktreeRemoved,
+    EventKind::TabCreated,
+    EventKind::TabClosed,
+    EventKind::TabRenamed,
+    EventKind::TabFocused,
+    EventKind::PaneCreated,
+    EventKind::PaneClosed,
+    EventKind::PaneFocused,
+    EventKind::PaneMoved,
+    EventKind::PaneOutputChanged,
+    EventKind::PaneExited,
+    EventKind::PaneAgentDetected,
+    EventKind::PaneAgentStatusChanged,
+];
+
 /// All event names that manifest `[[events]] on` values can reference.
 /// Kept next to `EventKind` so it stays in sync as events are added.
-pub fn known_event_names() -> &'static [&'static str] {
-    &[
-        "workspace.created",
-        "workspace.updated",
-        "workspace.closed",
-        "workspace.renamed",
-        "workspace.focused",
-        "worktree.created",
-        "worktree.opened",
-        "worktree.removed",
-        "tab.created",
-        "tab.closed",
-        "tab.renamed",
-        "tab.focused",
-        "pane.created",
-        "pane.closed",
-        "pane.focused",
-        "pane.moved",
-        "pane.output_changed",
-        "pane.exited",
-        "pane.agent_detected",
-        "pane.agent_status_changed",
-    ]
+pub fn known_event_names() -> Vec<&'static str> {
+    KNOWN_EVENT_KINDS
+        .iter()
+        .copied()
+        .map(EventKind::dot_name)
+        .collect()
 }
 
 #[cfg(test)]
@@ -227,60 +260,12 @@ mod known_event_name_tests {
 
     #[test]
     fn known_event_names_stay_in_sync_with_event_kind() {
-        // Exhaustive match: adding an EventKind variant fails compilation here
-        // until its dot name is added below and to known_event_names().
-        fn dot_name(kind: EventKind) -> &'static str {
-            match kind {
-                EventKind::WorkspaceCreated => "workspace.created",
-                EventKind::WorkspaceUpdated => "workspace.updated",
-                EventKind::WorkspaceClosed => "workspace.closed",
-                EventKind::WorkspaceRenamed => "workspace.renamed",
-                EventKind::WorkspaceFocused => "workspace.focused",
-                EventKind::WorktreeCreated => "worktree.created",
-                EventKind::WorktreeOpened => "worktree.opened",
-                EventKind::WorktreeRemoved => "worktree.removed",
-                EventKind::TabCreated => "tab.created",
-                EventKind::TabClosed => "tab.closed",
-                EventKind::TabRenamed => "tab.renamed",
-                EventKind::TabFocused => "tab.focused",
-                EventKind::PaneCreated => "pane.created",
-                EventKind::PaneClosed => "pane.closed",
-                EventKind::PaneFocused => "pane.focused",
-                EventKind::PaneMoved => "pane.moved",
-                EventKind::PaneOutputChanged => "pane.output_changed",
-                EventKind::PaneExited => "pane.exited",
-                EventKind::PaneAgentDetected => "pane.agent_detected",
-                EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
-            }
-        }
-        let variants = [
-            EventKind::WorkspaceCreated,
-            EventKind::WorkspaceUpdated,
-            EventKind::WorkspaceClosed,
-            EventKind::WorkspaceRenamed,
-            EventKind::WorkspaceFocused,
-            EventKind::WorktreeCreated,
-            EventKind::WorktreeOpened,
-            EventKind::WorktreeRemoved,
-            EventKind::TabCreated,
-            EventKind::TabClosed,
-            EventKind::TabRenamed,
-            EventKind::TabFocused,
-            EventKind::PaneCreated,
-            EventKind::PaneClosed,
-            EventKind::PaneFocused,
-            EventKind::PaneMoved,
-            EventKind::PaneOutputChanged,
-            EventKind::PaneExited,
-            EventKind::PaneAgentDetected,
-            EventKind::PaneAgentStatusChanged,
-        ];
-        let mut from_kind = variants
+        let mut from_kind = KNOWN_EVENT_KINDS
             .iter()
-            .map(|kind| dot_name(*kind))
+            .map(|kind| kind.dot_name())
             .collect::<Vec<_>>();
         from_kind.sort_unstable();
-        let mut known = known_event_names().to_vec();
+        let mut known = known_event_names();
         known.sort_unstable();
         assert_eq!(
             from_kind, known,
