@@ -288,9 +288,19 @@ Worktree commands also emit lifecycle events. `worktree.create` emits `workspace
 
 ## Plugin APIs
 
-The plugin API is an early host surface for executable workflow tools. A plugin is a package with a `herdr-plugin.toml` manifest. Actions are manifest-only; runtime action registration is not part of v1.
+The plugin API is an early host surface for executable workflow tools. A plugin
+is a package with a `herdr-plugin.toml` manifest. The manifest declares
+shareable actions, event hooks, terminal pane entrypoints, and link handlers.
+Actions and panes are manifest-only; runtime action registration and runtime
+argv pane creation are not part of v1.
 
-Installed and linked plugins persist across restarts. Herdr writes a `plugins.json` registry file alongside `session.json` on every `plugin.link` and `plugin.unlink`. The `herdr plugin install` CLI also writes the same registry when Herdr is not running, then startup loads it automatically. On startup, Herdr re-reads each manifest from its original path; if the file is missing or unparseable the entry is kept with a `warnings` field so `plugin.list` surfaces it.
+Installed and linked plugins persist across restarts. Herdr writes a
+`plugins.json` registry file alongside `session.json` on `plugin.link`,
+`plugin.unlink`, `plugin.enable`, and `plugin.disable`. The
+`herdr plugin install` CLI also writes the same registry when Herdr is not
+running, then startup loads it automatically. On startup, Herdr re-reads each
+manifest from its original path; if the file is missing or unparseable the entry
+is kept with a `warnings` field so `plugin.list` surfaces it.
 
 Event hook `on` values are validated against the known Herdr event names at link time. An unrecognised name is not an error — the link still succeeds — but the returned plugin info includes a warning (e.g. `"unknown event 'worktree.craeted'"`). Check the `warnings` field in the `plugin.link` and `plugin.list` responses.
 
@@ -306,7 +316,8 @@ Link a local plugin manifest:
 {"id":"req_plugin_link","method":"plugin.link","params":{"path":"/managed/plugin/herdr-plugin.toml","enabled":true,"source":{"kind":"github","owner":"ogulcancelik","repo":"herdr-plugin-examples","subdir":"worktree-bootstrap","requested_ref":"main","resolved_commit":"abc123","managed_path":"/data/plugins/github/example.worktree-bootstrap","installed_unix_ms":1780000000000}}}
 ```
 
-The path can be a plugin directory containing `herdr-plugin.toml` or a direct manifest path. The manifest shape for this slice is:
+The path can be a plugin directory containing `herdr-plugin.toml` or a direct
+manifest path. The manifest shape is:
 
 ```toml
 id = "example.worktree-bootstrap"
@@ -314,6 +325,9 @@ name = "Worktree Bootstrap"
 version = "0.1.0"
 description = "Prepare new worktrees"
 platforms = ["linux", "macos"]
+
+[[build]]
+command = ["bun", "install"]
 
 [[actions]]
 id = "bootstrap"
@@ -331,9 +345,27 @@ command = ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", "bootstrap.p
 [[events]]
 on = "worktree.created"
 command = ["bun", "run", "bootstrap.ts"]
+
+[[panes]]
+id = "board"
+title = "Worktree board"
+placement = "overlay"
+command = ["bun", "run", "board.ts"]
+
+[[link_handlers]]
+id = "github-issue"
+title = "Open GitHub issue"
+pattern = "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$"
+action = "bootstrap"
 ```
 
-Declare `platforms` at the top level with the OS identifiers (`linux`, `macos`, `windows`) your plugin supports. Omitting `platforms` is allowed for local development — `plugin.link` succeeds but the response includes a warning. Individual actions and events can declare their own `platforms` to override the plugin-level list; if omitted they inherit from the plugin. Invoking an action whose effective platforms do not include the current OS returns a `platform_unsupported` error.
+Declare `platforms` at the top level with the OS identifiers (`linux`, `macos`,
+`windows`) your plugin supports. Omitting `platforms` is allowed for local
+development — `plugin.link` succeeds but the response includes a warning.
+Individual build commands, actions, event hooks, panes, and link handlers can
+declare their own `platforms` to override the plugin-level list; if omitted they
+inherit from the plugin. Invoking an action or opening a pane whose effective
+platforms do not include the current OS returns a `platform_unsupported` error.
 
 List, enable, disable, or unlink linked plugins:
 
@@ -363,11 +395,11 @@ log record. Missing context fields are filled from the active workspace, tab,
 focused pane, worktree provenance, and request id. Invoking an action from a
 disabled plugin returns a `plugin_disabled` error.
 
-Herdr injects `HERDR_SOCKET_PATH`, `HERDR_ENV=1`, `HERDR_PLUGIN_ID`,
-`HERDR_PLUGIN_CONTEXT_JSON`, and available `HERDR_WORKSPACE_ID`,
-`HERDR_TAB_ID`, and `HERDR_PANE_ID` values. Action commands also receive
-`HERDR_PLUGIN_ACTION_ID`; event hooks receive `HERDR_PLUGIN_EVENT` and
-`HERDR_PLUGIN_EVENT_JSON`; pane commands receive
+Herdr injects `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ENV=1`,
+`HERDR_PLUGIN_ID`, `HERDR_PLUGIN_CONTEXT_JSON`, and available
+`HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID` values. Action
+commands also receive `HERDR_PLUGIN_ACTION_ID`; event hooks receive
+`HERDR_PLUGIN_EVENT` and `HERDR_PLUGIN_EVENT_JSON`; pane commands receive
 `HERDR_PLUGIN_ENTRYPOINT_ID`.
 
 List recent action and event command logs:
