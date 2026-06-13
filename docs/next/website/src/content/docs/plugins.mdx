@@ -14,11 +14,18 @@ version = "0.1.0"
 description = "Apply project layouts"
 platforms = ["linux", "macos", "windows"]
 
+[[build]]
+command = ["npm", "ci"]
+
+[[build]]
+command = ["npm", "run", "build"]
+platforms = ["linux", "macos"]
+
 [[actions]]
 id = "apply"
 title = "Apply layout"
 contexts = ["workspace"]
-command = ["herdr", "workspace", "list"]
+command = ["node", "dist/apply.js"]
 
 [[events]]
 on = "worktree.created"
@@ -40,9 +47,9 @@ action = "apply"
 Install an example plugin:
 
 ```bash
-herdr plugin install ogulcancelik/herdr-plugin-examples/worktree-bootstrap
+herdr plugin install ogulcancelik/herdr-plugin-examples/agent-telegram-notify
 herdr plugin list
-herdr plugin action list --plugin example.worktree-bootstrap
+herdr plugin action list --plugin examples.agent-telegram-notify
 ```
 
 When you are authoring a local plugin, link the working directory instead:
@@ -56,10 +63,16 @@ herdr plugin log list --plugin example.layout
 ```
 
 The example cookbook repo is `ogulcancelik/herdr-plugin-examples`. It contains
-separate example plugins in subdirectories, including `worktree-bootstrap`,
-`dev-layout`, `gh-link-router`, and `agent-telegram-notify`. These are examples
-to copy, not maintained official plugins. A GitHub-topic marketplace is planned
-for discovery later; `plugin install` is the sharing path for now.
+separate example plugins in subdirectories, including `agent-telegram-notify`,
+`github-link-preview`, and `dev-layout-bootstrap`. These are examples to copy,
+not maintained official plugins. A GitHub-topic marketplace is planned for
+discovery later; `plugin install` is the sharing path for now.
+
+Build commands run during GitHub `plugin install` after confirmation and before
+Herdr registers the plugin. If a build command fails, install aborts and the
+plugin is not registered. `plugin link` does not run build commands; local
+authors build their working tree themselves. Build commands may generate files,
+but changing `herdr-plugin.toml` after the install preview aborts install.
 
 Actions are manifest-only. Runtime action registration is not part of plugin
 v1. Pane commands are manifest-only too; `plugin.pane.open` selects a declared
@@ -68,13 +81,18 @@ and link handler ids are local ids inside the plugin; they may use ASCII
 letters, digits, colon, underscore, and hyphen, but not dots. Each id type must
 be unique inside a plugin.
 
-Commands run with the plugin directory as their working directory. Herdr injects
-`HERDR_SOCKET_PATH`, `HERDR_ENV=1`, `HERDR_PLUGIN_ID`,
+Runtime commands run with the plugin directory as their working directory. Herdr injects
+`HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ENV=1`, `HERDR_PLUGIN_ID`,
 `HERDR_PLUGIN_CONTEXT_JSON`, and any available `HERDR_WORKSPACE_ID`,
 `HERDR_TAB_ID`, and `HERDR_PANE_ID`. Action commands also receive
 `HERDR_PLUGIN_ACTION_ID`; event hooks receive `HERDR_PLUGIN_EVENT` and
 `HERDR_PLUGIN_EVENT_JSON`; pane commands receive
 `HERDR_PLUGIN_ENTRYPOINT_ID`.
+
+Build commands are plain argv commands too, but they do not receive runtime
+plugin context or Herdr socket env. Plugin authors should document required
+system tools such as `cargo`, `npm`, `bun`, or `lua`; Herdr reports build
+failures but does not install missing toolchains.
 
 Manifest pane `placement` defaults to `overlay`, which opens a temporary zoomed
 overlay over the active pane and restores the previous focus and zoom when it

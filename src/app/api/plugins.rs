@@ -7,10 +7,11 @@ use super::responses::{encode_error, encode_success};
 use crate::api::schema::{
     InstalledPluginInfo, PluginActionInfo, PluginActionInvokeParams, PluginActionListParams,
     PluginCommandLogInfo, PluginCommandStatus, PluginInvocationContext, PluginLinkParams,
-    PluginListParams, PluginLogListParams, PluginManifestAction, PluginManifestEventHook,
-    PluginManifestLinkHandler, PluginManifestPane, PluginPaneCloseParams, PluginPaneFocusParams,
-    PluginPaneInfo, PluginPaneOpenParams, PluginPanePlacement, PluginPlatform,
-    PluginSetEnabledParams, PluginSourceInfo, PluginSourceKind, PluginUnlinkParams, ResponseResult,
+    PluginListParams, PluginLogListParams, PluginManifestAction, PluginManifestBuild,
+    PluginManifestEventHook, PluginManifestLinkHandler, PluginManifestPane, PluginPaneCloseParams,
+    PluginPaneFocusParams, PluginPaneInfo, PluginPaneOpenParams, PluginPanePlacement,
+    PluginPlatform, PluginSetEnabledParams, PluginSourceInfo, PluginSourceKind, PluginUnlinkParams,
+    ResponseResult,
 };
 use crate::app::App;
 
@@ -1194,6 +1195,12 @@ impl App {
             ("HERDR_PLUGIN_ID".to_string(), plugin.plugin_id.clone()),
             ("HERDR_PLUGIN_CONTEXT_JSON".to_string(), context_json),
         ];
+        if let Ok(current_exe) = std::env::current_exe() {
+            env.push((
+                "HERDR_BIN_PATH".to_string(),
+                current_exe.display().to_string(),
+            ));
+        }
         if let Some(action_id) = action_id.as_ref() {
             env.push(("HERDR_PLUGIN_ACTION_ID".to_string(), action_id.clone()));
         }
@@ -1391,6 +1398,8 @@ struct RawPluginManifest {
     #[serde(default)]
     platforms: Option<Vec<RawPlatform>>,
     #[serde(default)]
+    build: Vec<RawPluginManifestBuild>,
+    #[serde(default)]
     actions: Vec<RawPluginManifestAction>,
     #[serde(default)]
     events: Vec<RawPluginManifestEventHook>,
@@ -1398,6 +1407,13 @@ struct RawPluginManifest {
     panes: Vec<RawPluginManifestPane>,
     #[serde(default)]
     link_handlers: Vec<RawPluginManifestLinkHandler>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPluginManifestBuild {
+    #[serde(default)]
+    platforms: Option<Vec<RawPlatform>>,
+    command: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1503,6 +1519,11 @@ pub(crate) fn load_plugin_manifest(
         .map(|description| description.trim().to_string())
         .filter(|description| !description.is_empty());
     let platforms = normalize_platforms(raw.platforms)?;
+    let build = raw
+        .build
+        .into_iter()
+        .map(normalize_manifest_build)
+        .collect::<Result<Vec<_>, _>>()?;
     let mut actions = raw
         .actions
         .into_iter()
@@ -1545,6 +1566,7 @@ pub(crate) fn load_plugin_manifest(
         plugin_root: plugin_root.display().to_string(),
         enabled,
         platforms,
+        build,
         actions,
         events,
         panes,
@@ -1552,6 +1574,14 @@ pub(crate) fn load_plugin_manifest(
         source: Default::default(),
         warnings,
     })
+}
+
+fn normalize_manifest_build(
+    build: RawPluginManifestBuild,
+) -> Result<PluginManifestBuild, (&'static str, String)> {
+    let platforms = normalize_platforms(build.platforms)?;
+    let command = normalize_command(build.command)?;
+    Ok(PluginManifestBuild { platforms, command })
 }
 
 fn normalize_plugin_source(
@@ -2043,6 +2073,9 @@ version = "0.1.0"
 description = "Prepare new worktrees"
 platforms = ["linux", "macos", "windows"]
 
+[[build]]
+command = ["bun", "install"]
+
 [[actions]]
 id = "bootstrap"
 title = "Bootstrap worktree"
@@ -2113,6 +2146,8 @@ action = "bootstrap"
         assert_eq!(plugin.version, "0.1.0");
         assert_eq!(plugin.plugin_root, root.display().to_string());
         assert!(plugin.enabled);
+        assert_eq!(plugin.build.len(), 1);
+        assert_eq!(plugin.build[0].command, ["bun", "install"]);
         assert_eq!(plugin.actions.len(), 1);
         assert_eq!(plugin.actions[0].id, "bootstrap");
         assert_eq!(plugin.actions[0].command, ["bun", "run", "bootstrap.ts"]);

@@ -45,6 +45,8 @@ pub struct InstalledPluginInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platforms: Option<Vec<PluginPlatform>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build: Vec<PluginManifestBuild>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<PluginManifestAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<PluginManifestEventHook>,
@@ -114,6 +116,13 @@ pub(crate) fn plugin_managed_path_component(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginManifestBuild {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platforms: Option<Vec<PluginPlatform>>,
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -690,6 +690,10 @@ fn plugin_link_list_unlink_round_trip() {
         plugin_root: "/plugins/worktree-bootstrap".into(),
         enabled: true,
         platforms: None,
+        build: vec![PluginManifestBuild {
+            platforms: None,
+            command: vec!["bun".into(), "install".into()],
+        }],
         actions: vec![PluginManifestAction {
             id: "bootstrap".into(),
             title: "Bootstrap worktree".into(),

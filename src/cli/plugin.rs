@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,9 +8,11 @@ use crate::api::schema::{
     InstalledPluginInfo, Method, PluginActionInvokeParams, PluginActionListParams,
     PluginInvocationContext, PluginLinkParams, PluginListParams, PluginLogListParams,
     PluginPaneCloseParams, PluginPaneFocusParams, PluginPaneOpenParams, PluginPanePlacement,
-    PluginSetEnabledParams, PluginSourceInfo, PluginSourceKind, PluginUnlinkParams, Request,
-    ResponseResult, SplitDirection, SuccessResponse,
+    PluginPlatform, PluginSetEnabledParams, PluginSourceInfo, PluginSourceKind, PluginUnlinkParams,
+    Request, ResponseResult, SplitDirection, SuccessResponse,
 };
+
+const PLUGIN_BUILD_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 
 pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -178,6 +180,9 @@ fn plugin_install(args: &[String]) -> std::io::Result<i32> {
             eprintln!("plugin install cancelled");
             return Ok(0);
         }
+        run_plugin_build_commands(&preview_plugin, &manifest_root)?;
+        let post_build_plugin = load_cli_plugin_manifest(&manifest_root, true)?;
+        ensure_manifest_unchanged_after_build(&preview_plugin, &post_build_plugin)?;
 
         let final_checkout = managed_checkout_path(&preview_plugin.plugin_id);
         let backup_checkout = temp_root.join("previous-checkout");
@@ -1062,6 +1067,18 @@ fn print_install_preview(
     eprintln!("  events: {}", plugin.events.len());
     eprintln!("  panes: {}", plugin.panes.len());
     eprintln!("  link handlers: {}", plugin.link_handlers.len());
+    eprintln!("  build commands: {}", plugin.build.len());
+    for build in &plugin.build {
+        let support = if build_platform_supported(&build.platforms, &plugin.platforms) {
+            String::new()
+        } else {
+            format!(
+                " (skipped on {})",
+                plugin_platform_name(current_plugin_platform())
+            )
+        };
+        eprintln!("    build{}: {}", support, build.command.join(" "));
+    }
     for action in &plugin.actions {
         eprintln!("    action {}: {}", action.id, action.command.join(" "));
     }
@@ -1080,6 +1097,142 @@ fn print_install_preview(
             existing.plugin_id,
             source_display(existing)
         );
+    }
+}
+
+fn run_plugin_build_commands(plugin: &InstalledPluginInfo, manifest_root: &Path) -> io::Result<()> {
+    for build in &plugin.build {
+        if !build_platform_supported(&build.platforms, &plugin.platforms) {
+            continue;
+        }
+        run_plugin_build_command(manifest_root, &build.command)?;
+    }
+    Ok(())
+}
+
+fn ensure_manifest_unchanged_after_build(
+    before: &InstalledPluginInfo,
+    after: &InstalledPluginInfo,
+) -> io::Result<()> {
+    if before == after {
+        return Ok(());
+    }
+    Err(io::Error::other(
+        "plugin build changed herdr-plugin.toml after install preview; aborting install",
+    ))
+}
+
+fn run_plugin_build_command(cwd: &Path, command: &[String]) -> io::Result<()> {
+    let Some(program) = command.first() else {
+        return Err(io::Error::other("plugin build command must not be empty"));
+    };
+    let mut child = Command::new(program);
+    child
+        .args(command.iter().skip(1))
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    scrub_herdr_runtime_env(&mut child);
+
+    let mut child = match child.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            return Err(io::Error::other(format!(
+                "plugin build failed\n  command: {}\n  error: {err}",
+                command.join(" ")
+            )));
+        }
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_reader = stdout.map(|stdout| {
+        std::thread::spawn(move || read_capped_output(stdout, PLUGIN_BUILD_OUTPUT_MAX_BYTES))
+    });
+    let stderr_reader = stderr.map(|stderr| {
+        std::thread::spawn(move || read_capped_output(stderr, PLUGIN_BUILD_OUTPUT_MAX_BYTES))
+    });
+    let status = child.wait()?;
+    let stdout = stdout_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    if status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "plugin build failed\n  command: {}\n  status: {status}\n  stdout:\n{}\n  stderr:\n{}",
+        command.join(" "),
+        stdout.trim_end(),
+        stderr.trim_end()
+    )))
+}
+
+fn read_capped_output(mut reader: impl Read, cap: usize) -> String {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let remaining = cap.saturating_sub(out.len());
+                if remaining > 0 {
+                    out.extend_from_slice(&buf[..n.min(remaining)]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn scrub_herdr_runtime_env(command: &mut Command) {
+    for key in [
+        crate::api::SOCKET_PATH_ENV_VAR,
+        crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+        crate::session::SESSION_ENV_VAR,
+        "HERDR_BIN_PATH",
+        "HERDR_ENV",
+        "HERDR_WORKSPACE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_PANE_ID",
+    ] {
+        command.env_remove(key);
+    }
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("HERDR_PLUGIN_") {
+            command.env_remove(key);
+        }
+    }
+}
+
+fn build_platform_supported(
+    platforms: &Option<Vec<PluginPlatform>>,
+    plugin_platforms: &Option<Vec<PluginPlatform>>,
+) -> bool {
+    platforms
+        .as_ref()
+        .or(plugin_platforms.as_ref())
+        .is_none_or(|platforms| platforms.contains(&current_plugin_platform()))
+}
+
+fn current_plugin_platform() -> PluginPlatform {
+    if cfg!(target_os = "linux") {
+        PluginPlatform::Linux
+    } else if cfg!(target_os = "macos") {
+        PluginPlatform::Macos
+    } else {
+        PluginPlatform::Windows
+    }
+}
+
+fn plugin_platform_name(platform: PluginPlatform) -> &'static str {
+    match platform {
+        PluginPlatform::Linux => "linux",
+        PluginPlatform::Macos => "macos",
+        PluginPlatform::Windows => "windows",
     }
 }
 

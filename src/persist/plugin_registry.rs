@@ -114,6 +114,7 @@ mod tests {
             plugin_root: format!("/tmp/{id}"),
             enabled: true,
             platforms: None,
+            build: vec![],
             actions: vec![],
             events: vec![],
             panes: vec![],
@@ -196,6 +197,7 @@ mod tests {
                 plugin_root: "/tmp/example.reload".to_string(),
                 enabled: true, // caller would pass stored enabled; fresh parse returns true
                 platforms: None,
+                build: vec![],
                 actions: vec![],
                 events: vec![],
                 panes: vec![],

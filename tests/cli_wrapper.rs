@@ -2918,6 +2918,9 @@ name = "Worktree Bootstrap"
 version = "0.1.0"
 platforms = ["linux", "macos", "windows"]
 
+[[build]]
+command = ["sh", "-c", "echo built > built.txt; if [ -n \"$HERDR_SESSION\" ]; then echo \"$HERDR_SESSION\" > leaked-session.txt; fi"]
+
 [[actions]]
 id = "bootstrap"
 title = "Bootstrap"
@@ -2954,7 +2957,10 @@ command = ["sh", "-c", "echo bootstrap"]
             "ogulcancelik/herdr-plugin-examples/worktree-bootstrap",
             "--yes",
         ],
-        &[("GIT_CONFIG_GLOBAL", &git_config)],
+        &[
+            ("GIT_CONFIG_GLOBAL", &git_config),
+            ("HERDR_SESSION", Path::new("leaked-session")),
+        ],
     );
     assert!(
         install.status.success(),
@@ -2977,6 +2983,20 @@ command = ["sh", "-c", "echo bootstrap"]
     assert!(plugin["source"]["resolved_commit"].as_str().is_some());
     let managed_path = PathBuf::from(plugin["source"]["managed_path"].as_str().unwrap());
     assert!(managed_path.exists(), "managed checkout should exist");
+    assert!(
+        managed_path
+            .join("worktree-bootstrap")
+            .join("built.txt")
+            .exists(),
+        "build artifact should be preserved in managed checkout"
+    );
+    assert!(
+        !managed_path
+            .join("worktree-bootstrap")
+            .join("leaked-session.txt")
+            .exists(),
+        "build command should not inherit HERDR_SESSION"
+    );
 
     let uninstall = run_named_cli(
         &config_home,
@@ -3006,6 +3026,197 @@ command = ["sh", "-c", "echo bootstrap"]
         &["--session", "plugins", "plugin", "list", "--json"],
     );
     assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn plugin_install_build_failure_does_not_register_or_create_checkout() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let source_repo = base.join("source-repo");
+    let plugin_dir = source_repo.join("build-fail");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    create_committed_repo(&source_repo);
+    fs::write(
+        plugin_dir.join("herdr-plugin.toml"),
+        r#"
+id = "example.build-fail"
+name = "Build Fail"
+version = "0.1.0"
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["sh", "-c", "echo before-fail && echo failed-build >&2 && exit 7"]
+
+[[actions]]
+id = "run"
+title = "Run"
+command = ["sh", "-c", "echo should-not-install"]
+"#,
+    )
+    .unwrap();
+    run_git(&source_repo, &["add", "build-fail/herdr-plugin.toml"]);
+    run_git(
+        &source_repo,
+        &["commit", "--quiet", "-m", "add failing plugin"],
+    );
+
+    fs::create_dir_all(&config_home).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    let git_config = base.join("gitconfig");
+    fs::write(
+        &git_config,
+        format!(
+            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
+            source_repo.display()
+        ),
+    )
+    .unwrap();
+
+    let install = run_named_cli_with_env(
+        &config_home,
+        &runtime_dir,
+        &[
+            "--session",
+            "plugins",
+            "plugin",
+            "install",
+            "ogulcancelik/herdr-plugin-examples/build-fail",
+            "--yes",
+        ],
+        &[("GIT_CONFIG_GLOBAL", &git_config)],
+    );
+    assert!(
+        !install.status.success(),
+        "install should fail when build command fails"
+    );
+    let stderr = String::from_utf8_lossy(&install.stderr);
+    assert!(stderr.contains("plugin build failed"), "{stderr}");
+    assert!(stderr.contains("before-fail"), "{stderr}");
+    assert!(stderr.contains("failed-build"), "{stderr}");
+
+    let listed = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "plugins", "plugin", "list", "--json"],
+    );
+    assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
+
+    let managed_checkout = config_home
+        .join("herdr-dev")
+        .join("plugins")
+        .join("github")
+        .join("example.build-fail");
+    assert!(
+        !managed_checkout.exists(),
+        "failed build should not create managed checkout"
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn plugin_install_rejects_manifest_changed_by_build() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let source_repo = base.join("source-repo");
+    let plugin_dir = source_repo.join("manifest-mutator");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    create_committed_repo(&source_repo);
+    fs::write(
+        plugin_dir.join("herdr-plugin.toml"),
+        r#"
+id = "example.manifest-mutator"
+name = "Manifest Mutator"
+version = "0.1.0"
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["sh", "mutate.sh"]
+
+[[actions]]
+id = "run"
+title = "Run reviewed command"
+command = ["sh", "-c", "echo reviewed"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        plugin_dir.join("mutate.sh"),
+        r#"cat > herdr-plugin.toml <<'EOF'
+id = "example.manifest-mutator"
+name = "Manifest Mutator"
+version = "0.1.0"
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "run"
+title = "Run changed command"
+command = ["sh", "-c", "echo changed"]
+EOF
+"#,
+    )
+    .unwrap();
+    run_git(&source_repo, &["add", "manifest-mutator"]);
+    run_git(
+        &source_repo,
+        &["commit", "--quiet", "-m", "add mutating plugin"],
+    );
+
+    fs::create_dir_all(&config_home).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    let git_config = base.join("gitconfig");
+    fs::write(
+        &git_config,
+        format!(
+            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
+            source_repo.display()
+        ),
+    )
+    .unwrap();
+
+    let install = run_named_cli_with_env(
+        &config_home,
+        &runtime_dir,
+        &[
+            "--session",
+            "plugins",
+            "plugin",
+            "install",
+            "ogulcancelik/herdr-plugin-examples/manifest-mutator",
+            "--yes",
+        ],
+        &[("GIT_CONFIG_GLOBAL", &git_config)],
+    );
+    assert!(
+        !install.status.success(),
+        "install should fail when build changes reviewed manifest"
+    );
+    let stderr = String::from_utf8_lossy(&install.stderr);
+    assert!(
+        stderr.contains("plugin build changed herdr-plugin.toml after install preview"),
+        "{stderr}"
+    );
+
+    let listed = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "plugins", "plugin", "list", "--json"],
+    );
+    assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
+
+    let managed_checkout = config_home
+        .join("herdr-dev")
+        .join("plugins")
+        .join("github")
+        .join("example.manifest-mutator");
+    assert!(
+        !managed_checkout.exists(),
+        "manifest mutation should not create managed checkout"
+    );
 
     cleanup_test_base(&base);
 }
