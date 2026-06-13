@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Added
+- Added local plugin v1 support with `plugin.link/list/unlink/enable/disable`,
+  manifest-declared actions, event hooks, managed plugin panes, link handlers,
+  command logs, keybinding integration, and authoring docs under Preview docs.
+- Added `herdr plugin install <owner>/<repo>[/subdir...]`, `plugin uninstall`,
+  source metadata in `plugin.list`, offline registry fallback, and a
+  human-readable default `plugin list` with `--json` for scripts.
+- Added supporting plugin host APIs for `pane.current`, `pane.process_info`,
+  `client.window_title.set/clear`, `layout.export/apply`, plugin pane placement,
+  plugin invocation context/env injection, and plugin pane ownership across
+  `pane.move`.
 - Added `pane.move` and `herdr pane move` to relocate a running pane into another tab, a new tab, or a new workspace without restarting its terminal process. (#299)
 
 ### Changed

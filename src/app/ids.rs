@@ -40,6 +40,26 @@ impl App {
         ))
     }
 
+    pub(super) fn pane_launch_env(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        extra_env: Vec<(String, String)>,
+    ) -> Option<crate::pane::PaneLaunchEnv> {
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
+        let tab_id = self.public_tab_id(ws_idx, tab_idx)?;
+        let pane_id = self.public_pane_id(ws_idx, pane_id)?;
+        Some(
+            crate::pane::PaneLaunchEnv::from_extra(extra_env).with_identity(
+                workspace_id,
+                tab_id,
+                pane_id,
+            ),
+        )
+    }
+
     pub(super) fn parse_workspace_id(&self, id: &str) -> Option<usize> {
         self.state
             .workspaces

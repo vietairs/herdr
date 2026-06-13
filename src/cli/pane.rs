@@ -1,10 +1,11 @@
 use crate::api::schema::{
-    Method, PaneDirection, PaneEdgesParams, PaneFocusDirectionParams, PaneLayoutParams,
-    PaneListParams, PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneReadParams,
-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams,
-    ReadFormat, ReadSource, Request, SplitDirection,
+    Method, PaneCurrentParams, PaneDirection, PaneEdgesParams, PaneFocusDirectionParams,
+    PaneLayoutParams, PaneListParams, PaneMoveDestination, PaneMoveParams, PaneNeighborParams,
+    PaneProcessInfoParams, PaneReadParams, PaneReleaseAgentParams, PaneRenameParams,
+    PaneReportAgentParams, PaneReportAgentSessionParams, PaneReportMetadataParams,
+    PaneResizeParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams,
+    PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
+    SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -15,8 +16,10 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "list" => pane_list(&args[1..]),
+        "current" => pane_current(&args[1..]),
         "get" => pane_get(&args[1..]),
         "layout" => pane_layout(&args[1..]),
+        "process-info" => pane_process_info(&args[1..]),
         "neighbor" => pane_neighbor(&args[1..]),
         "edges" => pane_edges(&args[1..]),
         "focus" => pane_focus(&args[1..]),
@@ -91,6 +94,49 @@ fn pane_get(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+fn pane_current(args: &[String]) -> std::io::Result<i32> {
+    let env_pane_id = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let caller_pane_id = match parse_pane_current_args(args, env_pane_id.as_deref()) {
+        Ok(caller_pane_id) => caller_pane_id,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:current".into(),
+        method: Method::PaneCurrent(PaneCurrentParams { caller_pane_id }),
+    })?)
+}
+
+fn parse_pane_current_args(
+    args: &[String],
+    env_pane_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let mut caller_pane_id = env_pane_id.map(super::normalize_pane_id);
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pane".into());
+                };
+                caller_pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--current" => {
+                caller_pane_id = env_pane_id.map(super::normalize_pane_id);
+                index += 1;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+    Ok(caller_pane_id)
+}
+
 fn pane_layout(args: &[String]) -> std::io::Result<i32> {
     let pane_id = match parse_optional_current_pane_args(args) {
         Ok(pane_id) => pane_id,
@@ -103,6 +149,21 @@ fn pane_layout(args: &[String]) -> std::io::Result<i32> {
     super::print_response(&super::send_request(&Request {
         id: "cli:pane:layout".into(),
         method: Method::PaneLayout(PaneLayoutParams { pane_id }),
+    })?)
+}
+
+fn pane_process_info(args: &[String]) -> std::io::Result<i32> {
+    let pane_id = match parse_optional_current_pane_args(args) {
+        Ok(pane_id) => pane_id,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:process_info".into(),
+        method: Method::PaneProcessInfo(PaneProcessInfoParams { pane_id }),
     })?)
 }
 
@@ -483,6 +544,7 @@ fn pane_split(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn parse_pane_split_args(args: &[String]) -> Result<PaneSplitParams, String> {
+    let mut env = std::collections::HashMap::new();
     let mut pane_id = None;
     let mut direction = None;
     let mut ratio = None;
@@ -546,13 +608,21 @@ fn parse_pane_split_args(args: &[String]) -> Result<PaneSplitParams, String> {
                 focus = false;
                 index += 1;
             }
+            "--env" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --env".into());
+                };
+                let (key, value) = super::parse_env_assignment(value)?;
+                env.insert(key, value);
+                index += 2;
+            }
             other => return Err(format!("unknown option: {other}")),
         }
     }
 
     let Some(direction) = direction else {
         return Err(
-            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--focus] [--no-focus]"
+            "usage: herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]"
                 .into(),
         );
     };
@@ -564,6 +634,7 @@ fn parse_pane_split_args(args: &[String]) -> Result<PaneSplitParams, String> {
         ratio,
         cwd,
         focus,
+        env,
     })
 }
 
@@ -1348,8 +1419,10 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
 fn print_pane_help() {
     eprintln!("herdr pane commands:");
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
+    eprintln!("  herdr pane current [--pane ID|--current]");
     eprintln!("  herdr pane get <pane_id>");
     eprintln!("  herdr pane layout [--pane ID|--current]");
+    eprintln!("  herdr pane process-info [--pane ID|--current]");
     eprintln!("  herdr pane neighbor --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  herdr pane edges [--pane ID|--current]");
     eprintln!("  herdr pane focus --direction left|right|up|down [--pane ID|--current]");
@@ -1360,7 +1433,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane rename <pane_id> <label>|--clear");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!(
-        "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--focus] [--no-focus]"
+        "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--focus] [--no-focus]"
     );
     eprintln!("  herdr pane swap --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  herdr pane swap --source-pane ID --target-pane ID");
@@ -1416,6 +1489,35 @@ mod tests {
 
         assert_eq!(params.target_pane_id, Some("issue-2".into()));
         assert_eq!(params.direction, crate::api::schema::SplitDirection::Right);
+    }
+
+    #[test]
+    fn parse_pane_current_args_uses_env_pane_by_default() {
+        let pane_id = parse_pane_current_args(&args(&[]), Some("issue-1")).unwrap();
+
+        assert_eq!(pane_id, Some("issue-1".into()));
+    }
+
+    #[test]
+    fn parse_pane_current_args_accepts_explicit_pane() {
+        let pane_id =
+            parse_pane_current_args(&args(&["--pane", "issue-2"]), Some("issue-1")).unwrap();
+
+        assert_eq!(pane_id, Some("issue-2".into()));
+    }
+
+    #[test]
+    fn parse_pane_current_args_current_keeps_env_pane() {
+        let pane_id = parse_pane_current_args(&args(&["--current"]), Some("issue-1")).unwrap();
+
+        assert_eq!(pane_id, Some("issue-1".into()));
+    }
+
+    #[test]
+    fn parse_pane_current_args_without_env_falls_back_to_focused_pane() {
+        let pane_id = parse_pane_current_args(&args(&[]), None).unwrap();
+
+        assert_eq!(pane_id, None);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 #[cfg(test)]
 use crate::layout::TileLayout;
-use crate::pane::PaneState;
+use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 mod aggregate;
@@ -26,7 +26,7 @@ pub use self::{
         derive_label_from_cwd, git_branch, git_space_metadata, git_status_cache_key,
         GitSpaceMetadata, GitStatusCacheEntry,
     },
-    tab::Tab,
+    tab::{NewPane, Tab},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -111,6 +111,10 @@ pub(crate) fn public_workspace_number(id: &str) -> Option<usize> {
 
 fn public_pane_id_for_number(workspace_id: &str, pane_number: usize) -> String {
     format!("{workspace_id}:p{}", encode_public_number(pane_number))
+}
+
+fn public_tab_id_for_number(workspace_id: &str, tab_number: usize) -> String {
+    format!("{workspace_id}:t{}", encode_public_number(tab_number))
 }
 
 pub(crate) fn reserve_workspace_ids(workspaces: &[Workspace]) {
@@ -222,6 +226,9 @@ impl Workspace {
         }
     }
 
+    // Test modules construct workspaces through the default constructor; production paths
+    // use the env-aware variant so pane identity env is always explicit.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(
         initial_cwd: PathBuf,
         rows: u16,
@@ -232,6 +239,33 @@ impl Workspace {
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
+        Self::new_with_extra_env(
+            initial_cwd,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            shell_config,
+            events,
+            render_notify,
+            render_dirty,
+            Vec::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_extra_env(
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+        extra_env: Vec<(String, String)>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_tab(
             initial_cwd,
@@ -244,9 +278,12 @@ impl Workspace {
             render_notify,
             render_dirty,
             None,
+            extra_env,
         )
     }
 
+    // Kept for tests that do not need launch-env customization.
+    #[allow(dead_code)]
     pub fn new_argv_command(
         initial_cwd: PathBuf,
         rows: u16,
@@ -257,6 +294,33 @@ impl Workspace {
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
+        Self::new_argv_command_with_extra_env(
+            initial_cwd,
+            rows,
+            cols,
+            argv,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            events,
+            render_notify,
+            render_dirty,
+            Vec::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_argv_command_with_extra_env(
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        argv: &[String],
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+        extra_env: Vec<(String, String)>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_tab(
             initial_cwd,
@@ -269,6 +333,7 @@ impl Workspace {
             render_notify,
             render_dirty,
             Some(argv),
+            extra_env,
         )
     }
 
@@ -284,9 +349,14 @@ impl Workspace {
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
         argv: Option<&[String]>,
+        extra_env: Vec<(String, String)>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         let id = generate_workspace_id();
-        let root_public_pane_id = public_pane_id_for_number(&id, 1);
+        let launch_env = PaneLaunchEnv::from_extra(extra_env).with_identity(
+            id.clone(),
+            public_tab_id_for_number(&id, 1),
+            public_pane_id_for_number(&id, 1),
+        );
         let (tab, terminal, runtime) = if let Some(argv) = argv {
             Tab::new_argv_command(
                 1,
@@ -296,10 +366,10 @@ impl Workspace {
                 argv,
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                &launch_env,
                 events,
                 render_notify,
                 render_dirty,
-                Some(&root_public_pane_id),
             )?
         } else {
             Tab::new(
@@ -310,10 +380,10 @@ impl Workspace {
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 shell_config,
+                &launch_env,
                 events,
                 render_notify,
                 render_dirty,
-                Some(&root_public_pane_id),
             )?
         };
         let mut public_pane_numbers = HashMap::new();
@@ -375,6 +445,7 @@ impl Workspace {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
         self.create_tab_with_runtime(
             rows,
@@ -384,6 +455,29 @@ impl Workspace {
             host_terminal_theme,
             shell_config,
             None,
+            extra_env,
+        )
+    }
+
+    pub fn create_tab_argv_command(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        cwd: PathBuf,
+        argv: &[String],
+        extra_env: Vec<(String, String)>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
+        self.create_tab_with_runtime(
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            Some(argv),
+            extra_env,
         )
     }
 
@@ -396,11 +490,12 @@ impl Workspace {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
         argv: Option<&[String]>,
+        extra_env: Vec<(String, String)>,
     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
         let number = self.next_public_tab_number;
         self.next_public_tab_number += 1;
         let pane_number = self.next_public_pane_number;
-        let public_pane_id = public_pane_id_for_number(&self.id, pane_number);
+        let launch_env = self.launch_env_for_new_pane(number, pane_number, extra_env);
         let events = self
             .active_tab()
             .map(|tab| tab.events.clone())
@@ -423,10 +518,10 @@ impl Workspace {
                 argv,
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                &launch_env,
                 events,
                 render_notify,
                 render_dirty,
-                Some(&public_pane_id),
             )?
         } else {
             Tab::new(
@@ -437,10 +532,10 @@ impl Workspace {
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 shell_config,
+                &launch_env,
                 events,
                 render_notify,
                 render_dirty,
-                Some(&public_pane_id),
             )?
         };
         self.register_new_pane_with_number(tab.root_pane, pane_number);
@@ -502,9 +597,14 @@ impl Workspace {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
     ) -> std::io::Result<crate::workspace::tab::NewPane> {
         let pane_number = self.next_public_pane_number;
-        let public_pane_id = public_pane_id_for_number(&self.id, pane_number);
+        let tab_number = self
+            .active_tab()
+            .map(|tab| tab.number)
+            .expect("workspace must always have at least one tab");
+        let launch_env = self.launch_env_for_new_pane(tab_number, pane_number, extra_env);
         let new_pane = self
             .active_tab_mut()
             .expect("workspace must always have at least one tab")
@@ -516,7 +616,7 @@ impl Workspace {
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 shell_config,
-                Some(&public_pane_id),
+                &launch_env,
             )?;
         self.register_new_pane_with_number(new_pane.pane_id, pane_number);
         Ok(new_pane)
@@ -530,12 +630,16 @@ impl Workspace {
         cols: u16,
         cwd: Option<PathBuf>,
         command: &str,
-        extra_env: &[(String, String)],
+        extra_env: Vec<(String, String)>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
     ) -> std::io::Result<crate::workspace::tab::NewPane> {
         let pane_number = self.next_public_pane_number;
-        let public_pane_id = public_pane_id_for_number(&self.id, pane_number);
+        let tab_number = self
+            .active_tab()
+            .map(|tab| tab.number)
+            .expect("workspace must always have at least one tab");
+        let launch_env = self.launch_env_for_new_pane(tab_number, pane_number, extra_env);
         let new_pane = self
             .active_tab_mut()
             .expect("workspace must always have at least one tab")
@@ -545,10 +649,9 @@ impl Workspace {
                 cols,
                 cwd,
                 command,
-                extra_env,
+                &launch_env,
                 scrollback_limit_bytes,
                 host_terminal_theme,
-                Some(&public_pane_id),
             )?;
         self.register_new_pane_with_number(new_pane.pane_id, pane_number);
         Ok(new_pane)
@@ -564,6 +667,7 @@ impl Workspace {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
         focus_new_pane: bool,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         self.split_pane_with_runtime(
@@ -576,6 +680,7 @@ impl Workspace {
             scrollback_limit_bytes,
             host_terminal_theme,
             shell_config,
+            extra_env,
             focus_new_pane,
             None,
         )
@@ -593,6 +698,7 @@ impl Workspace {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
         focus_new_pane: bool,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         self.split_pane_with_runtime(
@@ -605,6 +711,7 @@ impl Workspace {
             scrollback_limit_bytes,
             host_terminal_theme,
             shell_config,
+            extra_env,
             focus_new_pane,
             None,
         )
@@ -619,6 +726,7 @@ impl Workspace {
         cols: u16,
         cwd: Option<PathBuf>,
         argv: &[String],
+        extra_env: Vec<(String, String)>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         focus_new_pane: bool,
@@ -633,6 +741,38 @@ impl Workspace {
             scrollback_limit_bytes,
             host_terminal_theme,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            extra_env,
+            focus_new_pane,
+            Some(argv),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_pane_argv_command_with_ratio(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        ratio: f32,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        argv: &[String],
+        extra_env: Vec<(String, String)>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        focus_new_pane: bool,
+    ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
+        self.split_pane_with_runtime(
+            pane_id,
+            direction,
+            Some(ratio),
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            extra_env,
             focus_new_pane,
             Some(argv),
         )
@@ -650,26 +790,41 @@ impl Workspace {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
         focus_new_pane: bool,
         argv: Option<&[String]>,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         let tab_idx = self.find_tab_index_for_pane(pane_id)?;
         let pane_number = self.next_public_pane_number;
-        let public_pane_id = public_pane_id_for_number(&self.id, pane_number);
+        let tab_number = self.tabs[tab_idx].number;
+        let launch_env = self.launch_env_for_new_pane(tab_number, pane_number, extra_env);
         let tab = &mut self.tabs[tab_idx];
         let previous_focus = tab.layout.focused();
         tab.layout.focus_pane(pane_id);
         let new_pane = match if let Some(argv) = argv {
-            tab.split_focused_argv_command(
-                direction,
-                rows,
-                cols,
-                cwd,
-                argv,
-                scrollback_limit_bytes,
-                host_terminal_theme,
-                Some(&public_pane_id),
-            )
+            match ratio {
+                Some(ratio) => tab.split_focused_argv_command_with_ratio(
+                    direction,
+                    ratio,
+                    rows,
+                    cols,
+                    cwd,
+                    argv,
+                    &launch_env,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                ),
+                None => tab.split_focused_argv_command(
+                    direction,
+                    rows,
+                    cols,
+                    cwd,
+                    argv,
+                    &launch_env,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                ),
+            }
         } else {
             match ratio {
                 Some(ratio) => tab.split_focused_with_ratio(
@@ -681,7 +836,7 @@ impl Workspace {
                     scrollback_limit_bytes,
                     host_terminal_theme,
                     shell_config,
-                    Some(&public_pane_id),
+                    &launch_env,
                 ),
                 None => tab.split_focused(
                     direction,
@@ -691,7 +846,7 @@ impl Workspace {
                     scrollback_limit_bytes,
                     host_terminal_theme,
                     shell_config,
-                    Some(&public_pane_id),
+                    &launch_env,
                 ),
             }
         } {
@@ -834,6 +989,19 @@ impl Workspace {
 
     pub fn public_pane_number(&self, pane_id: PaneId) -> Option<usize> {
         self.public_pane_numbers.get(&pane_id).copied()
+    }
+
+    fn launch_env_for_new_pane(
+        &self,
+        tab_number: usize,
+        pane_number: usize,
+        extra_env: Vec<(String, String)>,
+    ) -> PaneLaunchEnv {
+        PaneLaunchEnv::from_extra(extra_env).with_identity(
+            self.id.clone(),
+            public_tab_id_for_number(&self.id, tab_number),
+            public_pane_id_for_number(&self.id, pane_number),
+        )
     }
 
     pub fn public_tab_number(&self, tab_idx: usize) -> Option<usize> {

@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
 use crate::layout::{Node, PaneId, TileLayout};
-use crate::pane::PaneState;
+use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 pub(crate) type DetachedPane = (PaneId, TerminalId);
@@ -27,10 +27,11 @@ pub struct NewPane {
 enum SplitCommand<'a> {
     Shell {
         command: &'a str,
-        extra_env: &'a [(String, String)],
+        launch_env: &'a PaneLaunchEnv,
     },
     Argv {
         argv: &'a [String],
+        launch_env: &'a PaneLaunchEnv,
     },
 }
 
@@ -59,10 +60,10 @@ impl Tab {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        launch_env: &PaneLaunchEnv,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
-        public_pane_id: Option<&str>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_runtime(
             number,
@@ -72,11 +73,11 @@ impl Tab {
             scrollback_limit_bytes,
             host_terminal_theme,
             shell_config,
+            launch_env,
             events,
             render_notify,
             render_dirty,
             None,
-            public_pane_id,
         )
     }
 
@@ -88,10 +89,10 @@ impl Tab {
         argv: &[String],
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        launch_env: &PaneLaunchEnv,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
-        public_pane_id: Option<&str>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_runtime(
             number,
@@ -101,11 +102,11 @@ impl Tab {
             scrollback_limit_bytes,
             host_terminal_theme,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            launch_env,
             events,
             render_notify,
             render_dirty,
             Some(argv),
-            public_pane_id,
         )
     }
 
@@ -118,11 +119,11 @@ impl Tab {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        launch_env: &PaneLaunchEnv,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
         argv: Option<&[String]>,
-        public_pane_id: Option<&str>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         let (layout, root_id) = TileLayout::new();
         let runtime = if let Some(argv) = argv {
@@ -132,12 +133,12 @@ impl Tab {
                 cols,
                 initial_cwd.clone(),
                 argv,
+                launch_env,
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 events.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
-                public_pane_id,
             )?
         } else {
             TerminalRuntime::spawn(
@@ -148,10 +149,10 @@ impl Tab {
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 shell_config,
+                launch_env,
                 events.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
-                public_pane_id,
             )?
         };
 
@@ -207,7 +208,7 @@ impl Tab {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
-        public_pane_id: Option<&str>,
+        launch_env: &PaneLaunchEnv,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
@@ -218,8 +219,8 @@ impl Tab {
             scrollback_limit_bytes,
             host_terminal_theme,
             shell_config,
+            launch_env,
             None,
-            public_pane_id,
         )
     }
 
@@ -233,7 +234,7 @@ impl Tab {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
-        public_pane_id: Option<&str>,
+        launch_env: &PaneLaunchEnv,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
@@ -244,8 +245,8 @@ impl Tab {
             scrollback_limit_bytes,
             host_terminal_theme,
             shell_config,
+            launch_env,
             None,
-            public_pane_id,
         )
     }
 
@@ -256,10 +257,9 @@ impl Tab {
         cols: u16,
         cwd: Option<PathBuf>,
         command: &str,
-        extra_env: &[(String, String)],
+        launch_env: &PaneLaunchEnv,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        public_pane_id: Option<&str>,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
@@ -270,8 +270,11 @@ impl Tab {
             scrollback_limit_bytes,
             host_terminal_theme,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
-            Some(SplitCommand::Shell { command, extra_env }),
-            public_pane_id,
+            launch_env,
+            Some(SplitCommand::Shell {
+                command,
+                launch_env,
+            }),
         )
     }
 
@@ -282,9 +285,9 @@ impl Tab {
         cols: u16,
         cwd: Option<PathBuf>,
         argv: &[String],
+        launch_env: &PaneLaunchEnv,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        public_pane_id: Option<&str>,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
@@ -295,8 +298,34 @@ impl Tab {
             scrollback_limit_bytes,
             host_terminal_theme,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
-            Some(SplitCommand::Argv { argv }),
-            public_pane_id,
+            launch_env,
+            Some(SplitCommand::Argv { argv, launch_env }),
+        )
+    }
+
+    pub fn split_focused_argv_command_with_ratio(
+        &mut self,
+        direction: Direction,
+        ratio: f32,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        argv: &[String],
+        launch_env: &PaneLaunchEnv,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<NewPane> {
+        self.split_focused_with_runtime(
+            direction,
+            Some(ratio),
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            launch_env,
+            Some(SplitCommand::Argv { argv, launch_env }),
         )
     }
 
@@ -310,8 +339,8 @@ impl Tab {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        launch_env: &PaneLaunchEnv,
         command: Option<SplitCommand<'_>>,
-        public_pane_id: Option<&str>,
     ) -> std::io::Result<NewPane> {
         let previous_focus = self.layout.focused();
         let new_id = match ratio {
@@ -320,40 +349,40 @@ impl Tab {
         };
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-        let launch_argv = if let Some(SplitCommand::Argv { argv }) = &command {
+        let launch_argv = if let Some(SplitCommand::Argv { argv, .. }) = &command {
             Some((*argv).to_vec())
         } else {
             None
         };
         let runtime = match command {
-            Some(SplitCommand::Shell { command, extra_env }) => {
-                TerminalRuntime::spawn_shell_command(
-                    new_id,
-                    rows,
-                    cols,
-                    actual_cwd.clone(),
-                    command,
-                    extra_env,
-                    scrollback_limit_bytes,
-                    host_terminal_theme,
-                    self.events.clone(),
-                    self.render_notify.clone(),
-                    self.render_dirty.clone(),
-                    public_pane_id,
-                )
-            }
-            Some(SplitCommand::Argv { argv }) => TerminalRuntime::spawn_argv_command(
+            Some(SplitCommand::Shell {
+                command,
+                launch_env,
+            }) => TerminalRuntime::spawn_shell_command(
                 new_id,
                 rows,
                 cols,
                 actual_cwd.clone(),
-                argv,
+                command,
+                launch_env,
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 self.events.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
-                public_pane_id,
+            ),
+            Some(SplitCommand::Argv { argv, launch_env }) => TerminalRuntime::spawn_argv_command(
+                new_id,
+                rows,
+                cols,
+                actual_cwd.clone(),
+                argv,
+                launch_env,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                self.events.clone(),
+                self.render_notify.clone(),
+                self.render_dirty.clone(),
             ),
             None => TerminalRuntime::spawn(
                 new_id,
@@ -363,10 +392,10 @@ impl Tab {
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 shell_config,
+                launch_env,
                 self.events.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
-                public_pane_id,
             ),
         };
         let runtime = match runtime {
