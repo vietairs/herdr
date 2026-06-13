@@ -3092,10 +3092,21 @@ command = ["sh", "-c", "echo should-not-install"]
         !install.status.success(),
         "install should fail when build command fails"
     );
+    assert_eq!(install.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&install.stderr);
-    assert!(stderr.contains("plugin build failed"), "{stderr}");
-    assert!(stderr.contains("before-fail"), "{stderr}");
-    assert!(stderr.contains("failed-build"), "{stderr}");
+    assert!(stderr.contains("error: plugin build failed"), "{stderr}");
+    assert!(stderr.contains("  plugin: example.build-fail"), "{stderr}");
+    assert!(stderr.contains("  build: 1/1"), "{stderr}");
+    assert!(stderr.contains("  cwd: "), "{stderr}");
+    assert!(
+        stderr.contains("  command: sh -c echo before-fail && echo failed-build >&2 && exit 7"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("  status: exit status: 7"), "{stderr}");
+    assert!(stderr.contains("stdout:\nbefore-fail"), "{stderr}");
+    assert!(stderr.contains("stderr:\nfailed-build"), "{stderr}");
+    assert!(stderr.contains("Plugin was not installed."), "{stderr}");
+    assert!(!stderr.contains("Error: Custom"), "{stderr}");
 
     let listed = run_named_cli_json(
         &config_home,
@@ -3113,6 +3124,94 @@ command = ["sh", "-c", "echo should-not-install"]
         !managed_checkout.exists(),
         "failed build should not create managed checkout"
     );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn plugin_install_build_spawn_failure_prints_clean_error() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let source_repo = base.join("source-repo");
+    let plugin_dir = source_repo.join("missing-tool");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    create_committed_repo(&source_repo);
+    fs::write(
+        plugin_dir.join("herdr-plugin.toml"),
+        r#"
+id = "example.missing-tool"
+name = "Missing Tool"
+version = "0.1.0"
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["definitely-missing-herdr-build-tool-xyz"]
+
+[[actions]]
+id = "run"
+title = "Run"
+command = ["sh", "-c", "echo should-not-install"]
+"#,
+    )
+    .unwrap();
+    run_git(&source_repo, &["add", "missing-tool/herdr-plugin.toml"]);
+    run_git(
+        &source_repo,
+        &["commit", "--quiet", "-m", "add missing tool plugin"],
+    );
+
+    fs::create_dir_all(&config_home).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    let git_config = base.join("gitconfig");
+    fs::write(
+        &git_config,
+        format!(
+            "[url \"file://{}\"]\n    insteadOf = https://github.com/ogulcancelik/herdr-plugin-examples.git\n",
+            source_repo.display()
+        ),
+    )
+    .unwrap();
+
+    let install = run_named_cli_with_env(
+        &config_home,
+        &runtime_dir,
+        &[
+            "--session",
+            "plugins",
+            "plugin",
+            "install",
+            "ogulcancelik/herdr-plugin-examples/missing-tool",
+            "--yes",
+        ],
+        &[("GIT_CONFIG_GLOBAL", &git_config)],
+    );
+    assert!(
+        !install.status.success(),
+        "install should fail when build command cannot start"
+    );
+    assert_eq!(install.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&install.stderr);
+    assert!(stderr.contains("error: plugin build failed"), "{stderr}");
+    assert!(
+        stderr.contains("  plugin: example.missing-tool"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("  build: 1/1"), "{stderr}");
+    assert!(
+        stderr.contains("  command: definitely-missing-herdr-build-tool-xyz"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("  error: failed to start:"), "{stderr}");
+    assert!(stderr.contains("Plugin was not installed."), "{stderr}");
+    assert!(!stderr.contains("Error: Custom"), "{stderr}");
+
+    let listed = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "plugins", "plugin", "list", "--json"],
+    );
+    assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
 
     cleanup_test_base(&base);
 }

@@ -72,7 +72,9 @@ Build commands run during GitHub `plugin install` after confirmation and before
 Herdr registers the plugin. If a build command fails, install aborts and the
 plugin is not registered. `plugin link` does not run build commands; local
 authors build their working tree themselves. Build commands may generate files,
-but changing `herdr-plugin.toml` after the install preview aborts install.
+but changing `herdr-plugin.toml` after the install preview aborts install. Build
+failures show the plugin id, build index, working directory, command, exit
+status or spawn error, and capped stdout/stderr without interpreting tool output.
 
 Actions are manifest-only. Runtime action registration is not part of plugin
 v1. Pane commands are manifest-only too; `plugin.pane.open` selects a declared

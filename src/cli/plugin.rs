@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
@@ -180,7 +181,10 @@ fn plugin_install(args: &[String]) -> std::io::Result<i32> {
             eprintln!("plugin install cancelled");
             return Ok(0);
         }
-        run_plugin_build_commands(&preview_plugin, &manifest_root)?;
+        if let Err(err) = run_plugin_build_commands(&preview_plugin, &manifest_root) {
+            eprintln!("{err}");
+            return Ok(1);
+        }
         let post_build_plugin = load_cli_plugin_manifest(&manifest_root, true)?;
         ensure_manifest_unchanged_after_build(&preview_plugin, &post_build_plugin)?;
 
@@ -1100,12 +1104,22 @@ fn print_install_preview(
     }
 }
 
-fn run_plugin_build_commands(plugin: &InstalledPluginInfo, manifest_root: &Path) -> io::Result<()> {
-    for build in &plugin.build {
+fn run_plugin_build_commands(
+    plugin: &InstalledPluginInfo,
+    manifest_root: &Path,
+) -> Result<(), Box<PluginBuildFailure>> {
+    let total = plugin.build.len();
+    for (index, build) in plugin.build.iter().enumerate() {
         if !build_platform_supported(&build.platforms, &plugin.platforms) {
             continue;
         }
-        run_plugin_build_command(manifest_root, &build.command)?;
+        run_plugin_build_command(
+            &plugin.plugin_id,
+            index + 1,
+            total,
+            manifest_root,
+            &build.command,
+        )?;
     }
     Ok(())
 }
@@ -1122,9 +1136,24 @@ fn ensure_manifest_unchanged_after_build(
     ))
 }
 
-fn run_plugin_build_command(cwd: &Path, command: &[String]) -> io::Result<()> {
+fn run_plugin_build_command(
+    plugin_id: &str,
+    build_index: usize,
+    build_total: usize,
+    cwd: &Path,
+    command: &[String],
+) -> Result<(), Box<PluginBuildFailure>> {
+    let context = plugin_build_context(plugin_id, build_index, build_total, cwd, command);
     let Some(program) = command.first() else {
-        return Err(io::Error::other("plugin build command must not be empty"));
+        return Err(Box::new(PluginBuildFailure {
+            context,
+            kind: PluginBuildFailureKind::Start {
+                error: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "build command must not be empty",
+                ),
+            },
+        }));
     };
     let mut child = Command::new(program);
     child
@@ -1138,21 +1167,26 @@ fn run_plugin_build_command(cwd: &Path, command: &[String]) -> io::Result<()> {
     let mut child = match child.spawn() {
         Ok(child) => child,
         Err(err) => {
-            return Err(io::Error::other(format!(
-                "plugin build failed\n  command: {}\n  error: {err}",
-                command.join(" ")
-            )));
+            return Err(Box::new(PluginBuildFailure {
+                context,
+                kind: PluginBuildFailureKind::Start { error: err },
+            }));
         }
     };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdout_reader = stdout.map(|stdout| {
-        std::thread::spawn(move || read_capped_output(stdout, PLUGIN_BUILD_OUTPUT_MAX_BYTES))
+        std::thread::spawn(move || read_tail_capped_output(stdout, PLUGIN_BUILD_OUTPUT_MAX_BYTES))
     });
     let stderr_reader = stderr.map(|stderr| {
-        std::thread::spawn(move || read_capped_output(stderr, PLUGIN_BUILD_OUTPUT_MAX_BYTES))
+        std::thread::spawn(move || read_tail_capped_output(stderr, PLUGIN_BUILD_OUTPUT_MAX_BYTES))
     });
-    let status = child.wait()?;
+    let status = child.wait().map_err(|error| {
+        Box::new(PluginBuildFailure {
+            context: context.clone(),
+            kind: PluginBuildFailureKind::Wait { error },
+        })
+    })?;
     let stdout = stdout_reader
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
@@ -1162,30 +1196,149 @@ fn run_plugin_build_command(cwd: &Path, command: &[String]) -> io::Result<()> {
     if status.success() {
         return Ok(());
     }
-    Err(io::Error::other(format!(
-        "plugin build failed\n  command: {}\n  status: {status}\n  stdout:\n{}\n  stderr:\n{}",
-        command.join(" "),
-        stdout.trim_end(),
-        stderr.trim_end()
-    )))
+    Err(Box::new(PluginBuildFailure {
+        context,
+        kind: PluginBuildFailureKind::Exit {
+            status,
+            stdout,
+            stderr,
+        },
+    }))
 }
 
-fn read_capped_output(mut reader: impl Read, cap: usize) -> String {
+fn plugin_build_context(
+    plugin_id: &str,
+    build_index: usize,
+    build_total: usize,
+    cwd: &Path,
+    command: &[String],
+) -> PluginBuildContext {
+    PluginBuildContext {
+        plugin_id: plugin_id.to_string(),
+        build_index,
+        build_total,
+        cwd: cwd.display().to_string(),
+        command: command.to_vec(),
+    }
+}
+
+#[derive(Debug, Default)]
+struct CappedOutput {
+    text: String,
+    truncated: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PluginBuildContext {
+    plugin_id: String,
+    build_index: usize,
+    build_total: usize,
+    cwd: String,
+    command: Vec<String>,
+}
+
+#[derive(Debug)]
+struct PluginBuildFailure {
+    context: PluginBuildContext,
+    kind: PluginBuildFailureKind,
+}
+
+#[derive(Debug)]
+enum PluginBuildFailureKind {
+    Start {
+        error: io::Error,
+    },
+    Wait {
+        error: io::Error,
+    },
+    Exit {
+        status: ExitStatus,
+        stdout: CappedOutput,
+        stderr: CappedOutput,
+    },
+}
+
+impl fmt::Display for PluginBuildFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "error: plugin build failed")?;
+        write_build_context(f, &self.context)?;
+        match &self.kind {
+            PluginBuildFailureKind::Start { error } => {
+                writeln!(f, "  error: failed to start: {error}")?;
+            }
+            PluginBuildFailureKind::Wait { error } => {
+                writeln!(f, "  error: failed to wait for command: {error}")?;
+            }
+            PluginBuildFailureKind::Exit {
+                status,
+                stdout,
+                stderr,
+            } => {
+                writeln!(f, "  status: {status}")?;
+                write_output_section(f, "stderr", stderr)?;
+                write_output_section(f, "stdout", stdout)?;
+            }
+        }
+        writeln!(f)?;
+        write!(f, "Plugin was not installed.")
+    }
+}
+
+fn write_build_context(f: &mut fmt::Formatter<'_>, context: &PluginBuildContext) -> fmt::Result {
+    writeln!(f, "  plugin: {}", context.plugin_id)?;
+    writeln!(
+        f,
+        "  build: {}/{}",
+        context.build_index, context.build_total
+    )?;
+    writeln!(f, "  cwd: {}", context.cwd)?;
+    writeln!(f, "  command: {}", context.command.join(" "))
+}
+
+fn write_output_section(
+    f: &mut fmt::Formatter<'_>,
+    label: &str,
+    output: &CappedOutput,
+) -> fmt::Result {
+    let text = output.text.trim_end();
+    if text.is_empty() {
+        return Ok(());
+    }
+    writeln!(f)?;
+    if output.truncated {
+        writeln!(
+            f,
+            "{label}: showing last {PLUGIN_BUILD_OUTPUT_MAX_BYTES} bytes; earlier output omitted"
+        )?;
+    } else {
+        writeln!(f, "{label}:")?;
+    }
+    writeln!(f, "{text}")
+}
+
+fn read_tail_capped_output(mut reader: impl Read, cap: usize) -> CappedOutput {
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
+    let mut truncated = false;
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                let remaining = cap.saturating_sub(out.len());
-                if remaining > 0 {
-                    out.extend_from_slice(&buf[..n.min(remaining)]);
+                out.extend_from_slice(&buf[..n]);
+                if out.len() > cap {
+                    let excess = out.len() - cap;
+                    out.drain(0..excess);
+                    truncated = true;
                 }
             }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
     }
-    String::from_utf8_lossy(&out).to_string()
+    CappedOutput {
+        text: String::from_utf8_lossy(&out).to_string(),
+        truncated,
+    }
 }
 
 fn scrub_herdr_runtime_env(command: &mut Command) {
