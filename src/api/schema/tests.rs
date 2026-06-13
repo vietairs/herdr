@@ -651,6 +651,7 @@ fn plugin_link_list_unlink_round_trip() {
         method: Method::PluginLink(PluginLinkParams {
             path: "/plugins/worktree-bootstrap".into(),
             enabled: true,
+            source: None,
         }),
     };
     let json = serde_json::to_string(&link).unwrap();
@@ -717,6 +718,7 @@ fn plugin_link_list_unlink_round_trip() {
             action: "bootstrap".into(),
             platforms: None,
         }],
+        source: Default::default(),
         warnings: vec![],
     };
 

@@ -288,9 +288,9 @@ Worktree commands also emit lifecycle events. `worktree.create` emits `workspace
 
 ## Plugin APIs
 
-The plugin API is an early host surface for local workflow tools. A plugin is a local executable package with a `herdr-plugin.toml` manifest. Actions are manifest-only; runtime action registration is not part of v1.
+The plugin API is an early host surface for executable workflow tools. A plugin is a package with a `herdr-plugin.toml` manifest. Actions are manifest-only; runtime action registration is not part of v1.
 
-Linked plugins persist across restarts. Herdr writes a `plugins.json` registry file alongside `session.json` on every `plugin.link` and `plugin.unlink`. On startup, Herdr re-reads each manifest from its original path; if the file is missing or unparseable the entry is kept with a `warnings` field so `plugin.list` surfaces it.
+Installed and linked plugins persist across restarts. Herdr writes a `plugins.json` registry file alongside `session.json` on every `plugin.link` and `plugin.unlink`. The `herdr plugin install` CLI also writes the same registry when Herdr is not running, then startup loads it automatically. On startup, Herdr re-reads each manifest from its original path; if the file is missing or unparseable the entry is kept with a `warnings` field so `plugin.list` surfaces it.
 
 Event hook `on` values are validated against the known Herdr event names at link time. An unrecognised name is not an error — the link still succeeds — but the returned plugin info includes a warning (e.g. `"unknown event 'worktree.craeted'"`). Check the `warnings` field in the `plugin.link` and `plugin.list` responses.
 
@@ -298,6 +298,12 @@ Link a local plugin manifest:
 
 ```json
 {"id":"req_plugin_link","method":"plugin.link","params":{"path":"/path/to/plugin","enabled":true}}
+```
+
+`plugin.link` also accepts optional `source` metadata. The CLI uses this when it installs from GitHub so `plugin.list` can show origin, requested ref, resolved commit, and managed checkout path:
+
+```json
+{"id":"req_plugin_link","method":"plugin.link","params":{"path":"/managed/plugin/herdr-plugin.toml","enabled":true,"source":{"kind":"github","owner":"ogulcancelik","repo":"herdr-plugin-examples","subdir":"worktree-bootstrap","requested_ref":"main","resolved_commit":"abc123","managed_path":"/data/plugins/github/example.worktree-bootstrap","installed_unix_ms":1780000000000}}}
 ```
 
 The path can be a plugin directory containing `herdr-plugin.toml` or a direct manifest path. The manifest shape for this slice is:
