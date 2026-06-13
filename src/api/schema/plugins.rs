@@ -12,6 +12,8 @@ pub struct PluginLinkParams {
     pub path: String,
     #[serde(default = "super::common::default_true")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PluginSourceInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -50,10 +52,68 @@ pub struct InstalledPluginInfo {
     pub panes: Vec<PluginManifestPane>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_handlers: Vec<PluginManifestLinkHandler>,
+    #[serde(default)]
+    pub source: PluginSourceInfo,
     /// Warnings collected at link time or on registry load (e.g. unknown event names,
     /// missing manifest file). Non-fatal — the entry is kept and surfaced by plugin.list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSourceInfo {
+    #[serde(default)]
+    pub kind: PluginSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_unix_ms: Option<u64>,
+}
+
+impl Default for PluginSourceInfo {
+    fn default() -> Self {
+        Self {
+            kind: PluginSourceKind::Local,
+            owner: None,
+            repo: None,
+            subdir: None,
+            requested_ref: None,
+            resolved_commit: None,
+            managed_path: None,
+            installed_unix_ms: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginSourceKind {
+    #[default]
+    Local,
+    Github,
+}
+
+pub(crate) fn plugin_managed_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -3,9 +3,9 @@ title: Plugins
 description: Author local Herdr plugins with manifest actions, event hooks, and panes.
 ---
 
-Herdr plugins are local executable packages. A plugin directory contains
-`herdr-plugin.toml`; Herdr links that manifest, then runs declared action,
-event, and pane commands out of process.
+Herdr plugins are executable packages. A plugin directory contains
+`herdr-plugin.toml`; Herdr installs or links that manifest, then runs declared
+action, event, and pane commands out of process.
 
 ```toml
 id = "example.layout"
@@ -37,7 +37,15 @@ pattern = "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$"
 action = "apply"
 ```
 
-Link the plugin:
+Install an example plugin:
+
+```bash
+herdr plugin install ogulcancelik/herdr-plugin-examples/worktree-bootstrap
+herdr plugin list
+herdr plugin action list --plugin example.worktree-bootstrap
+```
+
+When you are authoring a local plugin, link the working directory instead:
 
 ```bash
 herdr plugin link /path/to/plugin
@@ -46,6 +54,12 @@ herdr plugin action invoke example.layout.apply
 herdr plugin pane open --plugin example.layout --entrypoint board
 herdr plugin log list --plugin example.layout
 ```
+
+The example cookbook repo is `ogulcancelik/herdr-plugin-examples`. It contains
+separate example plugins in subdirectories, including `worktree-bootstrap`,
+`dev-layout`, `gh-link-router`, and `agent-telegram-notify`. These are examples
+to copy, not maintained official plugins. A GitHub-topic marketplace is planned
+for discovery later; `plugin install` is the sharing path for now.
 
 Actions are manifest-only. Runtime action registration is not part of plugin
 v1. Pane commands are manifest-only too; `plugin.pane.open` selects a declared

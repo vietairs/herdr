@@ -10,7 +10,7 @@ use crate::api::schema::{
     PluginListParams, PluginLogListParams, PluginManifestAction, PluginManifestEventHook,
     PluginManifestLinkHandler, PluginManifestPane, PluginPaneCloseParams, PluginPaneFocusParams,
     PluginPaneInfo, PluginPaneOpenParams, PluginPanePlacement, PluginPlatform,
-    PluginSetEnabledParams, PluginUnlinkParams, ResponseResult,
+    PluginSetEnabledParams, PluginSourceInfo, PluginSourceKind, PluginUnlinkParams, ResponseResult,
 };
 use crate::app::App;
 
@@ -21,10 +21,16 @@ const MAX_PLUGIN_COMMANDS_IN_FLIGHT: usize = 32;
 const PLUGIN_COMMAND_LOG_LIMIT: usize = 200;
 impl App {
     pub(super) fn handle_plugin_link(&mut self, id: String, params: PluginLinkParams) -> String {
-        let plugin = match load_plugin_manifest(&params.path, params.enabled) {
+        let mut plugin = match load_plugin_manifest(&params.path, params.enabled) {
             Ok(plugin) => plugin,
             Err((code, message)) => return encode_error(id, code, message),
         };
+        if let Some(source) = params.source {
+            match normalize_plugin_source(&plugin, source) {
+                Ok(source) => plugin.source = source,
+                Err((code, message)) => return encode_error(id, code, message),
+            }
+        }
         let previous = self.state.installed_plugins.get(&plugin.plugin_id).cloned();
         self.state
             .installed_plugins
@@ -1543,8 +1549,51 @@ pub(crate) fn load_plugin_manifest(
         events,
         panes,
         link_handlers,
+        source: Default::default(),
         warnings,
     })
+}
+
+fn normalize_plugin_source(
+    plugin: &InstalledPluginInfo,
+    source: PluginSourceInfo,
+) -> Result<PluginSourceInfo, (&'static str, String)> {
+    if source.kind == PluginSourceKind::Local {
+        return Ok(source);
+    }
+    let Some(managed_path) = source.managed_path.as_deref() else {
+        return Err((
+            "invalid_plugin_source",
+            "GitHub plugin source requires managed_path".to_string(),
+        ));
+    };
+    let managed_path = std::path::PathBuf::from(managed_path)
+        .canonicalize()
+        .map_err(|err| ("invalid_plugin_source", err.to_string()))?;
+    let plugin_root = std::path::PathBuf::from(&plugin.plugin_root)
+        .canonicalize()
+        .map_err(|err| ("invalid_plugin_source", err.to_string()))?;
+    let expected = crate::session::data_dir()
+        .join("plugins")
+        .join("github")
+        .join(crate::api::schema::plugin_managed_path_component(
+            &plugin.plugin_id,
+        ))
+        .canonicalize()
+        .map_err(|err| ("invalid_plugin_source", err.to_string()))?;
+    if managed_path != expected {
+        return Err((
+            "invalid_plugin_source",
+            "GitHub plugin managed_path does not match the plugin id".to_string(),
+        ));
+    }
+    if !plugin_root.starts_with(&managed_path) {
+        return Err((
+            "invalid_plugin_source",
+            "plugin manifest is not inside the managed checkout".to_string(),
+        ));
+    }
+    Ok(source)
 }
 
 fn reject_duplicate_action_ids(
@@ -2033,6 +2082,7 @@ action = "bootstrap"
             method: Method::PluginLink(PluginLinkParams {
                 path: root.display().to_string(),
                 enabled: true,
+                source: None,
             }),
         });
         assert!(
@@ -2052,6 +2102,7 @@ action = "bootstrap"
             method: Method::PluginLink(PluginLinkParams {
                 path: root.display().to_string(),
                 enabled: true,
+                source: None,
             }),
         });
         let ResponseResult::PluginLinked { plugin } = response_result(&link) else {
@@ -2106,6 +2157,35 @@ action = "bootstrap"
             panic!("expected plugin list response: {list}");
         };
         assert!(plugins.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugin_link_rejects_invalid_github_source_path() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-invalid-source");
+        write_manifest(&root);
+
+        let response = app.handle_api_request(Request {
+            id: "link-invalid-source".into(),
+            method: Method::PluginLink(PluginLinkParams {
+                path: root.display().to_string(),
+                enabled: true,
+                source: Some(PluginSourceInfo {
+                    kind: PluginSourceKind::Github,
+                    owner: Some("ogulcancelik".into()),
+                    repo: Some("herdr-plugin-examples".into()),
+                    subdir: Some("worktree-bootstrap".into()),
+                    requested_ref: None,
+                    resolved_commit: Some("abc123".into()),
+                    managed_path: Some(root.display().to_string()),
+                    installed_unix_ms: Some(42),
+                }),
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], "invalid_plugin_source");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2930,6 +3010,7 @@ action = "open"
             method: Method::PluginLink(PluginLinkParams {
                 path: root.display().to_string(),
                 enabled: true,
+                source: None,
             }),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -2971,6 +3052,7 @@ action = "missing"
             method: Method::PluginLink(PluginLinkParams {
                 path: root.display().to_string(),
                 enabled: true,
+                source: None,
             }),
         });
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3088,6 +3170,7 @@ command = ["show-ctx"]
             method: Method::PluginLink(PluginLinkParams {
                 path: root.display().to_string(),
                 enabled: false,
+                source: None,
             }),
         });
         assert!(
@@ -3147,6 +3230,7 @@ command = ["sh", "-c", "echo ok"]
             method: Method::PluginLink(PluginLinkParams {
                 path: root.display().to_string(),
                 enabled: true,
+                source: None,
             }),
         });
 
@@ -3474,6 +3558,7 @@ command = ["act"]
             method: Method::PluginLink(PluginLinkParams {
                 path: root.display().to_string(),
                 enabled: true,
+                source: None,
             }),
         });
         assert!(link.contains("plugin_linked"), "link failed: {link}");
@@ -3538,6 +3623,7 @@ command = ["act"]
             method: Method::PluginLink(PluginLinkParams {
                 path: root.display().to_string(),
                 enabled: true,
+                source: None,
             }),
         });
         assert!(link.contains("plugin_linked"), "link failed: {link}");
@@ -3584,6 +3670,7 @@ command = ["act"]
             method: Method::PluginLink(PluginLinkParams {
                 path: root.display().to_string(),
                 enabled: true,
+                source: None,
             }),
         });
         let ResponseResult::PluginLinked { plugin } = response_result(&link) else {

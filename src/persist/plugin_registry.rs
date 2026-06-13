@@ -74,6 +74,7 @@ pub fn reload_manifests(
         match reload_fn(&entry.manifest_path, entry.enabled) {
             Ok(mut fresh) => {
                 fresh.enabled = entry.enabled;
+                fresh.source = entry.source.clone();
                 *entry = fresh;
             }
             Err(warn_msg) => {
@@ -117,6 +118,7 @@ mod tests {
             events: vec![],
             panes: vec![],
             link_handlers: vec![],
+            source: Default::default(),
             warnings: vec![],
         }
     }
@@ -173,6 +175,16 @@ mod tests {
     fn reload_manifests_uses_fresh_parse_and_keeps_enabled_flag() {
         let mut entry = sample_plugin("example.reload");
         entry.enabled = false;
+        entry.source = crate::api::schema::PluginSourceInfo {
+            kind: crate::api::schema::PluginSourceKind::Github,
+            owner: Some("ogulcancelik".into()),
+            repo: Some("herdr-plugin-examples".into()),
+            subdir: Some("worktree-bootstrap".into()),
+            requested_ref: Some("main".into()),
+            resolved_commit: Some("abc123".into()),
+            managed_path: Some("/tmp/herdr/plugins/github/example.reload".into()),
+            installed_unix_ms: Some(42),
+        };
 
         let result = reload_manifests(vec![entry], |_path, _enabled| {
             Ok(InstalledPluginInfo {
@@ -188,6 +200,7 @@ mod tests {
                 events: vec![],
                 panes: vec![],
                 link_handlers: vec![],
+                source: Default::default(),
                 warnings: vec![],
             })
         });
@@ -196,6 +209,11 @@ mod tests {
         assert_eq!(result[0].version, "0.2.0");
         // enabled preserved from stored entry
         assert!(!result[0].enabled);
+        assert_eq!(
+            result[0].source.kind,
+            crate::api::schema::PluginSourceKind::Github
+        );
+        assert_eq!(result[0].source.owner.as_deref(), Some("ogulcancelik"));
         assert!(result[0].warnings.is_empty());
     }
 
