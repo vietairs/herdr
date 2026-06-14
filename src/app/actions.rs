@@ -2452,9 +2452,16 @@ impl AppState {
                 agent_label,
                 seq,
                 session_ref,
+                session_start_source,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    terminal.set_agent_session_ref(source, agent_label, session_ref, seq)
+                    terminal.set_agent_session_ref_for_session_start(
+                        source,
+                        agent_label,
+                        session_ref,
+                        seq,
+                        session_start_source,
+                    )
                 })
                 .into_iter()
                 .collect(),

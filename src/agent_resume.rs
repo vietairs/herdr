@@ -69,6 +69,13 @@ pub fn session_ref_from_report(
     agent_session_id.and_then(AgentSessionRef::id)
 }
 
+pub fn normalize_claude_session_start_source(value: Option<String>) -> Option<String> {
+    match value.as_deref().map(str::trim) {
+        Some(source @ ("startup" | "resume" | "clear" | "compact")) => Some(source.to_string()),
+        _ => None,
+    }
+}
+
 pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
     matches!(
         (source, agent),
@@ -423,6 +430,35 @@ mod tests {
                 .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "qoder-id");
+    }
+
+    #[test]
+    fn normalize_claude_session_start_source_allows_known_claude_values() {
+        assert_eq!(
+            normalize_claude_session_start_source(Some("startup".into())),
+            Some("startup".into())
+        );
+        assert_eq!(
+            normalize_claude_session_start_source(Some("resume".into())),
+            Some("resume".into())
+        );
+        assert_eq!(
+            normalize_claude_session_start_source(Some("clear".into())),
+            Some("clear".into())
+        );
+        assert_eq!(
+            normalize_claude_session_start_source(Some("compact".into())),
+            Some("compact".into())
+        );
+        assert_eq!(
+            normalize_claude_session_start_source(Some(" resume ".into())),
+            Some("resume".into())
+        );
+        assert_eq!(
+            normalize_claude_session_start_source(Some("other".into())),
+            None
+        );
+        assert_eq!(normalize_claude_session_start_source(None), None);
     }
 
     #[test]
