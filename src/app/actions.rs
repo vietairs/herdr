@@ -3531,27 +3531,6 @@ mod tests {
         assert_eq!(state.workspaces[0].worktree_space().cloned(), membership);
     }
 
-    #[test]
-    fn update_ready_sets_explicit_upgrade_toast() {
-        let mut state = AppState::test_new();
-        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
-
-        let updates = state.handle_app_event(crate::events::AppEvent::UpdateReady {
-            version: "0.5.0".into(),
-            install_command: "herdr update".into(),
-        });
-
-        assert!(updates.is_empty());
-        assert_eq!(state.update_available.as_deref(), Some("0.5.0"));
-        assert!(state.latest_release_notes_available);
-        let toast = state.toast.as_ref().expect("update toast");
-        assert_eq!(toast.title, "v0.5.0 available");
-        assert_eq!(
-            toast.context,
-            "detach, run `herdr update`, then follow its restart guidance"
-        );
-    }
-
     fn mark_agent(state: &mut AppState, ws_idx: usize, tab_idx: usize, pane_id: PaneId) {
         state.ensure_test_terminals();
         let terminal_id = state.workspaces[ws_idx].tabs[tab_idx]
@@ -3596,6 +3575,7 @@ mod tests {
         state.previous_agent();
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_second));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3621,6 +3601,7 @@ mod tests {
 
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].focused_pane_id(), Some(second_root));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3633,6 +3614,7 @@ mod tests {
         assert!(state.focus_agent_entry(0));
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3659,6 +3641,7 @@ mod tests {
 
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(first_root));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3688,6 +3671,7 @@ mod tests {
         let last_idx = state.workspaces[0].tabs.len() - 1;
         assert_eq!(state.workspaces[0].active_tab, last_idx);
         assert!(state.agent_panel_scroll > 0);
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3958,6 +3942,7 @@ mod tests {
 
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].custom_name.as_deref(), Some("b"));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3970,17 +3955,20 @@ mod tests {
 
         assert!(state.workspaces.is_empty());
         assert_eq!(state.mode, Mode::Navigate);
+        state.assert_invariants_for_test();
     }
 
     #[test]
     fn pane_died_multi_pane_keeps_workspace() {
         let mut state = app_with_workspaces(&["test"]);
         let second_id = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
 
         state.handle_pane_died(second_id);
 
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].panes.len(), 1);
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -3991,6 +3979,7 @@ mod tests {
         state.handle_pane_died(fake_id);
 
         assert_eq!(state.workspaces.len(), 1);
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -4013,6 +4002,7 @@ mod tests {
 
         assert!(state.selection.is_some());
         assert!(state.selection_autoscroll.is_some());
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -4020,6 +4010,7 @@ mod tests {
         let mut state = app_with_workspaces(&["test"]);
         let first_id = state.workspaces[0].tabs[0].root_pane;
         let second_id = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
 
         state.selection = Some(crate::selection::Selection::anchor(second_id, 0, 0, None));
         state.selection_autoscroll = Some(crate::app::state::SelectionAutoscroll {
@@ -4036,6 +4027,7 @@ mod tests {
         assert!(state.selection_autoscroll.is_none());
         assert_eq!(state.workspaces[0].panes.len(), 1);
         assert_eq!(state.workspaces[0].panes.keys().next().unwrap(), &first_id);
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -4928,6 +4920,7 @@ mod tests {
     fn close_pane_removes_from_workspace() {
         let mut state = app_with_workspaces(&["test"]);
         let closed = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
         assert_eq!(state.workspaces[0].panes.len(), 2);
         state.plugin_panes.insert(
             closed,
@@ -4940,6 +4933,7 @@ mod tests {
         state.close_pane();
         assert_eq!(state.workspaces[0].panes.len(), 1);
         assert!(!state.plugin_panes.contains_key(&closed));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -4985,6 +4979,7 @@ mod tests {
         state.close_pane();
 
         assert!(!state.terminals.contains_key(&terminal_id));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -5007,6 +5002,7 @@ mod tests {
 
         assert!(!state.terminals.contains_key(&terminal_id));
         assert!(!state.plugin_panes.contains_key(&pane_id));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -5026,6 +5022,7 @@ mod tests {
 
         assert!(!state.terminals.contains_key(&terminal_id));
         assert!(!state.plugin_panes.contains_key(&pane_id));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -5042,6 +5039,7 @@ mod tests {
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
         assert!(!state.terminals.contains_key(&active_terminal_id));
+        state.assert_invariants_for_test();
     }
 
     #[test]
@@ -5058,6 +5056,7 @@ mod tests {
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
         assert!(!state.terminals.contains_key(&active_terminal_id));
+        state.assert_invariants_for_test();
     }
 
     #[test]

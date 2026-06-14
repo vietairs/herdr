@@ -1547,6 +1547,105 @@ fn server_stop_then_restart_restores_pane_history() {
 }
 
 #[test]
+fn server_start_restores_legacy_session_through_api_identity() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let data_dir = config_home.join(app_dir_name());
+    let pion_cwd = base.join("legacy-pion");
+    let herdr_cwd = base.join("legacy-herdr");
+
+    fs::create_dir_all(&pion_cwd).unwrap();
+    fs::create_dir_all(&herdr_cwd).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+    let pion_cwd = pion_cwd.to_str().expect("test cwd should be UTF-8");
+    let herdr_cwd = herdr_cwd.to_str().expect("test cwd should be UTF-8");
+    let legacy_session = include_str!("fixtures/session/legacy-pre-tabs-v2.json")
+        .replace("/tmp/pion", pion_cwd)
+        .replace("/tmp/herdr", herdr_cwd);
+    fs::write(data_dir.join("session.json"), legacy_session).unwrap();
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&client_socket, Duration::from_secs(5));
+
+    let workspaces = run_cli_json(&socket_path, &["workspace", "list"]);
+    let restored_workspace = workspaces["result"]["workspaces"]
+        .as_array()
+        .expect("workspace.list should return workspaces")
+        .iter()
+        .find(|workspace| workspace["label"] == "legacy")
+        .expect("legacy workspace should restore");
+    let workspace_id = restored_workspace["workspace_id"]
+        .as_str()
+        .expect("restored workspace should have public id")
+        .to_string();
+    assert_eq!(restored_workspace["pane_count"], 2);
+    assert_eq!(restored_workspace["tab_count"], 1);
+    assert_eq!(
+        restored_workspace["active_tab_id"],
+        format!("{workspace_id}:t1")
+    );
+
+    let panes = run_cli_json(
+        &socket_path,
+        &["pane", "list", "--workspace", &workspace_id],
+    );
+    let panes = panes["result"]["panes"]
+        .as_array()
+        .expect("pane.list should return panes");
+    assert_eq!(panes.len(), 2);
+    let root_pane_id = format!("{workspace_id}:p1");
+    let focused_pane_id = format!("{workspace_id}:p2");
+    assert!(panes.iter().any(|pane| {
+        pane["pane_id"] == root_pane_id
+            && pane["tab_id"] == format!("{workspace_id}:t1")
+            && pane["cwd"] == pion_cwd
+            && pane["focused"] == false
+    }));
+    assert!(panes.iter().any(|pane| {
+        pane["pane_id"] == focused_pane_id
+            && pane["tab_id"] == format!("{workspace_id}:t1")
+            && pane["cwd"] == herdr_cwd
+            && pane["focused"] == true
+    }));
+
+    let reported = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-agent",
+            &focused_pane_id,
+            "--source",
+            "test",
+            "--agent",
+            "pi",
+            "--state",
+            "working",
+        ],
+    );
+    assert!(
+        reported.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+
+    let agents = run_cli_json(&socket_path, &["agent", "list"]);
+    let agents = agents["result"]["agents"]
+        .as_array()
+        .expect("agent.list should return agents");
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0]["pane_id"], focused_pane_id);
+    assert_eq!(agents[0]["workspace_id"], workspace_id);
+    assert_eq!(agents[0]["agent"], "pi");
+    assert_eq!(agents[0]["agent_status"], "working");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn workspace_and_pane_management_commands_work() {
     let base = unique_test_dir();
     let config_home = base.join("config");
