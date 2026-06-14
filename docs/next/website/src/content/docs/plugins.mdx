@@ -143,6 +143,7 @@ Install an example plugin:
 
 ```bash
 herdr plugin install ogulcancelik/herdr-plugin-examples/agent-telegram-notify
+herdr plugin config-dir examples.agent-telegram-notify
 herdr plugin list
 herdr plugin action list --plugin examples.agent-telegram-notify
 ```
@@ -151,6 +152,7 @@ When you are authoring a local plugin, link the working directory instead:
 
 ```bash
 herdr plugin link /path/to/plugin
+herdr plugin config-dir example.layout
 herdr plugin action list --plugin example.layout
 herdr plugin action invoke example.layout.apply
 herdr plugin pane open --plugin example.layout --entrypoint board
@@ -163,7 +165,9 @@ terminals, runs supported build commands, then stores the checkout under
 Herdr-managed plugin data and registers it. Use `--yes` for noninteractive
 installs. Reinstalling a GitHub-managed plugin replaces that managed checkout.
 Installing over a locally linked plugin is refused; unlink or uninstall the
-local plugin first.
+local plugin first. `plugin install` and `plugin link` create the plugin's
+config and state directories, and `plugin config-dir <id>` prints the config
+directory for setup docs and shell scripts.
 
 `plugin uninstall <id-or-source>` unregisters the plugin. For GitHub-managed
 installs it also removes the managed checkout, and it accepts either the plugin
@@ -206,8 +210,10 @@ receive `HERDR_PLUGIN_ACTION_ID`; event hooks receive `HERDR_PLUGIN_EVENT` and
 user credentials or durable state there, because GitHub-installed plugin roots
 are managed source checkouts. Put user-editable config such as `.env` files
 under `HERDR_PLUGIN_CONFIG_DIR`, and put local runtime state under
-`HERDR_PLUGIN_STATE_DIR`. Herdr does not read, create, migrate, validate, sync,
-or delete their contents. The plugin owns the file format and lifecycle.
+`HERDR_PLUGIN_STATE_DIR`. Herdr creates those directories and seeds
+`HERDR_PLUGIN_CONFIG_DIR` from the legacy plugin config locations when present,
+but it does not validate, sync, or delete their contents. The plugin owns the
+file format and lifecycle.
 
 `HERDR_PLUGIN_CONTEXT_JSON` can include workspace, tab, focused pane, worktree,
 agent, selected text, clicked URL, and link handler fields when they are

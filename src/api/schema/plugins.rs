@@ -107,7 +107,7 @@ pub enum PluginSourceKind {
 
 pub(crate) fn plugin_managed_path_component(value: &str) -> String {
     let slug = readable_plugin_path_slug(value);
-    let hash = short_plugin_id_hash(value);
+    let hash = short_plugin_id_hash_for_path_component(value);
     format!("{slug}-{hash}")
 }
 
@@ -133,14 +133,14 @@ fn readable_plugin_path_slug(value: &str) -> String {
     } else {
         slug.chars().take(80).collect()
     };
-    if has_windows_reserved_stem(&slug) {
+    if has_windows_reserved_stem_for_path_component(&slug) {
         slug.replace('.', "-")
     } else {
         slug
     }
 }
 
-fn short_plugin_id_hash(value: &str) -> String {
+pub(crate) fn short_plugin_id_hash_for_path_component(value: &str) -> String {
     use sha2::{Digest, Sha256};
 
     let digest = Sha256::digest(value.as_bytes());
@@ -152,7 +152,7 @@ fn short_plugin_id_hash(value: &str) -> String {
     hash
 }
 
-fn has_windows_reserved_stem(value: &str) -> bool {
+pub(crate) fn has_windows_reserved_stem_for_path_component(value: &str) -> bool {
     let stem = value.split('.').next().unwrap_or(value);
     matches!(
         stem.to_ascii_uppercase().as_str(),

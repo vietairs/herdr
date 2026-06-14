@@ -9,6 +9,9 @@
 - Added `herdr plugin install <owner>/<repo>[/subdir...]`, `plugin uninstall`,
   source metadata in `plugin.list`, offline registry fallback, and a
   human-readable default `plugin list` with `--json` for scripts.
+- Added `herdr plugin config-dir <id>` and automatic plugin config/state
+  directory creation so plugin setup docs can point users at a stable config
+  path.
 - Added supporting plugin host APIs for `pane.current`, `pane.process_info`,
   `client.window_title.set/clear`, `layout.export/apply`, plugin pane placement,
   plugin invocation context/env injection, and plugin pane ownership across
@@ -17,6 +20,9 @@
 
 ### Changed
 - Bumped the client/server protocol version to 14 for `pane.move` compatibility. (#299)
+- Plugin runtime config directories now use stable, readable plugin-id paths
+  instead of checkout hashes; existing legacy config directories are copied into
+  the new location when first seen.
 - Public workspace, tab, and pane ids are now short stable handles such as `w1`, `w1:t1`, and `w1:p1`; closed tab and pane ids no longer retarget later resources. (#569)
 
 ### Fixed

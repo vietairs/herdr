@@ -31,6 +31,8 @@ impl App {
         let args = command.iter().skip(1).cloned().collect::<Vec<_>>();
         let context_json = serde_json::to_string(context)
             .map_err(|err| ("invalid_plugin_context", err.to_string()))?;
+        super::env::ensure_plugin_user_dirs(plugin)
+            .map_err(|err| ("plugin_user_dir_create_failed", err.to_string()))?;
         let log_id = format!("plugin-log-{}", self.state.next_plugin_command_log_id);
         self.state.next_plugin_command_log_id += 1;
         let started_unix_ms = current_unix_ms();

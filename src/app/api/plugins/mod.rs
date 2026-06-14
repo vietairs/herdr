@@ -36,6 +36,9 @@ impl App {
                 Err((code, message)) => return encode_error(id, code, message),
             }
         }
+        if let Err(err) = env::ensure_plugin_user_dirs(&plugin) {
+            return encode_error(id, "plugin_user_dir_create_failed", err.to_string());
+        }
         let previous = self.state.installed_plugins.get(&plugin.plugin_id).cloned();
         self.state
             .installed_plugins
@@ -756,6 +759,71 @@ action = "bootstrap"
     }
 
     #[test]
+    fn plugin_link_creates_stable_config_and_state_dirs() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-link-dirs");
+        let config_dir = super::env::plugin_config_dir("example.config-dirs");
+        let state_dir = super::env::plugin_state_dir("example.config-dirs");
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let _ = std::fs::remove_dir_all(&state_dir);
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.config-dirs"
+name = "Config Dirs"
+version = "0.1.0"
+platforms = ["linux", "macos", "windows"]
+"#,
+        );
+
+        link_manifest(&mut app, &root);
+
+        assert!(config_dir.is_dir());
+        assert!(state_dir.is_dir());
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(config_dir);
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn plugin_link_seeds_stable_config_dir_from_legacy_unhashed_dir() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-link-legacy-config");
+        let config_dir = super::env::plugin_config_dir("example.legacy-config");
+        let state_dir = super::env::plugin_state_dir("example.legacy-config");
+        let legacy_dir = crate::config::config_dir()
+            .join("plugins")
+            .join("example.legacy-config");
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let _ = std::fs::remove_dir_all(&legacy_dir);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join(".env"), "TELEGRAM_BOT_TOKEN=test\n").unwrap();
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.legacy-config"
+name = "Legacy Config"
+version = "0.1.0"
+platforms = ["linux", "macos", "windows"]
+"#,
+        );
+
+        link_manifest(&mut app, &root);
+
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join(".env")).unwrap(),
+            "TELEGRAM_BOT_TOKEN=test\n"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(config_dir);
+        let _ = std::fs::remove_dir_all(state_dir);
+        let _ = std::fs::remove_dir_all(legacy_dir);
+    }
+
+    #[test]
     fn plugin_link_lists_and_unlinks_manifest() {
         let mut app = test_app();
         let root = unique_temp_path("plugin-link");
@@ -1192,9 +1260,8 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
             Some(
                 crate::config::config_dir()
                     .join("plugins")
-                    .join(crate::api::schema::plugin_managed_path_component(
-                        "example.path-env"
-                    ))
+                    .join("config")
+                    .join("example.path-env")
                     .display()
                     .to_string()
                     .as_str()
@@ -1205,9 +1272,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
             Some(
                 crate::config::state_dir()
                     .join("plugins")
-                    .join(crate::api::schema::plugin_managed_path_component(
-                        "example.path-env"
-                    ))
+                    .join("example.path-env")
                     .display()
                     .to_string()
                     .as_str()
@@ -1570,9 +1635,8 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
             Some(
                 crate::config::config_dir()
                     .join("plugins")
-                    .join(crate::api::schema::plugin_managed_path_component(
-                        "example.action-paths"
-                    ))
+                    .join("config")
+                    .join("example.action-paths")
                     .display()
                     .to_string()
                     .as_str()
@@ -1583,9 +1647,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
             Some(
                 crate::config::state_dir()
                     .join("plugins")
-                    .join(crate::api::schema::plugin_managed_path_component(
-                        "example.action-paths"
-                    ))
+                    .join("example.action-paths")
                     .display()
                     .to_string()
                     .as_str()

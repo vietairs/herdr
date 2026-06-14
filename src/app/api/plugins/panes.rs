@@ -183,6 +183,8 @@ impl App {
         let mut env = super::super::env::normalize_launch_env(env)?;
         let context_json = serde_json::to_string(&context)
             .map_err(|err| ("invalid_plugin_context".to_string(), err.to_string()))?;
+        super::env::ensure_plugin_user_dirs(plugin)
+            .map_err(|err| ("plugin_user_dir_create_failed".to_string(), err.to_string()))?;
         env.retain(|(key, _)| !plugin_pane_protected_env_key(key));
         env.extend(super::env::plugin_path_env(plugin));
         env.push((
