@@ -2889,6 +2889,7 @@ fn plugin_link_list_unlink_cli_smoke_test() {
 id = "example.layout"
 name = "Layout"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 description = "Apply a preferred Herdr layout"
 
 [[actions]]
@@ -3029,6 +3030,7 @@ fn plugin_install_list_uninstall_offline_cli_smoke_test() {
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
@@ -3158,6 +3160,7 @@ fn plugin_install_build_failure_does_not_register_or_create_checkout() {
 id = "example.build-fail"
 name = "Build Fail"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
@@ -3251,6 +3254,7 @@ fn plugin_install_build_spawn_failure_prints_clean_error() {
 id = "example.missing-tool"
 name = "Missing Tool"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
@@ -3339,6 +3343,7 @@ fn plugin_install_rejects_manifest_changed_by_build() {
 id = "example.manifest-mutator"
 name = "Manifest Mutator"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
@@ -3357,12 +3362,16 @@ command = ["sh", "-c", "echo reviewed"]
 id = "example.manifest-mutator"
 name = "Manifest Mutator"
 version = "0.1.0"
+min_herdr_version = "0.0.1"
 platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["sh", "mutate.sh"]
 
 [[actions]]
 id = "run"
-title = "Run changed command"
-command = ["sh", "-c", "echo changed"]
+title = "Run reviewed command"
+command = ["sh", "-c", "echo reviewed"]
 EOF
 "#,
     )
@@ -3439,6 +3448,7 @@ fn plugin_install_restores_previous_checkout_when_registration_fails() {
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.2.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -3494,6 +3504,7 @@ command = ["sh", "-c", "echo new"]
                         "plugin_id": "example.worktree-bootstrap",
                         "name": "Worktree Bootstrap",
                         "version": "0.1.0",
+                        "min_herdr_version": "0.6.10",
                         "manifest_path": managed_checkout_for_server.join("herdr-plugin.toml").display().to_string(),
                         "plugin_root": managed_checkout_for_server.display().to_string(),
                         "enabled": true,
@@ -3569,6 +3580,7 @@ fn plugin_install_rejects_server_that_drops_source_metadata() {
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -3633,6 +3645,7 @@ command = ["sh", "-c", "echo install"]
                         "plugin_id": "example.worktree-bootstrap",
                         "name": "Worktree Bootstrap",
                         "version": "0.1.0",
+                        "min_herdr_version": "0.6.10",
                         "manifest_path": managed_checkout_for_server.join("herdr-plugin.toml").display().to_string(),
                         "plugin_root": managed_checkout_for_server.display().to_string(),
                         "enabled": true,
@@ -3704,6 +3717,7 @@ fn plugin_install_keeps_checkout_when_incompatible_server_cleanup_fails() {
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -3764,6 +3778,7 @@ command = ["sh", "-c", "echo install"]
                         "plugin_id": "example.worktree-bootstrap",
                         "name": "Worktree Bootstrap",
                         "version": "0.1.0",
+                        "min_herdr_version": "0.6.10",
                         "manifest_path": managed_checkout_for_server.join("herdr-plugin.toml").display().to_string(),
                         "plugin_root": managed_checkout_for_server.display().to_string(),
                         "enabled": true,

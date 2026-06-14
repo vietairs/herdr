@@ -566,6 +566,7 @@ fn plugin_link_list_unlink_round_trip() {
         plugin_id: "example.worktree-bootstrap".into(),
         name: "Worktree Bootstrap".into(),
         version: "0.1.0".into(),
+        min_herdr_version: crate::build_info::BASE_VERSION.into(),
         description: Some("Prepare new worktrees".into()),
         manifest_path: "/plugins/worktree-bootstrap/herdr-plugin.toml".into(),
         plugin_root: "/plugins/worktree-bootstrap".into(),

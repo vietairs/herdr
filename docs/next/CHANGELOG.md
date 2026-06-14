@@ -23,6 +23,8 @@
 - Plugin runtime config directories now use stable, readable plugin-id paths
   instead of checkout hashes; existing legacy config directories are copied into
   the new location when first seen.
+- Plugin manifests must now declare `min_herdr_version`; install and link fail
+  when a plugin requires a newer Herdr binary.
 - Public workspace, tab, and pane ids are now short stable handles such as `w1`, `w1:t1`, and `w1:p1`; closed tab and pane ids no longer retarget later resources. (#569)
 
 ### Fixed

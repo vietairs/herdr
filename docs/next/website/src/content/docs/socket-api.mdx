@@ -323,6 +323,7 @@ manifest path. The manifest shape is:
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 description = "Prepare new worktrees"
 platforms = ["linux", "macos", "windows"]
 
@@ -351,6 +352,9 @@ title = "Open GitHub issue"
 pattern = "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$"
 action = "bootstrap"
 ```
+
+`min_herdr_version` is required. The server refuses to link a plugin when the
+field is missing, invalid, or newer than the running Herdr binary.
 
 Declare `platforms` at the top level with the OS identifiers (`linux`, `macos`,
 `windows`) your plugin supports. Omitting `platforms` is allowed for local

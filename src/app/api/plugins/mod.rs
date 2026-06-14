@@ -704,6 +704,7 @@ mod tests {
 id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 description = "Prepare new worktrees"
 platforms = ["linux", "macos", "windows"]
 
@@ -772,6 +773,7 @@ action = "bootstrap"
 id = "example.config-dirs"
 name = "Config Dirs"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 "#,
         );
@@ -806,6 +808,7 @@ platforms = ["linux", "macos", "windows"]
 id = "example.legacy-config"
 name = "Legacy Config"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 "#,
         );
@@ -925,6 +928,56 @@ platforms = ["linux", "macos", "windows"]
     }
 
     #[test]
+    fn link_rejects_invalid_min_herdr_versions() {
+        let cases = [
+            (
+                "plugin-missing-min-herdr",
+                r#"
+id = "example.missing-min-herdr"
+name = "Missing Min Herdr"
+version = "0.1.0"
+platforms = ["linux", "macos", "windows"]
+"#,
+                "invalid_plugin_min_herdr_version",
+            ),
+            (
+                "plugin-invalid-min-herdr",
+                r#"
+id = "example.invalid-min-herdr"
+name = "Invalid Min Herdr"
+version = "0.1.0"
+min_herdr_version = "soon"
+platforms = ["linux", "macos", "windows"]
+"#,
+                "invalid_plugin_min_herdr_version",
+            ),
+            (
+                "plugin-future-min-herdr",
+                r#"
+id = "example.future-min-herdr"
+name = "Future Min Herdr"
+version = "0.1.0"
+min_herdr_version = "999.0.0"
+platforms = ["linux", "macos", "windows"]
+"#,
+                "plugin_requires_newer_herdr",
+            ),
+        ];
+
+        for (name, manifest, expected_code) in cases {
+            let root = unique_temp_path(name);
+            write_manifest_content(&root, manifest);
+
+            let result = load_plugin_manifest(&root.display().to_string(), true);
+            assert!(
+                matches!(result, Err((code, _)) if code == expected_code),
+                "{name}: expected {expected_code}, got {result:?}"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn link_rejects_duplicate_action_ids() {
         let root = unique_temp_path("plugin-duplicate-action");
         write_manifest_content(
@@ -933,6 +986,7 @@ platforms = ["linux", "macos", "windows"]
 id = "example.duplicate"
 name = "Duplicate"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -961,6 +1015,7 @@ command = ["echo", "b"]
 id = "example.dotted-action"
 name = "Dotted Action"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -984,6 +1039,7 @@ command = ["echo", "build"]
 id = "example.duplicate-pane"
 name = "Duplicate Pane"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[panes]]
@@ -1099,6 +1155,7 @@ command = ["echo", "b"]
 id = "example.pane"
 name = "Pane Plugin"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[panes]]
@@ -1205,6 +1262,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$HERDR_
 id = "example.path-env"
 name = "Path Env"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[panes]]
@@ -1310,6 +1368,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
 id = "example.tab"
 name = "Tab Plugin"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[panes]]
@@ -1514,6 +1573,7 @@ command = ["sh", "-c", "sleep 1"]
 id = "example.runner"
 name = "Runner"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -1580,6 +1640,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_ACTION_ID\""]
 id = "example.action-paths"
 name = "Action Paths"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -1702,6 +1763,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
 id = "example.event-context"
 name = "Event Context"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[events]]
@@ -1851,6 +1913,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
 id = "example.links"
 name = "Links"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -1918,6 +1981,7 @@ action = "open"
 id = "example.link-order"
 name = "Link Order"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -1964,6 +2028,7 @@ action = "generic"
 id = "example.bad-links"
 name = "Bad Links"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -2006,6 +2071,7 @@ action = "open"
 id = "example.bad-link-action"
 name = "Bad Link Action"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -2079,6 +2145,7 @@ action = "missing"
 id = "example.context"
 name = "Context"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 
 [[actions]]
 id = "show"
@@ -2175,6 +2242,7 @@ command = ["show-ctx"]
 id = "example.bad-event"
 name = "Bad Event Plugin"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 
 [[events]]
 on = "worktree.craeted"
@@ -2458,6 +2526,7 @@ command = ["sh", "-c", "echo ok"]
 id = "example.platforms"
 name = "Platforms"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -2540,6 +2609,7 @@ command = ["run.bat"]
 id = "example.reject"
 name = "Reject"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 {excluded_platforms}
 
 [[actions]]
@@ -2604,6 +2674,7 @@ command = ["act"]
 id = "example.override"
 name = "Override"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[actions]]
@@ -2654,6 +2725,7 @@ command = ["act"]
 id = "example.nodecl"
 name = "No Decl"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 
 [[actions]]
 id = "act"
@@ -2711,6 +2783,7 @@ command = ["act"]
 id = "example.badplatform"
 name = "Bad Platform"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "beos"]
 
 [[actions]]
@@ -2742,6 +2815,7 @@ command = ["act"]
 id = "example.platform-rt"
 name = "Platform RT"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[actions]]

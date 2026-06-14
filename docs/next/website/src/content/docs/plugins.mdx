@@ -42,6 +42,7 @@ Herdr can run.
 id = "example.layout"
 name = "Layout"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 description = "Apply project layouts"
 platforms = ["linux", "macos", "windows"]
 
@@ -75,8 +76,12 @@ pattern = "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$"
 action = "apply"
 ```
 
-Top-level `id`, `name`, and `version` are required. `description` is optional.
-Plugin ids may use ASCII letters, digits, dot, colon, underscore, and hyphen.
+Top-level `id`, `name`, `version`, and `min_herdr_version` are required.
+Set `min_herdr_version` to the oldest Herdr version that supports the plugin
+APIs, event names, and manifest fields your plugin uses. Herdr refuses to link
+or install a plugin when its minimum version is newer than the current binary.
+`description` is optional. Plugin ids may use ASCII letters, digits, dot,
+colon, underscore, and hyphen.
 
 Action ids, pane ids, and link handler ids are local ids inside the plugin.
 They may use ASCII letters, digits, colon, underscore, and hyphen, but not
@@ -107,6 +112,7 @@ my-plugin/
 id = "example.workspace-tools"
 name = "Workspace Tools"
 version = "0.1.0"
+min_herdr_version = "0.6.10"
 description = "Small workspace helpers"
 platforms = ["linux", "macos", "windows"]
 
