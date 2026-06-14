@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use super::manifest::{effective_platforms, ensure_platform_supported};
 use super::plugin_manifest_available;
@@ -117,8 +117,7 @@ impl App {
         self.state.plugin_commands_in_flight += 1;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let child = Command::new(&program)
-                .args(args)
+            let child = crate::plugin_command::command_for_argv(&program, &args)
                 .current_dir(plugin_root)
                 .envs(env)
                 .stdout(Stdio::piped())

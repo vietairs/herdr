@@ -16,12 +16,26 @@ use support::{
     unregister_spawned_herdr_pid,
 };
 
+const WORKTREE_BOOTSTRAP_MANAGED_COMPONENT: &str = "example.worktree-bootstrap-ef876653ffc3";
+
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     PathBuf::from(format!("/tmp/hcli-{}-{nanos}", std::process::id()))
+}
+
+fn managed_github_plugin_dir(config_home: &Path) -> PathBuf {
+    config_home.join("herdr-dev").join("plugins").join("github")
+}
+
+fn path_missing_or_empty(path: &Path) -> bool {
+    match fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+        Err(err) => panic!("failed to read {}: {err}", path.display()),
+    }
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
@@ -3214,14 +3228,9 @@ command = ["sh", "-c", "echo should-not-install"]
     );
     assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
 
-    let managed_checkout = config_home
-        .join("herdr-dev")
-        .join("plugins")
-        .join("github")
-        .join("example.build-fail");
     assert!(
-        !managed_checkout.exists(),
-        "failed build should not create managed checkout"
+        path_missing_or_empty(&managed_github_plugin_dir(&config_home)),
+        "failed build should not leave managed checkouts"
     );
 
     cleanup_test_base(&base);
@@ -3406,14 +3415,9 @@ EOF
     );
     assert!(listed["result"]["plugins"].as_array().unwrap().is_empty());
 
-    let managed_checkout = config_home
-        .join("herdr-dev")
-        .join("plugins")
-        .join("github")
-        .join("example.manifest-mutator");
     assert!(
-        !managed_checkout.exists(),
-        "manifest mutation should not create managed checkout"
+        path_missing_or_empty(&managed_github_plugin_dir(&config_home)),
+        "manifest mutation should not leave managed checkouts"
     );
 
     cleanup_test_base(&base);
@@ -3456,7 +3460,7 @@ command = ["sh", "-c", "echo new"]
         .join("herdr-dev")
         .join("plugins")
         .join("github")
-        .join("example.worktree-bootstrap");
+        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
     fs::create_dir_all(&managed_checkout).unwrap();
     fs::write(managed_checkout.join("old-marker"), "old checkout\n").unwrap();
 
@@ -3586,7 +3590,7 @@ command = ["sh", "-c", "echo install"]
         .join("herdr-dev")
         .join("plugins")
         .join("github")
-        .join("example.worktree-bootstrap");
+        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
     let git_config = base.join("gitconfig");
     fs::write(
         &git_config,
@@ -3721,7 +3725,7 @@ command = ["sh", "-c", "echo install"]
         .join("herdr-dev")
         .join("plugins")
         .join("github")
-        .join("example.worktree-bootstrap");
+        .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
     let git_config = base.join("gitconfig");
     fs::write(
         &git_config,

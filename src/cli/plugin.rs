@@ -192,14 +192,17 @@ fn plugin_install(args: &[String]) -> std::io::Result<i32> {
         let backup_checkout = temp_root.join("previous-checkout");
         let mut backup_moved = false;
         if final_checkout.exists() {
-            std::fs::rename(&final_checkout, &backup_checkout)?;
+            std::fs::rename(&final_checkout, &backup_checkout)
+                .map_err(|err| plugin_checkout_lifecycle_error("replace", &final_checkout, err))?;
             backup_moved = true;
         }
         let install_attempt = (|| {
             if let Some(parent) = final_checkout.parent() {
                 std::fs::create_dir_all(parent).map_err(InstallFailure::Rollback)?;
             }
-            std::fs::rename(&checkout, &final_checkout).map_err(InstallFailure::Rollback)?;
+            std::fs::rename(&checkout, &final_checkout)
+                .map_err(|err| plugin_checkout_lifecycle_error("install", &final_checkout, err))
+                .map_err(InstallFailure::Rollback)?;
 
             source_info.managed_path = Some(final_checkout.display().to_string());
             let final_manifest_root = source.manifest_root(&final_checkout);
@@ -1220,9 +1223,9 @@ fn run_plugin_build_command(
             },
         }));
     };
-    let mut child = Command::new(program);
+    let args = command.iter().skip(1).cloned().collect::<Vec<_>>();
+    let mut child = crate::plugin_command::command_for_argv(program, &args);
     child
-        .args(command.iter().skip(1))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1499,7 +1502,21 @@ fn remove_managed_plugin_files(plugin: &InstalledPluginInfo) -> std::io::Result<
             path.display()
         )));
     }
-    std::fs::remove_dir_all(path)
+    std::fs::remove_dir_all(&path)
+        .map_err(|err| plugin_checkout_lifecycle_error("remove", &path, err))
+}
+
+fn plugin_checkout_lifecycle_error(operation: &str, path: &Path, err: io::Error) -> io::Error {
+    if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied {
+        return io::Error::new(
+            err.kind(),
+            format!(
+                "failed to {operation} managed plugin checkout at {}; close any Herdr plugin panes or plugin commands using that checkout, then retry: {err}",
+                path.display()
+            ),
+        );
+    }
+    err
 }
 
 fn is_expected_managed_path(plugin: &InstalledPluginInfo, path: &Path) -> bool {

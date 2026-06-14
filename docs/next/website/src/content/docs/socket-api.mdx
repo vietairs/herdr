@@ -313,7 +313,7 @@ Link a local plugin manifest:
 `plugin.link` also accepts optional `source` metadata. The CLI uses this when it installs from GitHub so `plugin.list` can show origin, requested ref, resolved commit, and managed checkout path:
 
 ```json
-{"id":"req_plugin_link","method":"plugin.link","params":{"path":"/managed/plugin/herdr-plugin.toml","enabled":true,"source":{"kind":"github","owner":"ogulcancelik","repo":"herdr-plugin-examples","subdir":"worktree-bootstrap","requested_ref":"main","resolved_commit":"abc123","managed_path":"/data/plugins/github/example.worktree-bootstrap","installed_unix_ms":1780000000000}}}
+{"id":"req_plugin_link","method":"plugin.link","params":{"path":"/managed/plugin/herdr-plugin.toml","enabled":true,"source":{"kind":"github","owner":"ogulcancelik","repo":"herdr-plugin-examples","subdir":"worktree-bootstrap","requested_ref":"main","resolved_commit":"abc123","managed_path":"/data/plugins/github/<managed-checkout>","installed_unix_ms":1780000000000}}}
 ```
 
 The path can be a plugin directory containing `herdr-plugin.toml` or a direct
@@ -324,7 +324,7 @@ id = "example.worktree-bootstrap"
 name = "Worktree Bootstrap"
 version = "0.1.0"
 description = "Prepare new worktrees"
-platforms = ["linux", "macos"]
+platforms = ["linux", "macos", "windows"]
 
 [[build]]
 command = ["bun", "install"]
@@ -334,13 +334,6 @@ id = "bootstrap"
 title = "Bootstrap worktree"
 contexts = ["workspace"]
 command = ["bun", "run", "bootstrap.ts"]
-
-[[actions]]
-id = "bootstrap-win"
-title = "Bootstrap worktree (Windows)"
-contexts = ["workspace"]
-platforms = ["windows"]
-command = ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", "bootstrap.ps1"]
 
 [[events]]
 on = "worktree.created"
@@ -382,6 +375,9 @@ Actions are resolved from the linked manifest. `plugin.action.list` returns all 
 {"id":"req_plugin_actions","method":"plugin.action.list","params":{}}
 {"id":"req_plugin_actions_filtered","method":"plugin.action.list","params":{"plugin_id":"example.worktree-bootstrap"}}
 ```
+
+`plugin.action.list` returns each action's effective `platforms` after applying
+plugin-level inheritance.
 
 Invoke an action by its qualified id or bare action id:
 
@@ -434,7 +430,8 @@ returns `plugin_pane_focused`; close returns `plugin_pane_closed`.
 
 ## Socket transport
 
-Herdr uses newline-delimited JSON over a Unix domain socket.
+Herdr uses newline-delimited JSON over a local socket. On Unix, that socket is a
+Unix domain socket. On Windows, it is a named pipe.
 
 Send one request per line:
 
@@ -469,6 +466,10 @@ Resolution order:
 4. default session socket
 
 Use `HERDR_SOCKET_PATH` only for low-level overrides.
+
+For plugins, prefer invoking `HERDR_BIN_PATH` and the CLI wrappers when you need
+portable Windows behavior. Raw socket clients are responsible for using the
+platform-native local socket form.
 
 ## Agent state reporting
 

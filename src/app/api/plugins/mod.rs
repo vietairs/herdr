@@ -471,7 +471,7 @@ impl App {
                 .actions
                 .iter()
                 .find(|a| a.id == action_id)
-                .map(|a| manifest_action_info(&plugin_id, a))
+                .map(|a| manifest_action_info(&plugin_id, &plugin.platforms, a))
                 .ok_or_else(|| {
                     (
                         "plugin_action_not_found",
@@ -622,7 +622,11 @@ fn plugin_manifest_available(plugin: &InstalledPluginInfo) -> bool {
     })
 }
 
-fn manifest_action_info(plugin_id: &str, action: &PluginManifestAction) -> PluginActionInfo {
+fn manifest_action_info(
+    plugin_id: &str,
+    plugin_platforms: &Option<Vec<crate::api::schema::PluginPlatform>>,
+    action: &PluginManifestAction,
+) -> PluginActionInfo {
     PluginActionInfo {
         plugin_id: plugin_id.to_string(),
         action_id: action.id.clone(),
@@ -630,7 +634,7 @@ fn manifest_action_info(plugin_id: &str, action: &PluginManifestAction) -> Plugi
         description: action.description.clone(),
         contexts: action.contexts.clone(),
         command: action.command.clone(),
-        platforms: action.platforms.clone(),
+        platforms: effective_platforms(&action.platforms, plugin_platforms).clone(),
     }
 }
 
@@ -644,7 +648,7 @@ fn manifest_actions(
             plugin
                 .actions
                 .iter()
-                .map(|action| manifest_action_info(&plugin.plugin_id, action))
+                .map(|action| manifest_action_info(&plugin.plugin_id, &plugin.platforms, action))
         })
 }
 
@@ -1311,6 +1315,14 @@ command = ["sh", "-c", "sleep 1"]
             "example.worktree-bootstrap.bootstrap"
         );
         assert_eq!(actions[0].command, ["bun", "run", "bootstrap.ts"]);
+        assert_eq!(
+            actions[0].platforms,
+            Some(vec![
+                crate::api::schema::PluginPlatform::Linux,
+                crate::api::schema::PluginPlatform::Macos,
+                crate::api::schema::PluginPlatform::Windows,
+            ])
+        );
 
         let invoke = app.handle_api_request(Request {
             id: "invoke".into(),

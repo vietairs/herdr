@@ -17,6 +17,13 @@ fn save_json_to_path<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> st
     let json = serde_json::to_string_pretty(value)?;
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, &json)?;
+    #[cfg(windows)]
+    if path.exists() {
+        if let Err(err) = std::fs::remove_file(path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err);
+        }
+    }
     if let Err(err) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(err);
@@ -233,5 +240,16 @@ mod tests {
             "tmp file should be cleaned up after successful rename"
         );
         assert!(path.exists());
+    }
+
+    #[test]
+    fn save_replaces_existing_registry_file() {
+        let path = temp_registry_path("replace-existing");
+        save_to_path(&path, &[sample_plugin("example.first")]).unwrap();
+        save_to_path(&path, &[sample_plugin("example.second")]).unwrap();
+
+        let loaded = load_from_path(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].plugin_id, "example.second");
     }
 }

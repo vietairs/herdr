@@ -140,6 +140,12 @@ agent, selected text, clicked URL, and link handler fields when they are
 available for that invocation. Shell plugins can read the individual env vars
 for common ids, or parse the context JSON for the full shape.
 
+Use `HERDR_BIN_PATH` when a plugin needs to call Herdr portably from Node,
+PowerShell, Bash, or another runtime. The raw socket transport behind
+`HERDR_SOCKET_PATH` is OS-specific: Unix clients connect to a Unix socket path,
+while Windows clients connect to a named pipe. CLI calls through
+`HERDR_BIN_PATH` avoid that transport difference.
+
 ## Panes
 
 Manifest pane `placement` defaults to `overlay`, which opens a temporary zoomed
@@ -151,6 +157,11 @@ Plugin panes are normal Herdr panes after they open. Plugins can call standard
 pane APIs such as `pane.move`, `pane.swap`, `pane.resize`, and `pane.zoom`
 through the socket or CLI; Herdr keeps plugin pane ownership attached to the
 underlying pane when it moves across tabs or workspaces.
+
+On Windows, build commands, action commands, and event commands resolve common
+`PATHEXT` shims such as `npm.cmd`, `bun.cmd`, and `pnpm.cmd` when the bare
+command is on `PATH`. Pane commands use Herdr's normal Windows pane launcher and
+must still be valid Windows argv commands.
 
 ## Keybindings
 
