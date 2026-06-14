@@ -105,11 +105,7 @@ impl App {
                 if let Some(label) = label {
                     let workspace_id = self.state.workspaces[ws_idx].id.clone();
                     let tab_id = self.public_tab_id(ws_idx, tab_idx).unwrap_or_else(|| {
-                        format!(
-                            "{}:t{}",
-                            workspace_id,
-                            crate::workspace::encode_public_number(tab_idx + 1)
-                        )
+                        crate::workspace::public_tab_id_for_number(&workspace_id, tab_idx + 1)
                     });
                     if let Some(tab) = self
                         .state
@@ -165,9 +161,9 @@ impl App {
             return tab_not_found(id, &params.tab_id);
         };
         let workspace_id = self.state.workspaces[ws_idx].id.clone();
-        let tab_id = self
-            .public_tab_id(ws_idx, tab_idx)
-            .unwrap_or_else(|| format!("{}:{}", workspace_id, tab_idx + 1));
+        let tab_id = self.public_tab_id(ws_idx, tab_idx).unwrap_or_else(|| {
+            crate::workspace::public_tab_id_for_number(&workspace_id, tab_idx + 1)
+        });
         let Some(tab) = self
             .state
             .workspaces

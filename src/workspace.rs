@@ -109,11 +109,11 @@ pub(crate) fn public_workspace_number(id: &str) -> Option<usize> {
     id.strip_prefix('w').and_then(decode_public_number)
 }
 
-fn public_pane_id_for_number(workspace_id: &str, pane_number: usize) -> String {
+pub(crate) fn public_pane_id_for_number(workspace_id: &str, pane_number: usize) -> String {
     format!("{workspace_id}:p{}", encode_public_number(pane_number))
 }
 
-fn public_tab_id_for_number(workspace_id: &str, tab_number: usize) -> String {
+pub(crate) fn public_tab_id_for_number(workspace_id: &str, tab_number: usize) -> String {
     format!("{workspace_id}:t{}", encode_public_number(tab_number))
 }
 

@@ -2932,6 +2932,61 @@ mod tests {
     }
 
     #[test]
+    fn tab_info_number_uses_stable_public_tab_number() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("api-tab-public-number");
+        let removed_tab = workspace.test_add_tab(None);
+        let survivor_tab = workspace.test_add_tab(None);
+        let survivor_pane = workspace.tabs[survivor_tab].root_pane;
+        assert!(workspace.close_tab(removed_tab));
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let survivor_idx = app.state.workspaces[0]
+            .find_tab_index_for_pane(survivor_pane)
+            .unwrap();
+
+        let tab = app.tab_info(0, survivor_idx).unwrap();
+
+        assert_eq!(tab.tab_id, format!("{}:t3", app.state.workspaces[0].id));
+        assert_eq!(tab.number, 3);
+        assert_eq!(tab.label, "3");
+    }
+
+    #[test]
+    fn legacy_bare_tab_id_uses_tab_position_not_public_tab_number() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("legacy-tab-id");
+        let removed_tab = workspace.test_add_tab(None);
+        workspace.test_add_tab(None);
+        let public_four_tab = workspace.test_add_tab(None);
+        let fourth_position_tab = workspace.test_add_tab(None);
+        let public_four_pane = workspace.tabs[public_four_tab].root_pane;
+        let fourth_position_pane = workspace.tabs[fourth_position_tab].root_pane;
+        assert!(workspace.close_tab(removed_tab));
+        app.state.workspaces = vec![workspace];
+
+        let public_four_idx = app.state.workspaces[0]
+            .find_tab_index_for_pane(public_four_pane)
+            .unwrap();
+        let fourth_position_idx = app.state.workspaces[0]
+            .find_tab_index_for_pane(fourth_position_pane)
+            .unwrap();
+
+        assert_eq!(app.state.workspaces[0].tabs[public_four_idx].number, 4);
+        assert_eq!(app.state.workspaces[0].tabs[fourth_position_idx].number, 5);
+        assert_eq!(
+            app.parse_tab_id(&format!("{}:t4", app.state.workspaces[0].id)),
+            Some((0, public_four_idx))
+        );
+        assert_eq!(
+            app.parse_tab_id(&format!("{}:4", app.state.workspaces[0].id)),
+            Some((0, fourth_position_idx))
+        );
+    }
+
+    #[test]
     fn workspace_creation_in_navigate_mode_uses_selected_workspace_seed_cwd() {
         let mut app = test_app();
         let mut first = Workspace::test_new("herdr");

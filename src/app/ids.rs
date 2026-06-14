@@ -19,10 +19,8 @@ impl App {
     pub(super) fn public_tab_id(&self, ws_idx: usize, tab_idx: usize) -> Option<String> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab_number = ws.public_tab_number(tab_idx)?;
-        Some(format!(
-            "{}:t{}",
-            ws.id,
-            crate::workspace::encode_public_number(tab_number)
+        Some(crate::workspace::public_tab_id_for_number(
+            &ws.id, tab_number,
         ))
     }
 
@@ -33,10 +31,9 @@ impl App {
     ) -> Option<String> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_number = ws.public_pane_number(pane_id)?;
-        Some(format!(
-            "{}:p{}",
-            ws.id,
-            crate::workspace::encode_public_number(pane_number)
+        Some(crate::workspace::public_pane_id_for_number(
+            &ws.id,
+            pane_number,
         ))
     }
 
@@ -80,18 +77,17 @@ impl App {
 
         let (ws_raw, tab_raw) = id.rsplit_once(':')?;
         let ws_idx = self.parse_workspace_id(ws_raw)?;
-        let tab_number = if let Some(encoded) = tab_raw.strip_prefix('t') {
-            crate::workspace::decode_public_number(encoded)?
+        let tab_idx = if let Some(encoded) = tab_raw.strip_prefix('t') {
+            let tab_number = crate::workspace::decode_public_number(encoded)?;
+            self.state
+                .workspaces
+                .get(ws_idx)?
+                .tabs
+                .iter()
+                .position(|tab| tab.number == tab_number)?
         } else {
-            tab_raw.parse::<usize>().ok()?
+            tab_raw.parse::<usize>().ok()?.checked_sub(1)?
         };
-        let tab_idx = self
-            .state
-            .workspaces
-            .get(ws_idx)?
-            .tabs
-            .iter()
-            .position(|tab| tab.number == tab_number)?;
         self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
         Some((ws_idx, tab_idx))
     }
