@@ -20,6 +20,7 @@
 
 ### Changed
 - Bumped the client/server protocol version to 14 for `pane.move` compatibility. (#299)
+- Preview releases are now published only by manual maintainer workflow dispatch, not on a scheduled cron.
 - Plugin runtime config directories now use stable, readable plugin-id paths
   instead of checkout hashes; existing legacy config directories are copied into
   the new location when first seen.
