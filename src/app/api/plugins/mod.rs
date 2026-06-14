@@ -771,7 +771,7 @@ action = "bootstrap"
         assert_eq!(plugin.plugin_id, "example.worktree-bootstrap");
         assert_eq!(plugin.name, "Worktree Bootstrap");
         assert_eq!(plugin.version, "0.1.0");
-        assert_eq!(plugin.plugin_root, root.display().to_string());
+        assert_eq!(plugin.plugin_root, canonical_path_string(&root));
         assert!(plugin.enabled);
         assert_eq!(plugin.build.len(), 1);
         assert_eq!(plugin.build[0].command, ["bun", "install"]);
