@@ -10,12 +10,33 @@ validation, keybindings, terminal panes, events, invocation context, and socket
 access. The plugin owns its implementation language, dependencies, files, and
 durable state.
 
-A plugin directory contains `herdr-plugin.toml`. Herdr installs or links that
-manifest, then runs declared action, event, and pane commands out of process.
-The manifest is the contract. Runtime action registration and native
-non-terminal plugin UI are not part of plugin v1.
+Plugins exist so Herdr can stay lean. The core stays focused on terminal
+workspaces, panes, agents, and a stable CLI/socket API. Plugins turn that
+existing extension surface into reusable workflows that people can build,
+install, and share without adding every workflow to Herdr itself.
+
+A plugin is not an SDK integration. It is a directory with a
+`herdr-plugin.toml` manifest and commands Herdr can launch. Herdr validates the
+manifest, injects runtime context, starts the declared commands, and records
+logs. The commands call back into Herdr through the CLI or socket when they need
+to do more work.
+
+Most plugins should call Herdr through `HERDR_BIN_PATH`, which points at the
+running Herdr binary. That keeps plugins portable across Unix sockets and
+Windows named pipes. Use the [CLI reference](/docs/cli-reference/) as the
+catalog of commands a plugin can call. Use the
+[socket API](/docs/socket-api/) when you want to send raw JSON requests
+yourself.
+
+Runtime action registration and native non-terminal plugin UI are not part of
+plugin v1. Actions, event hooks, panes, and link handlers are all declared in
+the manifest.
 
 ## Manifest
+
+The manifest is the contract between Herdr and the plugin. It declares package
+metadata, supported platforms, optional build commands, and the entrypoints
+Herdr can run.
 
 ```toml
 id = "example.layout"
@@ -54,14 +75,67 @@ pattern = "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$"
 action = "apply"
 ```
 
-Actions are manifest-only. Pane commands are manifest-only too;
-`plugin.pane.open` selects a declared `[[panes]]` entrypoint and does not
-accept runtime argv. Action ids, pane ids, and link handler ids are local ids
-inside the plugin; they may use ASCII letters, digits, colon, underscore, and
-hyphen, but not dots. Each id type must be unique inside a plugin.
+Top-level `id`, `name`, and `version` are required. `description` is optional.
+Plugin ids may use ASCII letters, digits, dot, colon, underscore, and hyphen.
 
-Use `platforms` to declare where the plugin can run. Local plugins without
-`platforms` link with a warning.
+Action ids, pane ids, and link handler ids are local ids inside the plugin.
+They may use ASCII letters, digits, colon, underscore, and hyphen, but not
+dots. Each id type must be unique inside a plugin. Herdr qualifies action ids
+as `plugin.id.action` when it needs a globally unique name.
+
+Use `platforms = ["linux", "macos", "windows"]` to declare where the plugin
+can run. Build commands, actions, event hooks, panes, and link handlers can
+also declare their own `platforms`; item-level platforms override the top-level
+list. Local plugins without top-level `platforms` link with a warning.
+
+`command` values are argv arrays. Herdr does not run them through a shell, so
+there is no shell expansion unless your command starts a shell itself. Put
+language-specific behavior in your script or binary.
+
+## First plugin
+
+Start with a directory that contains `herdr-plugin.toml` and one executable
+script or program:
+
+```text
+my-plugin/
+  herdr-plugin.toml
+  index.js
+```
+
+```toml
+id = "example.workspace-tools"
+name = "Workspace Tools"
+version = "0.1.0"
+description = "Small workspace helpers"
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "list-workspaces"
+title = "List workspaces"
+contexts = ["workspace"]
+command = ["node", "index.js"]
+```
+
+Inside the command, call back into Herdr with `HERDR_BIN_PATH`:
+
+```js
+const { spawnSync } = require("node:child_process");
+
+const herdr = process.env.HERDR_BIN_PATH ?? "herdr";
+const result = spawnSync(herdr, ["workspace", "list"], {
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"],
+});
+
+process.stdout.write(result.stdout);
+process.stderr.write(result.stderr);
+process.exit(result.status ?? 1);
+```
+
+This example uses Node, but nothing about plugins requires Node. The manifest
+could launch Bash, PowerShell, Python, Rust, Go, Lua, Bun, or any other command
+available on the user's machine.
 
 ## Install and link
 
@@ -144,7 +218,9 @@ Use `HERDR_BIN_PATH` when a plugin needs to call Herdr portably from Node,
 PowerShell, Bash, or another runtime. The raw socket transport behind
 `HERDR_SOCKET_PATH` is OS-specific: Unix clients connect to a Unix socket path,
 while Windows clients connect to a named pipe. CLI calls through
-`HERDR_BIN_PATH` avoid that transport difference.
+`HERDR_BIN_PATH` avoid that transport difference. See the
+[CLI reference](/docs/cli-reference/) for available commands and
+[socket API](/docs/socket-api/) for raw request shapes.
 
 ## Panes
 
@@ -194,7 +270,10 @@ state should own their files or database.
 
 ## Marketplace
 
-A plugin marketplace is coming. You can already publish a GitHub repository and
-share it with `herdr plugin install owner/repo[/subdir]`. Tag your repo with the
-GitHub topic `herdr-plugin` now to be listed when the marketplace launches. See
+A plugin marketplace is coming. Plugins are already shareable today: publish a
+GitHub repository with `herdr-plugin.toml`, then share
+`herdr plugin install owner/repo[/subdir]`.
+
+If you want the plugin to appear in the website marketplace when discovery
+launches, add the GitHub topic `herdr-plugin` to the repository now. See
 [Marketplace](/docs/marketplace/) for how publishing and discovery will work.
