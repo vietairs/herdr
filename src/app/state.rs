@@ -1762,6 +1762,80 @@ impl AppState {
         }
     }
 
+    pub fn test_with_adversarial_identity_state() -> Self {
+        let mut state = Self::test_new();
+        state.workspaces = vec![crate::workspace::Workspace::test_adversarial_identity_state()];
+        state.active = Some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+        state
+    }
+
+    pub fn assert_invariants_for_test(&self) {
+        if self.workspaces.is_empty() {
+            assert!(
+                self.active.is_none(),
+                "empty app state must not have active workspace {:?}",
+                self.active
+            );
+            assert_eq!(
+                self.selected, 0,
+                "empty app state should keep selected workspace at 0"
+            );
+            return;
+        }
+
+        assert!(
+            self.selected < self.workspaces.len(),
+            "selected workspace {} out of bounds for {} workspaces",
+            self.selected,
+            self.workspaces.len()
+        );
+        let active = self
+            .active
+            .expect("non-empty app state must have active workspace");
+        assert!(
+            active < self.workspaces.len(),
+            "active workspace {} out of bounds for {} workspaces",
+            active,
+            self.workspaces.len()
+        );
+
+        let mut workspace_ids = std::collections::HashSet::new();
+        let mut pane_ids = std::collections::HashSet::new();
+        let mut attached_terminal_ids = std::collections::HashSet::new();
+        for (ws_idx, ws) in self.workspaces.iter().enumerate() {
+            assert!(
+                workspace_ids.insert(ws.id.clone()),
+                "duplicate workspace id {} at workspace index {}",
+                ws.id,
+                ws_idx
+            );
+            ws.assert_invariants_for_test();
+
+            for tab in &ws.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    assert!(
+                        pane_ids.insert(*pane_id),
+                        "pane {:?} appears in more than one workspace",
+                        pane_id
+                    );
+                    assert!(
+                        attached_terminal_ids.insert(pane.attached_terminal_id.clone()),
+                        "terminal {} is attached to more than one app pane",
+                        pane.attached_terminal_id
+                    );
+                    assert!(
+                        self.terminals.contains_key(&pane.attached_terminal_id),
+                        "pane {:?} is attached to missing terminal {}",
+                        pane_id,
+                        pane.attached_terminal_id
+                    );
+                }
+            }
+        }
+    }
+
     pub fn insert_test_runtime(
         &mut self,
         pane_id: crate::layout::PaneId,
@@ -1802,6 +1876,21 @@ mod tests {
         state.workspaces = vec![ws];
 
         assert!(state.pane_exposes_host_cursor(0, pane_id));
+    }
+
+    #[test]
+    fn adversarial_identity_state_satisfies_app_invariants_after_mutation() {
+        let mut state = AppState::test_with_adversarial_identity_state();
+        state.assert_invariants_for_test();
+
+        let ws = &mut state.workspaces[0];
+        let active_public = ws.tabs[ws.active_tab].number;
+        assert_ne!(ws.active_tab + 1, active_public);
+        let new_pane = ws.test_split(ratatui::layout::Direction::Horizontal);
+        assert!(ws.public_pane_number(new_pane).is_some());
+        state.ensure_test_terminals();
+
+        state.assert_invariants_for_test();
     }
 
     #[test]
