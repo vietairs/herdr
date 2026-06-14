@@ -19,6 +19,9 @@
 - Bumped the client/server protocol version to 14 for `pane.move` compatibility. (#299)
 - Public workspace, tab, and pane ids are now short stable handles such as `w1`, `w1:t1`, and `w1:p1`; closed tab and pane ids no longer retarget later resources. (#569)
 
+### Fixed
+- Config startup and reload now warn about unknown top-level table sections, including a `[toast]` hint that points to `[ui.toast]`, instead of silently ignoring them.
+
 ## [0.6.10] - 2026-06-11
 
 This is a hotfix release for v0.6.9. See the v0.6.9 notes for the full feature release.
