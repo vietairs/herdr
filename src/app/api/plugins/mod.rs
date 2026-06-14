@@ -681,6 +681,13 @@ mod tests {
         std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
     }
 
+    fn canonical_path_string(path: &std::path::Path) -> String {
+        path.canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .display()
+            .to_string()
+    }
+
     fn write_manifest(root: &std::path::Path) -> std::path::PathBuf {
         std::fs::create_dir_all(root).unwrap();
         let manifest = root.join("herdr-plugin.toml");
@@ -1077,7 +1084,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$HERDR_
         }
         let text = std::fs::read_to_string(&capture).expect("plugin pane command should write env");
         let mut lines = text.lines();
-        assert_eq!(lines.next(), Some(root.display().to_string().as_str()));
+        assert_eq!(lines.next(), Some(canonical_path_string(&root).as_str()));
         assert_eq!(lines.next(), Some("example.pane"));
         assert_eq!(lines.next(), Some("board"));
         assert_eq!(lines.next(), Some(plugin_pane.pane.workspace_id.as_str()));
@@ -1175,7 +1182,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
         }
         let text = std::fs::read_to_string(&capture).expect("plugin pane command should write env");
         let mut lines = text.lines();
-        assert_eq!(lines.next(), Some(root.display().to_string().as_str()));
+        assert_eq!(lines.next(), Some(canonical_path_string(&root).as_str()));
         assert_eq!(
             lines.next(),
             Some(
@@ -1545,7 +1552,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
             .expect("log should exist");
         assert_eq!(finished.status, PluginCommandStatus::Succeeded);
         let mut lines = finished.stdout.as_deref().unwrap_or_default().lines();
-        assert_eq!(lines.next(), Some(root.display().to_string().as_str()));
+        assert_eq!(lines.next(), Some(canonical_path_string(&root).as_str()));
         assert_eq!(
             lines.next(),
             Some(
