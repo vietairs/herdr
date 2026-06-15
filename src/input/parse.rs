@@ -253,6 +253,23 @@ fn kitty_codepoint_to_keycode(codepoint: u32) -> Option<KeyCode> {
         57362 => Some(KeyCode::Pause),
         57363 => Some(KeyCode::Menu),
         57376..=57398 => Some(KeyCode::F((codepoint - 57376 + 13) as u8)),
+        57399 => Some(KeyCode::Char('0')),
+        57400 => Some(KeyCode::Char('1')),
+        57401 => Some(KeyCode::Char('2')),
+        57402 => Some(KeyCode::Char('3')),
+        57403 => Some(KeyCode::Char('4')),
+        57404 => Some(KeyCode::Char('5')),
+        57405 => Some(KeyCode::Char('6')),
+        57406 => Some(KeyCode::Char('7')),
+        57407 => Some(KeyCode::Char('8')),
+        57408 => Some(KeyCode::Char('9')),
+        57409 => Some(KeyCode::Char('.')),
+        57410 => Some(KeyCode::Char('/')),
+        57411 => Some(KeyCode::Char('*')),
+        57412 => Some(KeyCode::Char('-')),
+        57413 => Some(KeyCode::Char('+')),
+        57415 => Some(KeyCode::Char('=')),
+        57416 => Some(KeyCode::Char(',')),
         57417 => Some(KeyCode::Left),
         57418 => Some(KeyCode::Right),
         57419 => Some(KeyCode::Up),
@@ -731,6 +748,24 @@ mod tests {
     #[test]
     fn kitty_functional_key_matrix_is_covered() {
         let cases = [
+            ("\x1b[57399;1u", KeyCode::Char('0')),
+            ("\x1b[57400;1u", KeyCode::Char('1')),
+            ("\x1b[57401;1u", KeyCode::Char('2')),
+            ("\x1b[57402;1u", KeyCode::Char('3')),
+            ("\x1b[57403;1u", KeyCode::Char('4')),
+            ("\x1b[57404;1u", KeyCode::Char('5')),
+            ("\x1b[57405;1u", KeyCode::Char('6')),
+            ("\x1b[57406;1u", KeyCode::Char('7')),
+            ("\x1b[57407;1u", KeyCode::Char('8')),
+            ("\x1b[57408;1u", KeyCode::Char('9')),
+            ("\x1b[57409;1u", KeyCode::Char('.')),
+            ("\x1b[57410;1u", KeyCode::Char('/')),
+            ("\x1b[57411;1u", KeyCode::Char('*')),
+            ("\x1b[57412;1u", KeyCode::Char('-')),
+            ("\x1b[57413;1u", KeyCode::Char('+')),
+            ("\x1b[57414;1u", KeyCode::Enter),
+            ("\x1b[57415;1u", KeyCode::Char('=')),
+            ("\x1b[57416;1u", KeyCode::Char(',')),
             ("\x1b[57417;1u", KeyCode::Left),
             ("\x1b[57418;1u", KeyCode::Right),
             ("\x1b[57419;1u", KeyCode::Up),
@@ -753,6 +788,11 @@ mod tests {
                 None,
             );
         }
+    }
+
+    #[test]
+    fn unknown_kitty_functional_key_remains_unsupported() {
+        assert!(parse_terminal_key_sequence("\x1b[57364;1u").is_none());
     }
 
     fn assert_fixture_corpus_parses(corpus: &str) {
