@@ -302,6 +302,14 @@ herdr plugin unlink <plugin_id>
 
 `plugin link` accepts a plugin directory containing `herdr-plugin.toml` or a direct manifest path. It is still the right command while authoring or testing a plugin from a local checkout. `plugin unlink` unregisters the plugin and leaves files alone. `plugin uninstall` unregisters a plugin and also removes Herdr-managed GitHub checkout files. For GitHub installs, uninstall accepts either the plugin id or the same `owner/repo[/subdir...]` shorthand used by install. Actions, event hooks, panes, and link handlers are declared in the manifest; runtime action registration is not part of v1.
 
+Config directory:
+
+```bash
+herdr plugin config-dir <plugin_id>
+```
+
+`plugin config-dir` prints the plugin's config directory, creating it (and seeding it from legacy plugin config locations when present) if needed. Use it in setup docs and shell scripts to point users at a stable path for `.env` files and other user-editable config, separate from the managed plugin checkout.
+
 Actions:
 
 ```bash

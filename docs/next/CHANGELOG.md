@@ -3,33 +3,16 @@
 ## Unreleased
 
 ### Added
-- Added local plugin v1 support with `plugin.link/list/unlink/enable/disable`,
-  manifest-declared actions, event hooks, managed plugin panes, link handlers,
-  command logs, keybinding integration, and authoring docs under Preview docs.
-- Added `herdr plugin install <owner>/<repo>[/subdir...]`, `plugin uninstall`,
-  source metadata in `plugin.list`, offline registry fallback, and a
-  human-readable default `plugin list` with `--json` for scripts.
-- Added `herdr plugin config-dir <id>` and automatic plugin config/state
-  directory creation so plugin setup docs can point users at a stable config
-  path.
-- Added Devin CLI automatic detection plus `herdr integration install devin`
-  hooks that report session ids for restore with `devin --resume <id>`.
-  Devin state remains screen-detected because Devin hooks do not cover every
-  permission cancellation and user interrupt transition.
-- Added supporting plugin host APIs for `pane.current`, `pane.process_info`,
-  `client.window_title.set/clear`, `layout.export/apply`, plugin pane placement,
-  plugin invocation context/env injection, and plugin pane ownership across
-  `pane.move`.
+- Added local plugin v1 support with `plugin.link/list/unlink/enable/disable`, manifest-declared actions, event hooks, managed plugin panes, link handlers, command logs, keybinding integration, and authoring docs under Preview docs.
+- Added `herdr plugin install <owner>/<repo>[/subdir...]`, `plugin uninstall`, source metadata in `plugin.list`, offline registry fallback, and a human-readable default `plugin list` with `--json` for scripts.
+- Added `herdr plugin config-dir <id>` and automatic plugin config/state directory creation so plugin setup docs can point users at a stable config path.
+- Added Devin CLI automatic detection plus `herdr integration install devin` hooks that report session ids for restore with `devin --resume <id>`. Devin state remains screen-detected because Devin hooks do not cover every permission cancellation and user interrupt transition. (#606, #622, thanks @minatoaquaMK2)
+- Added supporting plugin host APIs for `pane.current`, `pane.process_info`, `client.window_title.set/clear`, `layout.export/apply`, plugin pane placement, plugin invocation context/env injection, and plugin pane ownership across `pane.move`.
 - Added `pane.move` and `herdr pane move` to relocate a running pane into another tab, a new tab, or a new workspace without restarting its terminal process. (#299)
+- Tabs containing a zoomed pane are now marked in the tab bar so the zoom state is visible from other tabs.
 
 ### Changed
 - Bumped the client/server protocol version to 14 for `pane.move` compatibility. (#299)
-- Preview releases are now published only by manual maintainer workflow dispatch, not on a scheduled cron.
-- Plugin runtime config directories now use stable, readable plugin-id paths
-  instead of checkout hashes; existing legacy config directories are copied into
-  the new location when first seen.
-- Plugin manifests must now declare `min_herdr_version`; install and link fail
-  when a plugin requires a newer Herdr binary.
 - Public workspace, tab, and pane ids are now short stable handles such as `w1`, `w1:t1`, and `w1:p1`; closed tab and pane ids no longer retarget later resources. (#569)
 
 ### Fixed
@@ -39,6 +22,11 @@
 - Auto-named tab labels now stay compact after closing, moving, or creating tabs while public tab ids remain stable.
 - F1-F4 key presses sent as `ESC[11~` through `ESC[14~` now reach pane apps instead of being dropped. (#574)
 - Numeric keypad keys sent through the kitty keyboard protocol now enter their digits and operators instead of being dropped. (#570)
+- Pane resize keybindings now shrink panes again instead of only being able to grow them. (#562)
+- Windows pane cursor rendering is now stable instead of showing a misplaced or flickering cursor. (#556)
+- Tab identity is now preserved across restored sessions.
+- Idle panes now poll their PTY less frequently, reducing CPU use while sessions are inactive.
+- Captured pane URL clicks, including plugin link handlers, now use Ctrl-click on macOS too because captured terminal mouse reports do not expose Cmd-click separately from plain click. (#307)
 
 ## [0.6.10] - 2026-06-11
 
@@ -58,7 +46,7 @@ This is a hotfix release for v0.6.9. See the v0.6.9 notes for the full feature r
 - Numeric keypad keys that send VT100 application-keypad escape sequences now enter their digits and operators instead of being dropped. (#493)
 - Codex panes now stay marked working when the live status header uses reasoning-summary text such as `Investigating code output` instead of the literal `Working` label. (#501)
 - Codex blocker detection now ignores stale prompt text outside the live prompt region, reducing false blocked states from old scrollback.
-- Pane URL clicks, including plugin link handlers and native URL opening, now use Ctrl-click on macOS too because captured terminal mouse reports do not expose Cmd-click separately from plain click. (#307)
+- Native pane URL clicks now use Cmd-click on macOS and Ctrl-click on other platforms. (#307)
 - Worktree open, create, and remove actions now work from bare repositories instead of assuming a normal checkout. (#497)
 - Pane mouse handling no longer sends empty PTY writes for mouse events that produce no terminal input. (#496)
 - Pane output now renders flag emoji and other multi-codepoint grapheme clusters as complete symbols instead of blank cells. (#243)
