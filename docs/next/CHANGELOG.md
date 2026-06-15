@@ -33,6 +33,7 @@
 - Claude Code session restore now accepts real `/clear`, `/resume`, and compacted session identity changes while still ignoring nested `claude -p` startup sessions that inherit the pane environment. (#620)
 - Auto-named tab labels now stay compact after closing, moving, or creating tabs while public tab ids remain stable.
 - F1-F4 key presses sent as `ESC[11~` through `ESC[14~` now reach pane apps instead of being dropped. (#574)
+- Numeric keypad keys sent through the kitty keyboard protocol now enter their digits and operators instead of being dropped. (#570)
 
 ## [0.6.10] - 2026-06-11
 
