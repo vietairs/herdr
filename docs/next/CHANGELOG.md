@@ -12,6 +12,10 @@
 - Added `herdr plugin config-dir <id>` and automatic plugin config/state
   directory creation so plugin setup docs can point users at a stable config
   path.
+- Added Devin CLI automatic detection plus `herdr integration install devin`
+  hooks that report session ids for restore with `devin --resume <id>`.
+  Devin state remains screen-detected because Devin hooks do not cover every
+  permission cancellation and user interrupt transition.
 - Added supporting plugin host APIs for `pane.current`, `pane.process_info`,
   `client.window_title.set/clear`, `layout.export/apply`, plugin pane placement,
   plugin invocation context/env injection, and plugin pane ownership across

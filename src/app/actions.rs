@@ -2767,7 +2767,7 @@ impl AppState {
                 }),
             }
         };
-        let toast = (!is_active_tab).then(&build_toast);
+        let toast = (!is_active_tab).then(build_toast);
         let client_notification = (!suppress_active_tab_notifications).then(build_toast);
 
         if toast.is_none() && client_notification.is_none() && sound.is_none() {
@@ -4530,6 +4530,43 @@ mod tests {
         let terminal = state.terminals.get(&terminal_id).unwrap();
         assert_eq!(terminal.state, AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Claude));
+    }
+
+    #[test]
+    fn devin_state_report_refreshes_session_without_overriding_screen_state() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Devin),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:devin".into(),
+            agent_label: "devin".into(),
+            state: AgentState::Working,
+            message: None,
+            custom_status: None,
+            seq: Some(1),
+            session_ref: crate::agent_resume::AgentSessionRef::id("devin-session"),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(terminal.hook_authority.is_none());
+        assert!(terminal.persisted_agent_session.is_some());
     }
 
     #[test]

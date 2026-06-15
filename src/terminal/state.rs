@@ -1073,31 +1073,37 @@ mod tests {
 
     #[test]
     fn session_only_report_does_not_create_hook_authority() {
-        let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        for (agent, source, label, session_id) in [
+            (Agent::Codex, "herdr:codex", "codex", "codex-session"),
+            (Agent::Devin, "herdr:devin", "devin", "devin-session"),
+        ] {
+            let mut terminal = test_terminal();
+            terminal.set_detected_state(Some(agent), AgentState::Idle);
 
-        let mutation = terminal.set_agent_session_ref(
-            "herdr:codex".into(),
-            "codex".into(),
-            crate::agent_resume::AgentSessionRef::id("codex-session"),
-            Some(1),
-        );
+            let mutation = terminal.set_agent_session_ref(
+                source.into(),
+                label.into(),
+                crate::agent_resume::AgentSessionRef::id(session_id),
+                Some(1),
+            );
 
-        assert!(mutation.is_some());
-        assert!(terminal.hook_authority.is_none());
-        assert_eq!(terminal.state, AgentState::Idle);
+            assert!(mutation.is_some());
+            assert!(terminal.hook_authority.is_none());
+            assert!(!terminal.full_lifecycle_hook_authority_active());
+            assert_eq!(terminal.state, AgentState::Idle);
 
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Codex),
-            AgentState::Working,
-            false,
-            false,
-            false,
-            false,
-            Instant::now(),
-        );
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(agent),
+                AgentState::Working,
+                false,
+                false,
+                false,
+                false,
+                Instant::now(),
+            );
 
-        assert_eq!(terminal.state, AgentState::Working);
+            assert_eq!(terminal.state, AgentState::Working);
+        }
     }
 
     #[test]
