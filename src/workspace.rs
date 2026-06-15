@@ -423,7 +423,16 @@ impl Workspace {
     }
 
     pub fn active_tab_display_name(&self) -> Option<String> {
-        self.active_tab().map(Tab::display_name)
+        self.tab_display_name(self.active_tab)
+    }
+
+    pub fn tab_display_name(&self, tab_idx: usize) -> Option<String> {
+        let tab = self.tabs.get(tab_idx)?;
+        Some(
+            tab.custom_name
+                .clone()
+                .unwrap_or_else(|| (tab_idx + 1).to_string()),
+        )
     }
 
     pub fn switch_tab(&mut self, idx: usize) {
@@ -1581,8 +1590,10 @@ mod tests {
 
         assert!(ws.move_tab(0, ws.tabs.len()));
 
-        let labels: Vec<_> = ws.tabs.iter().map(|tab| tab.display_name()).collect();
-        assert_eq!(labels, vec!["foo", "3", "1"]);
+        let labels: Vec<_> = (0..ws.tabs.len())
+            .map(|tab_idx| ws.tab_display_name(tab_idx).unwrap())
+            .collect();
+        assert_eq!(labels, vec!["foo", "2", "3"]);
         assert_eq!(ws.tabs[0].custom_name.as_deref(), Some("foo"));
         assert!(ws.tabs[1].custom_name.is_none());
         assert!(ws.tabs[2].custom_name.is_none());

@@ -21,13 +21,15 @@ pub(crate) struct TabBarView {
     pub new_tab_hit_area: Rect,
 }
 
-fn tab_width(tab: &crate::workspace::Tab) -> u16 {
-    (tab_chrome_label(tab).chars().count() as u16 + 4).max(MIN_TAB_WIDTH)
+fn tab_width(ws: &crate::workspace::Workspace, tab_idx: usize) -> u16 {
+    (tab_chrome_label(ws, tab_idx).chars().count() as u16 + 4).max(MIN_TAB_WIDTH)
 }
 
-fn tab_chrome_label(tab: &crate::workspace::Tab) -> String {
-    let name = tab.display_name();
-    if tab.zoomed {
+fn tab_chrome_label(ws: &crate::workspace::Workspace, tab_idx: usize) -> String {
+    let name = ws
+        .tab_display_name(tab_idx)
+        .unwrap_or_else(|| (tab_idx + 1).to_string());
+    if ws.tabs.get(tab_idx).is_some_and(|tab| tab.zoomed) {
         format!("{name} Z")
     } else {
         name
@@ -46,7 +48,7 @@ fn layout_tab_hit_areas(ws: &crate::workspace::Workspace, area: Rect, scroll: us
         if x >= right {
             break;
         }
-        let desired = tab_width(&ws.tabs[idx]);
+        let desired = tab_width(ws, idx);
         let remaining = right.saturating_sub(x);
         let width = desired.min(remaining).max(1);
         *rect = Rect::new(x, area.y, width, 1);
@@ -333,7 +335,7 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(p.overlay1).bg(p.surface0)
         };
         let width = rect.width as usize;
-        let name = tab_chrome_label(tab);
+        let name = tab_chrome_label(ws, idx);
         let text = format!(" {:width$}", name, width = width.saturating_sub(1));
         frame.render_widget(Paragraph::new(text).style(style), rect);
     }
@@ -427,8 +429,11 @@ mod tests {
         let row = buffer_row_text(terminal.backend().buffer(), app.view.tab_bar_rect, 0);
         assert!(row.contains(" 1 Z"), "tab row: {row:?}");
         assert!(row.contains(" test Z"), "tab row: {row:?}");
-        assert_eq!(app.workspaces[0].tabs[0].display_name(), "1");
-        assert_eq!(app.workspaces[0].tabs[custom_tab].display_name(), "test");
+        assert_eq!(app.workspaces[0].tab_display_name(0).as_deref(), Some("1"));
+        assert_eq!(
+            app.workspaces[0].tab_display_name(custom_tab).as_deref(),
+            Some("test")
+        );
     }
 
     #[test]
@@ -437,6 +442,6 @@ mod tests {
         ws.tabs[0].set_custom_name("abcdefgh".into());
         ws.tabs[0].zoomed = true;
 
-        assert_eq!(tab_width(&ws.tabs[0]), 14);
+        assert_eq!(tab_width(&ws, 0), 14);
     }
 }
