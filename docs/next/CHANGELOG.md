@@ -57,7 +57,7 @@ This is a hotfix release for v0.6.9. See the v0.6.9 notes for the full feature r
 - Numeric keypad keys that send VT100 application-keypad escape sequences now enter their digits and operators instead of being dropped. (#493)
 - Codex panes now stay marked working when the live status header uses reasoning-summary text such as `Investigating code output` instead of the literal `Working` label. (#501)
 - Codex blocker detection now ignores stale prompt text outside the live prompt region, reducing false blocked states from old scrollback.
-- Native pane URL clicks now use Cmd-click on macOS and Ctrl-click on other platforms. (#307)
+- Pane URL clicks, including plugin link handlers and native URL opening, now use Ctrl-click on macOS too because captured terminal mouse reports do not expose Cmd-click separately from plain click. (#307)
 - Worktree open, create, and remove actions now work from bare repositories instead of assuming a normal checkout. (#497)
 - Pane mouse handling no longer sends empty PTY writes for mouse events that produce no terminal input. (#496)
 - Pane output now renders flag emoji and other multi-codepoint grapheme clusters as complete symbols instead of blank cells. (#243)

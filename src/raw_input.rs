@@ -818,6 +818,27 @@ mod tests {
         assert_eq!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
         assert_eq!(mouse.column, 19);
         assert_eq!(mouse.row, 9);
+        assert_eq!(mouse.modifiers, KeyModifiers::empty());
+    }
+
+    #[test]
+    fn parses_sgr_mouse_observable_modifiers() {
+        let cases = [
+            (b"\x1b[<8;20;10M".as_slice(), KeyModifiers::ALT),
+            (b"\x1b[<16;20;10M".as_slice(), KeyModifiers::CONTROL),
+            (
+                b"\x1b[<24;20;10M".as_slice(),
+                KeyModifiers::ALT | KeyModifiers::CONTROL,
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let (RawInputEvent::Mouse(mouse), _) = extract_one_event(input).unwrap() else {
+                panic!("expected mouse");
+            };
+            assert_eq!(mouse.modifiers, expected);
+            assert!(!mouse.modifiers.contains(KeyModifiers::SUPER));
+        }
     }
 
     #[test]
