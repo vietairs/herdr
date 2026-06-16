@@ -40,7 +40,7 @@ pub fn stdin_reader_loop(
     #[cfg(windows)]
     {
         let _ = host_color_query_sent;
-        return windows_stdin_reader_loop(event_tx, should_quit);
+        windows_stdin_reader_loop(event_tx, should_quit);
     }
 
     #[cfg(unix)]
