@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Host terminal color query (OSC 10/11) replies that arrive split at their escape introducer no longer leak as text like `11;rgb:...` into the focused pane, most visible when launching agents that probe terminal colors on startup. (#549)
+
 ## [0.7.0] - 2026-06-15
 
 ### Added
