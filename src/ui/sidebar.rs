@@ -973,11 +973,7 @@ fn render_workspace_list(
                     })
                     .unwrap_or(0);
                 let max_branch_len = (card.rect.width as usize).saturating_sub(5 + reserved);
-                let branch_display = if branch.len() > max_branch_len {
-                    format!("{}…", &branch[..max_branch_len.saturating_sub(1)])
-                } else {
-                    branch
-                };
+                let branch_display = truncate_text(&branch, max_branch_len);
                 let branch_color = if selected || is_active {
                     p.mauve
                 } else {
@@ -1432,6 +1428,31 @@ mod tests {
             grouped_child_display_label("herdr-issue", Some("worktree/issue-137"), false),
             "issue-137"
         );
+    }
+
+    #[test]
+    fn workspace_list_truncates_cjk_branch_without_panic() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("repo");
+        ws.cached_git_branch = Some("feature/中文-分支-644".into());
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.view.workspace_card_areas = vec![crate::app::state::WorkspaceCardArea {
+            ws_idx: 0,
+            rect: Rect::new(0, 1, 15, 2),
+            indented: false,
+        }];
+
+        let mut terminal = Terminal::new(TestBackend::new(15, 6)).expect("test terminal");
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        terminal
+            .draw(|frame| {
+                render_workspace_list(&app, &runtimes, frame, Rect::new(0, 0, 15, 6), false)
+            })
+            .expect("workspace list should render");
     }
 
     fn workspace_with_worktree_space(
