@@ -59,6 +59,7 @@ fn unix_stdin_reader_loop(
     let mut framer = crate::raw_input::RawInputByteFramer::default();
     if host_color_query_sent {
         framer.host_color_query_sent();
+        framer.enable_host_color_scheme_change_tracking();
     }
 
     while !should_quit.load(Ordering::Acquire) {
@@ -75,12 +76,25 @@ fn unix_stdin_reader_loop(
                 }
 
                 if stdin_read_ready(&reader, 10) == Some(false) {
-                    for data in framer.flush_timeout() {
+                    let had_pending = framer.has_pending_input();
+                    let chunks = framer.flush_timeout();
+                    let held_escape = had_pending && chunks.is_empty();
+                    for data in chunks {
                         if event_tx
                             .blocking_send(ClientLoopEvent::StdinInput(data))
                             .is_err()
                         {
                             return;
+                        }
+                    }
+                    if held_escape && stdin_read_ready(&reader, 10) == Some(false) {
+                        for data in framer.flush_timeout() {
+                            if event_tx
+                                .blocking_send(ClientLoopEvent::StdinInput(data))
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
                 }
@@ -268,6 +282,7 @@ fn windows_client_input_event_from_raw(
             Some(crate::protocol::ClientInputEvent::FocusLost)
         }
         crate::raw_input::RawInputEvent::HostDefaultColor { .. }
+        | crate::raw_input::RawInputEvent::HostColorSchemeChanged(_)
         | crate::raw_input::RawInputEvent::Unsupported => None,
     }
 }
