@@ -142,6 +142,11 @@ impl RawInputFramer {
         self.byte_framer.has_pending_input()
     }
 
+    #[cfg(any(windows, test))]
+    pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
+        self.byte_framer.has_pending_bracketed_paste()
+    }
+
     pub(crate) fn flush_timeout(&mut self) -> Vec<RawInputEvent> {
         Self::events_from_chunks(self.byte_framer.flush_timeout())
     }
@@ -196,6 +201,12 @@ impl RawInputByteFramer {
 
     pub(crate) fn has_pending_input(&self) -> bool {
         !self.buffer.is_empty()
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
+        self.buffer.starts_with(BRACKETED_PASTE_START)
+            && find_subsequence(&self.buffer, BRACKETED_PASTE_END).is_none()
     }
 
     pub(crate) fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
