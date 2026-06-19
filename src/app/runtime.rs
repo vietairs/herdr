@@ -68,6 +68,20 @@ impl App {
             crate::api::schema::Method::ServerStop(_)
                 | crate::api::schema::Method::ServerLiveHandoff(_)
         );
+        if matches!(
+            &msg.request.method,
+            crate::api::schema::Method::WorktreeCreate(_)
+                | crate::api::schema::Method::WorktreeRemove(_)
+        ) {
+            self.drain_all_internal_events();
+            let deferred_changed =
+                self.handle_deferred_worktree_api_request(msg.request, msg.respond_to);
+            if !skip_default_workspace {
+                changed |= self.ensure_default_workspace();
+            }
+            self.sync_prefix_input_source(previous_mode);
+            return changed | deferred_changed;
+        }
         let response = self.handle_api_request(msg.request);
         if !skip_default_workspace {
             changed |= self.ensure_default_workspace();

@@ -2611,6 +2611,15 @@ impl HeadlessServer {
         };
 
         self.sync_foreground_client_state();
+        if matches!(
+            &msg.request.method,
+            api::schema::Method::WorktreeCreate(_) | api::schema::Method::WorktreeRemove(_)
+        ) {
+            let deferred_changed = self
+                .app
+                .handle_deferred_worktree_api_request(msg.request, msg.respond_to);
+            return changed | deferred_changed;
+        }
         let response = if matches!(
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)

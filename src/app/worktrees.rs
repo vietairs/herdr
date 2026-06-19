@@ -547,10 +547,13 @@ impl App {
             } else {
                 crate::worktree::run_worktree_command(&command)
             };
-            let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(WorktreeAddResult {
-                path,
-                result,
-            }));
+            let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(Box::new(
+                WorktreeAddResult {
+                    path,
+                    api_request: None,
+                    result,
+                },
+            )));
         });
     }
 
@@ -604,14 +607,15 @@ impl App {
             return;
         };
 
-        #[cfg(windows)]
-        if let Some(ws_idx) = self
-            .state
-            .workspaces
-            .iter()
-            .position(|ws| ws.id == workspace_id)
-        {
-            self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
+        if Self::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(force) {
+            if let Some(ws_idx) = self
+                .state
+                .workspaces
+                .iter()
+                .position(|ws| ws.id == workspace_id)
+            {
+                self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
+            }
         }
 
         let (workspace_snapshot, worktree_snapshot) = self
@@ -633,20 +637,28 @@ impl App {
         tracing::info!(workspace_id = %workspace_id, path = %path.display(), force, "starting git worktree remove");
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = crate::worktree::run_worktree_command(&command);
-            let _ =
-                event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(WorktreeRemoveResult {
+            let result = crate::worktree::run_worktree_remove_command_with_recovery(
+                &command, &repo_root, &path, force,
+            );
+            let _ = event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(Box::new(
+                WorktreeRemoveResult {
                     workspace_id,
                     path,
                     workspace: workspace_snapshot,
                     worktree: worktree_snapshot,
                     forced: force,
+                    api_request: None,
                     result,
-                }));
+                },
+            )));
         });
     }
 
     pub(crate) fn handle_worktree_add_finished(&mut self, result: WorktreeAddResult) {
+        if result.api_request.is_some() {
+            self.handle_api_worktree_add_finished(result);
+            return;
+        }
         let Some(create) = &mut self.state.worktree_create else {
             return;
         };
@@ -741,6 +753,10 @@ impl App {
         }
     }
     pub(crate) fn handle_worktree_remove_finished(&mut self, result: WorktreeRemoveResult) {
+        if result.api_request.is_some() {
+            self.handle_api_worktree_remove_finished(result);
+            return;
+        }
         let Some(remove) = &mut self.state.worktree_remove else {
             return;
         };
@@ -823,7 +839,12 @@ impl App {
         }
     }
 
-    #[cfg(windows)]
+    pub(crate) fn should_shutdown_workspace_terminal_runtimes_for_worktree_remove(
+        force: bool,
+    ) -> bool {
+        force || cfg!(windows)
+    }
+
     pub(crate) fn shutdown_workspace_terminal_runtimes_for_worktree_remove(
         &mut self,
         ws_idx: usize,
@@ -833,7 +854,7 @@ impl App {
                 tracing::debug!(
                     workspace_index = ws_idx,
                     terminal_id = %terminal_id,
-                    "shutting down terminal runtime before Windows worktree removal"
+                    "shutting down terminal runtime before worktree removal"
                 );
                 runtime.shutdown();
             }
@@ -1446,6 +1467,7 @@ mod tests {
 
         app.handle_worktree_add_finished(WorktreeAddResult {
             path: checkout.clone(),
+            api_request: None,
             result: Ok(()),
         });
 
@@ -1539,6 +1561,7 @@ mod tests {
 
         app.handle_worktree_add_finished(WorktreeAddResult {
             path: checkout.clone(),
+            api_request: None,
             result: Ok(()),
         });
 
@@ -1594,6 +1617,7 @@ mod tests {
         let event = wait_for_worktree_event(&mut app);
         match event {
             AppEvent::WorktreeAddFinished(result) => {
+                let result = *result;
                 assert_eq!(result.path, checkout);
                 assert_eq!(result.result, Ok(()));
             }
@@ -1603,6 +1627,55 @@ mod tests {
 
         let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
         crate::worktree::run_worktree_command(&remove).unwrap();
+        let _ = std::fs::remove_dir_all(worktree_root);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn start_worktree_add_existing_branch_clears_creating_and_shows_fatal_error() {
+        let repo = create_committed_repo("app-worktree-add-existing-branch-repo");
+        let worktree_root = unique_temp_path("app-worktree-add-existing-branch-root");
+        let branch = "foo";
+        let checkout = crate::worktree::default_checkout_path(&worktree_root, "herdr", branch);
+        run_git(&repo, &["branch", branch]);
+        let mut app = app_for_worktree_tests();
+        app.state.worktree_directory = worktree_root.clone();
+        app.state.name_input = branch.into();
+        app.state.worktree_create = Some(WorktreeCreateState {
+            source_workspace_id: "source".into(),
+            source_checkout_path: repo.clone(),
+            source_existing_membership: None,
+            source_repo_root: repo.clone(),
+            repo_key: "repo-key".into(),
+            repo_name: "herdr".into(),
+            branch: branch.into(),
+            checkout_path: checkout.clone(),
+            error: None,
+            creating: false,
+        });
+
+        app.start_worktree_add();
+
+        assert!(app
+            .state
+            .worktree_create
+            .as_ref()
+            .is_some_and(|create| create.creating));
+        let event = wait_for_worktree_event(&mut app);
+        match event {
+            AppEvent::WorktreeAddFinished(result) => {
+                app.handle_worktree_add_finished(*result);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let create = app.state.worktree_create.as_ref().unwrap();
+        assert!(!create.creating);
+        let error = create.error.as_deref().unwrap();
+        assert!(error.contains("Preparing worktree"));
+        assert!(error.contains("fatal: a branch named 'foo' already exists"));
+        assert!(!checkout.exists());
+
         let _ = std::fs::remove_dir_all(worktree_root);
         let _ = std::fs::remove_dir_all(repo);
     }
@@ -1641,6 +1714,7 @@ mod tests {
         let event = wait_for_worktree_event(&mut app);
         match event {
             AppEvent::WorktreeAddFinished(result) => {
+                let result = *result;
                 assert_eq!(result.path, checkout);
                 assert_eq!(result.result, Ok(()));
             }
@@ -1700,6 +1774,7 @@ mod tests {
         let event = wait_for_worktree_event(&mut app);
         match event {
             AppEvent::WorktreeAddFinished(result) => {
+                let result = *result;
                 assert_eq!(result.path, checkout);
                 assert_eq!(result.result, Ok(()));
             }
@@ -1735,6 +1810,7 @@ mod tests {
             workspace: None,
             worktree: None,
             forced: false,
+            api_request: None,
             result: Err(
                 "fatal: '/w/herdr/dirty' contains modified or untracked files, use --force to delete it"
                     .into(),
@@ -1766,6 +1842,7 @@ mod tests {
             workspace: None,
             worktree: None,
             forced: false,
+            api_request: None,
             result: Err("fatal: '/w/herdr/missing' is not a working tree".into()),
         });
 
@@ -1819,6 +1896,7 @@ mod tests {
             workspace: Some(Box::new(workspace_snapshot.clone())),
             worktree: Some(Box::new(worktree_snapshot)),
             forced: true,
+            api_request: None,
             result: Ok(()),
         });
 
@@ -1882,6 +1960,7 @@ mod tests {
             let safe_event = wait_for_worktree_event(&mut app);
             match safe_event {
                 AppEvent::WorktreeRemoveFinished(result) => {
+                    let result = *result;
                     assert_eq!(result.workspace_id, workspace_id);
                     assert_eq!(result.path, checkout);
                     assert!(result.result.is_err());
@@ -1900,6 +1979,7 @@ mod tests {
         let force_event = wait_for_worktree_event(&mut app);
         match force_event {
             AppEvent::WorktreeRemoveFinished(result) => {
+                let result = *result;
                 assert_eq!(result.workspace_id, workspace_id);
                 assert_eq!(result.path, checkout);
                 assert_eq!(result.result, Ok(()));
@@ -1928,5 +2008,14 @@ mod tests {
         }));
 
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn worktree_remove_runtime_shutdown_policy_preserves_windows_safe_remove() {
+        assert_eq!(
+            App::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(false),
+            cfg!(windows)
+        );
+        assert!(App::should_shutdown_workspace_terminal_runtimes_for_worktree_remove(true));
     }
 }
