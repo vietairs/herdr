@@ -68,6 +68,7 @@ This is a hotfix release for v0.6.9. See the v0.6.9 notes for the full feature r
 - Mouse-click handling now respects `ui.prompt_new_tab_name`, so mouse-created tabs follow the same naming prompt setting as keyboard-created tabs. (#521, thanks @imrajyavardhan12)
 - Pasting now works in modal text inputs, including rename prompts, command prompts, and worktree dialogs. (#302)
 - Linux clipboard image reads now validate image payloads before accepting them, preventing malformed clipboard data from reaching pane image paste flows. (#534)
+- Worktree creation now checks out an existing local branch instead of failing by trying to create it again. (#729)
 
 ### Added
 - Added remote auto-updates for agent detection manifests, with per-agent validation, local override precedence, `herdr server agent-manifests` diagnostics, and explain output showing remote manifest status.

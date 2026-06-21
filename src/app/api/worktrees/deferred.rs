@@ -159,12 +159,6 @@ impl App {
         self.pending_api_worktree_creates
             .insert(checkout_key.clone(), operation_id);
 
-        let command = crate::worktree::build_worktree_add_new_branch_command(
-            &source.source_checkout_path,
-            &checkout_path,
-            &branch,
-            &base,
-        );
         let parent_dir = checkout_path.parent().map(Path::to_path_buf);
         let source_workspace_id = source
             .workspace_idx
@@ -191,15 +185,22 @@ impl App {
             respond_to,
         };
         let path = checkout_path;
+        let source_checkout_path = api_request.source_checkout_path.clone();
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = if let Some(parent_dir) = parent_dir {
-                std::fs::create_dir_all(&parent_dir)
-                    .map_err(|err| err.to_string())
-                    .and_then(|()| crate::worktree::run_worktree_command(&command))
+                std::fs::create_dir_all(&parent_dir).map_err(|err| err.to_string())
             } else {
-                crate::worktree::run_worktree_command(&command)
-            };
+                Ok(())
+            }
+            .and_then(|()| {
+                crate::worktree::run_worktree_add_command(
+                    &source_checkout_path,
+                    &path,
+                    &branch,
+                    &base,
+                )
+            });
             let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(Box::new(
                 crate::events::WorktreeAddResult {
                     path,
