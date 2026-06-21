@@ -5972,8 +5972,8 @@ mod tests {
         assert!(PI_EXTENSION_ASSET.contains("pane.report_agent\""));
         assert!(PI_EXTENSION_ASSET.contains("pi.on(\"agent_start\""));
         assert!(PI_EXTENSION_ASSET.contains("pi.on(\"agent_end\""));
-        assert!(!PI_EXTENSION_ASSET.contains("pane.release_agent"));
-        assert!(!PI_EXTENSION_ASSET.contains("session_shutdown"));
+        assert!(PI_EXTENSION_ASSET.contains("pane.release_agent"));
+        assert!(PI_EXTENSION_ASSET.contains("pi.on(\"session_shutdown\""));
         assert!(OMP_EXTENSION_ASSET.contains("agent_session_path"));
         assert!(OMP_EXTENSION_ASSET.contains("agent_session_id"));
         assert!(OMP_EXTENSION_ASSET.contains("ctx?.hasUI !== true"));
@@ -5981,8 +5981,8 @@ mod tests {
         assert!(OMP_EXTENSION_ASSET.contains("pane.report_agent\""));
         assert!(OMP_EXTENSION_ASSET.contains("pi.on(\"agent_start\""));
         assert!(OMP_EXTENSION_ASSET.contains("pi.on(\"agent_end\""));
-        assert!(!OMP_EXTENSION_ASSET.contains("pane.release_agent"));
-        assert!(!OMP_EXTENSION_ASSET.contains("session_shutdown"));
+        assert!(OMP_EXTENSION_ASSET.contains("pane.release_agent"));
+        assert!(OMP_EXTENSION_ASSET.contains("pi.on(\"session_shutdown\""));
         assert!(
             CLAUDE_HOOK_ASSET.contains("agent_session_id")
                 || CLAUDE_HOOK_ASSET.contains("--agent-session-id")
