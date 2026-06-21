@@ -307,6 +307,8 @@ redraw_on_focus_gained = true
 mouse_scroll_lines = 3
 confirm_close = true
 prompt_new_tab_name = true
+pane_borders = true
+pane_gaps = true
 show_agent_labels_on_pane_borders = false
 agent_panel_sort = "spaces"
 accent = "cyan"
@@ -327,6 +329,8 @@ Set `right_click_passthrough_modifier = "ctrl"` if you want Ctrl-right-click, ho
 Set `redraw_on_focus_gained = false` to avoid the visible full-screen refresh when switching back to Herdr. The default is `true` because a full redraw recovers from rare stale or dirty host terminal surfaces.
 
 Set `mouse_scroll_lines` to change how many pane scrollback lines each mouse wheel notch scrolls. The default is 3. Pane apps that request mouse reporting still receive wheel events directly. Alternate-screen apps have no scrollback to scroll; see [Scrollback](#scrollback).
+
+Set `pane_borders = false` to remove split pane borders. Set `pane_gaps = false` to make split panes share compact divider borders. With borders disabled, pane gaps use one blank terminal cell between panes. Terminal cells are usually taller than they are wide, so a one-row gap between top/bottom panes can look larger than a one-column gap between left/right panes.
 
 Set `show_agent_labels_on_pane_borders = true` if you want detected agent labels in split pane borders when no manual pane label is set.
 
