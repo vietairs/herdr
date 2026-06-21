@@ -9,6 +9,20 @@ class MemoryR2 {
   }
 }
 
+class MemoryKV {
+  constructor(private readonly keyNames: string[]) {}
+
+  async list(options?: { prefix?: string }): Promise<{
+    keys: Array<{ name: string }>;
+  }> {
+    return {
+      keys: this.keyNames
+        .filter((name) => !options?.prefix || name.startsWith(options.prefix))
+        .map((name) => ({ name })),
+    };
+  }
+}
+
 function repo(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 1,
@@ -34,9 +48,10 @@ function repo(overrides: Record<string, unknown> = {}): Record<string, unknown> 
   };
 }
 
-function env(bucket = new MemoryR2()): Env {
+function env(bucket = new MemoryR2(), blacklist?: MemoryKV): Env {
   return {
     PLUGIN_MARKETPLACE_BUCKET: bucket,
+    PLUGIN_MARKETPLACE_BLACKLIST: blacklist,
     GITHUB_TOKEN: "token",
   };
 }
@@ -189,6 +204,68 @@ describe("refreshPlugins", () => {
       "a/a",
       "b/b",
     ]);
+  });
+
+  test("excludes repositories listed in the KV blacklist", async () => {
+    const fetch = async (): Promise<Response> =>
+      Response.json({
+        total_count: 2,
+        items: [
+          repo({
+            id: 1,
+            full_name: "example/not-a-plugin",
+            owner: { login: "example" },
+            name: "not-a-plugin",
+            html_url: "https://github.com/example/not-a-plugin",
+          }),
+          repo({
+            id: 2,
+            full_name: "ogulcancelik/herdr-plugin-example",
+            owner: { login: "ogulcancelik" },
+            name: "herdr-plugin-example",
+            html_url: "https://github.com/ogulcancelik/herdr-plugin-example",
+          }),
+        ],
+      });
+    const bucket = new MemoryR2();
+
+    const result = await refreshPlugins(env(bucket, new MemoryKV(["repo:example/not-a-plugin"])), {
+      fetch,
+      logger: { error() {} },
+    });
+
+    expect(result.ok).toBe(true);
+    const snapshot = JSON.parse(bucket.objects.get("plugins/index.json")?.value ?? "");
+    expect(snapshot.plugins.map((plugin: { fullName: string }) => plugin.fullName)).toEqual([
+      "ogulcancelik/herdr-plugin-example",
+    ]);
+  });
+
+  test("writes an empty snapshot when every listable repository is blacklisted", async () => {
+    const fetch = async (): Promise<Response> =>
+      Response.json({
+        total_count: 1,
+        items: [
+          repo({
+            id: 1,
+            full_name: "example/not-a-plugin",
+            owner: { login: "example" },
+            name: "not-a-plugin",
+            html_url: "https://github.com/example/not-a-plugin",
+          }),
+        ],
+      });
+    const bucket = new MemoryR2();
+    await bucket.put("plugins/index.json", '{"schemaVersion":1,"plugins":[{"id":1}]}');
+
+    const result = await refreshPlugins(env(bucket, new MemoryKV(["repo:example/not-a-plugin"])), {
+      fetch,
+      logger: { error() {} },
+    });
+
+    expect(result.ok).toBe(true);
+    const snapshot = JSON.parse(bucket.objects.get("plugins/index.json")?.value ?? "");
+    expect(snapshot.plugins).toEqual([]);
   });
 
   test("marks snapshots truncated at the GitHub search cap", async () => {

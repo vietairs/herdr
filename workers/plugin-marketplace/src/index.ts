@@ -3,6 +3,7 @@ const SNAPSHOT_CACHE_CONTROL = "public, max-age=300, s-maxage=1800, stale-while-
 const GITHUB_QUERY = "topic:herdr-plugin is:public";
 const GITHUB_API_VERSION = "2022-11-28";
 const GITHUB_SEARCH_URL = "https://api.github.com/search/repositories";
+const BLACKLIST_REPO_KEY_PREFIX = "repo:";
 const PER_PAGE = 100;
 const MAX_REPOS = 1000;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -20,6 +21,13 @@ type R2Bucket = {
   ): Promise<unknown>;
 };
 
+type KVNamespace = {
+  list(options?: { prefix?: string; cursor?: string }): Promise<{
+    keys: Array<{ name: string }>;
+    cursor?: string;
+  }>;
+};
+
 type ExecutionContext = {
   waitUntil(promise: Promise<unknown>): void;
 };
@@ -28,6 +36,7 @@ type ScheduledController = unknown;
 
 export type Env = {
   PLUGIN_MARKETPLACE_BUCKET: R2Bucket;
+  PLUGIN_MARKETPLACE_BLACKLIST?: KVNamespace;
   GITHUB_TOKEN?: string;
 };
 
@@ -99,10 +108,18 @@ export async function refreshPlugins(
 
     const fetchFn = options.fetch ?? fetch;
     const result = await fetchGitHubRepositories(fetchFn, token);
-    const plugins = normalizeRepositories(result.repositories);
-    if (plugins.length === 0) {
+    const normalizedPlugins = normalizeRepositories(result.repositories);
+    if (normalizedPlugins.length === 0) {
       throw new Error("GitHub returned no listable plugin repositories");
     }
+
+    const blockedRepositories = await readBlacklistedRepositories(env);
+    const plugins =
+      blockedRepositories.size === 0
+        ? normalizedPlugins
+        : normalizedPlugins.filter(
+            (plugin) => !blockedRepositories.has(plugin.fullName.toLowerCase()),
+          );
 
     const snapshot: PluginSnapshot = {
       schemaVersion: 1,
@@ -214,6 +231,28 @@ export function normalizeRepositories(repositories: GitHubRepository[]): PluginL
     .map(normalizeRepository)
     .filter((plugin): plugin is PluginListing => plugin !== null)
     .sort(comparePlugins);
+}
+
+async function readBlacklistedRepositories(env: Env): Promise<Set<string>> {
+  const kv = env.PLUGIN_MARKETPLACE_BLACKLIST;
+  const blockedRepositories = new Set<string>();
+  if (!kv) {
+    return blockedRepositories;
+  }
+
+  let cursor: string | undefined;
+  do {
+    const page = await kv.list({ prefix: BLACKLIST_REPO_KEY_PREFIX, cursor });
+    for (const key of page.keys) {
+      const repository = key.name.slice(BLACKLIST_REPO_KEY_PREFIX.length).trim().toLowerCase();
+      if (repository.includes("/")) {
+        blockedRepositories.add(repository);
+      }
+    }
+    cursor = page.cursor;
+  } while (cursor);
+
+  return blockedRepositories;
 }
 
 function normalizeRepository(repo: GitHubRepository): PluginListing | null {
