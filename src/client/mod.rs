@@ -638,6 +638,25 @@ fn is_remote_client_process() -> bool {
     std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
 }
 
+/// Time to wait for the server's Welcome reply during the handshake.
+///
+/// A local client talks to an already-connected server, so 5s is plenty. The
+/// remote bridge client (`herdr --remote`) sits behind a fresh per-attach ssh
+/// connection whose cold-connect (TCP + key exchange + auth) happens inside this
+/// window; on a high-latency link that easily exceeds 5s, so it gets a far
+/// larger budget. See issue #753.
+const LOCAL_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
+const REMOTE_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn handshake_read_timeout() -> Duration {
+    #[cfg(unix)]
+    if is_remote_client_process() {
+        return REMOTE_HANDSHAKE_READ_TIMEOUT;
+    }
+    LOCAL_HANDSHAKE_READ_TIMEOUT
+}
+
 fn requested_keybindings() -> ClientKeybindings {
     match std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR)
         .ok()
@@ -717,7 +736,7 @@ fn do_handshake(
     // Read Welcome.
     set_handshake_recv_timeout(
         stream,
-        Some(Duration::from_secs(5)),
+        Some(handshake_read_timeout()),
         "client handshake read timeout unavailable",
     )?;
     let welcome: ServerMessage = protocol::read_message(stream, MAX_FRAME_SIZE)?;
