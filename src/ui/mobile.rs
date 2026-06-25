@@ -89,8 +89,24 @@ pub(crate) fn mobile_switcher_max_scroll_for_height(app: &AppState, viewport_hei
     mobile_switcher_content_height(app).saturating_sub(viewport_height as usize)
 }
 
-pub(crate) fn mobile_switcher_workspace_doc_range(idx: usize) -> std::ops::Range<usize> {
-    let start = 2 + idx * 2;
+/// Doc-row height of the agents section (title + two rows per agent), or 0 when
+/// there are no agents so we don't show an empty header. The switcher leads with
+/// agents, so every section below it is offset by this.
+fn mobile_agents_block_height(app: &AppState) -> usize {
+    let count = agent_panel_entries(app).len();
+    if count == 0 {
+        0
+    } else {
+        1 + count * 2
+    }
+}
+
+pub(crate) fn mobile_switcher_workspace_doc_range(
+    app: &AppState,
+    idx: usize,
+) -> std::ops::Range<usize> {
+    // spaces sit after the agents block, then a title + "new workspace" row.
+    let start = mobile_agents_block_height(app) + 2 + idx * 2;
     start..start + 2
 }
 
@@ -113,6 +129,24 @@ pub(crate) fn mobile_switcher_target_at(
         .mobile_switcher_scroll
         .saturating_add(row.saturating_sub(areas.viewport.y) as usize);
     let mut cursor = 0usize;
+
+    // Agents lead the switcher: the primary job is switching between running
+    // agents. Spaces/tabs/create actions follow for navigation and management.
+    // The section is omitted entirely when there are no agents.
+    let agents = agent_panel_entries(app);
+    if !agents.is_empty() {
+        cursor += 1; // agents title
+        let agents_end = cursor + agents.len() * 2;
+        if doc_row >= cursor && doc_row < agents_end {
+            let idx = (doc_row - cursor) / 2;
+            return agents.get(idx).map(|entry| MobileSwitcherTarget::Agent {
+                ws_idx: entry.ws_idx,
+                tab_idx: entry.tab_idx,
+                pane_id: entry.pane_id,
+            });
+        }
+        cursor = agents_end;
+    }
 
     cursor += 1; // spaces title
     if doc_row == cursor {
@@ -137,19 +171,6 @@ pub(crate) fn mobile_switcher_target_at(
         }
         cursor = tabs_end;
     }
-
-    cursor += 1; // agents title
-    let agents = agent_panel_entries(app);
-    let agents_end = cursor + agents.len() * 2;
-    if doc_row >= cursor && doc_row < agents_end {
-        let idx = (doc_row - cursor) / 2;
-        return agents.get(idx).map(|entry| MobileSwitcherTarget::Agent {
-            ws_idx: entry.ws_idx,
-            tab_idx: entry.tab_idx,
-            pane_id: entry.pane_id,
-        });
-    }
-    cursor = agents_end;
 
     cursor += 1; // menu title
     let menu_idx = doc_row.checked_sub(cursor)?;
@@ -322,8 +343,7 @@ fn render_header_status(
 
     if area.height > 1 {
         frame.render_widget(
-            Paragraph::new(agent_priority_label(app))
-                .style(Style::default().fg(p.overlay1).bg(p.panel_bg)),
+            Paragraph::new(agent_summary_line(app, p, area.width)),
             Rect::new(area.x, area.y + 1, area.width, 1),
         );
     }
@@ -363,6 +383,15 @@ fn render_switch_button(app: &AppState, frame: &mut Frame, area: Rect) {
             .alignment(Alignment::Center),
         Rect::new(area.x + 1, label_y, area.width.saturating_sub(1), 1),
     );
+
+    // Attention badge: a blocked agent anywhere makes the button itself read as
+    // "tap me" without the user reading the summary row.
+    if global_agent_counts(app).blocked > 0 {
+        let bx = area.x + area.width.saturating_sub(1);
+        frame.buffer_mut()[(bx, area.y)]
+            .set_symbol("●")
+            .set_style(Style::default().fg(p.red).bg(p.surface0));
+    }
 }
 
 fn render_close_button(app: &AppState, frame: &mut Frame, area: Rect) {
@@ -409,7 +438,7 @@ fn mobile_switcher_content_height(app: &AppState) -> usize {
         .and_then(|idx| app.workspaces.get(idx))
         .map(|ws| 2 + ws.tabs.len())
         .unwrap_or(0);
-    let agents_h = 1 + agent_panel_entries(app).len() * 2;
+    let agents_h = mobile_agents_block_height(app);
     let menu_h = 1 + app.global_menu_labels().len();
     spaces_h + tabs_h + agents_h + menu_h
 }
@@ -440,6 +469,61 @@ fn render_mobile_switcher_content(
     }
 
     let mut doc_y = 0usize;
+
+    let entries = agent_panel_entries_from(app, terminal_runtimes);
+    if !entries.is_empty() {
+        let focused_agent = app.active.and_then(|ws_idx| {
+            let ws = app.workspaces.get(ws_idx)?;
+            ws.focused_pane_id()
+                .map(|pane_id| (ws_idx, ws.active_tab, pane_id))
+        });
+        render_section_title_at(
+            frame,
+            viewport,
+            content,
+            doc_y,
+            app.mobile_switcher_scroll,
+            "agents",
+            p,
+        );
+        doc_y += 1;
+        for entry in &entries {
+            let active = focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
+                entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
+            });
+            let bg = mobile_item_bg(false, active, p);
+            let (icon, icon_style) = agent_icon(entry.state, entry.seen, app.spinner_tick, p);
+            let title = Line::from(vec![
+                Span::styled("  ", Style::default().bg(bg)),
+                Span::styled(icon, icon_style.bg(bg)),
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(
+                    truncate(
+                        &entry.primary_label,
+                        content.width.saturating_sub(5) as usize,
+                    ),
+                    Style::default()
+                        .fg(p.text)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            let detail = mobile_agent_detail(entry);
+            render_two_line_item(
+                frame,
+                viewport,
+                content,
+                doc_y,
+                app.mobile_switcher_scroll,
+                bg,
+                title,
+                truncate(&detail, content.width as usize),
+                p.overlay0,
+            );
+            doc_y += 2;
+        }
+    }
+
     render_section_title_at(
         frame,
         viewport,
@@ -553,58 +637,6 @@ fn render_mobile_switcher_content(
             );
             doc_y += 1;
         }
-    }
-
-    let focused_agent = app.active.and_then(|ws_idx| {
-        let ws = app.workspaces.get(ws_idx)?;
-        ws.focused_pane_id()
-            .map(|pane_id| (ws_idx, ws.active_tab, pane_id))
-    });
-    let entries = agent_panel_entries_from(app, terminal_runtimes);
-    render_section_title_at(
-        frame,
-        viewport,
-        content,
-        doc_y,
-        app.mobile_switcher_scroll,
-        "agents",
-        p,
-    );
-    doc_y += 1;
-    for entry in &entries {
-        let active = focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
-            entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
-        });
-        let bg = mobile_item_bg(false, active, p);
-        let (icon, icon_style) = agent_icon(entry.state, entry.seen, app.spinner_tick, p);
-        let title = Line::from(vec![
-            Span::styled("  ", Style::default().bg(bg)),
-            Span::styled(icon, icon_style.bg(bg)),
-            Span::styled(" ", Style::default().bg(bg)),
-            Span::styled(
-                truncate(
-                    &entry.primary_label,
-                    content.width.saturating_sub(5) as usize,
-                ),
-                Style::default()
-                    .fg(p.text)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        let detail = mobile_agent_detail(entry);
-        render_two_line_item(
-            frame,
-            viewport,
-            content,
-            doc_y,
-            app.mobile_switcher_scroll,
-            bg,
-            title,
-            truncate(&detail, content.width as usize),
-            p.overlay0,
-        );
-        doc_y += 2;
     }
 
     render_section_title_at(
@@ -864,30 +896,143 @@ fn mobile_screen_rect(app: &AppState) -> Rect {
     Rect::new(x, y, right.saturating_sub(x), bottom.saturating_sub(y))
 }
 
-fn agent_priority_label(app: &AppState) -> String {
-    let Some(ws) = app.active.and_then(|idx| app.workspaces.get(idx)) else {
-        return " no agents".to_string();
-    };
-    let mut blocked = 0usize;
-    let mut working = 0usize;
-    let mut done = 0usize;
-    for detail in ws.pane_details(&app.terminals) {
-        match (detail.state, detail.seen) {
-            (AgentState::Blocked, _) => blocked += 1,
-            (AgentState::Working, _) => working += 1,
-            (AgentState::Idle, false) => done += 1,
-            _ => {}
+/// Agent state counts across every workspace. The mobile header is global on
+/// purpose: while you stare at one terminal, a blocked agent anywhere should
+/// still surface.
+#[derive(Debug, Default, Clone, Copy)]
+struct GlobalAgentCounts {
+    blocked: usize,
+    done: usize,
+    working: usize,
+    idle: usize,
+}
+
+impl GlobalAgentCounts {
+    fn total(&self) -> usize {
+        self.blocked + self.done + self.working + self.idle
+    }
+
+    fn any_pending(&self) -> bool {
+        self.blocked > 0 || self.done > 0 || self.working > 0
+    }
+}
+
+fn global_agent_counts(app: &AppState) -> GlobalAgentCounts {
+    let mut counts = GlobalAgentCounts::default();
+    for entry in agent_panel_entries(app) {
+        match (entry.state, entry.seen) {
+            (AgentState::Blocked, _) => counts.blocked += 1,
+            (AgentState::Idle, false) => counts.done += 1,
+            (AgentState::Working, _) => counts.working += 1,
+            (AgentState::Idle, true) => counts.idle += 1,
+            (AgentState::Unknown, _) => {}
         }
     }
-    if blocked > 0 {
-        format!(" ◉ {blocked} blocked")
-    } else if working > 0 {
-        format!(" {working} working")
-    } else if done > 0 {
-        format!(" {done} done")
-    } else {
-        " all idle".to_string()
+    counts
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryTone {
+    Blocked,
+    Done,
+    Working,
+    Idle,
+    Muted,
+}
+
+/// Ordered, non-zero breakdown for the header roll-up: attention states lead
+/// (blocked → done → working → idle). Pure so it can be unit-tested.
+fn agent_summary_segments(counts: GlobalAgentCounts) -> Vec<(String, SummaryTone)> {
+    if counts.total() == 0 {
+        return vec![("no agents".to_string(), SummaryTone::Muted)];
     }
+    if !counts.any_pending() {
+        return vec![("all idle".to_string(), SummaryTone::Muted)];
+    }
+    let mut segments = Vec::new();
+    if counts.blocked > 0 {
+        segments.push((
+            format!("◉ {} blocked", counts.blocked),
+            SummaryTone::Blocked,
+        ));
+    }
+    if counts.done > 0 {
+        segments.push((format!("● {} done", counts.done), SummaryTone::Done));
+    }
+    if counts.working > 0 {
+        segments.push((format!("{} working", counts.working), SummaryTone::Working));
+    }
+    if counts.idle > 0 {
+        segments.push((format!("{} idle", counts.idle), SummaryTone::Idle));
+    }
+    segments
+}
+
+/// Greedily keep the most-urgent segments that fit `max_width` (counting the
+/// leading space and " · " separators) and report whether any were dropped.
+/// Segments are ordered by urgency, so the dropped tail is always the least
+/// important state.
+fn fit_summary_segments(
+    segments: Vec<(String, SummaryTone)>,
+    max_width: usize,
+) -> (Vec<(String, SummaryTone)>, bool) {
+    let mut shown = Vec::new();
+    let mut used = 1usize; // leading space
+    for (idx, segment) in segments.iter().enumerate() {
+        let sep = if idx > 0 { 3 } else { 0 }; // " · "
+        let seg_w = segment.0.chars().count();
+        if used + sep + seg_w > max_width {
+            break;
+        }
+        used += sep + seg_w;
+        shown.push(segment.clone());
+    }
+    let truncated = shown.len() < segments.len();
+    (shown, truncated)
+}
+
+fn agent_summary_line(app: &AppState, p: &Palette, max_width: u16) -> Line<'static> {
+    let segments = agent_summary_segments(global_agent_counts(app));
+    let (shown, truncated) = fit_summary_segments(segments, max_width as usize);
+
+    let mut spans = vec![Span::styled(" ", Style::default().bg(p.panel_bg))];
+    let mut used = 1usize;
+    for (idx, (text, tone)) in shown.into_iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled(
+                " · ",
+                Style::default().fg(p.overlay0).bg(p.panel_bg),
+            ));
+            used += 3;
+        }
+        // Only the leading (most urgent) segment keeps its state color; the
+        // rest stay dim so the urgent count is the loud thing.
+        let style = if idx == 0 {
+            let color = match tone {
+                SummaryTone::Blocked => p.red,
+                SummaryTone::Done => p.blue,
+                SummaryTone::Working => p.yellow,
+                SummaryTone::Idle | SummaryTone::Muted => p.overlay1,
+            };
+            let style = Style::default().fg(color).bg(p.panel_bg);
+            if tone == SummaryTone::Muted {
+                style
+            } else {
+                style.add_modifier(Modifier::BOLD)
+            }
+        } else {
+            Style::default().fg(p.overlay1).bg(p.panel_bg)
+        };
+        used += text.chars().count();
+        spans.push(Span::styled(text, style));
+    }
+    if truncated && used + 2 <= max_width as usize {
+        spans.push(Span::styled(
+            " …",
+            Style::default().fg(p.overlay0).bg(p.panel_bg),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn mobile_toast_title(toast: &ToastNotification) -> String {
@@ -963,6 +1108,130 @@ mod tests {
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn agent_summary_leads_with_attention_states_in_priority_order() {
+        let counts = GlobalAgentCounts {
+            blocked: 2,
+            done: 1,
+            working: 2,
+            idle: 1,
+        };
+        let segments = agent_summary_segments(counts);
+        let labels: Vec<&str> = segments.iter().map(|(text, _)| text.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["◉ 2 blocked", "● 1 done", "2 working", "1 idle"]
+        );
+        assert_eq!(segments[0].1, SummaryTone::Blocked);
+    }
+
+    #[test]
+    fn agent_summary_hides_empty_categories() {
+        let counts = GlobalAgentCounts {
+            done: 1,
+            working: 2,
+            ..Default::default()
+        };
+        let labels: Vec<String> = agent_summary_segments(counts)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["● 1 done".to_string(), "2 working".to_string()]
+        );
+    }
+
+    #[test]
+    fn agent_summary_collapses_to_all_idle_without_attention() {
+        let counts = GlobalAgentCounts {
+            idle: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            agent_summary_segments(counts),
+            vec![("all idle".to_string(), SummaryTone::Muted)]
+        );
+    }
+
+    #[test]
+    fn agent_summary_drops_least_urgent_segments_when_narrow() {
+        let counts = GlobalAgentCounts {
+            blocked: 2,
+            done: 1,
+            working: 2,
+            idle: 1,
+        };
+        let (shown, truncated) = fit_summary_segments(agent_summary_segments(counts), 24);
+        let labels: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
+        assert_eq!(labels, vec!["◉ 2 blocked", "● 1 done"]);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn agent_summary_keeps_all_segments_when_wide_enough() {
+        let counts = GlobalAgentCounts {
+            blocked: 2,
+            done: 1,
+            working: 2,
+            idle: 1,
+        };
+        let (shown, truncated) = fit_summary_segments(agent_summary_segments(counts), 60);
+        assert_eq!(shown.len(), 4);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn agent_summary_reports_no_agents_when_empty() {
+        assert_eq!(
+            agent_summary_segments(GlobalAgentCounts::default()),
+            vec![("no agents".to_string(), SummaryTone::Muted)]
+        );
+    }
+
+    #[test]
+    fn switcher_leads_with_agents_and_shifts_spaces_below() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("agents-first");
+        workspace.test_add_tab(None); // two tabs -> two agent panes
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        for terminal in app.terminals.values_mut() {
+            terminal.agent_name = Some("pi".to_string());
+            terminal.state = AgentState::Working;
+        }
+        app.active = Some(0);
+        app.selected = 0;
+        app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
+        app.view.terminal_area = Rect::new(0, 2, 40, 18);
+
+        assert_eq!(agent_panel_entries(&app).len(), 2);
+        // agents title (1) + 2 agents * 2 rows = 5, then spaces title + "new
+        // workspace" (2) before the first workspace ribbon at doc row 7.
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).start, 7);
+
+        let viewport = mobile_switcher_areas(&app).viewport;
+        let agent_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 1);
+        assert!(matches!(
+            agent_hit,
+            Some(MobileSwitcherTarget::Agent { .. })
+        ));
+        let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 7);
+        assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
+    }
+
+    #[test]
+    fn switcher_without_agents_keeps_spaces_first() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("shell-only")];
+        app.active = Some(0);
+        app.selected = 0;
+
+        // No attached terminals -> no agents -> no agents header, spaces lead.
+        assert_eq!(agent_panel_entries(&app).len(), 0);
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).start, 2);
     }
 
     #[test]
