@@ -6,7 +6,11 @@ use ratatui::{
     Frame,
 };
 
-use super::sidebar::{agent_panel_entries, agent_panel_entries_from, AgentPanelEntry};
+use super::sidebar::{
+    agent_panel_entries, agent_panel_entries_from, grouped_child_display_label,
+    next_entry_is_indented_workspace, workspace_list_entries_expanded, AgentPanelEntry,
+    WorkspaceListEntry,
+};
 use super::status::{agent_icon, state_dot};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
@@ -105,8 +109,14 @@ pub(crate) fn mobile_switcher_workspace_doc_range(
     app: &AppState,
     idx: usize,
 ) -> std::ops::Range<usize> {
+    // Spaces render in grouped order, so a workspace's row position is its index
+    // in the entry list, not its raw array index.
+    let pos = workspace_list_entries_expanded(app)
+        .iter()
+        .position(|WorkspaceListEntry::Workspace { ws_idx, .. }| *ws_idx == idx)
+        .unwrap_or(idx);
     // spaces sit after the agents block, then a title + "new workspace" row.
-    let start = mobile_agents_block_height(app) + 2 + idx * 2;
+    let start = mobile_agents_block_height(app) + 2 + pos * 2;
     start..start + 2
 }
 
@@ -153,9 +163,15 @@ pub(crate) fn mobile_switcher_target_at(
         return Some(MobileSwitcherTarget::NewWorkspace);
     }
     cursor += 1;
-    let spaces_end = cursor + app.workspaces.len() * 2;
+    // Spaces render in grouped (worktree-tree) order, which differs from raw
+    // array order, so map the clicked row to the entry's real workspace index.
+    let space_entries = workspace_list_entries_expanded(app);
+    let spaces_end = cursor + space_entries.len() * 2;
     if doc_row >= cursor && doc_row < spaces_end {
-        return Some(MobileSwitcherTarget::Workspace((doc_row - cursor) / 2));
+        let entry_idx = (doc_row - cursor) / 2;
+        return space_entries.get(entry_idx).map(
+            |WorkspaceListEntry::Workspace { ws_idx, .. }| MobileSwitcherTarget::Workspace(*ws_idx),
+        );
     }
     cursor = spaces_end;
 
@@ -432,7 +448,9 @@ fn render_close_button(app: &AppState, frame: &mut Frame, area: Rect) {
 }
 
 fn mobile_switcher_content_height(app: &AppState) -> usize {
-    let spaces_h = 2 + app.workspaces.len() * 2;
+    // Derive spaces height from the same entry list the render/hit-test use so
+    // the three never disagree.
+    let spaces_h = 2 + workspace_list_entries_expanded(app).len() * 2;
     let tabs_h = app
         .active
         .and_then(|idx| app.workspaces.get(idx))
@@ -544,29 +562,61 @@ fn render_mobile_switcher_content(
         p,
     );
     doc_y += 1;
-    for (idx, ws) in app.workspaces.iter().enumerate() {
-        let active = Some(idx) == app.active;
-        let selected = idx == app.selected;
+    let space_entries = workspace_list_entries_expanded(app);
+    for (entry_idx, WorkspaceListEntry::Workspace { ws_idx, indented }) in
+        space_entries.iter().enumerate()
+    {
+        let Some(ws) = app.workspaces.get(*ws_idx) else {
+            continue;
+        };
+        let active = Some(*ws_idx) == app.active;
+        let selected = *ws_idx == app.selected;
         let bg = mobile_item_bg(selected, active, p);
         let (state, seen) = ws.aggregate_state(&app.terminals);
         let (dot, dot_style) = state_dot(state, seen, p);
-        let title = Line::from(vec![
-            Span::styled("  ", Style::default().bg(bg)),
-            Span::styled(dot, dot_style.bg(bg)),
-            Span::styled(" ", Style::default().bg(bg)),
-            Span::styled(
-                truncate(
-                    &ws.display_name_from(&app.terminals, terminal_runtimes),
-                    content.width.saturating_sub(5) as usize,
-                ),
-                Style::default()
-                    .fg(p.text)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
+
+        let mut title_spans = vec![Span::styled("  ", Style::default().bg(bg))];
+        // Worktrees of the same space render as branches off their parent, so a
+        // child gets an L/T connector on its name row and a matching vertical
+        // continuation on its detail row.
+        let detail_prefix = if *indented {
+            let last_child = !next_entry_is_indented_workspace(&space_entries, entry_idx);
+            title_spans.push(Span::styled(
+                if last_child { "└─ " } else { "├─ " },
+                Style::default().fg(p.overlay0).bg(bg),
+            ));
+            if last_child {
+                "       "
+            } else {
+                "  │    "
+            }
+        } else {
+            "  "
+        };
+
+        title_spans.push(Span::styled(dot, dot_style.bg(bg)));
+        title_spans.push(Span::styled(" ", Style::default().bg(bg)));
+        let raw_label = ws.display_name_from(&app.terminals, terminal_runtimes);
+        let name = if *indented {
+            grouped_child_display_label(
+                &raw_label,
+                ws.branch().as_deref(),
+                ws.custom_name.is_some(),
+            )
+        } else {
+            raw_label
+        };
+        let name_budget = content.width.saturating_sub(if *indented { 8 } else { 5 }) as usize;
+        title_spans.push(Span::styled(
+            truncate(&name, name_budget),
+            Style::default()
+                .fg(p.text)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+
         let detail = format!(
-            "  {} · {}",
+            "{detail_prefix}{} · {}",
             ws.branch().unwrap_or_else(|| "shell".into()),
             mobile_tab_status(ws)
         );
@@ -577,7 +627,7 @@ fn render_mobile_switcher_content(
             doc_y,
             app.mobile_switcher_scroll,
             bg,
-            title,
+            Line::from(title_spans),
             truncate(&detail, content.width as usize),
             p.overlay0,
         );
@@ -1220,6 +1270,50 @@ mod tests {
         ));
         let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 7);
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
+    }
+
+    fn worktree_workspace(name: &str, key: &str, linked: bool) -> crate::workspace::Workspace {
+        let mut ws = crate::workspace::Workspace::test_new(name);
+        ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: key.into(),
+            label: "herdr".into(),
+            repo_root: std::path::PathBuf::from("/repo/herdr"),
+            checkout_path: std::path::PathBuf::from(format!("/repo/{name}")),
+            is_linked_worktree: linked,
+        });
+        ws
+    }
+
+    #[test]
+    fn switcher_spaces_follow_grouped_worktree_order() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            worktree_workspace("main", "repo-key", false),
+            crate::workspace::Workspace::test_new("other"),
+            worktree_workspace("feature", "repo-key", true),
+        ];
+        app.active = Some(0);
+        app.selected = 0;
+        app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
+        app.view.terminal_area = Rect::new(0, 2, 40, 18);
+
+        // Grouped order pulls the worktree (idx 2) up under its parent (idx 0),
+        // ahead of the unrelated "other" workspace (idx 1): rows are main,
+        // feature, other.
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 2).start, 4);
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 1).start, 6);
+
+        let viewport = mobile_switcher_areas(&app).viewport;
+        // The second space row on screen is the worktree, not workspaces[1].
+        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
+        assert_eq!(hit, Some(MobileSwitcherTarget::Workspace(2)));
+
+        // Mobile ignores collapse: even with the space folded on desktop, the
+        // worktree child still renders in the same position.
+        app.collapsed_space_keys.insert("repo-key".to_string());
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 2).start, 4);
+        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4);
+        assert_eq!(hit, Some(MobileSwitcherTarget::Workspace(2)));
     }
 
     #[test]
