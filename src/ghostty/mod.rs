@@ -162,6 +162,10 @@ pub const MODE_MOUSE_SGR_PIXELS: u16 = 1016;
 pub const MODE_BRACKETED_PASTE: u16 = 2004;
 pub const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
 pub const MODE_GRAPHEME_CLUSTER: u16 = 2027;
+// These are documented in vendor/libghostty-vt/include/ghostty/vt/terminal.h,
+// but the generated bindings do not currently expose named constants for them.
+const TERMINAL_DATA_COLOR_FOREGROUND: ffi::GhosttyTerminalData = 18;
+const TERMINAL_DATA_COLOR_CURSOR: ffi::GhosttyTerminalData = 20;
 
 const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const APC_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -1006,6 +1010,14 @@ impl Terminal {
         self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS)
     }
 
+    pub fn effective_foreground_color(&self) -> Result<Option<RgbColor>, Error> {
+        self.get_optional_rgb_color(TERMINAL_DATA_COLOR_FOREGROUND)
+    }
+
+    pub fn effective_cursor_color(&self) -> Result<Option<RgbColor>, Error> {
+        self.get_optional_rgb_color(TERMINAL_DATA_COLOR_CURSOR)
+    }
+
     fn width_px(&self) -> Result<u32, Error> {
         self.get_u32(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_WIDTH_PX)
     }
@@ -1050,6 +1062,25 @@ impl Terminal {
                 .into_result()?;
         }
         Ok(out)
+    }
+
+    fn get_optional_rgb_color(
+        &self,
+        data: ffi::GhosttyTerminalData,
+    ) -> Result<Option<RgbColor>, Error> {
+        let mut out = ffi::GhosttyColorRgb::default();
+        let result = unsafe {
+            ffi::ghostty_terminal_get(
+                self.raw,
+                data,
+                (&mut out as *mut ffi::GhosttyColorRgb).cast(),
+            )
+        };
+        match result {
+            ffi::GhosttyResult_GHOSTTY_SUCCESS => Ok(Some(out.into())),
+            ffi::GhosttyResult_GHOSTTY_NO_VALUE => Ok(None),
+            other => Err(Error(other)),
+        }
     }
 
     pub fn kitty_image_placements(&self) -> Result<Vec<KittyImagePlacement>, Error> {
