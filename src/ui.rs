@@ -18,6 +18,7 @@ mod settings;
 mod sidebar;
 mod status;
 mod tabs;
+mod text;
 mod widgets;
 
 use self::dialogs::{

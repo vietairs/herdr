@@ -12,6 +12,7 @@ use super::sidebar::{
     WorkspaceListEntry,
 };
 use super::status::{agent_icon, state_dot};
+use super::text::{display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
 use crate::app::AppState;
 use crate::detect::AgentState;
@@ -329,7 +330,9 @@ fn render_header_status(
     };
     let tab_label = mobile_tab_status(ws);
     let row1 = Rect::new(area.x, area.y, area.width, 1);
-    let tab_w = (tab_label.chars().count() as u16 + 1).min(area.width);
+    let tab_w = display_width_u16(&tab_label)
+        .saturating_add(1)
+        .min(area.width);
     let name_w = area.width.saturating_sub(tab_w);
 
     frame.render_widget(
@@ -338,7 +341,7 @@ fn render_header_status(
             Span::styled(dot, dot_style.bg(p.panel_bg)),
             Span::raw(" "),
             Span::styled(
-                truncate(
+                truncate_end(
                     &ws.display_name_from(&app.terminals, terminal_runtimes),
                     name_w.saturating_sub(4) as usize,
                 ),
@@ -516,7 +519,7 @@ fn render_mobile_switcher_content(
                 Span::styled(icon, icon_style.bg(bg)),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
-                    truncate(
+                    truncate_end(
                         &entry.primary_label,
                         content.width.saturating_sub(5) as usize,
                     ),
@@ -535,7 +538,7 @@ fn render_mobile_switcher_content(
                 app.mobile_switcher_scroll,
                 bg,
                 title,
-                truncate(&detail, content.width as usize),
+                truncate_end(&detail, content.width as usize),
                 p.overlay0,
             );
             doc_y += 2;
@@ -608,7 +611,7 @@ fn render_mobile_switcher_content(
         };
         let name_budget = content.width.saturating_sub(if *indented { 8 } else { 5 }) as usize;
         title_spans.push(Span::styled(
-            truncate(&name, name_budget),
+            truncate_end(&name, name_budget),
             Style::default()
                 .fg(p.text)
                 .bg(bg)
@@ -628,7 +631,7 @@ fn render_mobile_switcher_content(
             app.mobile_switcher_scroll,
             bg,
             Line::from(title_spans),
-            truncate(&detail, content.width as usize),
+            truncate_end(&detail, content.width as usize),
             p.overlay0,
         );
         doc_y += 2;
@@ -669,7 +672,7 @@ fn render_mobile_switcher_content(
             let title = Line::from(vec![
                 Span::styled("  ", Style::default().bg(bg)),
                 Span::styled(
-                    truncate(&label, content.width.saturating_sub(3) as usize),
+                    truncate_end(&label, content.width.saturating_sub(3) as usize),
                     Style::default()
                         .fg(p.text)
                         .bg(bg)
@@ -1126,20 +1129,6 @@ fn draw_horizontal_rule(frame: &mut Frame, area: Rect, p: &Palette) {
     }
 }
 
-fn truncate(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
-    format!("{prefix}…")
-}
 #[cfg(test)]
 mod tests {
     use super::*;

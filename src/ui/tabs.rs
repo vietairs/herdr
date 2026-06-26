@@ -5,6 +5,7 @@ use ratatui::{
     Frame,
 };
 
+use super::text::display_width_u16;
 use super::widgets::panel_contrast_fg;
 use crate::app::AppState;
 
@@ -22,7 +23,9 @@ pub(crate) struct TabBarView {
 }
 
 fn tab_width(ws: &crate::workspace::Workspace, tab_idx: usize) -> u16 {
-    (tab_chrome_label(ws, tab_idx).chars().count() as u16 + 4).max(MIN_TAB_WIDTH)
+    display_width_u16(&tab_chrome_label(ws, tab_idx))
+        .saturating_add(4)
+        .max(MIN_TAB_WIDTH)
 }
 
 fn tab_chrome_label(ws: &crate::workspace::Workspace, tab_idx: usize) -> String {
@@ -443,5 +446,38 @@ mod tests {
         ws.tabs[0].zoomed = true;
 
         assert_eq!(tab_width(&ws, 0), 14);
+    }
+
+    #[test]
+    fn tab_width_uses_display_width_for_cjk_labels() {
+        let mut ws = Workspace::test_new("test");
+        ws.tabs[0].set_custom_name("提交 herdr 的反馈".into());
+
+        assert_eq!(
+            tab_width(&ws, 0),
+            display_width_u16("提交 herdr 的反馈") + 4
+        );
+    }
+
+    #[test]
+    fn tab_bar_renders_trailing_cjk_character() {
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        ws.tabs[0].set_custom_name("提交 herdr 的反馈".into());
+
+        app.active = Some(0);
+        app.workspaces = vec![ws];
+        app.view.tab_bar_rect = Rect::new(0, 0, 30, 1);
+        let view = compute_tab_bar_view(&app.workspaces[0], app.view.tab_bar_rect, 0, true, false);
+        app.view.tab_hit_areas = view.tab_hit_areas;
+
+        let backend = TestBackend::new(30, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_tab_bar(&app, frame, app.view.tab_bar_rect))
+            .unwrap();
+
+        let row = buffer_row_text(terminal.backend().buffer(), app.view.tab_bar_rect, 0);
+        assert!(row.contains('馈'), "tab row: {row:?}");
     }
 }

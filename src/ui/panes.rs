@@ -5,9 +5,11 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
+#[cfg(test)]
+use super::text::display_width;
+use super::text::truncate_end;
 use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
@@ -19,30 +21,6 @@ pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
         .is_some_and(|metrics| metrics.offset_from_bottom > 0)
 }
 
-fn truncate_label(text: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    let mut prefix = String::new();
-    let mut width = 0;
-    let prefix_width = max_width.saturating_sub(1);
-    for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width > prefix_width {
-            break;
-        }
-        prefix.push(ch);
-        width += ch_width;
-    }
-    format!("{prefix}…")
-}
-
 fn pane_border_title(label: &str, pane_width: u16, focused: bool) -> Option<String> {
     let label = label.trim();
     if label.is_empty() || pane_width <= 4 {
@@ -50,10 +28,10 @@ fn pane_border_title(label: &str, pane_width: u16, focused: bool) -> Option<Stri
     }
     if focused {
         let max_label_width = pane_width.saturating_sub(5) as usize;
-        Some(format!("▌ {} ", truncate_label(label, max_label_width)))
+        Some(format!("▌ {} ", truncate_end(label, max_label_width)))
     } else {
         let max_label_width = pane_width.saturating_sub(4) as usize;
-        Some(format!(" {} ", truncate_label(label, max_label_width)))
+        Some(format!(" {} ", truncate_end(label, max_label_width)))
     }
 }
 
@@ -843,7 +821,7 @@ mod tests {
         let title = pane_border_title("1 模块组织（已定）", 12, false).unwrap();
 
         assert_eq!(title, " 1 模块… ");
-        assert!(UnicodeWidthStr::width(title.as_str()) <= 10);
+        assert!(display_width(title.as_str()) <= 10);
     }
 
     #[test]
