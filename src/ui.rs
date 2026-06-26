@@ -1257,4 +1257,39 @@ mod tests {
         assert!(rendered_help.contains("open lazygit"));
         assert!(rendered_help.contains("custom command"));
     }
+
+    #[test]
+    fn keybind_help_compacts_multiple_indexed_ranges() {
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[keys]
+switch_tab = ["prefix+1..9", "alt+1..9"]
+switch_workspace = "ctrl+1..9"
+"#,
+        )
+        .expect("config parses");
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.keybinds = config.keybinds();
+
+        let workspace_tab = keybind_help_groups(&app)
+            .into_iter()
+            .find(|(name, _)| *name == "workspaces / tabs")
+            .expect("workspace tab group")
+            .1;
+
+        let switch_tab_key = workspace_tab
+            .iter()
+            .find(|(_, label)| label.as_ref() == "switch tab 1-9")
+            .map(|(key, _)| key.as_str())
+            .expect("switch tab help entry");
+        let switch_workspace_key = workspace_tab
+            .iter()
+            .find(|(_, label)| label.as_ref() == "switch workspace 1-9")
+            .map(|(key, _)| key.as_str())
+            .expect("switch workspace help entry");
+
+        assert_eq!(switch_tab_key, "prefix+1..9 / alt+1..9");
+        assert_eq!(switch_workspace_key, "ctrl+1..9");
+    }
 }
