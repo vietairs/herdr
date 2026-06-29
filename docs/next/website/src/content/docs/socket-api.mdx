@@ -17,6 +17,22 @@ Most automation should start with the CLI wrappers. Use the raw socket API only 
 
 The layers share the same control surface.
 
+## Schema
+
+The installed CLI can print the socket protocol schema bundled with that Herdr
+binary:
+
+```bash
+herdr api schema
+herdr api schema --json
+herdr api schema --output herdr-api.schema.json
+```
+
+Plain `herdr api schema` prints a short summary. `--json` prints the full JSON
+Schema document for tools, and `--output PATH` writes that document to a file.
+The schema covers raw requests, success responses, error responses, emitted
+events, and subscription events.
+
 ## What you can control
 
 The socket API can:

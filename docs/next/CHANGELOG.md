@@ -4,6 +4,7 @@
 
 ### Added
 - Added `session.snapshot` to bootstrap client runtime state in one socket API response before subscribing to events.
+- Added `herdr api schema` to inspect the bundled socket API schema, with `--json` for the full JSON Schema document and `--output PATH` for file output.
 
 ### Changed
 - Bumped the client/server protocol version to 15 for socket API placement mutation event and response compatibility.

@@ -486,6 +486,7 @@ fn main() -> io::Result<()> {
         println!("       herdr channel set <stable|preview>");
         println!("       herdr server stop");
         println!("       herdr server reload-config");
+        println!("       herdr api <subcommand> ...");
         println!("       herdr config <subcommand> ...");
         println!("       herdr channel <subcommand> ...");
         println!("       herdr workspace <subcommand> ...");
@@ -525,6 +526,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr channel <subcommand>",
                 "Manage the stable or preview update channel",
+            ),
+            (
+                "herdr api <subcommand>",
+                "Inspect the bundled socket API schema",
             ),
             (
                 "herdr workspace <subcommand>",
