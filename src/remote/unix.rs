@@ -459,18 +459,17 @@ fn prepare_remote_herdr(
     let platform = detect_remote_platform(target)?;
     let remote_herdr = RemoteHerdr::for_platform(platform);
     let override_binary = remote_binary_override_path()?;
-    let path_remote_herdr = remote_binary_on_path_any(target, &remote_herdr)?;
+    let remote_binary_candidates = remote_binary_candidates(target, &remote_herdr)?;
 
     if override_binary.is_none() {
-        if let Some(path_remote_herdr) = path_remote_herdr
-            .as_ref()
-            .filter(|candidate| remote_binary_matches(target, candidate).unwrap_or(false))
-        {
-            return Ok(PreparedRemoteHerdr {
-                remote_herdr: path_remote_herdr.clone(),
-                installed_or_replaced: false,
-                stop_after_install_approved: false,
-            });
+        for candidate in &remote_binary_candidates {
+            if remote_binary_matches(target, candidate).unwrap_or(false) {
+                return Ok(PreparedRemoteHerdr {
+                    remote_herdr: candidate.clone(),
+                    installed_or_replaced: false,
+                    stop_after_install_approved: false,
+                });
+            }
         }
         if remote_binary_matches(target, &remote_herdr)? {
             return Ok(PreparedRemoteHerdr {
@@ -482,7 +481,7 @@ fn prepare_remote_herdr(
     }
 
     let mut stop_after_install_approved = false;
-    if let Some(status_probe_herdr) = path_remote_herdr.as_ref().or_else(|| {
+    if let Some(status_probe_herdr) = remote_binary_candidates.first().or_else(|| {
         remote_binary_exists(target, &remote_herdr)
             .ok()
             .and_then(|exists| exists.then_some(&remote_herdr))
@@ -538,6 +537,89 @@ fn detect_remote_platform(target: &str) -> io::Result<RemotePlatform> {
     })
 }
 
+fn remote_binary_candidates(
+    target: &str,
+    remote_herdr: &RemoteHerdr,
+) -> io::Result<Vec<RemoteHerdr>> {
+    let mut candidates = Vec::new();
+
+    if let Some(path_candidate) = remote_binary_on_path_any(target, remote_herdr)? {
+        push_if_new_remote_binary_candidate(&mut candidates, path_candidate);
+    }
+
+    let output = ssh_sh_output(
+        target,
+        &known_remote_binary_candidate_script(&remote_herdr.platform),
+    )?;
+    if !output.status.success() {
+        return Err(command_failed("remote binary discovery failed", &output));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for candidate in remote_herdrs_from_path_discovery(remote_herdr, &stdout) {
+        push_if_new_remote_binary_candidate(&mut candidates, candidate);
+    }
+
+    Ok(candidates)
+}
+
+fn push_if_new_remote_binary_candidate(candidates: &mut Vec<RemoteHerdr>, candidate: RemoteHerdr) {
+    if !candidates
+        .iter()
+        .any(|existing| existing.shell_path == candidate.shell_path)
+    {
+        candidates.push(candidate);
+    }
+}
+
+fn known_remote_binary_candidate_script(platform: &RemotePlatform) -> String {
+    let mut script = String::from(
+        r#"home=${HOME:-}
+user=${USER:-}
+version="#,
+    );
+    script.push_str(&shell_quote(&current_version()));
+    script.push_str(
+        r#"
+emit() {
+    path=$1
+    if [ -n "$path" ] && [ -x "$path" ]; then
+        printf '%s\n' "$path"
+    fi
+}
+if [ -n "$home" ]; then
+    emit "$home/.local/bin/herdr"
+fi
+"#,
+    );
+    if platform.os == "macos" {
+        script.push_str(
+            r#"    emit "/opt/homebrew/bin/herdr"
+    emit "/usr/local/bin/herdr"
+"#,
+        );
+    } else if platform.os == "linux" {
+        script.push_str(
+            r#"    emit "/home/linuxbrew/.linuxbrew/bin/herdr"
+"#,
+        );
+    }
+    script.push_str(
+        r#"if [ -n "$home" ]; then
+    emit "$home/.local/share/mise/installs/herdr/$version/bin/herdr"
+    emit "$home/.local/share/mise/installs/github-ogulcancelik-herdr/$version/herdr"
+    emit "$home/.nix-profile/bin/herdr"
+fi
+if [ -n "$user" ]; then
+    emit "/etc/profiles/per-user/$user/bin/herdr"
+fi
+emit "/nix/var/nix/profiles/default/bin/herdr"
+emit "/run/current-system/sw/bin/herdr"
+"#,
+    );
+
+    script
+}
+
 fn remote_binary_on_path_any(
     target: &str,
     remote_herdr: &RemoteHerdr,
@@ -551,16 +633,35 @@ fn remote_binary_on_path_any(
     Ok(remote_herdr_from_path_discovery(remote_herdr, &stdout))
 }
 
+fn remote_herdrs_from_path_discovery(remote_herdr: &RemoteHerdr, stdout: &str) -> Vec<RemoteHerdr> {
+    stdout
+        .lines()
+        .filter_map(|path| remote_herdr_from_path(remote_herdr, path))
+        .collect()
+}
+
 fn remote_herdr_from_path_discovery(
     remote_herdr: &RemoteHerdr,
     stdout: &str,
 ) -> Option<RemoteHerdr> {
-    let mut lines = stdout.lines();
-    let path = lines.next()?;
+    stdout
+        .lines()
+        .find_map(|path| remote_herdr_from_path(remote_herdr, path))
+}
+
+fn remote_herdr_from_path(remote_herdr: &RemoteHerdr, path: &str) -> Option<RemoteHerdr> {
+    let path = path.trim();
     if !path.starts_with('/') {
         return None;
     }
+    if is_mise_shim_path(path) {
+        return None;
+    }
     Some(remote_herdr.clone().with_shell_path(shell_quote(path)))
+}
+
+fn is_mise_shim_path(path: &str) -> bool {
+    path.ends_with("/mise/shims/herdr")
 }
 
 fn remote_binary_matches(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
@@ -2053,6 +2154,75 @@ mod tests {
             "exec /opt/homebrew/bin/herdr remote-client-bridge"
         );
         assert_eq!(remote_herdr.platform.asset_key(), "macos-aarch64");
+    }
+
+    #[test]
+    fn remote_path_discovery_reads_multiple_absolute_paths() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        let candidates = remote_herdrs_from_path_discovery(
+            &remote_herdr,
+            "/usr/bin/herdr\nbin/herdr\n /opt/herdr bin/herdr\n",
+        );
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].shell_path, "/usr/bin/herdr");
+        assert_eq!(candidates[1].shell_path, "'/opt/herdr bin/herdr'");
+    }
+
+    #[test]
+    fn remote_path_discovery_ignores_mise_shims() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        let candidates = remote_herdrs_from_path_discovery(
+            &remote_herdr,
+            "/home/can/.local/share/mise/shims/herdr\n/home/can/.local/share/mise/installs/herdr/0.7.1/bin/herdr\n",
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].shell_path,
+            "/home/can/.local/share/mise/installs/herdr/0.7.1/bin/herdr"
+        );
+    }
+
+    #[test]
+    fn known_remote_binary_candidate_script_includes_mise_and_nix_paths() {
+        let script = known_remote_binary_candidate_script(&RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+
+        assert!(script.contains("emit \"$home/.local/bin/herdr\""));
+        assert!(!script.contains("mise/shims/herdr"));
+        assert!(script.contains(&format!("version={}", shell_quote(&current_version()))));
+        assert!(
+            script.contains("emit \"$home/.local/share/mise/installs/herdr/$version/bin/herdr\"")
+        );
+        assert!(script.contains(
+            "emit \"$home/.local/share/mise/installs/github-ogulcancelik-herdr/$version/herdr\""
+        ));
+        assert!(script.contains("emit \"$home/.nix-profile/bin/herdr\""));
+        assert!(script.contains("emit \"/etc/profiles/per-user/$user/bin/herdr\""));
+        assert!(script.contains("emit \"/run/current-system/sw/bin/herdr\""));
+        assert!(script.contains("emit \"/home/linuxbrew/.linuxbrew/bin/herdr\""));
+        assert!(!script.contains("emit \"/opt/homebrew/bin/herdr\""));
+    }
+
+    #[test]
+    fn known_remote_binary_candidate_script_includes_macos_homebrew_paths() {
+        let script = known_remote_binary_candidate_script(&RemotePlatform {
+            os: "macos",
+            arch: "aarch64",
+        });
+
+        assert!(script.contains("emit \"/opt/homebrew/bin/herdr\""));
+        assert!(script.contains("emit \"/usr/local/bin/herdr\""));
+        assert!(!script.contains("emit \"/home/linuxbrew/.linuxbrew/bin/herdr\""));
     }
 
     #[test]
