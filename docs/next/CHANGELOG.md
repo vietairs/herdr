@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added `session.snapshot` to bootstrap client runtime state in one socket API response before subscribing to events.
+
 ### Changed
 - Bumped the client/server protocol version to 15 for socket API placement mutation event and response compatibility.
 

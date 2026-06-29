@@ -16,6 +16,7 @@ use super::plugins::{
     PluginPaneInfo,
 };
 use super::server::ServerCapabilities;
+use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
@@ -46,6 +47,9 @@ pub enum ResponseResult {
         protocol: u32,
         #[serde(default)]
         capabilities: Option<ServerCapabilities>,
+    },
+    SessionSnapshot {
+        snapshot: Box<SessionSnapshot>,
     },
     WorkspaceInfo {
         workspace: WorkspaceInfo,

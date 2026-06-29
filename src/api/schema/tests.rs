@@ -377,6 +377,40 @@ fn success_response_round_trips() {
 }
 
 #[test]
+fn session_snapshot_request_and_response_round_trip() {
+    let request = Request {
+        id: "req_snapshot".into(),
+        method: Method::SessionSnapshot(EmptyParams::default()),
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(json.contains("\"method\":\"session.snapshot\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, request);
+
+    let response = SuccessResponse {
+        id: "req_snapshot".into(),
+        result: ResponseResult::SessionSnapshot {
+            snapshot: Box::new(SessionSnapshot {
+                version: "0.1.2".into(),
+                protocol: 15,
+                focused_workspace_id: None,
+                focused_tab_id: None,
+                focused_pane_id: None,
+                workspaces: Vec::new(),
+                tabs: Vec::new(),
+                panes: Vec::new(),
+                layouts: Vec::new(),
+                agents: Vec::new(),
+            }),
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(json.contains("\"type\":\"session_snapshot\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
 fn worktree_request_and_response_round_trip() {
     let request = Request {
         id: "req_worktree".into(),
