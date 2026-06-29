@@ -130,6 +130,9 @@ pub enum ResponseResult {
     LayoutApply {
         layout: LayoutDescription,
     },
+    LayoutSplitRatioSet {
+        layout: LayoutDescription,
+    },
     PaneNeighbor {
         neighbor: PaneNeighborResult,
     },

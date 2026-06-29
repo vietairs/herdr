@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- Bumped the client/server protocol version to 15 for socket API placement mutation event and response compatibility.
+
 ### Fixed
 - Native Windows clients running inside Alacritty now preserve mouse reports and `ctrl+j` input instead of leaking mouse escape sequences into panes. `shift+enter` remains dependent on whether the outer terminal reports it as a distinct modified Enter key. (#792)
 

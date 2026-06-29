@@ -250,18 +250,39 @@ fn pane_process_info_request_round_trips() {
 
 #[test]
 fn event_envelope_round_trips() {
-    let event = EventEnvelope {
-        event: EventKind::PaneOutputChanged,
-        data: EventData::PaneOutputChanged {
-            pane_id: "p_1".into(),
-            workspace_id: "w_1".into(),
-            revision: 42,
+    let events = [
+        EventEnvelope {
+            event: EventKind::PaneOutputChanged,
+            data: EventData::PaneOutputChanged {
+                pane_id: "p_1".into(),
+                workspace_id: "w_1".into(),
+                revision: 42,
+            },
         },
-    };
+        EventEnvelope {
+            event: EventKind::WorkspaceMoved,
+            data: EventData::WorkspaceMoved {
+                workspace_id: "w_1".into(),
+                insert_index: 2,
+                workspaces: vec![],
+            },
+        },
+        EventEnvelope {
+            event: EventKind::TabMoved,
+            data: EventData::TabMoved {
+                tab_id: "w_1:1".into(),
+                workspace_id: "w_1".into(),
+                insert_index: 1,
+                tabs: vec![],
+            },
+        },
+    ];
 
-    let json = serde_json::to_string(&event).unwrap();
-    let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, event);
+    for event in events {
+        let json = serde_json::to_string(&event).unwrap();
+        let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, event);
+    }
 }
 
 #[test]
@@ -700,6 +721,28 @@ fn layout_export_apply_round_trip() {
     let json = serde_json::to_string(&response).unwrap();
     let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, response);
+
+    let response = SuccessResponse {
+        id: "layout_ratio".into(),
+        result: ResponseResult::LayoutSplitRatioSet {
+            layout: LayoutDescription {
+                workspace_id: "w1".into(),
+                tab_id: "w1:1".into(),
+                zoomed: false,
+                focused_pane_id: "w1-1".into(),
+                root: LayoutNode::Pane {
+                    pane: LayoutPane {
+                        pane_id: Some("w1-1".into()),
+                        ..Default::default()
+                    },
+                },
+            },
+        },
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(json.contains("\"type\":\"layout_split_ratio_set\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
 }
 
 #[test]
@@ -752,6 +795,18 @@ fn authority_mutation_requests_round_trip() {
     assert_eq!(json["method"], "layout.set_split_ratio");
     let restored: Request = serde_json::from_value(json).unwrap();
     assert_eq!(restored, split_ratio);
+
+    let subscription = Request {
+        id: "sub_moves".into(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: vec![Subscription::WorkspaceMoved {}, Subscription::TabMoved {}],
+        }),
+    };
+    let json = serde_json::to_string(&subscription).unwrap();
+    assert!(json.contains("\"type\":\"workspace.moved\""));
+    assert!(json.contains("\"type\":\"tab.moved\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, subscription);
 }
 
 #[test]
