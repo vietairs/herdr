@@ -1587,6 +1587,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub fn resize_pane(&mut self, direction: NavDirection) {
         if let Some(first) = self.view.pane_infos.first() {
             let area = self
