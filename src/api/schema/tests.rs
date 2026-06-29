@@ -703,6 +703,58 @@ fn layout_export_apply_round_trip() {
 }
 
 #[test]
+fn authority_mutation_requests_round_trip() {
+    let workspace_move = Request {
+        id: "move_ws".into(),
+        method: Method::WorkspaceMove(WorkspaceMoveParams {
+            workspace_id: "w1".into(),
+            insert_index: 2,
+        }),
+    };
+    let json = serde_json::to_value(&workspace_move).unwrap();
+    assert_eq!(json["method"], "workspace.move");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, workspace_move);
+
+    let tab_move = Request {
+        id: "move_tab".into(),
+        method: Method::TabMove(TabMoveParams {
+            tab_id: "w1:1".into(),
+            insert_index: 1,
+        }),
+    };
+    let json = serde_json::to_value(&tab_move).unwrap();
+    assert_eq!(json["method"], "tab.move");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, tab_move);
+
+    let pane_focus = Request {
+        id: "focus_pane".into(),
+        method: Method::PaneFocus(PaneTarget {
+            pane_id: "w1:1".into(),
+        }),
+    };
+    let json = serde_json::to_value(&pane_focus).unwrap();
+    assert_eq!(json["method"], "pane.focus");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, pane_focus);
+
+    let split_ratio = Request {
+        id: "set_ratio".into(),
+        method: Method::LayoutSetSplitRatio(LayoutSetSplitRatioParams {
+            tab_id: Some("w1:1".into()),
+            pane_id: None,
+            path: vec![false, true],
+            ratio: 0.6,
+        }),
+    };
+    let json = serde_json::to_value(&split_ratio).unwrap();
+    assert_eq!(json["method"], "layout.set_split_ratio");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, split_ratio);
+}
+
+#[test]
 fn create_response_round_trips_with_root_pane() {
     let response = SuccessResponse {
         id: "req_2".into(),

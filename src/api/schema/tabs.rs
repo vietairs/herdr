@@ -31,6 +31,12 @@ pub struct TabRenameParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabMoveParams {
+    pub tab_id: String,
+    pub insert_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabInfo {
     pub tab_id: String,
     pub workspace_id: String,

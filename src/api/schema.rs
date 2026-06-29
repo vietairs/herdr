@@ -69,6 +69,8 @@ pub enum Method {
     WorkspaceFocus(WorkspaceTarget),
     #[serde(rename = "workspace.rename")]
     WorkspaceRename(WorkspaceRenameParams),
+    #[serde(rename = "workspace.move")]
+    WorkspaceMove(WorkspaceMoveParams),
     #[serde(rename = "workspace.close")]
     WorkspaceClose(WorkspaceTarget),
     #[serde(rename = "worktree.list")]
@@ -89,6 +91,8 @@ pub enum Method {
     TabFocus(TabTarget),
     #[serde(rename = "tab.rename")]
     TabRename(TabRenameParams),
+    #[serde(rename = "tab.move")]
+    TabMove(TabMoveParams),
     #[serde(rename = "tab.close")]
     TabClose(TabTarget),
     #[serde(rename = "agent.list")]
@@ -123,6 +127,8 @@ pub enum Method {
     LayoutExport(LayoutExportParams),
     #[serde(rename = "layout.apply")]
     LayoutApply(LayoutApplyParams),
+    #[serde(rename = "layout.set_split_ratio")]
+    LayoutSetSplitRatio(LayoutSetSplitRatioParams),
     #[serde(rename = "pane.neighbor")]
     PaneNeighbor(PaneNeighborParams),
     #[serde(rename = "pane.edges")]
@@ -137,6 +143,8 @@ pub enum Method {
     PaneCurrent(PaneCurrentParams),
     #[serde(rename = "pane.get")]
     PaneGet(PaneTarget),
+    #[serde(rename = "pane.focus")]
+    PaneFocus(PaneTarget),
     #[serde(rename = "pane.rename")]
     PaneRename(PaneRenameParams),
     #[serde(rename = "pane.send_text")]
