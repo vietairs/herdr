@@ -17,6 +17,8 @@ use super::{api_helpers::pane_agent_status, App, Mode, OverlayPaneState, ToastKi
 use crate::events::AppEvent;
 
 const API_NOTIFICATION_RATE_LIMIT: Duration = Duration::from_secs(1);
+#[cfg(windows)]
+const WINDOWS_POWERSHELL_AGENT_EXIT_RESPAWN_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeExitAction {
@@ -235,6 +237,8 @@ impl App {
         self.sync_full_lifecycle_authority_detection_pauses();
         if terminal_cwd_reported {
             self.mark_git_status_refresh_due(Instant::now());
+            self.render_dirty.store(true, Ordering::Release);
+            self.render_notify.notify_one();
         }
         for update in &pane_updates {
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
@@ -425,10 +429,35 @@ impl App {
             return RuntimeExitAction::ClosePane;
         };
 
-        if terminal.respawn_shell_on_exit {
+        if terminal.respawn_shell_on_exit || self.should_respawn_shell_after_agent_exit(terminal) {
             RuntimeExitAction::RespawnShell
         } else {
             RuntimeExitAction::ClosePane
+        }
+    }
+
+    fn should_respawn_shell_after_agent_exit(
+        &self,
+        terminal: &crate::terminal::TerminalState,
+    ) -> bool {
+        #[cfg(not(windows))]
+        {
+            let _ = terminal;
+            false
+        }
+
+        #[cfg(windows)]
+        {
+            if !terminal.agent_process_exited_within(
+                Instant::now(),
+                WINDOWS_POWERSHELL_AGENT_EXIT_RESPAWN_GRACE,
+            ) {
+                return false;
+            }
+
+            crate::pane::uses_windows_powershell_prompt_cwd_reporting(
+                crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
+            )
         }
     }
 
@@ -1761,6 +1790,64 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_exit_after_agent_process_exit_respawns_shell() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("powershell");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.default_shell = "powershell.exe".into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+
+        app.handle_internal_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(crate::detect::Agent::OpenCode),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: true,
+            observed_at: std::time::Instant::now(),
+        });
+
+        assert_eq!(
+            app.runtime_exit_action(pane_id),
+            RuntimeExitAction::RespawnShell
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_exit_without_recent_agent_process_exit_closes_pane() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("powershell");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.default_shell = "powershell.exe".into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+
+        assert_eq!(
+            app.runtime_exit_action(pane_id),
+            RuntimeExitAction::ClosePane
+        );
     }
 
     #[test]

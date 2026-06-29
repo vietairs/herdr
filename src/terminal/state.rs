@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-#[cfg(test)]
+#[cfg(any(windows, test))]
 use std::time::Duration;
 use std::time::Instant;
 
@@ -91,6 +91,7 @@ pub struct TerminalState {
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
+    recent_agent_process_exit_at: Option<Instant>,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
 }
 
@@ -117,6 +118,7 @@ impl TerminalState {
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
+            recent_agent_process_exit_at: None,
             pending_agent_resume_plan: None,
         }
     }
@@ -129,6 +131,12 @@ impl TerminalState {
     pub fn with_respawn_shell_on_exit(mut self) -> Self {
         self.respawn_shell_on_exit = true;
         self
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn agent_process_exited_within(&self, now: Instant, max_age: Duration) -> bool {
+        self.recent_agent_process_exit_at
+            .is_some_and(|exited_at| now.saturating_duration_since(exited_at) <= max_age)
     }
 
     pub fn with_pending_agent_resume_plan(
@@ -246,6 +254,11 @@ impl TerminalState {
         self.fallback_state = fallback_state;
         self.fallback_visible_blocker = visible_blocker && fallback_state == AgentState::Blocked;
         self.fallback_observed_at = Some(now);
+        if process_exited && agent.is_some() {
+            self.recent_agent_process_exit_at = Some(now);
+        } else if agent.is_some() {
+            self.recent_agent_process_exit_at = None;
+        }
         if process_exited
             && self.hook_authority_not_newer_than(now)
             && self.hook_authority.as_ref().is_some_and(|authority| {
@@ -1118,6 +1131,7 @@ impl TerminalState {
         self.last_agent_state_change_seq = None;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
+        self.recent_agent_process_exit_at = None;
         self.pending_agent_resume_plan = None;
         self.clear_agent_name();
     }
@@ -3654,6 +3668,39 @@ mod tests {
         assert!(terminal.agent_name.is_none());
         assert!(terminal.persisted_agent_session.is_none());
         assert!(!terminal.respawn_shell_on_exit);
+    }
+
+    #[test]
+    fn agent_process_exit_tracks_recent_respawn_window() {
+        let mut terminal = test_terminal();
+        let now = std::time::Instant::now();
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::OpenCode),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            now,
+        );
+
+        assert!(terminal.agent_process_exited_within(now, Duration::from_secs(2)));
+        assert!(!terminal
+            .agent_process_exited_within(now + Duration::from_secs(3), Duration::from_secs(2)));
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::OpenCode),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            now + Duration::from_secs(4),
+        );
+
+        assert!(!terminal
+            .agent_process_exited_within(now + Duration::from_secs(4), Duration::from_secs(2)));
     }
 
     #[test]
