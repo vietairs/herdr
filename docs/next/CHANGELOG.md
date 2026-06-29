@@ -11,6 +11,7 @@
 
 ### Fixed
 - Native Windows clients running inside Alacritty now preserve mouse reports and `ctrl+j` input instead of leaking mouse escape sequences into panes. `shift+enter` remains dependent on whether the outer terminal reports it as a distinct modified Enter key. (#792)
+- OMP integration state now recovers after resumed sessions such as `omp -c` and reports Ask/tool approval waits as blocked instead of leaving the pane working or stuck on the previous OMP session. (#879)
 
 ## [0.7.1] - 2026-06-24
 
