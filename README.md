@@ -119,7 +119,13 @@ official integrations add native session restore, and some report semantic state
 
 ## agents can use herdr too
 
-the local Unix socket lets agents create workspaces, split or zoom panes, spawn helpers, read output, and subscribe to state changes instead of polling. start with the [socket API docs](https://herdr.dev/docs/socket-api/) and [`SKILL.md`](./SKILL.md).
+the local Unix socket lets agents create workspaces, split or zoom panes, spawn helpers, read output, and subscribe to state changes instead of polling. install the reusable skill with:
+
+```bash
+npx skills add ogulcancelik/herdr --skill herdr -g
+```
+
+start with the [agent skill docs](https://herdr.dev/docs/agent-skill/), [socket API docs](https://herdr.dev/docs/socket-api/), and [`SKILL.md`](./SKILL.md).
 
 ## docs
 
