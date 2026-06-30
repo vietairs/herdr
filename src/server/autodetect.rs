@@ -9,8 +9,6 @@
 //! (escape hatch for users who want the traditional single-process behavior).
 
 use std::io;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -218,12 +216,7 @@ fn build_server_daemon_command(exe: PathBuf) -> Command {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    {
-        // Create a new process group so the server survives the parent's exit
-        // and doesn't receive SIGHUP when the client's terminal closes.
-        command.process_group(0);
-    }
+    crate::platform::detach_server_daemon_command(&mut command);
 
     match std::env::current_dir() {
         Ok(cwd) => {
@@ -382,6 +375,24 @@ mod tests {
         assert!(envs.iter().any(|(key, value)| {
             *key == OsStr::new(STARTUP_CWD_ENV_VAR) && value == &Some(expected.as_os_str())
         }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn server_daemon_detach_creates_new_session() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(
+            r#"sid=$(ps -o sid= -p $$ | tr -d ' ')
+test "$sid" = "$$"
+"#,
+        );
+        crate::platform::detach_server_daemon_command(&mut command);
+
+        let status = command.status().unwrap();
+        assert!(
+            status.success(),
+            "detached server child should be its own session leader"
+        );
     }
 
     #[test]

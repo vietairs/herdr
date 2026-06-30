@@ -16,4 +16,6 @@ pub struct ServerLiveHandoffParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerCapabilities {
     pub live_handoff: bool,
+    #[serde(default)]
+    pub detached_server_daemon: bool,
 }
