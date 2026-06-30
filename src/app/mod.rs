@@ -14,6 +14,7 @@ mod creation;
 mod ids;
 mod input;
 mod runtime;
+mod runtime_mutations;
 mod session;
 pub mod state;
 mod terminal_targets;
@@ -886,7 +887,7 @@ impl App {
 
             if self.state.request_new_workspace {
                 self.state.request_new_workspace = false;
-                self.dispatch_tui_api_request(
+                self.dispatch_tui_runtime_mutation(
                     "tui.workspace.create",
                     crate::api::schema::Method::WorkspaceCreate(
                         crate::api::schema::WorkspaceCreateParams {
@@ -903,7 +904,7 @@ impl App {
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 let label = self.state.requested_new_tab_name.take();
-                self.dispatch_tui_api_request(
+                self.dispatch_tui_runtime_mutation(
                     "tui.tab.create",
                     crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
                         workspace_id: None,
@@ -927,7 +928,7 @@ impl App {
             }
 
             if let Some(cwd) = self.state.request_new_workspace_cwd.take() {
-                self.dispatch_tui_api_request(
+                self.dispatch_tui_runtime_mutation(
                     "tui.workspace.create_cwd",
                     crate::api::schema::Method::WorkspaceCreate(
                         crate::api::schema::WorkspaceCreateParams {
