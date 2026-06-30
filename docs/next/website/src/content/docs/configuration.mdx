@@ -300,6 +300,7 @@ Common options:
 sidebar_width = 32
 sidebar_min_width = 18
 sidebar_max_width = 36
+sidebar_collapsed_mode = "compact"
 mobile_width_threshold = 64
 mouse_capture = true
 right_click_passthrough_modifier = ""
@@ -315,6 +316,8 @@ accent = "cyan"
 ```
 
 `sidebar_min_width` and `sidebar_max_width` control the expanded sidebar's resize bounds in columns. The defaults are 18 and 36.
+
+`sidebar_collapsed_mode` controls what remains visible after toggling the sidebar closed. The default, `compact`, keeps the narrow status rail. Set it to `hidden` to make the collapsed sidebar zero-width; reopen it with `keys.toggle_sidebar`.
 
 `mobile_width_threshold` controls the terminal width at or below which Herdr uses the mobile single-column layout. The default is 64 columns; increase it for foldables, tablets, or wide phone terminals.
 

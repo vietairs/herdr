@@ -182,7 +182,10 @@ fn compute_view_internal(
     }
 
     let sidebar_w = if app.sidebar_collapsed {
-        COLLAPSED_WIDTH
+        match app.sidebar_collapsed_mode {
+            crate::config::SidebarCollapsedModeConfig::Compact => COLLAPSED_WIDTH,
+            crate::config::SidebarCollapsedModeConfig::Hidden => 0,
+        }
     } else {
         app.sidebar_width
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
@@ -385,10 +388,12 @@ pub fn render_with_runtime_registry(
 
     if app.view.layout == ViewLayout::Mobile {
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
-    } else if app.sidebar_collapsed {
-        render_sidebar_collapsed(app, frame, sidebar_area);
-    } else {
-        render_sidebar(app, terminal_runtimes, frame, sidebar_area);
+    } else if sidebar_area.width > 0 {
+        if app.sidebar_collapsed {
+            render_sidebar_collapsed(app, frame, sidebar_area);
+        } else {
+            render_sidebar(app, terminal_runtimes, frame, sidebar_area);
+        }
     }
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
@@ -788,6 +793,28 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 100, 20));
 
         assert_eq!(app.view.sidebar_rect.width, 22);
+    }
+
+    #[test]
+    fn hidden_collapsed_sidebar_uses_full_width_terminal_area() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_collapsed = true;
+        app.sidebar_collapsed_mode = crate::config::SidebarCollapsedModeConfig::Hidden;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        assert_eq!(app.view.sidebar_rect, Rect::new(0, 0, 0, 20));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(0, 0, 80, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(0, 1, 80, 19));
+        assert!(app.view.workspace_card_areas.is_empty());
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
     }
 
     #[test]

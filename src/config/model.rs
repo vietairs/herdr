@@ -106,6 +106,14 @@ impl AgentPanelSortConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarCollapsedModeConfig {
+    #[default]
+    Compact,
+    Hidden,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RightClickPassthroughModifierConfig(Option<KeyModifiers>);
 
@@ -763,6 +771,8 @@ pub struct UiConfig {
     pub sidebar_min_width: u16,
     /// Maximum sidebar width (columns) when expanded. Default: 36.
     pub sidebar_max_width: u16,
+    /// Collapsed sidebar presentation. Default: compact.
+    pub sidebar_collapsed_mode: SidebarCollapsedModeConfig,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
@@ -963,6 +973,7 @@ impl Default for UiConfig {
             sidebar_width: 26,
             sidebar_min_width: 18,
             sidebar_max_width: 36,
+            sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
@@ -1308,6 +1319,25 @@ mobile_width_threshold = 96
         assert_eq!(config.ui.sidebar_min_width, 12);
         assert_eq!(config.ui.sidebar_max_width, 80);
         assert_eq!(config.ui.mobile_width_threshold, 96);
+    }
+
+    #[test]
+    fn sidebar_collapsed_mode_defaults_compact_and_parses_hidden() {
+        let default_config = Config::default();
+        assert_eq!(
+            default_config.ui.sidebar_collapsed_mode,
+            SidebarCollapsedModeConfig::Compact
+        );
+
+        let toml = r#"
+[ui]
+sidebar_collapsed_mode = "hidden"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.sidebar_collapsed_mode,
+            SidebarCollapsedModeConfig::Hidden
+        );
     }
 
     #[test]

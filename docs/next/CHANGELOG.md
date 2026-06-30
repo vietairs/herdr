@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added `ui.sidebar_collapsed_mode = "hidden"` to make a collapsed sidebar use zero width while keeping the existing compact rail as the default. (#842)
 - Added `session.snapshot` to bootstrap client runtime state in one socket API response before subscribing to events.
 - Added `herdr api schema` to inspect the bundled socket API schema, with `--json` for the full JSON Schema document and `--output PATH` for file output.
 - Added `herdr terminal session observe` for read-only live ANSI terminal streams that bridge processes can consume as newline-delimited JSON.
