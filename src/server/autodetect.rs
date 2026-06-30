@@ -2,7 +2,7 @@
 //!
 //! When the user runs `herdr` with no subcommand:
 //! 1. Check if a server is already listening on the client socket
-//! 2. If no server → spawn one as a background daemon → wait for socket readiness (up to 5s)
+//! 2. If no server → spawn one as a background daemon → wait for socket readiness (up to 15s)
 //! 3. Attach as a thin client to the server
 //!
 //! The `--no-session` flag bypasses server/client entirely and runs monolithically
@@ -20,7 +20,7 @@ use super::socket_paths::client_socket_path;
 
 /// Maximum time to wait for the server's client socket to become ready
 /// after spawning the server process.
-const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Poll interval when waiting for the server socket to appear.
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -266,9 +266,10 @@ pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Resu
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         format!(
-            "server did not become ready within {}s (socket: {})",
+            "server did not become ready within {}s (socket: {}). The background server may still be starting; try `herdr` again, or check {}",
             timeout.as_secs(),
-            socket_path.display()
+            socket_path.display(),
+            crate::session::data_dir().join("herdr-server.log").display()
         ),
     ))
 }
