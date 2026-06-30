@@ -23,6 +23,7 @@ const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
 const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
+const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
 pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
 
 pub(crate) const REMOTE_KEYBINDINGS_ENV_VAR: &str = "HERDR_REMOTE_KEYBINDINGS";
@@ -165,25 +166,26 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         remote.keybindings,
         remote.live_handoff,
     );
-    let prepared_remote = prepare_remote_herdr(&remote.target, remote.live_handoff)?;
+    let manage_ssh_config = crate::config::Config::load()
+        .config
+        .remote
+        .manage_ssh_config;
+    let remote_ssh = RemoteSsh::new(remote.target.clone(), manage_ssh_config);
+    let prepared_remote = prepare_remote_herdr(&remote_ssh, remote.live_handoff)?;
     ensure_remote_server_ready(
-        &remote.target,
+        &remote_ssh,
         &prepared_remote.remote_herdr,
         prepared_remote.installed_or_replaced,
         prepared_remote.stop_after_install_approved,
         remote.live_handoff,
     )?;
 
-    let manage_ssh_config = crate::config::Config::load()
-        .config
-        .remote
-        .manage_ssh_config;
     let _bridge = SshStdioBridge::start(
         remote.target,
         prepared_remote.remote_herdr,
         local_socket.clone(),
         session_name,
-        manage_ssh_config,
+        remote_ssh.options(),
     )?;
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
@@ -430,6 +432,175 @@ struct PreparedRemoteHerdr {
     stop_after_install_approved: bool,
 }
 
+#[derive(Clone)]
+struct ManagedSshOptions {
+    config_path: PathBuf,
+    control_path: PathBuf,
+}
+
+struct ManagedSshConfig {
+    options: ManagedSshOptions,
+}
+
+impl Drop for ManagedSshConfig {
+    fn drop(&mut self) {
+        if let Some(dir) = self.options.config_path.parent() {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+struct RemoteSsh {
+    target: String,
+    managed_config: Option<ManagedSshConfig>,
+}
+
+impl RemoteSsh {
+    fn new(target: String, manage_ssh_config: bool) -> Self {
+        let managed_config = if manage_ssh_config {
+            write_managed_ssh_config()
+                .inspect_err(|err| {
+                    tracing::debug!(%err, "could not write managed ssh config; using plain ssh");
+                })
+                .ok()
+        } else {
+            None
+        };
+
+        Self {
+            target,
+            managed_config,
+        }
+    }
+
+    fn target(&self) -> &str {
+        &self.target
+    }
+
+    fn options(&self) -> Option<&ManagedSshOptions> {
+        self.managed_config.as_ref().map(|config| &config.options)
+    }
+
+    fn command(&self) -> Command {
+        let mut command = self.base_command();
+        command.arg("-T").arg(&self.target);
+        command
+    }
+
+    fn base_command(&self) -> Command {
+        let mut command = Command::new("ssh");
+        apply_managed_ssh_options(&mut command, self.options());
+        command
+    }
+
+    fn sh_output(&self, script: &str) -> io::Result<Output> {
+        let mut child = self
+            .command()
+            .arg("/bin/sh -s")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let write_result = if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(script.as_bytes())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "ssh bootstrap stdin missing",
+            ))
+        };
+        let output = child.wait_with_output()?;
+        write_result?;
+        Ok(output)
+    }
+
+    fn user_shell_output(&self, command: &str) -> io::Result<Output> {
+        self.command().arg(command).output()
+    }
+
+    fn install_herdr(&self, remote_herdr: &RemoteHerdr, source_path: &Path) -> io::Result<()> {
+        let script = format!(
+            r#"dest="$HOME/{install_suffix}"
+dir="${{dest%/*}}"
+mkdir -p "$dir"
+tmp="${{dest}}.tmp.$$"
+cat > "$tmp"
+chmod 755 "$tmp"
+mv "$tmp" "$dest"
+"#,
+            install_suffix = remote_herdr.install_suffix
+        );
+
+        let mut child = self
+            .command()
+            .arg(format!("/bin/sh -eu -c {}", shell_quote(&script)))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|err| {
+                io::Error::new(err.kind(), format!("failed to start ssh install: {err}"))
+            })?;
+
+        let mut source = File::open(source_path)?;
+        let copy_result = if let Some(mut stdin) = child.stdin.take() {
+            io::copy(&mut source, &mut stdin).map(|_| ())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "ssh install stdin missing",
+            ))
+        };
+        let status = child.wait()?;
+        copy_result?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "remote install exited with {status}"
+            )))
+        }
+    }
+}
+
+impl Drop for RemoteSsh {
+    fn drop(&mut self) {
+        if self.managed_config.is_none() {
+            return;
+        }
+
+        let _ = self
+            .base_command()
+            .arg("-O")
+            .arg("exit")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg(&self.target)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
+    let Some(options) = options else {
+        return;
+    };
+
+    command
+        .arg("-F")
+        .arg(&options.config_path)
+        .arg("-S")
+        .arg(&options.control_path)
+        .arg("-o")
+        .arg("ControlMaster=auto")
+        .arg("-o")
+        .arg("ControlPersist=yes");
+}
+
 impl InstallSource {
     fn persistent(path: PathBuf) -> Self {
         Self {
@@ -453,17 +624,17 @@ impl InstallSource {
 }
 
 fn prepare_remote_herdr(
-    target: &str,
+    ssh: &RemoteSsh,
     live_handoff_enabled: bool,
 ) -> io::Result<PreparedRemoteHerdr> {
-    let platform = detect_remote_platform(target)?;
+    let platform = detect_remote_platform(ssh)?;
     let remote_herdr = RemoteHerdr::for_platform(platform);
     let override_binary = remote_binary_override_path()?;
-    let remote_binary_candidates = remote_binary_candidates(target, &remote_herdr)?;
+    let remote_binary_candidates = remote_binary_candidates(ssh, &remote_herdr)?;
 
     if override_binary.is_none() {
         for candidate in &remote_binary_candidates {
-            if remote_binary_matches(target, candidate).unwrap_or(false) {
+            if remote_binary_matches(ssh, candidate).unwrap_or(false) {
                 return Ok(PreparedRemoteHerdr {
                     remote_herdr: candidate.clone(),
                     installed_or_replaced: false,
@@ -471,7 +642,7 @@ fn prepare_remote_herdr(
                 });
             }
         }
-        if remote_binary_matches(target, &remote_herdr)? {
+        if remote_binary_matches(ssh, &remote_herdr)? {
             return Ok(PreparedRemoteHerdr {
                 remote_herdr,
                 installed_or_replaced: false,
@@ -482,34 +653,34 @@ fn prepare_remote_herdr(
 
     let mut stop_after_install_approved = false;
     if let Some(status_probe_herdr) = remote_binary_candidates.first().or_else(|| {
-        remote_binary_exists(target, &remote_herdr)
+        remote_binary_exists(ssh, &remote_herdr)
             .ok()
             .and_then(|exists| exists.then_some(&remote_herdr))
     }) {
         stop_after_install_approved = confirm_remote_install_with_running_server(
-            target,
+            ssh,
             status_probe_herdr,
             live_handoff_enabled,
         )?;
     }
     confirm_remote_install(
-        target,
+        ssh.target(),
         &remote_herdr,
         &install_source_description(&remote_herdr.platform, override_binary.as_deref()),
     )?;
     let source = resolve_install_source(&remote_herdr.platform, override_binary)?;
-    let install_result = install_remote_herdr(target, &remote_herdr, &source.path);
+    let install_result = ssh.install_herdr(&remote_herdr, &source.path);
     source.cleanup();
     install_result?;
 
-    if !remote_binary_matches(target, &remote_herdr)? {
+    if !remote_binary_matches(ssh, &remote_herdr)? {
         return Err(io::Error::other(format!(
             "installed remote herdr at {}, but it did not report version {}",
             remote_herdr.shell_path,
             current_version()
         )));
     }
-    warn_if_remote_bin_not_on_path(target)?;
+    warn_if_remote_bin_not_on_path(ssh)?;
 
     Ok(PreparedRemoteHerdr {
         remote_herdr,
@@ -518,8 +689,8 @@ fn prepare_remote_herdr(
     })
 }
 
-fn detect_remote_platform(target: &str) -> io::Result<RemotePlatform> {
-    let output = ssh_sh_output(target, "uname -s\nuname -m\n")?;
+fn detect_remote_platform(ssh: &RemoteSsh) -> io::Result<RemotePlatform> {
+    let output = ssh.sh_output("uname -s\nuname -m\n")?;
     if !output.status.success() {
         return Err(command_failed("remote platform detection failed", &output));
     }
@@ -538,19 +709,18 @@ fn detect_remote_platform(target: &str) -> io::Result<RemotePlatform> {
 }
 
 fn remote_binary_candidates(
-    target: &str,
+    ssh: &RemoteSsh,
     remote_herdr: &RemoteHerdr,
 ) -> io::Result<Vec<RemoteHerdr>> {
     let mut candidates = Vec::new();
 
-    if let Some(path_candidate) = remote_binary_on_path_any(target, remote_herdr)? {
+    if let Some(path_candidate) = remote_binary_on_path_any(ssh, remote_herdr)? {
         push_if_new_remote_binary_candidate(&mut candidates, path_candidate);
     }
 
-    let output = ssh_sh_output(
-        target,
-        &known_remote_binary_candidate_script(&remote_herdr.platform),
-    )?;
+    let output = ssh.sh_output(&known_remote_binary_candidate_script(
+        &remote_herdr.platform,
+    ))?;
     if !output.status.success() {
         return Err(command_failed("remote binary discovery failed", &output));
     }
@@ -621,10 +791,10 @@ emit "/run/current-system/sw/bin/herdr"
 }
 
 fn remote_binary_on_path_any(
-    target: &str,
+    ssh: &RemoteSsh,
     remote_herdr: &RemoteHerdr,
 ) -> io::Result<Option<RemoteHerdr>> {
-    let output = ssh_user_shell_output(target, "command -v herdr")?;
+    let output = ssh.user_shell_output("command -v herdr")?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -664,12 +834,12 @@ fn is_mise_shim_path(path: &str) -> bool {
     path.ends_with("/mise/shims/herdr")
 }
 
-fn remote_binary_matches(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
+fn remote_binary_matches(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
     let command = format!(
         "test -x {0} && {0} --version && {0} status client --json",
         remote_herdr.shell_path
     );
-    let output = ssh_sh_output(target, &command)?;
+    let output = ssh.sh_output(&command)?;
     if !output.status.success() {
         return Ok(false);
     }
@@ -684,9 +854,9 @@ fn remote_binary_matches(target: &str, remote_herdr: &RemoteHerdr) -> io::Result
             .unwrap_or(false))
 }
 
-fn remote_binary_exists(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
+fn remote_binary_exists(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
     let command = format!("test -x {}", remote_herdr.shell_path);
-    Ok(ssh_sh_output(target, &command)?.status.success())
+    Ok(ssh.sh_output(&command)?.status.success())
 }
 
 fn remote_binary_override_path() -> io::Result<Option<PathBuf>> {
@@ -798,13 +968,13 @@ enum RemoteServerRestartReason {
 }
 
 fn ensure_remote_server_ready(
-    target: &str,
+    ssh: &RemoteSsh,
     remote_herdr: &RemoteHerdr,
     remote_binary_changed: bool,
     stop_after_install_approved: bool,
     live_handoff_enabled: bool,
 ) -> io::Result<()> {
-    let status = remote_server_status(target, remote_herdr)?;
+    let status = remote_server_status(ssh, remote_herdr)?;
     let RemoteServerStatus::Running {
         version,
         protocol,
@@ -821,7 +991,7 @@ fn ensure_remote_server_ready(
     };
 
     if live_handoff_enabled && live_handoff {
-        match live_handoff_remote_server(target, remote_herdr) {
+        match live_handoff_remote_server(ssh, remote_herdr) {
             Ok(()) => return Ok(()),
             Err(err) => {
                 eprintln!("remote live handoff failed: {err}");
@@ -831,12 +1001,12 @@ fn ensure_remote_server_ready(
     }
 
     if stop_after_install_approved {
-        stop_remote_server(target, remote_herdr)?;
+        stop_remote_server(ssh, remote_herdr)?;
         return Ok(());
     }
 
-    if confirm_remote_server_stop(target, version.as_deref(), protocol, reason)? {
-        stop_remote_server(target, remote_herdr)?;
+    if confirm_remote_server_stop(ssh.target(), version.as_deref(), protocol, reason)? {
+        stop_remote_server(ssh, remote_herdr)?;
     }
     Ok(())
 }
@@ -859,11 +1029,12 @@ fn remote_server_restart_reason(
 }
 
 fn confirm_remote_install_with_running_server(
-    target: &str,
+    ssh: &RemoteSsh,
     remote_herdr: &RemoteHerdr,
     live_handoff_enabled: bool,
 ) -> io::Result<bool> {
-    let status = match remote_server_status(target, remote_herdr) {
+    let target = ssh.target();
+    let status = match remote_server_status(ssh, remote_herdr) {
         Ok(status) => status,
         Err(err) => {
             if !io::stdin().is_terminal() {
@@ -944,11 +1115,11 @@ fn confirm_remote_install_with_running_server(
 }
 
 fn remote_server_status(
-    target: &str,
+    ssh: &RemoteSsh,
     remote_herdr: &RemoteHerdr,
 ) -> io::Result<RemoteServerStatus> {
     let command = format!("{} status server --json", remote_herdr.shell_path);
-    let output = ssh_sh_output(target, &command)?;
+    let output = ssh.sh_output(&command)?;
     if !output.status.success() {
         return Err(command_failed("remote server status failed", &output));
     }
@@ -1067,7 +1238,7 @@ fn confirm_remote_server_stop(
     Ok(false)
 }
 
-fn live_handoff_remote_server(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<()> {
+fn live_handoff_remote_server(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Result<()> {
     let command = format!(
         "{} server live-handoff --import-exe {} --expected-protocol {} --expected-version {}",
         remote_herdr.shell_path,
@@ -1075,33 +1246,37 @@ fn live_handoff_remote_server(target: &str, remote_herdr: &RemoteHerdr) -> io::R
         CURRENT_PROTOCOL,
         current_version()
     );
-    let output = ssh_sh_output(target, &command)?;
+    let output = ssh.sh_output(&command)?;
     if !output.status.success() {
         return Err(command_failed("remote server live handoff failed", &output));
     }
 
     eprintln!(
-        "handed off the remote herdr server on {target}; reconnecting to the prepared server."
+        "handed off the remote herdr server on {}; reconnecting to the prepared server.",
+        ssh.target()
     );
     Ok(())
 }
 
-fn stop_remote_server(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<()> {
+fn stop_remote_server(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Result<()> {
     let command = format!("{} server stop", remote_herdr.shell_path);
-    let output = ssh_sh_output(target, &command)?;
+    let output = ssh.sh_output(&command)?;
     if !output.status.success() {
         return Err(command_failed("remote server stop failed", &output));
     }
 
-    wait_for_remote_server_shutdown(target, remote_herdr)?;
-    eprintln!("stopped the remote herdr server on {target}; it will restart when the remote client bridge attaches.");
+    wait_for_remote_server_shutdown(ssh, remote_herdr)?;
+    eprintln!(
+        "stopped the remote herdr server on {}; it will restart when the remote client bridge attaches.",
+        ssh.target()
+    );
     Ok(())
 }
 
-fn wait_for_remote_server_shutdown(target: &str, remote_herdr: &RemoteHerdr) -> io::Result<()> {
+fn wait_for_remote_server_shutdown(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Result<()> {
     let deadline = Instant::now() + REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT;
     loop {
-        if remote_server_status(target, remote_herdr)? == RemoteServerStatus::NotRunning {
+        if remote_server_status(ssh, remote_herdr)? == RemoteServerStatus::NotRunning {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -1109,7 +1284,8 @@ fn wait_for_remote_server_shutdown(target: &str, remote_herdr: &RemoteHerdr) -> 
                 io::ErrorKind::TimedOut,
                 format!(
                     "shutdown was requested, but the old remote herdr server on {target} is still responding after {} seconds",
-                    REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT.as_secs()
+                    REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT.as_secs(),
+                    target = ssh.target()
                 ),
             ));
         }
@@ -1121,8 +1297,8 @@ fn version_label(version: Option<&str>) -> &str {
     version.unwrap_or("unknown")
 }
 
-fn warn_if_remote_bin_not_on_path(target: &str) -> io::Result<()> {
-    let output = ssh_user_shell_output(target, "command -v herdr")?;
+fn warn_if_remote_bin_not_on_path(ssh: &RemoteSsh) -> io::Result<()> {
+    let output = ssh.user_shell_output("command -v herdr")?;
     if output.status.success()
         && remote_shell_resolves_managed_install(&String::from_utf8_lossy(&output.stdout))
     {
@@ -1323,87 +1499,6 @@ fn confirm_remote_install(
     Ok(())
 }
 
-fn install_remote_herdr(
-    target: &str,
-    remote_herdr: &RemoteHerdr,
-    source_path: &Path,
-) -> io::Result<()> {
-    let script = format!(
-        r#"dest="$HOME/{install_suffix}"
-dir="${{dest%/*}}"
-mkdir -p "$dir"
-tmp="${{dest}}.tmp.$$"
-cat > "$tmp"
-chmod 755 "$tmp"
-mv "$tmp" "$dest"
-"#,
-        install_suffix = remote_herdr.install_suffix
-    );
-
-    let mut child = Command::new("ssh")
-        .arg("-T")
-        .arg(target)
-        .arg(format!("/bin/sh -eu -c {}", shell_quote(&script)))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|err| io::Error::new(err.kind(), format!("failed to start ssh install: {err}")))?;
-
-    let mut source = File::open(source_path)?;
-    let copy_result = if let Some(mut stdin) = child.stdin.take() {
-        io::copy(&mut source, &mut stdin).map(|_| ())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "ssh install stdin missing",
-        ))
-    };
-    let status = child.wait()?;
-    copy_result?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "remote install exited with {status}"
-        )))
-    }
-}
-
-fn ssh_sh_output(target: &str, script: &str) -> io::Result<Output> {
-    // Feed POSIX bootstrap scripts to /bin/sh so the user's login shell only
-    // has to parse a simple executable invocation.
-    let mut child = Command::new("ssh")
-        .arg("-T")
-        .arg(target)
-        .arg("/bin/sh -s")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let write_result = if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(script.as_bytes())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "ssh bootstrap stdin missing",
-        ))
-    };
-    let output = child.wait_with_output()?;
-    write_result?;
-    Ok(output)
-}
-
-fn ssh_user_shell_output(target: &str, command: &str) -> io::Result<Output> {
-    Command::new("ssh")
-        .arg("-T")
-        .arg(target)
-        .arg(command)
-        .output()
-}
-
 fn remote_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
     let mut command = format!("exec {}", remote_herdr.shell_path);
     if session_name != crate::session::DEFAULT_SESSION_NAME {
@@ -1465,7 +1560,6 @@ fn command_failed(context: &str, output: &Output) -> io::Error {
 
 struct SshStdioBridge {
     local_socket: PathBuf,
-    keepalive_ssh_config: Option<PathBuf>,
     should_stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -1476,26 +1570,16 @@ impl SshStdioBridge {
         remote_herdr: RemoteHerdr,
         local_socket: PathBuf,
         session_name: String,
-        manage_ssh_config: bool,
+        ssh_options: Option<&ManagedSshOptions>,
     ) -> io::Result<Self> {
         let _ = std::fs::remove_file(&local_socket);
         let listener = UnixListener::bind(&local_socket)?;
         crate::ipc::restrict_socket_permissions(&local_socket, BRIDGE_SOCKET_PERMISSION_MODE)?;
         listener.set_nonblocking(true)?;
 
-        let keepalive_ssh_config = if manage_ssh_config {
-            write_keepalive_ssh_config()
-                .inspect_err(|err| {
-                    tracing::debug!(%err, "could not write ssh keepalive config; using plain ssh");
-                })
-                .ok()
-        } else {
-            None
-        };
-
         let should_stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&should_stop);
-        let thread_ssh_config = keepalive_ssh_config.clone();
+        let thread_ssh_options = ssh_options.cloned();
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
@@ -1511,7 +1595,7 @@ impl SshStdioBridge {
                             &target,
                             &remote_herdr,
                             &session_name,
-                            thread_ssh_config.as_deref(),
+                            thread_ssh_options.as_ref(),
                         ) {
                             eprintln!("herdr: remote bridge failed: {err}");
                         }
@@ -1529,7 +1613,6 @@ impl SshStdioBridge {
 
         Ok(Self {
             local_socket,
-            keepalive_ssh_config,
             should_stop,
             thread: Some(thread),
         })
@@ -1543,17 +1626,11 @@ impl Drop for SshStdioBridge {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        // Remove the generated ssh config only after the bridge thread has
-        // joined, so it can never start a connection with a config path that
-        // was just deleted.
-        if let Some(dir) = self.keepalive_ssh_config.as_deref().and_then(Path::parent) {
-            let _ = std::fs::remove_dir_all(dir);
-        }
     }
 }
 
-/// Creates a fresh user-only (`0700`) directory under the temp dir for the
-/// bridge's generated ssh config, returning its path.
+/// Creates a fresh user-only (`0700`) directory for the generated ssh config
+/// and control socket, returning its path.
 ///
 /// Using a private directory created with fail-if-exists semantics — rather
 /// than a predictable file in the world-writable temp dir — stops a local user
@@ -1562,20 +1639,36 @@ impl Drop for SshStdioBridge {
 fn private_ssh_config_dir() -> io::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
 
-    let base = std::env::temp_dir();
-    for attempt in 0..100 {
-        let dir = base.join(format!("herdr-ssh-{}-{attempt}", std::process::id()));
-        match fs::DirBuilder::new().mode(0o700).create(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(err),
+    let mut bases = vec![std::env::temp_dir()];
+    let short_tmp = PathBuf::from("/tmp");
+    if bases.first() != Some(&short_tmp) {
+        bases.push(short_tmp);
+    }
+
+    let mut last_error = None;
+    for base in bases {
+        for attempt in 0..100 {
+            let dir = base.join(format!("herdr-ssh-{}-{attempt}", std::process::id()));
+            if !fits_unix_socket_path(&dir.join(SSH_CONTROL_SOCKET_NAME)) {
+                continue;
+            }
+            match fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => return Ok(dir),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(err) => {
+                    last_error = Some(err);
+                    break;
+                }
+            }
         }
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "failed to create private herdr ssh config directory",
-    ))
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "failed to create private herdr ssh config directory",
+        )
+    }))
 }
 
 /// Quotes a path for an ssh_config `Include` so a path containing spaces (or
@@ -1586,17 +1679,19 @@ fn ssh_config_quote(path: &str) -> String {
     format!("\"{path}\"")
 }
 
-/// Builds a temporary ssh config that keeps the bridge tunnel alive without
-/// overriding the user's own settings, returning its path.
+/// Builds a temporary ssh config for remote attach commands without overriding
+/// the user's own settings, returning its path.
 ///
 /// The file `Include`s the user's real ssh config first, so ssh's
 /// first-value-wins rule keeps any `ServerAlive*` the user set there (including
-/// an explicit `0` to disable it); herdr's values apply only when the user has
-/// none.
-fn write_keepalive_ssh_config() -> io::Result<PathBuf> {
+/// an explicit `0` to disable it). Herdr's keepalive values apply only when
+/// the user has none.
+fn write_managed_ssh_config() -> io::Result<ManagedSshConfig> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    let path = private_ssh_config_dir()?.join("config");
+    let dir = private_ssh_config_dir()?;
+    let path = dir.join("config");
+    let control_path = dir.join(SSH_CONTROL_SOCKET_NAME);
 
     let mut contents = String::new();
     if let Some(home) = std::env::var_os("HOME") {
@@ -1621,7 +1716,12 @@ fn write_keepalive_ssh_config() -> io::Result<PathBuf> {
         .mode(BRIDGE_SOCKET_PERMISSION_MODE)
         .open(&path)?;
     file.write_all(contents.as_bytes())?;
-    Ok(path)
+    Ok(ManagedSshConfig {
+        options: ManagedSshOptions {
+            config_path: path,
+            control_path,
+        },
+    })
 }
 
 fn bridge_connection(
@@ -1629,13 +1729,10 @@ fn bridge_connection(
     target: &str,
     remote_herdr: &RemoteHerdr,
     session_name: &str,
-    keepalive_ssh_config: Option<&Path>,
+    ssh_options: Option<&ManagedSshOptions>,
 ) -> io::Result<()> {
     let mut command = Command::new("ssh");
-    // Use the generated keepalive ssh config when present; otherwise plain ssh.
-    if let Some(ssh_config) = keepalive_ssh_config {
-        command.arg("-F").arg(ssh_config);
-    }
+    apply_managed_ssh_options(&mut command, ssh_options);
     command
         .arg("-T")
         .arg(target)
@@ -1813,7 +1910,7 @@ mod tests {
             remote_herdr,
             socket.clone(),
             "default".to_string(),
-            false,
+            None,
         )
         .expect("start bridge listener");
 
@@ -1825,13 +1922,15 @@ mod tests {
     }
 
     #[test]
-    fn keepalive_ssh_config_includes_user_config_then_fallback() {
+    fn managed_ssh_config_includes_user_config_then_fallback() {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = write_keepalive_ssh_config().expect("write keepalive config");
+        let managed_config = write_managed_ssh_config().expect("write managed config");
+        let path = managed_config.options.config_path.clone();
+        let control_path = managed_config.options.control_path.clone();
         let contents = std::fs::read_to_string(&path).expect("read keepalive config");
 
-        // herdr's fallback keepalive is present...
+        // herdr's fallback transport settings are present...
         assert!(
             contents.contains("Host *"),
             "config should add a Host * fallback block: {contents}"
@@ -1844,8 +1943,11 @@ mod tests {
             contents.contains("ServerAliveCountMax 4"),
             "config should set the keepalive count: {contents}"
         );
-        // ...and any user config is Included (quoted) BEFORE it so first-value-wins
-        // keeps the user's own settings.
+        assert!(!contents.contains("ControlMaster"));
+        assert!(!contents.contains("ControlPersist"));
+        assert!(!contents.contains("ControlPath"));
+        // ...and any user config is Included (quoted) BEFORE it so
+        // first-value-wins keeps the user's own settings.
         if let Some(home) = std::env::var_os("HOME") {
             let user_config = PathBuf::from(home).join(".ssh").join("config");
             if user_config.is_file() {
@@ -1871,8 +1973,12 @@ mod tests {
         let dir = path.parent().expect("config has a parent dir");
         let dir_mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "ssh config dir must be user-only");
+        assert!(
+            fits_unix_socket_path(&control_path),
+            "control socket path must fit portable Unix socket limits"
+        );
 
-        let _ = std::fs::remove_dir_all(dir);
+        drop(managed_config);
     }
 
     #[test]
@@ -1881,6 +1987,55 @@ mod tests {
             ssh_config_quote("/home/a b/.ssh/config"),
             "\"/home/a b/.ssh/config\""
         );
+    }
+
+    #[test]
+    fn remote_ssh_command_uses_managed_config_when_present() {
+        let managed_config = write_managed_ssh_config().expect("write managed config");
+        let config_path = managed_config.options.config_path.clone();
+        let control_path = managed_config.options.control_path.clone();
+        let ssh = RemoteSsh {
+            target: "example".to_string(),
+            managed_config: Some(managed_config),
+        };
+
+        let command = ssh.command();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "-F".to_string(),
+                config_path.to_string_lossy().into_owned(),
+                "-S".to_string(),
+                control_path.to_string_lossy().into_owned(),
+                "-o".to_string(),
+                "ControlMaster=auto".to_string(),
+                "-o".to_string(),
+                "ControlPersist=yes".to_string(),
+                "-T".to_string(),
+                "example".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_ssh_command_is_plain_without_managed_config() {
+        let ssh = RemoteSsh {
+            target: "example".to_string(),
+            managed_config: None,
+        };
+
+        let command = ssh.command();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args, vec!["-T".to_string(), "example".to_string()]);
     }
 
     #[test]

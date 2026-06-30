@@ -844,8 +844,8 @@ pub struct AdvancedConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct RemoteConfig {
-    /// Add a keepalive fallback under the user's ssh config for the `--remote`
-    /// bridge. Set false to run plain ssh unchanged. Default: true.
+    /// Add keepalive fallbacks and private connection reuse for `herdr --remote`.
+    /// Set false to run plain ssh unchanged. Default: true.
     pub manage_ssh_config: bool,
 }
 
