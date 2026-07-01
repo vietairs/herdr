@@ -113,6 +113,7 @@ external contributor guardrail.
 ### Windows VM validation
 
 The Windows VM is for final/manual Windows validation, not normal agent work.
+Connect to it with the `windows-wirt` SSH alias.
 
 Use the single reusable checkout at `C:\work\repo`. Do not create additional
 persistent Herdr clones or worktrees on the VM. The Windows account is already
@@ -121,11 +122,15 @@ named `herdr`, so avoid paths like `C:\Users\herdr\herdr`.
 Before validating a fix on Windows, sync or apply the Linux worktree changes
 into `C:\work\repo`, then run the needed Windows build or test commands there.
 Reuse the shared Rust caches under `C:\Users\herdr\.cargo` and
-`C:\Users\herdr\.rustup`. Do not use WSL on the VM.
+`C:\Users\herdr\.rustup`. Do not use WSL on the VM. The VM may have a newer
+Zig on `PATH`; Herdr currently requires Zig 0.15.2, so set
+`$env:ZIG = "C:\Users\herdr\zig-0.15.2\zig.exe"` before running Cargo commands
+that build the vendored libghostty-vt.
 
 After validation, leave `C:\work\repo` clean. Remove temporary files and delete
 `C:\work\repo\target` when disk space is tight, but keep the shared Cargo and
-Rustup caches.
+Rustup caches. Unless Can explicitly asks to keep the patched tree for more
+manual testing, reset `C:\work\repo` back to a clean checkout before finishing.
 
 ## Agent Detection Updates
 
