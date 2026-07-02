@@ -455,9 +455,10 @@ impl App {
                 return false;
             }
 
-            crate::pane::uses_windows_powershell_prompt_cwd_reporting(
-                crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
-            )
+            crate::pane::uses_windows_powershell_pane_shell(crate::pane::PaneShellConfig::new(
+                &self.state.default_shell,
+                self.state.shell_mode,
+            ))
         }
     }
 
