@@ -193,7 +193,8 @@ pub struct HeadlessServer {
     app: app::App,
     #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
-    #[cfg(unix)]
+    // Kept on every platform so dropping HeadlessServer owns API server shutdown.
+    #[cfg_attr(windows, allow(dead_code))]
     api_server: Option<api::ServerHandle>,
     #[cfg(unix)]
     client_listener: LocalListener,
@@ -386,13 +387,11 @@ impl HeadlessServer {
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
             server_config_diagnostic_summaries(config_diagnostics);
         #[cfg(not(unix))]
-        let _ = (&api_tx, &api_server);
-
+        let _ = api_tx;
         Ok(Self {
             app,
             #[cfg(unix)]
             api_tx,
-            #[cfg(unix)]
             api_server,
             #[cfg(unix)]
             client_listener: listener,
@@ -4173,7 +4172,6 @@ mod tests {
             app,
             #[cfg(unix)]
             api_tx: None,
-            #[cfg(unix)]
             api_server: None,
             #[cfg(unix)]
             client_listener: listener,
