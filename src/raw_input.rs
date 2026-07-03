@@ -101,6 +101,7 @@ use crate::terminal_theme::{
 
 const ESC: u8 = 0x1b;
 pub(crate) const RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS: i32 = 10;
+#[cfg(any(not(windows), test))]
 pub(crate) const MOUSE_ACTIVE_LONE_ESCAPE_FLUSH_TIMEOUT_MS: i32 = 150;
 pub(crate) const GHOSTTY_COLOR_SCHEME_DARK_REPORT: &[u8] = b"\x1b[?997;1n";
 pub(crate) const GHOSTTY_COLOR_SCHEME_LIGHT_REPORT: &[u8] = b"\x1b[?997;2n";
@@ -207,6 +208,7 @@ impl RawInputByteFramer {
         !self.buffer.is_empty()
     }
 
+    #[cfg(any(not(windows), test))]
     pub(crate) fn has_pending_lone_escape(&self) -> bool {
         self.buffer.as_slice() == [ESC]
     }
