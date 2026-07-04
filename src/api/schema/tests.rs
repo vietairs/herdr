@@ -374,6 +374,34 @@ fn event_envelope_round_trips() {
                 tabs: vec![],
             },
         },
+        EventEnvelope {
+            event: EventKind::LayoutUpdated,
+            data: EventData::LayoutUpdated {
+                layout: PaneLayoutSnapshot {
+                    workspace_id: "w_1".into(),
+                    tab_id: "w_1:1".into(),
+                    zoomed: false,
+                    area: PaneLayoutRect {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 24,
+                    },
+                    focused_pane_id: "w_1-1".into(),
+                    panes: vec![PaneLayoutPane {
+                        pane_id: "w_1-1".into(),
+                        focused: true,
+                        rect: PaneLayoutRect {
+                            x: 0,
+                            y: 0,
+                            width: 100,
+                            height: 24,
+                        },
+                    }],
+                    splits: vec![],
+                },
+            },
+        },
     ];
 
     for event in events {
@@ -934,12 +962,17 @@ fn authority_mutation_requests_round_trip() {
     let subscription = Request {
         id: "sub_moves".into(),
         method: Method::EventsSubscribe(EventsSubscribeParams {
-            subscriptions: vec![Subscription::WorkspaceMoved {}, Subscription::TabMoved {}],
+            subscriptions: vec![
+                Subscription::WorkspaceMoved {},
+                Subscription::TabMoved {},
+                Subscription::LayoutUpdated {},
+            ],
         }),
     };
     let json = serde_json::to_string(&subscription).unwrap();
     assert!(json.contains("\"type\":\"workspace.moved\""));
     assert!(json.contains("\"type\":\"tab.moved\""));
+    assert!(json.contains("\"type\":\"layout.updated\""));
     let restored: Request = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, subscription);
 }
