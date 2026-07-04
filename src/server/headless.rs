@@ -618,17 +618,7 @@ impl HeadlessServer {
 
         if self.app.state.request_new_workspace {
             self.app.state.request_new_workspace = false;
-            let response = self.dispatch_headless_runtime_mutation(
-                "headless.workspace.create",
-                crate::api::schema::Method::WorkspaceCreate(
-                    crate::api::schema::WorkspaceCreateParams {
-                        cwd: None,
-                        focus: true,
-                        label: None,
-                        env: Default::default(),
-                    },
-                ),
-            );
+            let response = self.headless_workspace_create("headless.workspace.create", None, None);
             if let Err(error) = response {
                 error!(
                     code = %error.code,
@@ -643,16 +633,7 @@ impl HeadlessServer {
         if self.app.state.request_new_tab {
             self.app.state.request_new_tab = false;
             let label = self.app.state.requested_new_tab_name.take();
-            let response = self.dispatch_headless_runtime_mutation(
-                "headless.tab.create",
-                crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
-                    workspace_id: None,
-                    cwd: None,
-                    focus: true,
-                    label,
-                    env: Default::default(),
-                }),
-            );
+            let response = self.headless_tab_create("headless.tab.create", label);
             if let Err(error) = response {
                 error!(
                     code = %error.code,
@@ -677,16 +658,10 @@ impl HeadlessServer {
         }
 
         if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
-            let response = self.dispatch_headless_runtime_mutation(
+            let response = self.headless_workspace_create(
                 "headless.workspace.create_cwd",
-                crate::api::schema::Method::WorkspaceCreate(
-                    crate::api::schema::WorkspaceCreateParams {
-                        cwd: Some(cwd.display().to_string()),
-                        focus: true,
-                        label: None,
-                        env: Default::default(),
-                    },
-                ),
+                Some(cwd.display().to_string()),
+                None,
             );
             if let Err(error) = response {
                 error!(
@@ -735,6 +710,40 @@ impl HeadlessServer {
         }
 
         needs_render
+    }
+
+    fn headless_workspace_create(
+        &mut self,
+        id: &'static str,
+        cwd: Option<String>,
+        label: Option<String>,
+    ) -> Result<(), api::schema::ErrorBody> {
+        self.dispatch_headless_runtime_mutation(
+            id,
+            api::schema::Method::WorkspaceCreate(api::schema::WorkspaceCreateParams {
+                cwd,
+                focus: true,
+                label,
+                env: Default::default(),
+            }),
+        )
+    }
+
+    fn headless_tab_create(
+        &mut self,
+        id: &'static str,
+        label: Option<String>,
+    ) -> Result<(), api::schema::ErrorBody> {
+        self.dispatch_headless_runtime_mutation(
+            id,
+            api::schema::Method::TabCreate(api::schema::TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: true,
+                label,
+                env: Default::default(),
+            }),
+        )
     }
 
     fn dispatch_headless_runtime_mutation(
