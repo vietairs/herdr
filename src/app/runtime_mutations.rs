@@ -1,7 +1,7 @@
 use crate::api::schema::{
     LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneRenameParams,
     PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomParams, TabTarget,
-    WorkspaceTarget,
+    WorkspaceTarget, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 use super::App;
@@ -97,5 +97,29 @@ impl App {
         params: LayoutSetSplitRatioParams,
     ) -> String {
         self.dispatch_runtime_mutation(id, Method::LayoutSetSplitRatio(params))
+    }
+
+    pub(crate) fn runtime_worktree_create_deferred(
+        &mut self,
+        id: &'static str,
+        params: WorktreeCreateParams,
+    ) -> Option<String> {
+        self.dispatch_deferred_runtime_mutation(id, Method::WorktreeCreate(params))
+    }
+
+    pub(crate) fn runtime_worktree_open(
+        &mut self,
+        id: &'static str,
+        params: WorktreeOpenParams,
+    ) -> String {
+        self.dispatch_runtime_mutation(id, Method::WorktreeOpen(params))
+    }
+
+    pub(crate) fn runtime_worktree_remove_deferred(
+        &mut self,
+        id: &'static str,
+        params: WorktreeRemoveParams,
+    ) -> Option<String> {
+        self.dispatch_deferred_runtime_mutation(id, Method::WorktreeRemove(params))
     }
 }
