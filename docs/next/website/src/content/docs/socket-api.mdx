@@ -121,6 +121,9 @@ Call `session.snapshot` again after reconnecting or when the local cache may be
 stale. Attached worktree provenance is included on workspace records. Full repo
 worktree discovery remains `worktree.list`.
 
+From the CLI, `herdr api snapshot` prints the live `session.snapshot` response
+as JSON for clients and agents that want a simple bootstrap command.
+
 Pane control methods use public pane ids such as `w1:p1`. Methods whose
 schema makes `pane_id` optional use the server's active focused pane when it is
 omitted. `pane.move` always requires the source `pane_id`.

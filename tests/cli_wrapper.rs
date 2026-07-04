@@ -1173,6 +1173,57 @@ fn api_schema_json_prints_bundled_schema() {
 }
 
 #[test]
+fn api_snapshot_prints_live_session_snapshot() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn({
+        let socket_path = socket_path.clone();
+        move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(700);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut line = String::new();
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        reader.read_line(&mut line).unwrap();
+                        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                        assert_eq!(request["method"], "session.snapshot");
+                        assert_eq!(request["id"], "cli:api:snapshot");
+
+                        let response = serde_json::json!({
+                            "id": "cli:api:snapshot",
+                            "result": {
+                                "type": "ok",
+                                "marker": "snapshot-passthrough"
+                            }
+                        });
+                        writeln!(stream, "{response}").unwrap();
+                        stream.flush().unwrap();
+                        let _ = fs::remove_file(socket_path);
+                        return;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept failed: {err}"),
+                }
+            }
+            panic!("CLI did not connect to fake API socket");
+        }
+    });
+
+    let value = run_cli_json(&socket_path, &["api", "snapshot"]);
+
+    assert_eq!(value["result"]["marker"], "snapshot-passthrough");
+    server.join().unwrap();
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn api_schema_output_writes_bundled_schema_to_file() {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
