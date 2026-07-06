@@ -248,9 +248,7 @@ impl App {
                 format!("tab {} could not be closed", target.tab_id),
             );
         }
-        for pane_id in pane_ids {
-            self.state.plugin_panes.remove(&pane_id);
-        }
+        self.state.remove_plugin_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
         self.schedule_session_save();
