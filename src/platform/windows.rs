@@ -3,17 +3,19 @@ use std::{
     ffi::c_void,
     mem::{size_of, MaybeUninit},
     path::PathBuf,
-    ptr::null_mut,
+    ptr::{copy_nonoverlapping, null_mut},
 };
 
 use windows_sys::{
     Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation},
     Win32::{
         Foundation::{
-            CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS, STATUS_SUCCESS,
-            UNICODE_STRING,
+            CloseHandle, GlobalFree, LocalFree, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS,
+            STATUS_SUCCESS, UNICODE_STRING,
         },
         System::{
+            Console::GetConsoleWindow,
+            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
             Diagnostics::{
                 Debug::ReadProcessMemory,
                 ToolHelp::{
@@ -21,6 +23,8 @@ use windows_sys::{
                     TH32CS_SNAPPROCESS,
                 },
             },
+            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+            Ole::CF_UNICODETEXT,
             Threading::{
                 GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_BASIC_INFORMATION,
                 PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
@@ -420,8 +424,50 @@ pub fn process_exists(pid: u32) -> bool {
     ok && exit_code == STILL_ACTIVE
 }
 
-pub fn write_clipboard(_bytes: &[u8]) -> bool {
-    false
+pub fn write_clipboard(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    if text.contains('\0') {
+        return false;
+    }
+    let mut utf16: Vec<u16> = text.encode_utf16().collect();
+    utf16.push(0);
+    let Some(byte_len) = utf16.len().checked_mul(size_of::<u16>()) else {
+        return false;
+    };
+
+    unsafe {
+        let owner = GetConsoleWindow();
+        if owner.is_null() || OpenClipboard(owner) == 0 {
+            return false;
+        }
+        let _clipboard = ClipboardGuard;
+
+        if EmptyClipboard() == 0 {
+            return false;
+        }
+
+        let memory = GlobalAlloc(GMEM_MOVEABLE, byte_len);
+        if memory.is_null() {
+            return false;
+        }
+
+        let locked = GlobalLock(memory);
+        if locked.is_null() {
+            GlobalFree(memory);
+            return false;
+        }
+        copy_nonoverlapping(utf16.as_ptr(), locked.cast::<u16>(), utf16.len());
+        GlobalUnlock(memory);
+
+        if SetClipboardData(CF_UNICODETEXT as u32, memory).is_null() {
+            GlobalFree(memory);
+            return false;
+        }
+
+        true
+    }
 }
 
 pub fn read_clipboard_text() -> Option<String> {
@@ -466,6 +512,16 @@ fn wide_null(value: &str) -> Vec<u16> {
 }
 
 struct ProcessHandle(HANDLE);
+
+struct ClipboardGuard;
+
+impl Drop for ClipboardGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseClipboard();
+        }
+    }
+}
 
 impl ProcessHandle {
     fn open(pid: u32, access: u32) -> Option<Self> {
