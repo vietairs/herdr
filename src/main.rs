@@ -661,7 +661,13 @@ fn main() -> io::Result<()> {
     }
 
     if let Some(remote_launch) = remote_launch {
-        return remote::run_remote(remote_launch);
+        let remote_target = remote_launch.target.clone();
+        if let Err(err) = remote::run_remote(remote_launch) {
+            eprintln!("error: {err}");
+            remote::print_remote_error_hint(&err, &remote_target);
+            std::process::exit(1);
+        }
+        return Ok(());
     }
 
     let loaded_config = config::Config::load();
