@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.7.3] - 2026-07-08
+
 ### Fixed
 - The session navigator now keeps the active search query when leaving and re-entering search focus, and its footer now shows shortcuts for the current input mode. (#1115, #1140, thanks @liby)
 - Re-focusing an already-focused done agent or pane through the socket API now marks it seen instead of leaving stale done status in API responses.
