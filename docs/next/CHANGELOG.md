@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.7.2] - 2026-07-07
+
 ### Added
 - Added MastraCode integration support with lifecycle state reports and native thread restore. (#337, #788, thanks @wardpeet)
 - Added `ui.sidebar_collapsed_mode = "hidden"` to make a collapsed sidebar use zero width while keeping the existing compact rail as the default. (#842)
