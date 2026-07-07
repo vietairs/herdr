@@ -13,13 +13,18 @@ goal of becoming the runtime for coding agents.
 |------|--------|-------------|
 | Backer | $25/mo | Name + link in this file |
 | Gold | $500/mo | Logo in README |
-| Platinum | $1,000/mo | Lead sponsor — logo in README and on herdr.dev |
+| Platinum | $2,500/mo | Logo in README and on herdr.dev |
+| Lead Sponsor | $5,000/mo | Top logo — README and herdr.dev hero placement |
 | Enterprise | custom | hey@herdr.dev |
 
 GitHub also allows a custom amount, so a sponsor lands in the tier their amount
 qualifies for.
 
 ---
+
+## Lead Sponsor
+
+<!-- lead sponsor renders here -->
 
 ## Platinum
 
