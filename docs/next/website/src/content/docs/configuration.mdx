@@ -308,6 +308,7 @@ sidebar_max_width = 36
 sidebar_collapsed_mode = "compact"
 mobile_width_threshold = 64
 mouse_capture = true
+copy_on_select = true
 host_cursor = "auto"
 right_click_passthrough_modifier = ""
 redraw_on_focus_gained = true
@@ -333,6 +334,8 @@ The agent panel shows all agents across all spaces. `agent_panel_sort` can be `s
 `confirm_close` controls whether closing a workspace asks for confirmation. `prompt_new_tab_name` controls whether new tabs ask for a label first.
 
 Set `mouse_capture = false` if you want your terminal to handle normal clicks, such as command-clicking URLs. With mouse capture enabled, Ctrl-click opens pane links when your terminal sends that modified click to Herdr. This includes macOS; Cmd-click is not reported separately from plain click while Herdr captures mouse input. Use Shift-Ctrl-click on Linux or Shift-Cmd-click on macOS for the terminal-native bypass path.
+
+Set `copy_on_select = false` to disable Herdr's mouse drag selection and double-click word copying. The default is `true`.
 
 `host_cursor` controls whether Herdr uses the outer terminal's native cursor or draws its own cursor as terminal cell content. The default, `auto`, draws Herdr's cursor on native Windows builds and WSL to avoid ConPTY cursor flicker during active redraws, and uses the native cursor elsewhere. Set it to `native` to always use the outer terminal cursor, or `drawn` to always use Herdr's drawn cursor.
 

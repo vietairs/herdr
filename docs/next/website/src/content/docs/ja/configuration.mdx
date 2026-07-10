@@ -304,6 +304,7 @@ sidebar_min_width = 18
 sidebar_max_width = 36
 mobile_width_threshold = 64
 mouse_capture = true
+copy_on_select = true
 right_click_passthrough_modifier = ""
 redraw_on_focus_gained = true
 mouse_scroll_lines = 3
@@ -325,6 +326,8 @@ accent = "cyan"
 `confirm_close` はワークスペースを閉じるときに確認を求めるかどうかを制御します。`prompt_new_tab_name` は新しいタブで先にラベルを尋ねるかどうかを制御します。
 
 URL の command+クリックなど、通常のクリックをターミナルに処理させたい場合は `mouse_capture = false` を設定してください。マウスキャプチャが有効な場合、ターミナルが修飾キー付きクリックを Herdr に送れば、Ctrl+クリックでペインのリンクを開けます。これは macOS も含みます。Herdr がマウス入力をキャプチャしている間、Cmd+クリックは通常のクリックと区別して報告されません。ターミナルネイティブのバイパス経路には、Linux では Shift+Ctrl+クリック、macOS では Shift+Cmd+クリックを使ってください。
+
+`copy_on_select = false` を設定すると、Herdr のマウスドラッグ選択とダブルクリックによる単語コピーが無効になります。デフォルトは `true` です。
 
 マウスレポーティング対応のペインアプリの中で、Ctrl+右クリック、ホールド、ドラッグのジェスチャーを Herdr のペインメニューを開く代わりにアプリへ届けたい場合は `right_click_passthrough_modifier = "ctrl"` を設定してください。デフォルトは空で、このパススルーは無効です。対応する修飾キーは `ctrl`、`alt`、`cmd`、`super`、`meta`、`hyper` です。多くのターミナルが Shift+マウスを自分のマウスバイパスのために予約しているため、`shift` は拒否されます。
 

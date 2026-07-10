@@ -304,6 +304,7 @@ sidebar_min_width = 18
 sidebar_max_width = 36
 mobile_width_threshold = 64
 mouse_capture = true
+copy_on_select = true
 right_click_passthrough_modifier = ""
 redraw_on_focus_gained = true
 mouse_scroll_lines = 3
@@ -325,6 +326,8 @@ accent = "cyan"
 `confirm_close` 控制关闭工作区时是否需要确认。`prompt_new_tab_name` 控制新标签页是否先询问名称。
 
 如果想让终端处理普通点击,比如 command+点击 URL,设置 `mouse_capture = false`。鼠标捕获启用时,如果终端把带修饰键的点击传给 Herdr,Ctrl+点击可以打开窗格链接。macOS 也是如此;Herdr 捕获鼠标输入期间,Cmd+点击不会与普通点击区分上报。终端原生的绕过路径: Linux 上用 Shift+Ctrl+点击,macOS 上用 Shift+Cmd+点击。
+
+设置 `copy_on_select = false` 可禁用 Herdr 的鼠标拖动选择和双击单词复制。默认值为 `true`。
 
 如果想让 Ctrl+右键点击、按住和拖动手势到达启用鼠标上报的窗格应用,而不是打开 Herdr 的窗格菜单,设置 `right_click_passthrough_modifier = "ctrl"`。默认为空,即禁用这种透传。支持的修饰键有 `ctrl`、`alt`、`cmd`、`super`、`meta` 和 `hyper`;`shift` 被拒绝,因为许多终端把 Shift+鼠标保留给它们自己的鼠标绕过。
 

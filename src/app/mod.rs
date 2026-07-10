@@ -600,6 +600,7 @@ impl App {
             agent_panel_sort,
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
+            copy_on_select: config.ui.copy_on_select,
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),
             right_click_passthrough: None,
             redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
@@ -1358,6 +1359,17 @@ impl App {
                     .sidebar_width
                     .clamp(self.state.sidebar_min_width, self.state.sidebar_max_width);
                 self.state.mouse_capture = config.ui.mouse_capture;
+                self.state.copy_on_select = config.ui.copy_on_select;
+                if !self.state.copy_on_select {
+                    if self.state.mode == Mode::Copy {
+                        self.state.stop_selection_autoscroll_state();
+                    } else {
+                        self.state.clear_selection();
+                    }
+                    self.last_pane_click = None;
+                    self.selection_autoscroll_deadline = None;
+                    self.selection_highlight_clear_deadline = None;
+                }
                 if self.state.redraw_on_focus_gained != config.ui.redraw_on_focus_gained {
                     self.state.request_client_config_reload = true;
                 }
@@ -2524,12 +2536,35 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\nagent_panel_scope = \"current\"\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\nagent_panel_scope = \"current\"\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\ncopy_on_select = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = test_app();
+        let selection_pane = crate::layout::PaneId::alloc();
+        app.state.selection = Some(crate::selection::Selection::range(
+            selection_pane,
+            0,
+            0,
+            1,
+            None,
+        ));
+        app.state.selection_autoscroll = Some(state::SelectionAutoscroll {
+            direction: state::SelectionAutoscrollDirection::Down,
+            last_mouse_screen_col: 1,
+            last_mouse_screen_row: 1,
+            inner_rect: ratatui::layout::Rect::new(0, 0, 2, 2),
+        });
+        let selection_deadline = Instant::now();
+        app.selection_autoscroll_deadline = Some(selection_deadline);
+        app.selection_highlight_clear_deadline = Some(selection_deadline);
+        app.last_pane_click = Some(PaneClickState {
+            pane_id: selection_pane,
+            viewport_row: 0,
+            col: 0,
+            at: selection_deadline,
+        });
         app.next_auto_update_check = Some(Instant::now());
         app.next_agent_manifest_update_check = Some(Instant::now());
         let report = app.reload_config();
@@ -2548,6 +2583,24 @@ mod tests {
         );
         assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
         assert!(!app.state.redraw_on_focus_gained);
+        assert!(!app.state.copy_on_select);
+        assert!(app.state.selection.is_none());
+        assert!(app.state.selection_autoscroll.is_none());
+        assert!(app.selection_autoscroll_deadline.is_none());
+        assert!(app.selection_highlight_clear_deadline.is_none());
+        assert!(app.last_pane_click.is_none());
+
+        app.state.mode = Mode::Copy;
+        app.state.selection = Some(crate::selection::Selection::range(
+            selection_pane,
+            0,
+            0,
+            1,
+            None,
+        ));
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(app.state.selection.is_some());
         assert_eq!(
             app.state.right_click_passthrough_modifiers,
             Some(KeyModifiers::CONTROL)
