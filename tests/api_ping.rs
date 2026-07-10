@@ -705,6 +705,10 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
         .as_str()
         .unwrap()
         .to_string();
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let command = format!(
         "/bin/sh -c 'cd {} && printf %s $$ > {} && touch {} && sleep 30'",
         foreground.display(),
@@ -786,6 +790,59 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
     assert_eq!(
         agents["result"]["agents"][0]["foreground_cwd"],
         foreground.display().to_string()
+    );
+
+    let split = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "fg_split",
+            "method": "pane.split",
+            "params": {
+                "target_pane_id": pane_id,
+                "direction": "right",
+                "focus": false,
+            },
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        split["result"]["pane"]["cwd"],
+        foreground.display().to_string()
+    );
+
+    let tab = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "fg_tab",
+            "method": "tab.create",
+            "params": {
+                "workspace_id": workspace_id,
+                "focus": false,
+            },
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        tab["result"]["root_pane"]["cwd"],
+        foreground.display().to_string()
+    );
+
+    let explicit_tab = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "fg_explicit_tab",
+            "method": "tab.create",
+            "params": {
+                "workspace_id": workspace_id,
+                "cwd": base,
+                "focus": false,
+            },
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        explicit_tab["result"]["root_pane"]["cwd"],
+        base.display().to_string()
     );
 
     cleanup_spawned_herdr(child, base);
