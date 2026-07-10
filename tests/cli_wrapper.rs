@@ -2367,6 +2367,79 @@ fn worktree_open_existing_checkout_by_path_and_branch() {
 }
 
 #[test]
+fn config_check_reports_invalid_config_without_server() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let config_dir = config_home.join(app_dir_name());
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[keys\nnew_workspace = \"g\"\n",
+    )
+    .unwrap();
+
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check"]);
+
+    assert_eq!(checked.status.code(), Some(1));
+    assert!(
+        checked.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(stdout.contains("config: issues found"), "{stdout}");
+    assert!(stdout.contains("TOML parse error"), "{stdout}");
+    assert!(stdout.contains("line 1"), "{stdout}");
+
+    fs::write(
+        config_dir.join("config.toml"),
+        "[ui]\nsidebar_min_width = 50\nsidebar_max_width = 30\n",
+    )
+    .unwrap();
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check"]);
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert_eq!(checked.status.code(), Some(1));
+    assert!(stdout.contains("sidebar_min_width (50)"), "{stdout}");
+    assert!(stdout.contains("sidebar_max_width (30)"), "{stdout}");
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn config_check_reports_ok_when_config_is_missing() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check"]);
+
+    assert!(checked.status.success());
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(stdout.contains("config: ok"), "{stdout}");
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn config_check_rejects_json_output() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check", "--json"]);
+
+    assert_eq!(checked.status.code(), Some(2));
+    assert!(checked.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&checked.stderr),
+        "usage: herdr config check\n"
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn worktree_cli_rejects_local_argument_errors_before_socket_use() {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();

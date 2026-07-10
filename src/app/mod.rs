@@ -1338,16 +1338,8 @@ impl App {
             // On `min > max`, treat the entire `[ui]` section as invalid: keep
             // the previous settings and skip the section so the re-clamp below
             // — and every subsequent render/drag — can never panic.
-            if crate::config::validated_sidebar_bounds(
-                config.ui.sidebar_min_width,
-                config.ui.sidebar_max_width,
-            )
-            .is_none()
-            {
-                diagnostics.push(format!(
-                    "ui.sidebar_min_width ({}) is greater than sidebar_max_width ({}); keeping previous [ui] settings",
-                    config.ui.sidebar_min_width, config.ui.sidebar_max_width,
-                ));
+            if let Some(diagnostic) = config.invalid_sidebar_bounds_diagnostic() {
+                diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 diagnostics.extend(config.ui.sound.diagnostics());
 
@@ -2786,21 +2778,21 @@ mod tests {
 
         let report = app.reload_config();
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("sidebar_min_width")
+                && diagnostic.contains("sidebar_max_width")
+                && diagnostic.contains("greater")
+        }));
         assert_eq!(app.state.sidebar_min_width, original_min);
         assert_eq!(app.state.sidebar_max_width, original_max);
         assert_eq!(
             app.state.mouse_capture, original_mouse_capture,
             "[ui] is treated as invalid on bad bounds; mouse_capture must not apply"
         );
-        assert!(app
-            .state
-            .config_diagnostic
-            .as_deref()
-            .is_some_and(|message| {
-                message.contains("sidebar_min_width")
-                    && message.contains("sidebar_max_width")
-                    && message.contains("greater")
-            }));
+        assert_eq!(
+            app.state.config_diagnostic.as_deref(),
+            Some("config.toml; herdr config check")
+        );
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -2823,6 +2815,9 @@ mod tests {
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("keys.new_workspace") && diagnostic.contains("disabling binding")
+        }));
         assert_eq!(
             (app.state.prefix_code, app.state.prefix_mods),
             original_prefix
@@ -2832,14 +2827,6 @@ mod tests {
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Terminal
         );
-        assert!(app
-            .state
-            .config_diagnostic
-            .as_deref()
-            .is_some_and(|message| {
-                message.contains("keys.new_workspace") && message.contains("disabling binding")
-            }));
-
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -2891,6 +2878,10 @@ mod tests {
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("invalid ui config")));
         assert!(app
             .state
             .keybinds
@@ -2900,12 +2891,6 @@ mod tests {
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Herdr
         );
-        assert!(app
-            .state
-            .config_diagnostic
-            .as_deref()
-            .is_some_and(|message| message.contains("invalid ui config")));
-
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -2929,6 +2914,10 @@ mod tests {
         let report = app.reload_config();
 
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("invalid terminal config")));
         assert_eq!(app.state.default_shell, original_default_shell);
         assert_eq!(app.state.shell_mode, original_shell_mode);
         assert_eq!(app.state.new_terminal_cwd, original_new_cwd);
@@ -2936,12 +2925,6 @@ mod tests {
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Terminal
         );
-        assert!(app
-            .state
-            .config_diagnostic
-            .as_deref()
-            .is_some_and(|message| message.contains("invalid terminal config")));
-
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -3047,7 +3030,7 @@ mod tests {
             .config_diagnostic
             .as_deref()
             .is_some_and(|message| {
-                message.contains("config parse error") && message.contains("keeping current config")
+                message.contains("config.toml:1:6") && message.contains("herdr config check")
             }));
         assert!(app.state.toast.is_none());
 

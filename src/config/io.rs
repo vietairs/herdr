@@ -154,22 +154,36 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
-    const MAX_VISIBLE_DIAGNOSTICS: usize = 4;
-
     if diagnostics.is_empty() {
         return None;
     }
 
-    let mut lines: Vec<String> = diagnostics
+    let target = config_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml")
+        .to_string();
+    let location = diagnostics
         .iter()
-        .take(MAX_VISIBLE_DIAGNOSTICS)
-        .map(|diagnostic| diagnostic.split_whitespace().collect::<Vec<_>>().join(" "))
-        .collect();
-    let hidden = diagnostics.len().saturating_sub(MAX_VISIBLE_DIAGNOSTICS);
-    if hidden > 0 {
-        lines.push(format!("and {hidden} more config warnings"));
-    }
-    Some(lines.join("\n"))
+        .find_map(|diagnostic| toml_error_location(diagnostic))
+        .map(|(line, column)| format!("{target}:{line}:{column}"))
+        .unwrap_or_else(|| target.to_string());
+
+    Some(format!("{location}; herdr config check"))
+}
+
+fn toml_error_location(diagnostic: &str) -> Option<(usize, usize)> {
+    let marker = "TOML parse error at line ";
+    let start = diagnostic.find(marker)? + marker.len();
+    let rest = &diagnostic[start..];
+    let (line, rest) = rest.split_once(", column ")?;
+    let column = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or_default();
+    let line = line.parse().ok()?;
+    let column = column.parse().ok()?;
+    Some((line, column))
 }
 
 pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
@@ -576,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn config_diagnostic_summary_keeps_multiple_warnings_visible() {
+    fn config_diagnostic_summary_uses_compact_actionable_banner() {
         let diagnostics = vec![
             "one".to_string(),
             "two".to_string(),
@@ -587,7 +601,33 @@ mod tests {
 
         assert_eq!(
             config_diagnostic_summary(&diagnostics).as_deref(),
-            Some("one\ntwo\nthree\nfour\nand 1 more config warnings")
+            Some("config.toml; herdr config check")
+        );
+    }
+
+    #[test]
+    fn config_diagnostic_summary_includes_toml_error_location() {
+        let diagnostics = vec![
+            "config parse error: TOML parse error at line 33, column 8\n   |\n33 | type = \"popup\"\n   |        ^^^^^^^\nunknown variant `popup`; using defaults"
+                .to_string(),
+        ];
+
+        assert_eq!(
+            config_diagnostic_summary(&diagnostics).as_deref(),
+            Some("config.toml:33:8; herdr config check")
+        );
+    }
+
+    #[test]
+    fn config_diagnostic_summary_finds_location_after_warning() {
+        let diagnostics = vec![
+            "unknown config section [toast]; ignoring section".to_string(),
+            "config parse error: TOML parse error at line 7, column 4".to_string(),
+        ];
+
+        assert_eq!(
+            config_diagnostic_summary(&diagnostics).as_deref(),
+            Some("config.toml:7:4; herdr config check")
         );
     }
 

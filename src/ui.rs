@@ -458,7 +458,12 @@ pub fn render_with_runtime_registry(
 fn render_notifications(app: &AppState, frame: &mut Frame, terminal_area: Rect) {
     let has_config_diagnostic = app.config_diagnostic.is_some();
     if let Some(message) = &app.config_diagnostic {
-        render_config_diagnostic(frame, terminal_area, message, &app.palette);
+        let diagnostic_area = if app.view.layout == ViewLayout::Mobile {
+            terminal_area
+        } else {
+            frame.area()
+        };
+        render_config_diagnostic(frame, diagnostic_area, message, &app.palette);
     }
     let mut copy_feedback_offset = u16::from(has_config_diagnostic);
     let mut toast_rect = None;
@@ -678,6 +683,25 @@ mod tests {
             app.view.mobile_menu_hit_area.x + app.view.mobile_menu_hit_area.width,
             44
         );
+    }
+
+    #[test]
+    fn mobile_config_diagnostic_keeps_command_visible() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.config_diagnostic = Some("config.toml:100:10; herdr config check".into());
+
+        let area = Rect::new(0, 0, 44, 20);
+        compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let row = buffer_row_text(terminal.backend().buffer(), area, app.view.terminal_area.y);
+
+        assert!(row.contains("config.toml:100:10"), "{row}");
+        assert!(row.contains("herdr config check"), "{row}");
     }
 
     #[test]
