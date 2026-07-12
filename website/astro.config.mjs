@@ -150,6 +150,7 @@ export default defineConfig({
             { label: 'Concepts', translations: { ja: 'コンセプト', 'zh-CN': '核心概念' }, slug: 'docs/concepts' },
             { label: 'Keyboard', translations: { ja: 'キーボード', 'zh-CN': '键盘' }, slug: 'docs/keyboard' },
             { label: 'How to work with Herdr', translations: { ja: 'Herdr での作業の進め方', 'zh-CN': '使用 Herdr 的工作方式' }, slug: 'docs/how-to-work' },
+            { label: 'Troubleshooting', translations: { ja: 'トラブルシューティング', 'zh-CN': '故障排除' }, slug: 'docs/troubleshooting' },
           ],
         },
         {
