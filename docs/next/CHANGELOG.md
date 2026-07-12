@@ -7,6 +7,7 @@
 - Added maki detection with idle, working, and blocked screen states. (#1301, thanks @tontinton)
 
 ### Fixed
+- Native Windows servers now detach from the terminal console that launched them, so closing WezTerm, Windows Terminal, or another host terminal no longer stops persistent pane processes. (#1329)
 - `herdr --remote` now installs remote helper binaries without routing the binary stream through a multiline `/bin/sh -c` command, fixing installs for non-POSIX login shells such as xonsh. (#1203, thanks @nhumrich)
 
 ## [0.7.3] - 2026-07-08
