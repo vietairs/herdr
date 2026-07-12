@@ -3083,7 +3083,7 @@ mod tests {
             .config_diagnostic
             .as_deref()
             .is_some_and(|message| {
-                message.contains("config.toml:1:6") && message.contains("herdr config check")
+                message == "config.toml invalid; keeping current config; herdr config check"
             }));
         assert!(app.state.toast.is_none());
 

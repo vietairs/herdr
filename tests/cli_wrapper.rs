@@ -2407,6 +2407,25 @@ fn config_check_reports_invalid_config_without_server() {
 }
 
 #[test]
+fn config_check_reports_unreadable_config_path() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let config_path = config_home.join(app_dir_name()).join("config.toml");
+    fs::create_dir_all(&config_path).unwrap();
+
+    let checked = run_named_cli(&config_home, &runtime_dir, &["config", "check"]);
+
+    assert_eq!(checked.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(stdout.contains("config: issues found"), "{stdout}");
+    assert!(stdout.contains("config read error"), "{stdout}");
+    assert!(stdout.contains("using defaults"), "{stdout}");
+
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn config_check_reports_ok_when_config_is_missing() {
     let base = unique_test_dir();
     let config_home = base.join("config");
