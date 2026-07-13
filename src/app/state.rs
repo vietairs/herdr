@@ -1495,6 +1495,11 @@ pub struct AppState {
 }
 
 /// Outcome of [`AppState::begin_federation_mount`] (P8 requirement 5, S10.1).
+/// Dormant outside tests until a real call site materializes a mount into a
+/// running session (see `implementation-notes.md`'s P8 entry) —
+/// `#[allow(dead_code)]` at this scope, matching `remote_mirror`'s and
+/// `client.rs`/`pane_source.rs`'s identical precedent for the same reason.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FederationMountConflict {
     /// A federation mount is already live; the data model
@@ -1513,6 +1518,7 @@ impl AppState {
     /// models "at most one mount" — this makes the single-mount enforcement
     /// (and its typed rejection) explicit rather than an accidental
     /// consequence of `Option::replace` silently dropping a prior mount.
+    #[allow(dead_code)]
     pub(crate) fn begin_federation_mount(
         &mut self,
         mirror: crate::remote::federation::reducer::RemoteMirror,
@@ -1526,6 +1532,7 @@ impl AppState {
 
     /// Tears down the live federation mount (disconnect / P9 lifecycle), if
     /// any. A no-op when nothing is mounted.
+    #[allow(dead_code)]
     pub(crate) fn end_federation_mount(&mut self) {
         self.remote_mirror = None;
     }
@@ -1541,6 +1548,7 @@ impl AppState {
     /// documented-not-enforced across process boundaries for v1, per the
     /// phase file's explicit allowance ("If detection proves costly,
     /// downgrade to documented-not-enforced for v1 — state the choice").
+    #[allow(dead_code)]
     pub(crate) fn double_attach_conflict(
         &self,
         host_key: &crate::remote::federation::id::HostKey,
