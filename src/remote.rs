@@ -1,6 +1,8 @@
 #[cfg(unix)]
 mod unix;
 
+pub mod federation;
+
 #[cfg(unix)]
 pub(crate) use unix::*;
 

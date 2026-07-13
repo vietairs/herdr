@@ -1,0 +1,15 @@
+- [x] 1. /hvn:blindspot --deep — done
+- [x] 2. /ck:brainstorm --html — done
+- [x] GATE — user chose Tier-2 true federation
+- [x] 3. /ck:scenario — done — reports/scenario-federation-edge-cases.md
+- [x] 3b. arch probe TerminalRuntime seam — done — MEDIUM seam
+- [x] 4. /ck:plan --tdd v1 — done (SUPERSEDED — unbuildable per adversarial gates) — plan.md + phase-01..08
+- [x] 5. red-team plan — done — reports/redteam-federation-plan-review.md (F1-F8; F1/F2 blockers)
+- [x] 6. codex adversarial plan review — done — 2-protocol conflation + missing remote-side bridge (Critical 1-3)
+- [x] PLAN-GATE — user chose: build full two-server system, our herdr on both ends (remote = headless federation server)
+- [ ] 4b. /ck:plan REVISION (fold findings + both-ends federation protocol) — in progress
+- [ ] 7. /hvn:impl-notes init — pending
+- [ ] 8. /ck:cook (no --auto) — phase by phase, TDD — pending
+- [ ] 9. /hvn:impl-notes review — pending
+- [ ] 10. /ck:code-review ‖ 11. /codex:adversarial-review <diff> — pending
+- [ ] 12. /hvn:ship-gate --hard — pending
