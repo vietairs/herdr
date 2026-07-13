@@ -1494,9 +1494,60 @@ pub struct AppState {
     pub(crate) remote_mirror: Option<crate::remote::federation::reducer::RemoteMirror>,
 }
 
+/// Outcome of [`AppState::begin_federation_mount`] (P8 requirement 5, S10.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FederationMountConflict {
+    /// A federation mount is already live; the data model
+    /// (`HostKey`/`server_instance_id`/`mount_generation`) is multi-remote
+    /// ready, but v1 enforces exactly one concurrent mount.
+    AlreadyMounted,
+}
+
 impl AppState {
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    /// P8 requirement 5 (S10.1): registers a new federation mount, rejecting
+    /// a second concurrent one. `remote_mirror` being `Option` (P4) already
+    /// models "at most one mount" — this makes the single-mount enforcement
+    /// (and its typed rejection) explicit rather than an accidental
+    /// consequence of `Option::replace` silently dropping a prior mount.
+    pub(crate) fn begin_federation_mount(
+        &mut self,
+        mirror: crate::remote::federation::reducer::RemoteMirror,
+    ) -> Result<(), FederationMountConflict> {
+        if self.remote_mirror.is_some() {
+            return Err(FederationMountConflict::AlreadyMounted);
+        }
+        self.remote_mirror = Some(mirror);
+        Ok(())
+    }
+
+    /// Tears down the live federation mount (disconnect / P9 lifecycle), if
+    /// any. A no-op when nothing is mounted.
+    pub(crate) fn end_federation_mount(&mut self) {
+        self.remote_mirror = None;
+    }
+
+    /// P8 requirement 6 (RT-F11/S8.2): whether a classic `--remote` attach to
+    /// `host_key` would collide with an already-mounted federated host.
+    /// Detection key is `HostKey` on the local mount registry (`remote_mirror`
+    /// — v1 allows exactly one mount, so this reduces to "is the live mount's
+    /// host the same one"). This only answers the question for the *local
+    /// in-process* registry; wiring an actual classic-attach call site to
+    /// consult a *running* local server's registry over the JSON API is not
+    /// built (no API method exists for it) — downgraded to
+    /// documented-not-enforced across process boundaries for v1, per the
+    /// phase file's explicit allowance ("If detection proves costly,
+    /// downgrade to documented-not-enforced for v1 — state the choice").
+    pub(crate) fn double_attach_conflict(
+        &self,
+        host_key: &crate::remote::federation::id::HostKey,
+    ) -> bool {
+        self.remote_mirror
+            .as_ref()
+            .is_some_and(|mirror| &mirror.mount().host_key == host_key)
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
@@ -2180,6 +2231,147 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    fn test_mount(host: &str) -> crate::remote::federation::reducer::RemoteMirror {
+        use crate::remote::federation::id::{HostKey, Mount, ServerInstanceId};
+        crate::remote::federation::reducer::RemoteMirror::new(Mount {
+            host_key: HostKey::new(host, "s1"),
+            server_instance_id: ServerInstanceId("inst-1".to_string()),
+            mount_generation: 1,
+        })
+    }
+
+    // P8 TDD test 6 (S10.1): a second concurrent federation mount is
+    // rejected with a typed error; the first mount stays live.
+    #[test]
+    fn a_second_concurrent_federation_mount_is_rejected() {
+        let mut state = AppState::test_new();
+        assert!(state.begin_federation_mount(test_mount("alice@10.0.0.1")).is_ok());
+        assert!(state.remote_mirror.is_some());
+
+        let result = state.begin_federation_mount(test_mount("bob@10.0.0.2"));
+        assert_eq!(result, Err(FederationMountConflict::AlreadyMounted));
+        // The original mount must still be the live one.
+        assert_eq!(
+            state.remote_mirror.as_ref().unwrap().mount().host_key,
+            crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1")
+        );
+    }
+
+    #[test]
+    fn ending_a_mount_allows_a_fresh_one() {
+        let mut state = AppState::test_new();
+        state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
+        state.end_federation_mount();
+        assert!(state.remote_mirror.is_none());
+        assert!(state.begin_federation_mount(test_mount("bob@10.0.0.2")).is_ok());
+    }
+
+    // P8 TDD test 7 (RT-F11/S8.2): a classic `--remote` attach targeting an
+    // already-federated host's `HostKey` is detected as a collision; a
+    // different host is not.
+    #[test]
+    fn double_attach_conflict_is_keyed_on_host_key() {
+        let mut state = AppState::test_new();
+        state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
+
+        assert!(state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
+            "alice@10.0.0.1",
+            "s1"
+        )));
+        assert!(!state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
+            "bob@10.0.0.2",
+            "s1"
+        )));
+    }
+
+    #[test]
+    fn no_double_attach_conflict_when_nothing_is_mounted() {
+        let state = AppState::test_new();
+        assert!(!state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
+            "alice@10.0.0.1",
+            "s1"
+        )));
+    }
+
+    // P8 TDD test 4 (S4.1/S8.1 Blocker, focus barrier): input routing is
+    // keyed strictly on the (namespaced) pane id — never a shared/global
+    // buffer — so rapid alternation between two panes' input never lets a
+    // keystroke cross from the pane focused at send time to the other one.
+    // `RemoteTerminalSourceHandle` (P5) stands in for two independently
+    // constructed pane sources here; the property under test — each pane
+    // owns its own exclusive channel, selected explicitly by the caller's
+    // currently-focused id, with no shared mutable routing state in between
+    // — is identical regardless of whether either handle is local or
+    // remote-backed, and is exactly what a real keystroke dispatch (keyed on
+    // `PaneId`) relies on.
+    #[tokio::test]
+    async fn rapid_focus_switching_never_leaks_a_keystroke_across_panes() {
+        use crate::remote::federation::pane_source::{
+            RemoteTerminalSourceConfig, RemoteTerminalSourceHandle,
+        };
+        use crate::remote::federation::protocol::FederationMessage;
+        use crate::terminal::TerminalSource;
+        use tokio::sync::mpsc;
+
+        fn spawn_pane(id: &str) -> (RemoteTerminalSourceHandle, mpsc::UnboundedReceiver<FederationMessage>) {
+            let (out_tx, out_rx) = mpsc::unbounded_channel();
+            let (_output_tx, output_rx) = mpsc::channel(4);
+            let handle = RemoteTerminalSourceHandle::spawn(RemoteTerminalSourceConfig {
+                terminal_id: id.to_string(),
+                mount_generation: 1,
+                out_tx,
+                output_rx,
+                on_read: Box::new(|_bytes: &[u8]| {}),
+            });
+            (handle, out_rx)
+        }
+
+        let (pane_a, mut a_rx) = spawn_pane("pane_a");
+        let (pane_b, mut b_rx) = spawn_pane("pane_b");
+
+        // Simulate a focus barrier: at each keystroke, the caller selects
+        // exactly one pane by id (never both) and writes only to it.
+        let keystrokes: [(&str, &[u8]); 6] = [
+            ("pane_a", b"a1"),
+            ("pane_b", b"b1"),
+            ("pane_a", b"a2"),
+            ("pane_a", b"a3"),
+            ("pane_b", b"b2"),
+            ("pane_b", b"b3"),
+        ];
+        for (focused_id, bytes) in keystrokes {
+            let handle = if focused_id == "pane_a" { &pane_a } else { &pane_b };
+            handle
+                .write_user_input(bytes::Bytes::copy_from_slice(bytes))
+                .await
+                .unwrap();
+        }
+
+        let mut a_seen = Vec::new();
+        while let Ok(msg) = a_rx.try_recv() {
+            let FederationMessage::Terminal(
+                crate::remote::federation::protocol::TerminalChannelMessage::Input { bytes, .. },
+            ) = msg
+            else {
+                panic!("expected an Input message");
+            };
+            a_seen.push(bytes);
+        }
+        let mut b_seen = Vec::new();
+        while let Ok(msg) = b_rx.try_recv() {
+            let FederationMessage::Terminal(
+                crate::remote::federation::protocol::TerminalChannelMessage::Input { bytes, .. },
+            ) = msg
+            else {
+                panic!("expected an Input message");
+            };
+            b_seen.push(bytes);
+        }
+
+        assert_eq!(a_seen, vec![b"a1".to_vec(), b"a2".to_vec(), b"a3".to_vec()]);
+        assert_eq!(b_seen, vec![b"b1".to_vec(), b"b2".to_vec(), b"b3".to_vec()]);
+    }
 
     #[test]
     fn agent_terminal_keeps_final_child_cursor_exposed() {

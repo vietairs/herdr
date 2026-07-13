@@ -51,11 +51,32 @@ impl RemoteKeybindings {
     }
 }
 
+/// Env var (P8 requirement 1) that opts a `--remote` launch into the
+/// federated workspace path instead of the classic full-screen attach.
+/// Default OFF: classic `herdr --remote ssh user@ip` stays byte-for-byte
+/// unchanged unless this is set to `"1"` or `--remote-workspace` is passed.
+pub(crate) const REMOTE_FEDERATION_ENV_VAR: &str = "HERDR_REMOTE_FEDERATION";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteLaunch {
     pub(crate) target: String,
     pub(crate) keybindings: RemoteKeybindings,
     pub(crate) live_handoff: bool,
+    /// P8 requirement 1: `--remote-workspace` was passed. Combined with
+    /// [`REMOTE_FEDERATION_ENV_VAR`] via [`federation_requested`] — neither
+    /// alone is definitive, since the env var is checked separately (kept
+    /// out of this struct so `extract_remote_args` stays a pure function of
+    /// its `args` argument, easing testing).
+    pub(crate) federation_flag: bool,
+}
+
+/// P8 requirement 1: whether this launch should attempt the federated
+/// workspace path. `--remote-workspace` and `HERDR_REMOTE_FEDERATION=1` are
+/// equivalent opt-ins (config-file support is deferred — no config surface
+/// exists yet for it, matching the phase's "flag/config surface" wording as
+/// "a distinct flag" rather than a hard requirement to add both).
+pub(crate) fn federation_requested(remote: &RemoteLaunch, env_value: Option<&str>) -> bool {
+    remote.federation_flag || env_value == Some("1")
 }
 
 pub(crate) fn extract_remote_args(
@@ -70,6 +91,7 @@ pub(crate) fn extract_remote_args(
     let mut keybindings = RemoteKeybindings::Local;
     let mut keybindings_seen = false;
     let mut live_handoff = false;
+    let mut federation_flag = false;
     let mut index = 1;
     while index < args.len() {
         let arg = &args[index];
@@ -79,6 +101,11 @@ pub(crate) fn extract_remote_args(
         }
         if arg == "--handoff" {
             live_handoff = true;
+            index += 1;
+            continue;
+        }
+        if arg == "--remote-workspace" {
+            federation_flag = true;
             index += 1;
             continue;
         }
@@ -131,9 +158,13 @@ pub(crate) fn extract_remote_args(
         target,
         keybindings,
         live_handoff,
+        federation_flag,
     });
     if remote.is_none() && keybindings_seen {
         return Err("--remote-keybindings requires --remote".to_string());
+    }
+    if remote.is_none() && federation_flag {
+        return Err("--remote-workspace requires --remote".to_string());
     }
     if remote.is_none() && live_handoff {
         cleaned.push("--handoff".to_string());
@@ -150,6 +181,173 @@ fn validate_remote_target(target: &str) -> Result<&str, String> {
         return Err("--remote target must not start with '-'".to_string());
     }
     Ok(target)
+}
+
+/// Remote invocation for `herdr federation-serve` (P8's dial target),
+/// mirroring `remote_bridge_command`'s shape. No `--session` passthrough yet
+/// — `federation-serve` (P3's `AppFederationHost::boot`) always boots the
+/// remote's default-config session; a named-session dial target is left to a
+/// future pass (not required by this phase's routing/negotiation tests).
+fn remote_federation_serve_command(remote_herdr: &RemoteHerdr) -> String {
+    format!("exec {} federation-serve", remote_herdr.shell_path)
+}
+
+/// `tokio::process::Command` counterpart to `apply_managed_ssh_options`
+/// (which is typed for `std::process::Command`) — same flags, needed because
+/// the federation dial runs on a tokio runtime end to end (`FederationClient`
+/// is async).
+fn apply_managed_ssh_options_tokio(
+    command: &mut tokio::process::Command,
+    options: Option<&ManagedSshOptions>,
+) {
+    let Some(options) = options else {
+        return;
+    };
+    command
+        .arg("-F")
+        .arg(&options.config_path)
+        .arg("-S")
+        .arg(&options.control_path)
+        .arg("-o")
+        .arg("ControlMaster=auto")
+        .arg("-o")
+        .arg("ControlPersist=yes");
+}
+
+/// Reason a federation mount attempt did not produce a usable mount,
+/// collapsed to one user-facing notice by [`FederationMountFailure::notice`]
+/// so `run_remote`'s fallback path never needs to match on
+/// federation-internal error types (RT-F4, requirement 1).
+#[derive(Debug)]
+pub(crate) enum FederationMountFailure {
+    /// The remote rejected the handshake or lacks a required capability
+    /// (old binary / version skew, `MountError::Rejected`/`MissingCapability`).
+    Unsupported(String),
+    /// Any other dial/mount failure (SSH failed to start, link closed early,
+    /// I/O error, ...) — never surfaced as a hard failure of the public
+    /// `--remote` command; always falls back to the classic attach, same as
+    /// `Unsupported`.
+    Failed(String),
+}
+
+impl FederationMountFailure {
+    pub(crate) fn notice(&self) -> String {
+        match self {
+            Self::Unsupported(reason) => format!(
+                "federated workspace mode is not supported by this remote host ({reason}); falling back to classic attach"
+            ),
+            Self::Failed(reason) => format!(
+                "could not mount a federated workspace ({reason}); falling back to classic attach"
+            ),
+        }
+    }
+}
+
+/// P8 requirement 1/2 routing decision — pure, so the TDD plan's tests 1-3
+/// can assert routing behavior without any real network I/O. `mount_outcome`
+/// is `None` when federation was never attempted (flag off, requirement 1
+/// test 1); `Some(Ok(()))` / `Some(Err(_))` otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FederationRoute {
+    /// Federation mount succeeded — the caller must NOT invoke
+    /// `run_client_process` (requirement 2).
+    Federated,
+    /// Federation was requested but unusable, or failed — fall back to
+    /// `run_client_process` with a user-facing notice; never a hard error of
+    /// the public command (requirement 1).
+    ClassicFallback { notice: String },
+    /// Federation was never requested — classic path, byte-for-byte
+    /// unchanged, no notice (requirement 1, test 1).
+    ClassicUnchanged,
+}
+
+pub(crate) fn decide_federation_route(
+    requested: bool,
+    mount_outcome: Option<Result<(), &FederationMountFailure>>,
+) -> FederationRoute {
+    if !requested {
+        return FederationRoute::ClassicUnchanged;
+    }
+    match mount_outcome {
+        Some(Ok(())) => FederationRoute::Federated,
+        Some(Err(failure)) => FederationRoute::ClassicFallback {
+            notice: failure.notice(),
+        },
+        None => FederationRoute::ClassicFallback {
+            notice: "federated workspace mount was not attempted; falling back to classic attach"
+                .to_string(),
+        },
+    }
+}
+
+/// P8 requirement 2: dials `herdr federation-serve` over SSH and performs the
+/// P1 handshake + P4 atomic mount. Real network I/O — exercised by a manual
+/// two-machine smoke test, not by `cargo test` (a genuine two-machine SSH
+/// session cannot run inside the test harness; `decide_federation_route`
+/// above covers the routing decision this feeds, in isolation, from a real
+/// unit test).
+fn attempt_federation_mount(
+    target: &str,
+    remote_herdr: &RemoteHerdr,
+    session_name: &str,
+    ssh_options: Option<&ManagedSshOptions>,
+) -> Result<crate::remote::federation::reducer::RemoteMirror, FederationMountFailure> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| FederationMountFailure::Failed(err.to_string()))?;
+
+    rt.block_on(async {
+        let mut command = tokio::process::Command::new("ssh");
+        apply_managed_ssh_options_tokio(&mut command, ssh_options);
+        command
+            .arg("-T")
+            .arg(target)
+            .arg(remote_federation_serve_command(remote_herdr))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit());
+
+        let mut child = command.spawn().map_err(|err| {
+            FederationMountFailure::Failed(format!("failed to start ssh federation dial: {err}"))
+        })?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            FederationMountFailure::Failed("ssh federation dial stdin missing".to_string())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            FederationMountFailure::Failed("ssh federation dial stdout missing".to_string())
+        })?;
+
+        let host_key = crate::remote::federation::id::HostKey::new(target, session_name);
+        let local_capabilities: std::collections::BTreeSet<_> = [
+            crate::remote::federation::protocol::Capability::new(
+                crate::remote::federation::protocol::Capability::SCROLLBACK_REPLAY,
+            ),
+            crate::remote::federation::protocol::Capability::new(
+                crate::remote::federation::protocol::Capability::AGENT_STATUS,
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let client = crate::remote::federation::client::FederationClient::new(
+            host_key,
+            local_capabilities,
+            std::collections::BTreeSet::new(),
+        );
+
+        let mount_result = client.connect_and_mount(stdout, stdin).await;
+        let _ = child.start_kill();
+        match mount_result {
+            Ok(mounted) => Ok(mounted.mirror),
+            Err(crate::remote::federation::client::MountError::Rejected(reason)) => Err(
+                FederationMountFailure::Unsupported(format!("{reason:?}")),
+            ),
+            Err(crate::remote::federation::client::MountError::MissingCapability(cap)) => Err(
+                FederationMountFailure::Unsupported(format!("missing capability {cap:?}")),
+            ),
+            Err(err) => Err(FederationMountFailure::Failed(err.to_string())),
+        }
+    })
 }
 
 pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
@@ -179,6 +377,51 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         prepared_remote.stop_after_install_approved,
         remote.live_handoff,
     )?;
+
+    // P8 requirement 1/2: attempt the federated workspace path when opted in
+    // (default OFF — classic path below is otherwise reached identically to
+    // today, byte-for-byte, requirement 1 test 1).
+    let federation_requested_now =
+        federation_requested(&remote, std::env::var(REMOTE_FEDERATION_ENV_VAR).ok().as_deref());
+    let mount_outcome = federation_requested_now.then(|| {
+        attempt_federation_mount(
+            &remote.target,
+            &prepared_remote.remote_herdr,
+            &session_name,
+            remote_ssh.options(),
+        )
+    });
+    let route = decide_federation_route(
+        federation_requested_now,
+        mount_outcome.as_ref().map(|result| result.as_ref().map(|_| ())),
+    );
+    match &route {
+        FederationRoute::Federated => {
+            // GAP (logged in implementation-notes.md, deferred to P9): the
+            // mount itself (handshake + capability negotiation + atomic
+            // snapshot, all real) succeeds here, but materializing it into a
+            // live rendered workspace requires wiring a *already-running*
+            // local session's `AppState`/API — outside this phase's declared
+            // file ownership (`app/creation.rs`/API surface, not
+            // `main.rs`/`remote/unix.rs`/`ui/sidebar.rs`/`app/state.rs`).
+            // Never silently pretend the federated UI is live: tell the user
+            // plainly, then still attach so the command does something
+            // useful rather than exiting with nothing rendered.
+            if let Some(Ok(mirror)) = &mount_outcome {
+                eprintln!(
+                    "herdr: federated workspace mount to {} succeeded ({} remote workspace(s)); \
+                     interactive federated rendering is not yet wired (tracked for a follow-up) — \
+                     attaching via the classic full-screen view instead.",
+                    remote.target,
+                    mirror.workspaces().len()
+                );
+            }
+        }
+        FederationRoute::ClassicFallback { notice } => {
+            eprintln!("herdr: {notice}");
+        }
+        FederationRoute::ClassicUnchanged => {}
+    }
 
     let _bridge = SshStdioBridge::start(
         remote.target,
@@ -2262,6 +2505,100 @@ mod tests {
         let remote = remote.unwrap();
         assert_eq!(remote.target, "dev");
         assert!(remote.live_handoff);
+    }
+
+    // P8 TDD test 1 (requirement 1): flag OFF ⇒ `extract_remote_args` is
+    // identical to today (`federation_flag` false, `federation_requested`
+    // false with no env override).
+    #[test]
+    fn extract_remote_args_federation_flag_defaults_off() {
+        let args = vec!["herdr".into(), "--remote".into(), "dev".into()];
+        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
+        let remote = remote.unwrap();
+        assert!(!remote.federation_flag);
+        assert!(!federation_requested(&remote, None));
+    }
+
+    #[test]
+    fn extract_remote_args_accepts_remote_workspace_flag() {
+        let args = vec![
+            "herdr".into(),
+            "--remote".into(),
+            "dev".into(),
+            "--remote-workspace".into(),
+        ];
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+        assert_eq!(cleaned, vec!["herdr"]);
+        let remote = remote.unwrap();
+        assert!(remote.federation_flag);
+        assert!(federation_requested(&remote, None));
+    }
+
+    #[test]
+    fn extract_remote_args_rejects_remote_workspace_without_remote() {
+        let args = vec!["herdr".into(), "--remote-workspace".into()];
+        let err = extract_remote_args(&args).unwrap_err();
+        assert_eq!(err, "--remote-workspace requires --remote");
+    }
+
+    #[test]
+    fn federation_requested_honors_env_var_even_without_the_flag() {
+        let args = vec!["herdr".into(), "--remote".into(), "dev".into()];
+        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
+        let remote = remote.unwrap();
+        assert!(!remote.federation_flag);
+        assert!(federation_requested(&remote, Some("1")));
+        assert!(!federation_requested(&remote, Some("0")));
+        assert!(!federation_requested(&remote, None));
+    }
+
+    // P8 TDD tests 1-3 (routing decision): pure, no network I/O.
+    #[test]
+    fn decide_federation_route_flag_off_is_classic_unchanged_with_no_notice() {
+        assert_eq!(
+            decide_federation_route(false, None),
+            FederationRoute::ClassicUnchanged
+        );
+    }
+
+    #[test]
+    fn decide_federation_route_flag_on_and_mount_ok_routes_to_federation() {
+        assert_eq!(
+            decide_federation_route(true, Some(Ok(()))),
+            FederationRoute::Federated
+        );
+    }
+
+    #[test]
+    fn decide_federation_route_flag_on_and_unsupported_falls_back_with_notice() {
+        let failure = FederationMountFailure::Unsupported("no federation capability".to_string());
+        let route = decide_federation_route(true, Some(Err(&failure)));
+        match route {
+            FederationRoute::ClassicFallback { notice } => {
+                assert!(notice.contains("not supported"));
+                assert!(notice.contains("falling back to classic attach"));
+            }
+            other => panic!("expected ClassicFallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_federation_route_flag_on_and_dial_failure_falls_back_never_a_hard_error() {
+        let failure = FederationMountFailure::Failed("connection refused".to_string());
+        let route = decide_federation_route(true, Some(Err(&failure)));
+        assert!(matches!(route, FederationRoute::ClassicFallback { .. }));
+    }
+
+    #[test]
+    fn remote_federation_serve_command_uses_installed_binary() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        });
+        assert_eq!(
+            remote_federation_serve_command(&remote_herdr),
+            "exec \"$HOME/.local/bin/herdr\" federation-serve"
+        );
     }
 
     #[test]
