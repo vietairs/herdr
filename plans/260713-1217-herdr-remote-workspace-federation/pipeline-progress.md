@@ -9,7 +9,15 @@
 - [x] PLAN-GATE — user chose: build full two-server system, our herdr on both ends (remote = headless federation server)
 - [ ] 4b. /ck:plan REVISION (fold findings + both-ends federation protocol) — in progress
 - [ ] 7. /hvn:impl-notes init — pending
-- [ ] 8. /ck:cook — BLOCKED (env cannot build: zig 0.15 vs macOS 27) — P1 code written+committed b436cdc, UNVALIDATED; needs buildable env (linux remote / nix / older mac)
+- [~] 8. /ck:cook — UNBLOCKED (nix on appn-ltu-vm-100/gpu-ml; `nix develop` builds+tests)
+    - [x] P1 federation protocol + id-fencing — VALIDATED 16/16 tests green (commit d619c20; codec bincode→serde_json fix)
+    - [x] P2 TerminalSource seam — VALIDATED full suite green (2569+integration, 0 failed; clippy clean; commits 4e43ffd, 50fc3ef)
+    - [x] P3 federation-serve remote server — VALIDATED suite green (2768/2768; clippy clean; commit 077c627). CARRIED GAP #1: AppFederationHost does not drain real App AppEvent channel → live relay not end-to-end vs real App; loopback substrate (P4-P9 consume) complete+green; MUST close before P8 default-flip
+    - [x] P4 federation client + replica reducer — VALIDATED suite green (2778/2778; no new clippy; commit 86453b4). CARRIED GAP #2: P1 EventFrame wire format has NO entity payload → per-event EventHub::push infeasible; impl = full-snapshot reconcile-by-diff on mount/gap-reset only (no incremental streaming). Affects P6 (event relay) + P8. Needs design review before P6/P9.
+    - [x] P5 remote-backed panes (raw byte tee → TerminalSource) — VALIDATED suite green (2793/2793; no new clippy; commit 8929dca). Additive/dormant until P8. RT-F7 clipboard local-policy + agent-status suppression deferred to P7/P6 as planned.
+    - [x] P6 agent-status relay — VALIDATED suite green (2801/0; clippy clean vs baseline; commit bc91b43). Relay + remote-probe-suppression tested in isolation; live call site is P8/P9 scope.
+    - [~] P7 security hardening (untrusted remote data) — in progress; required gate before P8 default-flip
+    - [ ] P8-P9 — pending
 - [ ] 9. /hvn:impl-notes review — pending
 - [ ] 10. /ck:code-review ‖ 11. /codex:adversarial-review <diff> — pending
 - [ ] 12. /hvn:ship-gate --hard — pending

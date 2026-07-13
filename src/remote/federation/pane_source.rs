@@ -32,7 +32,7 @@ use tokio::task::JoinHandle;
 
 use crate::terminal::{TerminalLifecyclePolicy, TerminalSource};
 
-use super::protocol::{FederationMessage, TerminalChannelMessage};
+use super::protocol::{ClipboardMessage, FederationMessage, TerminalChannelMessage};
 
 /// Bounded capacity of one remote pane's outbound-input queue. Mirrors the
 /// spirit of `PtyIoActorHandle`'s channel: `write_user_input` waits for
@@ -200,6 +200,44 @@ impl TerminalSource for RemoteTerminalSourceHandle {
 impl TerminalLifecyclePolicy for RemoteTerminalSourceHandle {
     fn emits_pane_died_on_reader_exit(&self) -> bool {
         false
+    }
+}
+
+/// P7 requirement 4 (S11.3 OSC52 policy parity): drains a mount's
+/// origin-tagged [`ClipboardMessage`] stream — the same `mpsc::
+/// UnboundedReceiver<ClipboardMessage>` type `pane::PaneRuntime::
+/// spawn_remote`'s dormant `clipboard_tx` parameter already produces (P5;
+/// `pane.rs` is not in this phase's file ownership, so this function is
+/// built to be a drop-in consumer of that exact existing channel once P8/P9
+/// wires a real receiver into it) — and applies `apply` to every payload
+/// with **no additional trust check based on origin**. This is the whole
+/// point: a remote-origin clipboard write receives exactly the same
+/// unconditional-apply policy `apply` embodies for a local one, never more
+/// (an elevated confirmation step) and never less (a silent drop) — S11.3
+/// requires parity, not elevation or suppression. `origin_tag` is passed
+/// through to `apply` unmodified so a future call site (P8's badge/audit
+/// surface) can log/attribute provenance without this function deciding
+/// trust on its behalf.
+///
+/// # Known consideration (requirement 4, not silently decided)
+/// herdr's actual local OSC52 policy (`selection::write_osc52_bytes`, the
+/// classic `--remote` client's `forward_clipboard`) auto-applies every
+/// clipboard write unconditionally — there is no local confirmation/consent
+/// gate today. Parity therefore means this function also auto-applies.
+/// Flagged here rather than silently decided: a future hardening pass may
+/// want to add friction (e.g. a confirmation prompt) specifically for
+/// clipboard writes whose `origin_tag` is remote, which would be an
+/// intentional *escalation* beyond today's parity baseline, deferred to
+/// that future work (see `implementation-notes.md`).
+///
+/// Runs until the channel closes (mount torn down / sender dropped); never
+/// panics, never blocks on anything other than `output_rx.recv()` itself.
+pub(crate) async fn apply_remote_clipboard_writes(
+    mut clipboard_rx: mpsc::UnboundedReceiver<ClipboardMessage>,
+    mut apply: impl FnMut(&str, &[u8]),
+) {
+    while let Some(ClipboardMessage { origin_tag, payload }) = clipboard_rx.recv().await {
+        apply(&origin_tag, &payload);
     }
 }
 
@@ -381,5 +419,61 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(20), out_rx.recv())
             .await
             .is_err());
+    }
+
+    // Phase 07 test 4 (S11.3 OSC52 policy parity): a remote-origin clipboard
+    // write reaches the SAME apply callback a local-origin one would, with
+    // no extra gate/skip based on `origin_tag` — proving parity (no elevated
+    // OR reduced trust) rather than a silent drop or a silently-added
+    // confirmation step.
+    #[tokio::test]
+    async fn remote_and_local_origin_clipboard_writes_are_applied_through_the_same_policy() {
+        let (tx, rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let applied: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let applied_for_closure = applied.clone();
+
+        let drain = tokio::spawn(apply_remote_clipboard_writes(rx, move |origin_tag, payload| {
+            applied_for_closure
+                .lock()
+                .unwrap()
+                .push((origin_tag.to_string(), payload.to_vec()));
+        }));
+
+        tx.send(ClipboardMessage {
+            origin_tag: "remote".to_string(),
+            payload: b"remote payload".to_vec(),
+        })
+        .unwrap();
+        tx.send(ClipboardMessage {
+            origin_tag: "local".to_string(),
+            payload: b"local payload".to_vec(),
+        })
+        .unwrap();
+        drop(tx);
+        drain.await.unwrap();
+
+        let applied = applied.lock().unwrap();
+        assert_eq!(
+            *applied,
+            vec![
+                ("remote".to_string(), b"remote payload".to_vec()),
+                ("local".to_string(), b"local payload".to_vec()),
+            ],
+            "both origins must reach `apply` unconditionally and identically — no origin-based gate"
+        );
+    }
+
+    // Phase 07 (S11.3): the drain task exits cleanly (never panics) once the
+    // channel closes, even with zero messages applied — mirrors the same
+    // "closing never misbehaves" discipline as
+    // `closing_the_channel_emits_no_pane_died_and_the_policy_is_pinned_false`.
+    #[tokio::test]
+    async fn clipboard_drain_exits_cleanly_when_the_channel_closes_with_no_messages() {
+        let (tx, rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let drain = tokio::spawn(apply_remote_clipboard_writes(rx, |_origin_tag, _payload| {
+            panic!("apply must never be called when no message was ever sent");
+        }));
+        drop(tx);
+        drain.await.unwrap();
     }
 }
