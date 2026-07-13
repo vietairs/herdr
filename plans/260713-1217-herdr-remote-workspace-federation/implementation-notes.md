@@ -327,3 +327,40 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   visibility modifier in `src/remote/federation/loopback.rs`.
   Reversibility: N/A — no scope was lost; if a future phase wants a shared test accessor, adding one
   `pub(crate) fn` to `loopback.rs` is a one-line, purely-additive follow-up.
+
+- What: P6 did not touch `src/detect/mod.rs` at all, despite it being listed in phase-06.md's Files
+  section as a conditional edit ("only if a small seam is needed").
+  Why: the relayed `AgentStatus` is fed directly into `spawn_basic_detection_task`'s existing loop
+  (new `tokio::select!` arm reading an optional `mpsc::Receiver<AgentStatus>`) and mapped to
+  `AgentState` by a small pure function in `pane.rs` (`map_relayed_agent_status`) — exactly the
+  phase's own preference ("prefer feeding through pane detection state, not forking `detect` core").
+  No seam inside `detect::detect_agent_with_osc`/`AgentDetection` was needed.
+  Evidence: `src/pane.rs` new `Some(relayed_status) = relayed_status_recv` select arm calls
+  `publish_state_changed_event` directly, reusing `agent_presence.current_agent()` for identity —
+  `src/detect/mod.rs` diff is empty.
+  Reversibility: N/A — a strictly additive file was simply not needed.
+
+- What: like P4/P5, nothing in production `App`/`AppState`/`PaneRuntime` construction wires a live
+  relay source into `spawn_remote`'s new `relayed_agent_status_tx`/`RemoteAgentStatusGate` yet — only
+  `reducer.rs`'s and `pane.rs`'s own tests exercise them (`PaneRuntime::relayed_agent_status_sender()`
+  and `RemoteMirror::apply_agent_status()` are both real, tested, working, but nothing calls the first
+  with output driven by the second in a live path).
+  Why: per the plan's own risk/rollback note ("every phase is additive and dormant") and P4/P5's
+  identical precedent, wiring a live call site is P8/P9 scope (mount lifecycle + CLI flag own that
+  wiring), not P6's; P6's job was to make the relay mechanism correct and testable in isolation.
+  Evidence: `grep -rn "relayed_agent_status_sender\|apply_agent_status" src/` outside `pane.rs`/
+  `reducer.rs`'s own modules returns only the two definitions and their own `#[cfg(test)]` call sites.
+  Reversibility: additive — P8/P9 adds one call site (poll `RemoteMirror`'s agent-status channel,
+  call `PaneRuntime::relayed_agent_status_sender()`); no revert needed here.
+
+- What: `RemoteMirror::apply_agent_status`'s `ReducerAction::Applied { source_seq, .. }` reuses the
+  mirror's current event-channel cursor rather than a real per-message sequence number.
+  Why: the P1 agent-status channel (`AgentStatusMessage`) carries no `source_seq` of its own (unlike
+  `EventFrame`) — it is a separate, unordered-relative-to-events channel by design (S12.2 cadence,
+  independent cadence from the ordered event stream). `ReducerAction::Applied`'s `source_seq` field is
+  documented as "for observability only" (existing module doc), so reusing the cursor is a harmless,
+  honest placeholder rather than fabricating a wire value that does not exist.
+  Evidence: `src/remote/federation/protocol/mod.rs`'s `AgentStatusMessage` struct has no `source_seq`
+  field, unlike `EventFrame`.
+  Reversibility: trivial — cosmetic only; no test asserts a specific `source_seq` value for
+  `apply_agent_status`'s `Applied` variant.
