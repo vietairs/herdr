@@ -21,7 +21,8 @@ use tracing::{error, info, warn};
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
-use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
+use crate::pty::actor::{PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
+use crate::terminal::{LocalChild, TerminalSource};
 
 mod agent_detection;
 mod cursor;
@@ -932,7 +933,12 @@ enum PaneRuntimeIo {
 impl PaneRuntimeIo {
     fn shutdown(&self) {
         match self {
-            PaneRuntimeIo::Actor(actor) => actor.shutdown(),
+            // Non-`Actor` variants of `PaneRuntimeIo` (today only the
+            // `#[cfg(test)]` `TestChannel`, tomorrow a `Remote` variant)
+            // no-op the 4 `#[cfg(unix)]` handoff registry methods below
+            // exactly as `TestChannel` already does — that pattern is the
+            // template a future non-PTY variant follows (phase-02 req. 5).
+            PaneRuntimeIo::Actor(actor) => TerminalSource::shutdown(actor),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -1001,7 +1007,8 @@ impl PaneRuntimeIo {
     ) {
         match self {
             PaneRuntimeIo::Actor(actor) => {
-                actor.resize(
+                TerminalSource::resize(
+                    actor,
                     rows,
                     cols,
                     cell_width_px,
@@ -1035,7 +1042,7 @@ impl PaneRuntimeIo {
 
     async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
         match self {
-            PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
+            PaneRuntimeIo::Actor(actor) => TerminalSource::write_user_input(actor, bytes).await,
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
         }
@@ -1043,7 +1050,7 @@ impl PaneRuntimeIo {
 
     fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
-            PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
+            PaneRuntimeIo::Actor(actor) => TerminalSource::try_write_user_input(actor, bytes),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
         }
@@ -1758,7 +1765,7 @@ impl PaneRuntime {
                 let _ = rt.block_on(exit_events.send(AppEvent::PaneDied { pane_id }));
                 debug!(pane = pane_id.raw(), "handoff PTY actor exiting");
             });
-            PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
+            PaneRuntimeIo::Actor(LocalChild::spawn(PtyIoActorConfig {
                 pane_id: pane_id.raw(),
                 master_fd,
                 initially_quiesced: true,
@@ -1911,7 +1918,7 @@ impl PaneRuntime {
                     terminal_responses: result.terminal_responses,
                 }
             });
-            PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
+            PaneRuntimeIo::Actor(LocalChild::spawn(PtyIoActorConfig {
                 pane_id: pane_id.raw(),
                 #[cfg(unix)]
                 master_fd: spawned.master_fd,
