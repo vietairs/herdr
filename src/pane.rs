@@ -565,11 +565,16 @@ fn map_relayed_agent_status(status: AgentStatus) -> AgentState {
 /// remote pane — only attended/visible ones stay active. A pane never
 /// marked visible here defaults to inactive: relay ingestion is opt-in per
 /// visibility, not opt-out.
+// Dormant like `RemoteTerminalSourceHandle`/`PaneRuntimeIo::Remote`: no live
+// call site constructs this until a future federation caller (P8/P9) wires
+// pane visibility into the relay; only this module's own tests do.
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(crate) struct RemoteAgentStatusGate {
     visible: std::collections::HashSet<PaneId>,
 }
 
+#[allow(dead_code)]
 impl RemoteAgentStatusGate {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -1025,7 +1030,11 @@ pub struct PaneRuntime {
     // `spawn_remote`-constructed runtimes (a real local runtime already has
     // a real process to probe); `None` everywhere else. Dormant until a
     // live federation call site (P8/P9) drives it from
-    // `RemoteMirror::apply_agent_status`.
+    // `RemoteMirror::apply_agent_status`. Read only by
+    // `relayed_agent_status_sender()` (dormant, same reason) and this
+    // module's own tests, so it's dead code outside `#[cfg(test)]` until
+    // then — same precedent as `PaneRuntimeIo::Remote`.
+    #[allow(dead_code)]
     relayed_agent_status_tx: Option<mpsc::Sender<AgentStatus>>,
 }
 
@@ -2816,6 +2825,7 @@ impl PaneRuntime {
     /// probe); `Some` only for `spawn_remote`-constructed runtimes. Dormant
     /// until a live federation call site (P8/P9) drives it from
     /// `remote::federation::reducer::RemoteMirror::apply_agent_status`.
+    #[allow(dead_code)]
     pub(crate) fn relayed_agent_status_sender(&self) -> Option<mpsc::Sender<AgentStatus>> {
         self.relayed_agent_status_tx.clone()
     }
