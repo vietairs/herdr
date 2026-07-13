@@ -23,3 +23,9 @@ pub(crate) mod tee;
 // literal `pub mod` wording (logged in implementation-notes.md).
 pub(crate) mod client;
 pub(crate) mod reducer;
+
+// P5: `RemoteTerminalSource` — the raw-byte-channel `TerminalSource`/
+// `TerminalLifecyclePolicy` counterpart to `terminal::LocalChild`, fed by
+// `client`'s per-mount `TerminalChannelRouter`. `pub(crate)` to match the
+// visibility pattern of every other module in this file.
+pub(crate) mod pane_source;

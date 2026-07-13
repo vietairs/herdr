@@ -139,6 +139,46 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    // P5: additive wrapper mirroring pane runtime construction arguments —
+    // a remote-backed pane fed by the federation raw terminal channel
+    // instead of a local PTY. Dormant until a live mount (P8) constructs
+    // one; every existing `spawn_*` site is untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_remote(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        initial_history_ansi: Option<&str>,
+        terminal_id: String,
+        mount_generation: u64,
+        out_tx: mpsc::UnboundedSender<crate::remote::federation::protocol::FederationMessage>,
+        output_rx: mpsc::Receiver<Bytes>,
+        clipboard_tx: mpsc::UnboundedSender<crate::remote::federation::protocol::ClipboardMessage>,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        crate::pane::PaneRuntime::spawn_remote(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            initial_history_ansi,
+            terminal_id,
+            mount_generation,
+            out_tx,
+            output_rx,
+            clipboard_tx,
+            events,
+            render_notify,
+            render_dirty,
+        )
+        .map(Self)
+    }
+
     // Wrapper mirrors pane runtime construction arguments.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_shell_command(
@@ -518,5 +558,43 @@ impl TerminalRuntime {
             channel_capacity,
         );
         (Self(runtime), rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // P5: exercises `spawn_remote` through this wrapper layer (not just
+    // `PaneRuntime::spawn_remote` directly, which `pane.rs`'s own tests
+    // cover) — dormant until a live mount (P8) constructs one in
+    // production, so this is also what keeps the wrapper from being flagged
+    // dead code.
+    #[tokio::test]
+    async fn spawn_remote_wrapper_delegates_to_the_pane_runtime() {
+        let (events_tx, _events_rx) = mpsc::channel::<AppEvent>(4);
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = mpsc::channel::<Bytes>(4);
+        let (clipboard_tx, _clipboard_rx) = mpsc::unbounded_channel();
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+
+        let runtime = TerminalRuntime::spawn_remote(
+            PaneId::from_raw(1),
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            "term_1".to_string(),
+            1,
+            out_tx,
+            output_rx,
+            clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        );
+        assert!(runtime.is_ok());
     }
 }

@@ -22,6 +22,8 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::pty::actor::{PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
+use crate::remote::federation::pane_source::{RemoteTerminalSourceConfig, RemoteTerminalSourceHandle};
+use crate::remote::federation::protocol::{ClipboardMessage, FederationMessage};
 use crate::terminal::{LocalChild, TerminalSource};
 
 mod agent_detection;
@@ -936,6 +938,11 @@ const OUTPUT_TEE_CAPACITY: usize = 4096;
 
 enum PaneRuntimeIo {
     Actor(PtyIoActorHandle),
+    /// P5: fed by the federation raw terminal channel instead of a local
+    /// PTY. See `RemoteTerminalSourceHandle`'s doc comment for the pinned
+    /// lifecycle contract (never spawns/kills a local child, never emits a
+    /// local `PaneDied` on reader-exit).
+    Remote(RemoteTerminalSourceHandle),
     #[cfg(test)]
     TestChannel {
         sender: mpsc::Sender<Bytes>,
@@ -946,12 +953,13 @@ enum PaneRuntimeIo {
 impl PaneRuntimeIo {
     fn shutdown(&self) {
         match self {
-            // Non-`Actor` variants of `PaneRuntimeIo` (today only the
-            // `#[cfg(test)]` `TestChannel`, tomorrow a `Remote` variant)
-            // no-op the 4 `#[cfg(unix)]` handoff registry methods below
-            // exactly as `TestChannel` already does — that pattern is the
-            // template a future non-PTY variant follows (phase-02 req. 5).
+            // Non-`Actor` variants of `PaneRuntimeIo` (`Remote` and the
+            // `#[cfg(test)]` `TestChannel`) no-op the `#[cfg(unix)]` handoff
+            // registry methods below exactly as `TestChannel` already did —
+            // that pattern is the template a non-PTY variant follows
+            // (phase-02 req. 5).
             PaneRuntimeIo::Actor(actor) => TerminalSource::shutdown(actor),
+            PaneRuntimeIo::Remote(remote) => TerminalSource::shutdown(remote),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -961,6 +969,9 @@ impl PaneRuntimeIo {
     fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.duplicate_for_handoff(),
+            PaneRuntimeIo::Remote(_) => Err(std::io::Error::other(
+                "remote-backed panes have no PTY master fd",
+            )),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {
                 Err(std::io::Error::other("test runtime has no PTY master fd"))
@@ -972,6 +983,7 @@ impl PaneRuntimeIo {
     fn foreground_process_group_id(&self) -> Option<u32> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
+            PaneRuntimeIo::Remote(_) => None,
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => None,
         }
@@ -981,6 +993,7 @@ impl PaneRuntimeIo {
     fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
+            PaneRuntimeIo::Remote(_) => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -996,6 +1009,7 @@ impl PaneRuntimeIo {
                     actor.rollback_handoff()
                 }
             }
+            PaneRuntimeIo::Remote(_) => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -1005,6 +1019,7 @@ impl PaneRuntimeIo {
     fn release_after_commit(&self) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.release_after_commit(),
+            PaneRuntimeIo::Remote(_) => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -1022,6 +1037,16 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => {
                 TerminalSource::resize(
                     actor,
+                    rows,
+                    cols,
+                    cell_width_px,
+                    cell_height_px,
+                    terminal_responses,
+                );
+            }
+            PaneRuntimeIo::Remote(remote) => {
+                TerminalSource::resize(
+                    remote,
                     rows,
                     cols,
                     cell_width_px,
@@ -1048,6 +1073,7 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => {
                 actor.nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
             }
+            PaneRuntimeIo::Remote(_) => {}
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -1056,6 +1082,7 @@ impl PaneRuntimeIo {
     async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
         match self {
             PaneRuntimeIo::Actor(actor) => TerminalSource::write_user_input(actor, bytes).await,
+            PaneRuntimeIo::Remote(remote) => TerminalSource::write_user_input(remote, bytes).await,
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
         }
@@ -1064,6 +1091,7 @@ impl PaneRuntimeIo {
     fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
             PaneRuntimeIo::Actor(actor) => TerminalSource::try_write_user_input(actor, bytes),
+            PaneRuntimeIo::Remote(remote) => TerminalSource::try_write_user_input(remote, bytes),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
         }
@@ -1592,6 +1620,160 @@ impl PaneRuntime {
                 windows_powershell_prompt_cwd_reporting,
             },
         )
+    }
+
+    /// P5: a remote-backed pane whose bytes arrive over the federation raw
+    /// terminal channel instead of a local PTY. Builds a real ghostty
+    /// terminal (`Pane::render` is source-agnostic — same grid, same
+    /// renderer) fed by the SAME `on_read` -> `process_pty_bytes` pathway
+    /// every local pane uses; never spawns or waits on a local child
+    /// process (`PaneRuntimeIo::Remote` + `preserve_processes_on_drop: true`
+    /// + `child_pid` pinned at 0 for the runtime's whole lifetime — see
+    /// `shutdown_pane_processes`'s `child_pid == 0` early return).
+    /// `initial_history_ansi` seeds scrollback exactly like
+    /// `spawn_with_initial_history` (RT-F6): the caller's `output_rx` is
+    /// expected to carry the channel's replayed history bytes before any
+    /// live bytes (see `remote::federation::client::TerminalChannelRouter`),
+    /// so hydrate order falls out of wire order rather than needing a
+    /// second seeding path here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_remote(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        initial_history_ansi: Option<&str>,
+        terminal_id: String,
+        mount_generation: u64,
+        out_tx: mpsc::UnboundedSender<FederationMessage>,
+        output_rx: mpsc::Receiver<Bytes>,
+        clipboard_tx: mpsc::UnboundedSender<ClipboardMessage>,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
+        let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        terminal
+            .enable_grapheme_cluster_mode()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        if crate::kitty_graphics::is_enabled() {
+            terminal
+                .enable_kitty_graphics()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
+        pane_terminal.apply_host_terminal_theme(host_terminal_theme);
+        if let Some(ansi) = initial_history_ansi {
+            pane_terminal.seed_history_ansi(ansi);
+        }
+        let terminal = Arc::new(PaneTerminal::new(pane_terminal));
+        // No local child ever exists for a remote-backed pane: `child_pid`
+        // stays 0 for this runtime's whole lifetime. `spawn_basic_detection_task`
+        // already treats `pid == 0` as "no process to probe"
+        // (`should_check_process = pid > 0 && ...`), degrading gracefully to
+        // source-agnostic screen-text detection — the P6 behavior this
+        // phase's context calls out ("suppress the local process-table
+        // probe for remote panes") is already today's behavior for `pid ==
+        // 0`, not new code added here.
+        let child_pid = Arc::new(AtomicU32::new(0));
+        let reported_cwd = Arc::new(Mutex::new(None));
+        let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let (output_tee, _) = broadcast::channel::<Bytes>(OUTPUT_TEE_CAPACITY);
+
+        let io = {
+            let terminal = terminal.clone();
+            let response_writer = response_tx.clone();
+            let output_tee = output_tee.clone();
+            let render_notify = render_notify.clone();
+            let render_dirty = render_dirty.clone();
+            let detection_content_seq = detection_content_seq.clone();
+            let read_events = events.clone();
+            let reported_cwd = reported_cwd.clone();
+            let rt = tokio::runtime::Handle::current();
+            let delay_rt = rt.clone();
+            let on_read = Box::new(move |bytes: &[u8]| {
+                // Remote panes never have a local shell pid to report.
+                let result = terminal.process_pty_bytes(pane_id, 0, bytes, &response_writer);
+                observe_detection_content_change(bytes, &detection_content_seq);
+                // Fork the exact bytes just consumed to any federation
+                // subscribers (dormant unless one subscribes; see
+                // `remote::federation::tee`), same as every local `on_read`.
+                let _ = output_tee.send(Bytes::copy_from_slice(bytes));
+                if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
+                    render_notify.notify_one();
+                }
+                if let Some(delay) = result.render_delay {
+                    let render_notify = render_notify.clone();
+                    let render_dirty = render_dirty.clone();
+                    delay_rt.spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        if !render_dirty.swap(true, Ordering::AcqRel) {
+                            render_notify.notify_one();
+                        }
+                    });
+                }
+                if let Some(cwd) = result.reported_cwd.clone() {
+                    publish_reported_cwd(pane_id, cwd, &reported_cwd, &read_events);
+                }
+                // RT-F7: remote-origin OSC 52 clipboard writes are carried
+                // on the origin-tagged federation Clipboard channel rather
+                // than the local `AppEvent::ClipboardWrite` path every local
+                // pane uses — this guarantees the write is never silently
+                // dropped; routing it into local clipboard policy with
+                // origin propagation is P7 scope (deviation logged in
+                // implementation-notes.md: P5 does not own `events.rs`).
+                for content in result.clipboard_writes {
+                    let _ = clipboard_tx.send(ClipboardMessage {
+                        origin_tag: "remote".to_string(),
+                        payload: content,
+                    });
+                }
+                // Any `terminal_responses` this mirror emulator computed
+                // (e.g. a synthesized cursor-position report) have no
+                // destination here — see `RemoteTerminalSourceHandle::resize`
+                // for the same disposition applied to resize-triggered
+                // responses. The remote host's own real terminal already
+                // owns the responder role for its shell.
+            });
+            PaneRuntimeIo::Remote(RemoteTerminalSourceHandle::spawn(RemoteTerminalSourceConfig {
+                terminal_id,
+                mount_generation,
+                out_tx,
+                output_rx,
+                on_read,
+            }))
+        };
+
+        let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
+            pane_id,
+            child_pid.clone(),
+            terminal.clone(),
+            detection_content_seq.clone(),
+            full_lifecycle_authority_active.clone(),
+            events,
+        );
+
+        Ok(Self {
+            pane_id,
+            terminal,
+            io,
+            current_size: Cell::new((rows, cols, 0, 0)),
+            child_pid,
+            reported_cwd,
+            child_wait_completed: None,
+            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            detection_content_seq,
+            full_lifecycle_authority_active,
+            detect_reset_notify,
+            pending_release,
+            preserve_processes_on_drop: true,
+            detect_handle,
+            output_tee,
+        })
     }
 
     // Runtime construction needs to thread PTY size, environment, theme, and render hooks together.
@@ -3986,5 +4168,135 @@ mod tests {
                 observed_at: _,
             } if delivered_pane == pane_id
         ));
+    }
+}
+
+/// P5: `PaneRuntime::spawn_remote` — remote-backed panes (raw byte channel
+/// -> the same `process_pty_bytes` pathway a local pane uses). Loopback-only
+/// (no real SSH), per the phase's TDD plan.
+#[cfg(test)]
+mod remote_spawn_tests {
+    use super::*;
+
+    #[allow(clippy::type_complexity)]
+    fn spawn_test_remote_pane(
+        terminal_id: &str,
+        mount_generation: u64,
+    ) -> (
+        PaneRuntime,
+        mpsc::Sender<Bytes>,
+        mpsc::UnboundedReceiver<FederationMessage>,
+        mpsc::Receiver<AppEvent>,
+    ) {
+        let (events_tx, events_rx) = mpsc::channel::<AppEvent>(16);
+        let (out_tx, out_rx) = mpsc::unbounded_channel();
+        let (output_tx, output_rx) = mpsc::channel::<Bytes>(64);
+        let (clipboard_tx, _clipboard_rx) = mpsc::unbounded_channel();
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+        let runtime = PaneRuntime::spawn_remote(
+            PaneId::from_raw(1),
+            24,
+            80,
+            1 << 20,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            terminal_id.to_string(),
+            mount_generation,
+            out_tx,
+            output_rx,
+            clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        )
+        .expect("spawn_remote should succeed with no local PTY/child involved");
+        (runtime, output_tx, out_rx, events_rx)
+    }
+
+    // Test 1 (CX-4, full fidelity): bytes pushed onto the demuxed output
+    // channel drive the SAME `process_pty_bytes` pathway a local pane uses,
+    // producing the exact same rendered grid a local PTY source would for
+    // identical bytes.
+    #[tokio::test]
+    async fn remote_byte_in_renders_the_same_grid_as_a_local_pty_source() {
+        let known_bytes = b"hello federation\r\nsecond line";
+
+        let local_reference = PaneRuntime::test_with_channel(80, 24).0;
+        local_reference.test_process_pty_bytes(known_bytes);
+
+        let (remote_runtime, output_tx, _out_rx, _events_rx) =
+            spawn_test_remote_pane("term_1", 1);
+        output_tx.send(Bytes::copy_from_slice(known_bytes)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        assert_eq!(remote_runtime.visible_text(), local_reference.visible_text());
+    }
+
+    // Test 6 (RT-F6 scrollback-on-hydrate): the caller is expected to push
+    // replayed history bytes onto `output_rx` before any live bytes — since
+    // hydrate order falls out of wire order (no separate seeding path in
+    // `spawn_remote`), pushing history first and live bytes after must
+    // produce a grid containing both, in that order.
+    #[tokio::test]
+    async fn scrollback_replay_bytes_pushed_before_live_bytes_both_land_on_the_grid() {
+        let (remote_runtime, output_tx, _out_rx, _events_rx) =
+            spawn_test_remote_pane("term_1", 1);
+
+        output_tx
+            .send(Bytes::from_static(b"earlier history\r\n"))
+            .await
+            .unwrap();
+        output_tx
+            .send(Bytes::from_static(b"live bytes after replay"))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        let visible = remote_runtime.visible_text();
+        assert!(visible.contains("earlier history"));
+        assert!(visible.contains("live bytes after replay"));
+    }
+
+    // Test 5 (codex #5 lifecycle, E2E): dropping a remote-backed
+    // `PaneRuntime` (simulating a remote disconnect/pane teardown) never
+    // sends `AppEvent::PaneDied` — the local-only signal every local pane's
+    // child-watcher/reader-exit path sends. `child_pid` stays 0 for the
+    // runtime's whole life, so `shutdown_pane_processes` (called from
+    // `Drop`) is a guaranteed no-op regardless.
+    #[tokio::test]
+    async fn dropping_a_remote_pane_never_emits_pane_died() {
+        let (remote_runtime, output_tx, _out_rx, mut events_rx) =
+            spawn_test_remote_pane("term_1", 1);
+
+        drop(output_tx);
+        drop(remote_runtime);
+
+        let saw_event = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            events_rx.recv(),
+        )
+        .await;
+        if let Ok(Some(event)) = saw_event {
+            assert!(
+                !matches!(event, AppEvent::PaneDied { .. }),
+                "a remote-backed pane must never emit PaneDied"
+            );
+        }
+    }
+
+    // Test 9 (P2 oracle re-run, narrow slice): the `Remote` variant does not
+    // perturb `PaneRuntimeIo`'s handoff no-op arms — calling every
+    // `#[cfg(unix)]` handoff method on a `Remote`-backed runtime must not
+    // panic, mirroring the existing `TestChannel` no-op contract.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_methods_on_a_remote_pane_no_op_without_panicking() {
+        let (remote_runtime, _output_tx, _out_rx, _events_rx) =
+            spawn_test_remote_pane("term_1", 1);
+
+        assert!(remote_runtime.duplicate_handoff_fd().is_err());
+        assert!(remote_runtime.pause_handoff_reader(std::time::Duration::from_millis(10)).is_ok());
+        remote_runtime.set_handoff_reader_paused(false);
     }
 }

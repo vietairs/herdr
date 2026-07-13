@@ -22,18 +22,20 @@
 //! per-item.
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::api::EventHub;
 
 use super::id::{HostKey, Mount, ServerInstanceId};
 use super::protocol::{
-    Capability, FederationMessage, Handshake, HandshakeResponse, MountSnapshot, RejectReason,
-    FEDERATION_PROTOCOL_VERSION,
+    Capability, ClipboardMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot,
+    RejectReason, ScrollbackReplay, TerminalChannelMessage, FEDERATION_PROTOCOL_VERSION,
 };
 use super::reducer::{ReducerAction, RemoteMirror};
 use super::serve::{read_frame, write_frame};
@@ -268,6 +270,152 @@ pub(crate) async fn drive_event_channel<R: AsyncRead + Unpin>(
     }
 }
 
+/// Capacity (in messages) of one remote pane's demuxed byte-in channel — the
+/// `RemoteTerminalSourceConfig::output_rx` end this router feeds. Sized
+/// generously so a pane that is briefly slower than the wire does not
+/// immediately drop bytes; a pane that stays behind this simply misses
+/// bytes (see `route_inbound`'s `try_send`, S2.2 isolation: this router's
+/// single read loop must never block on one slow/unfocused pane).
+const TERMINAL_OUTPUT_CHANNEL_CAPACITY: usize = 4096;
+
+/// Demultiplexes ONE mount's single `Terminal`-channel wire stream by
+/// `terminal_id` (requirement 9: every open remote pane's byte channel rides
+/// the ONE mount tunnel, never a per-pane connection). Built once per mount;
+/// panes register with `open_terminal` as they focus (P8 lazy hydrate,
+/// requirement 9) and deregister on `Close`.
+#[derive(Default)]
+pub(crate) struct TerminalChannelRouter {
+    output_senders: HashMap<String, mpsc::Sender<Bytes>>,
+}
+
+impl TerminalChannelRouter {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers `terminal_id` as open and sends the `Open` request
+    /// outbound. Returns the receiver end `RemoteTerminalSourceConfig::
+    /// output_rx` consumes — the server's `Open` acknowledgement (carrying
+    /// scrollback replay) and every subsequent `Output` frame for this
+    /// terminal id are pushed onto it, in wire order (RT-F6: replay first).
+    pub(crate) fn open_terminal(
+        &mut self,
+        terminal_id: String,
+        mount_generation: u64,
+        out_tx: &mpsc::UnboundedSender<FederationMessage>,
+    ) -> mpsc::Receiver<Bytes> {
+        let (tx, rx) = mpsc::channel::<Bytes>(TERMINAL_OUTPUT_CHANNEL_CAPACITY);
+        self.output_senders.insert(terminal_id.clone(), tx);
+        let _ = out_tx.send(FederationMessage::Terminal(TerminalChannelMessage::Open {
+            terminal_id,
+            mount_generation,
+            replay: ScrollbackReplay { bytes: Vec::new() },
+        }));
+        rx
+    }
+
+    /// Explicitly deregisters `terminal_id` (e.g. the pane lost focus and is
+    /// going back to metadata-only, S12.1/S12.3) without waiting for a
+    /// server-side `Close` echo.
+    pub(crate) fn forget(&mut self, terminal_id: &str) {
+        self.output_senders.remove(terminal_id);
+    }
+
+    /// Routes one inbound `Terminal` message to the registered pane, if
+    /// any. Uses `try_send` (never `.await`) so a slow/unfocused pane can
+    /// never stall this router's caller — the ONE mount tunnel's single
+    /// read loop must keep servicing every other pane and the event/agent
+    /// channels regardless (S2.2 isolation).
+    pub(crate) fn route_inbound(&mut self, msg: TerminalChannelMessage) {
+        match msg {
+            TerminalChannelMessage::Open {
+                terminal_id, replay, ..
+            } => {
+                if let Some(tx) = self.output_senders.get(&terminal_id) {
+                    if !replay.bytes.is_empty() {
+                        let _ = tx.try_send(Bytes::from(replay.bytes));
+                    }
+                }
+            }
+            TerminalChannelMessage::Output {
+                terminal_id, bytes, ..
+            } => {
+                if let Some(tx) = self.output_senders.get(&terminal_id) {
+                    let _ = tx.try_send(Bytes::from(bytes));
+                }
+            }
+            TerminalChannelMessage::Close { terminal_id, .. } => {
+                self.output_senders.remove(&terminal_id);
+            }
+            // Input/Resize are outbound-only from this client's perspective
+            // (sent by `RemoteTerminalSourceHandle`, never received back).
+            TerminalChannelMessage::Input { .. } | TerminalChannelMessage::Resize { .. } => {}
+        }
+    }
+}
+
+/// Wraps a local paste (including image payloads, RT-F7) as an origin-tagged
+/// `Clipboard` message and sends it outward on the shared mount link. Dormant
+/// helper: no production call site until P8 wires a real paste keybinding to
+/// a live mount.
+pub(crate) fn send_local_clipboard_to_remote(
+    out_tx: &mpsc::UnboundedSender<FederationMessage>,
+    origin_tag: impl Into<String>,
+    payload: Vec<u8>,
+) {
+    let _ = out_tx.send(FederationMessage::Clipboard(ClipboardMessage {
+        origin_tag: origin_tag.into(),
+        payload,
+    }));
+}
+
+/// Like `drive_event_channel`, but additionally routes inbound `Terminal`
+/// and `Clipboard` messages — the P5 counterpart needed once a live mount
+/// opens per-pane channels. Event-channel handling (ordering/gap/reset) is
+/// identical to `drive_event_channel`; kept as a separate, additive function
+/// (rather than changing `drive_event_channel`'s signature) so P4's
+/// mount-only callers/tests are untouched.
+pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    mirror: &mut RemoteMirror,
+    generation: u64,
+    hub: &EventHub,
+    router: &mut TerminalChannelRouter,
+    clipboard_tx: &mpsc::UnboundedSender<ClipboardMessage>,
+) -> Result<DriveOutcome, std::io::Error> {
+    let _ = hub;
+    loop {
+        let Some(msg) = read_frame(reader).await? else {
+            return Ok(DriveOutcome::LinkClosed);
+        };
+        match msg {
+            FederationMessage::Event(event_msg) => {
+                match mirror.apply_event_message(&event_msg, generation) {
+                    ReducerAction::RejectedStale
+                    | ReducerAction::Ignored
+                    | ReducerAction::Applied { .. } => continue,
+                    ReducerAction::GapDetected { .. } | ReducerAction::ResetRequired => {
+                        return Ok(DriveOutcome::ResyncRequired);
+                    }
+                }
+            }
+            FederationMessage::Terminal(term_msg) => {
+                router.route_inbound(term_msg);
+            }
+            FederationMessage::Clipboard(clip_msg) => {
+                let _ = clipboard_tx.send(clip_msg);
+            }
+            // Handshake/HandshakeResponse/MountSnapshot are already
+            // consumed during `connect_and_mount`; AgentStatus relay is P6
+            // scope. Neither is this driver's concern.
+            FederationMessage::Handshake(_)
+            | FederationMessage::HandshakeResponse(_)
+            | FederationMessage::MountSnapshot(_)
+            | FederationMessage::AgentStatus(_) => continue,
+        }
+    }
+}
+
 /// Runs `connect_and_mount` on its own task so the caller's event loop is
 /// never blocked by federation I/O — including a peer that never responds
 /// at all (e.g. an SSH prompt; the actual TTY-prompt pre-resolution is
@@ -488,5 +636,286 @@ mod tests {
             "the mount attempt should still be pending (peer never responded)"
         );
         mount_task.abort();
+    }
+
+    // P5: `TerminalChannelRouter` + `drive_mount_channel` — the client-side
+    // channel routing a live mount needs before `RemoteTerminalSourceHandle`
+    // can hydrate a pane. Loopback-only (no real SSH), per the phase's TDD
+    // plan.
+
+    /// Completes a handshake+mount over a fresh loopback connection, using
+    /// the exact same wire steps `loopback::tests::connect_and_mount` does
+    /// (that helper is private to `loopback.rs`, so this is a thin local
+    /// re-implementation rather than a cross-module reach-in).
+    async fn open_mount(
+        host: Arc<FixtureHost>,
+    ) -> (
+        tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    ) {
+        let (duplex, _server) = LoopbackFederationServer::spawn(host);
+        let (mut reader, mut writer) = tokio::io::split(duplex);
+        write_frame(
+            &mut writer,
+            &FederationMessage::Handshake(Handshake {
+                federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+                capabilities: [Capability::new(Capability::SCROLLBACK_REPLAY)].into(),
+                server_instance_id: ServerInstanceId("client-test".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        let Some(FederationMessage::HandshakeResponse(HandshakeResponse::Accept { .. })) =
+            read_frame(&mut reader).await.unwrap()
+        else {
+            panic!("expected HandshakeResponse::Accept");
+        };
+        let Some(FederationMessage::MountSnapshot(_)) = read_frame(&mut reader).await.unwrap()
+        else {
+            panic!("expected MountSnapshot");
+        };
+        (reader, writer)
+    }
+
+    // Test 6 (RT-F6, S12.1/S12.3): opening a terminal registers it with the
+    // router, and both the `Open` acknowledgement's scrollback replay and
+    // every subsequent `Output` frame reach the SAME per-terminal channel,
+    // in wire order (replay before live).
+    #[tokio::test]
+    async fn open_terminal_delivers_replay_then_live_bytes_on_the_same_channel() {
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let scrollback = b"earlier history".to_vec();
+        let host = Arc::new(
+            FixtureHost::new().with_terminal("term_1", runtime, scrollback.clone()),
+        );
+        let (mut reader, writer) = open_mount(host.clone()).await;
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let writer_task = tokio::spawn(async move {
+            let mut writer = writer;
+            while let Some(msg) = out_rx.recv().await {
+                if write_frame(&mut writer, &msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut router = TerminalChannelRouter::new();
+        let mut output_rx = router.open_terminal("term_1".to_string(), 1, &out_tx);
+
+        // Server's `Open` acknowledgement (carrying the scrollback replay) —
+        // real wire round-trip against `FixtureHost`/`serve::run`, proving
+        // the router applies a genuine server-produced replay payload.
+        let Some(FederationMessage::Terminal(open_ack)) = read_frame(&mut reader).await.unwrap()
+        else {
+            panic!("expected the server's Open acknowledgement");
+        };
+        router.route_inbound(open_ack);
+
+        // Live bytes: `loopback.rs`'s own tests already prove CX-4 fidelity
+        // (a real fixture terminal's tee producing an `Output` frame
+        // byte-for-byte); this router-level test only needs to prove
+        // ordering (replay before live) once a live `Output` frame for this
+        // terminal id arrives, so it is injected directly rather than
+        // reaching into `FixtureHost`'s private terminal registry (not this
+        // phase's file to modify).
+        router.route_inbound(TerminalChannelMessage::Output {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 1,
+            bytes: b"live bytes after replay".to_vec(),
+        });
+
+        let first = tokio::time::timeout(std::time::Duration::from_millis(200), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, Bytes::from(scrollback));
+        let second = tokio::time::timeout(std::time::Duration::from_millis(200), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second, Bytes::from_static(b"live bytes after replay"));
+
+        writer_task.abort();
+    }
+
+    // Test 4 (S2.2 isolation, router half): routing inbound `Output` frames
+    // for a pane whose channel is full (`try_send` fails) must never block
+    // or panic this router's caller — the ONE mount tunnel's read loop must
+    // keep servicing every other pane regardless of one slow consumer.
+    #[test]
+    fn routing_to_a_full_channel_never_blocks_or_panics() {
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let mut output_rx = router.open_terminal("term_1".to_string(), 1, &out_tx);
+
+        // Fill the bounded channel without ever draining it.
+        for i in 0..(TERMINAL_OUTPUT_CHANNEL_CAPACITY + 10) {
+            router.route_inbound(TerminalChannelMessage::Output {
+                terminal_id: "term_1".to_string(),
+                mount_generation: 1,
+                bytes: vec![i as u8],
+            });
+        }
+
+        // The receiver still has a bounded, non-exploded backlog — proving
+        // the router degraded (dropped) rather than panicked or blocked.
+        assert!(output_rx.try_recv().is_ok());
+    }
+
+    // Test 8 (RT-F7 clipboard, outbound half): a local paste (standing in
+    // for an image payload too — this helper is payload-agnostic) crosses
+    // the wire as an origin-tagged `Clipboard` message.
+    #[tokio::test]
+    async fn local_clipboard_paste_crosses_the_wire_origin_tagged() {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (_client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, _server_writer) = tokio::io::split(server_side);
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let writer_task = tokio::spawn(async move {
+            let mut writer = client_writer;
+            while let Some(msg) = out_rx.recv().await {
+                if write_frame(&mut writer, &msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        send_local_clipboard_to_remote(&out_tx, "local", b"pasted payload".to_vec());
+
+        let Some(FederationMessage::Clipboard(ClipboardMessage { origin_tag, payload })) =
+            read_frame(&mut server_reader).await.unwrap()
+        else {
+            panic!("expected a Clipboard message");
+        };
+        assert_eq!(origin_tag, "local");
+        assert_eq!(payload, b"pasted payload".to_vec());
+
+        writer_task.abort();
+    }
+
+    // Test 8 (RT-F7 clipboard, inbound half) + Test 9 (event-channel
+    // parity): `drive_mount_channel` routes `Clipboard` messages to the
+    // caller's queue and `Terminal` messages to the router, while still
+    // applying `Event` frames to the mirror exactly like
+    // `drive_event_channel` — proving the additive driver does not regress
+    // P4's event-application behavior.
+    // Driven against a hand-rolled fake server (like
+    // `version_mismatch_is_surfaced_as_a_typed_rejection` above) rather than
+    // `FixtureHost`/`LoopbackFederationServer`, so this test can inject an
+    // `Event` + `Terminal::Output` + `Clipboard` message in one deterministic
+    // sequence without reaching into `loopback.rs`'s private fixture state
+    // (not this phase's file to modify).
+    #[tokio::test]
+    async fn drive_mount_channel_routes_terminal_and_clipboard_while_still_applying_events() {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+        let fake_server = tokio::spawn(async move {
+            let Some(FederationMessage::Handshake(_)) =
+                read_frame(&mut server_reader).await.unwrap()
+            else {
+                panic!("expected a Handshake");
+            };
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                    agreed_capabilities: BTreeSet::new(),
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::MountSnapshot(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: crate::remote::federation::serve::empty_snapshot(),
+                    cursor: crate::remote::federation::protocol::EventCursor(0),
+                }),
+            )
+            .await
+            .unwrap();
+
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::Event(
+                    crate::remote::federation::protocol::EventChannelMessage::Frame(
+                        crate::remote::federation::protocol::EventFrame {
+                            source_seq: 1,
+                            kind: crate::api::schema::events::EventKind::WorkspaceFocused,
+                        },
+                    ),
+                ),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::Terminal(TerminalChannelMessage::Output {
+                    terminal_id: "term_1".to_string(),
+                    mount_generation: 1,
+                    bytes: b"routed live bytes".to_vec(),
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::Clipboard(ClipboardMessage {
+                    origin_tag: "remote".to_string(),
+                    payload: b"remote clip".to_vec(),
+                }),
+            )
+            .await
+            .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let client = FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new());
+        let mounted = client
+            .connect_and_mount(client_reader, client_writer)
+            .await
+            .unwrap();
+        let generation = mounted.mirror.mount().mount_generation;
+        let MountedConnection {
+            mut mirror,
+            mut reader,
+            ..
+        } = mounted;
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let mut output_rx = router.open_terminal("term_1".to_string(), generation, &out_tx);
+
+        let (clipboard_tx, mut clipboard_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let hub = EventHub::default();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            drive_mount_channel(
+                &mut reader,
+                &mut mirror,
+                generation,
+                &hub,
+                &mut router,
+                &clipboard_tx,
+            ),
+        )
+        .await;
+
+        assert_eq!(mirror.cursor(), 1);
+        let bytes = tokio::time::timeout(std::time::Duration::from_millis(200), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, Bytes::from_static(b"routed live bytes"));
+        let clip = tokio::time::timeout(std::time::Duration::from_millis(200), clipboard_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(clip.origin_tag, "remote");
+        assert_eq!(clip.payload, b"remote clip".to_vec());
+
+        fake_server.await.unwrap();
     }
 }
