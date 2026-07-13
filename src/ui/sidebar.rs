@@ -2067,6 +2067,9 @@ mod tests {
             workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
             Workspace::test_new("notes"),
         ];
+        for workspace in &mut app.workspaces {
+            workspace.cached_git_branch = Some("main".into());
+        }
         app.collapsed_space_keys.insert("repo-key".into());
         app.active = None;
         app.mode = Mode::Terminal;
