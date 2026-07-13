@@ -175,3 +175,65 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   one — reversing it (putting `Send + Sync` back on `FederationHost`) would require either making
   `PrefixInputSource` `Send` (an `app.rs` change out of this phase's ownership) or never wiring a
   real `App`-backed host at all; not expected to be revisited without a corresponding `app.rs` change.
+
+- What: P4's `protocol::EventFrame` (P1, locked) carries only `{source_seq, kind: EventKind}` — no
+  entity id or payload — so a normal in-order `Frame` cannot be turned into a valid, per-field
+  `EventData` (every `EventData` variant needs real typed fields the wire never sends). The reducer
+  therefore does NOT emit a local `EventHub::push` per received `Frame` (req 4's literal wording);
+  `Frame`/`Gap`/`Reset` only drive cursor bookkeeping + gap detection. ALL local pushes happen in
+  `RemoteMirror::reconcile_by_diff`, diffing the mirror against a freshly fetched `MountSnapshot` —
+  run once at initial mount, and again whenever `Gap`/`Reset` is observed (the wire also has no
+  "request a fresh snapshot on this connection" message, so a full remount — a new
+  `connect_and_mount` — is the only re-sync primitive P1/P3 actually provide; P9 owns the full
+  reconnect FSM, P4 exposes the minimal `DriveOutcome::ResyncRequired` signal it will build on).
+  Why: this is a genuine wire-payload gap in an already-merged, locked dependency (P1's
+  `EventFrame`/P3's `serve.rs` mount-once behavior) discovered while implementing P4, not a design
+  choice P4 could make differently within its own file ownership (`protocol/mod.rs` and `serve.rs`
+  are not in P4's Files list). Smallest faithful deviation: keep the wire contract as-is, make the
+  reducer's local-push path honest about what data is actually available (full snapshot diff),
+  rather than inventing placeholder/incorrect `EventData` from a bare `EventKind`.
+  Evidence: `src/remote/federation/protocol/mod.rs` `EventFrame { source_seq, kind }` (no other
+  fields); `src/remote/federation/serve.rs::run` sends exactly one `MountSnapshot` right after the
+  handshake and never again; `EventData` (`src/api/schema/events.rs`) has no catch-all/empty variant.
+  Reversibility: additive/isolated to `reducer.rs`/`client.rs`. A future protocol change (extending
+  `EventFrame` with the changed entity's public id, or a small delta) would let per-event pushes fire
+  without a full remount — that's a P1-owned change, flagged here for whoever revisits P1/P9.
+  FOLLOW-UP: recommend re-reviewing this constraint before P8/P9 ship, since resync-on-every-gap is
+  the only re-sync path today and its cost/latency was not part of P1/P3's own effort estimate.
+
+- What: `RemoteMirror::reconcile_by_diff`'s tab-content-changed case always emits `EventKind::TabRenamed`
+  (the closest available `EventData` variant), even when the actual diff wasn't a label change —
+  `EventKind`/`EventData` have no generic `TabUpdated` variant (unlike Workspace/Pane, which do).
+  Why: smallest reversible option within P4's file ownership; `EventKind`/`EventData` are owned by
+  the API schema, not this phase.
+  Evidence: `src/api/schema/events.rs` `EventKind` enum — `TabCreated/TabClosed/TabRenamed/TabMoved/
+  TabFocused`, no `TabUpdated`.
+  Reversibility: isolated to `reconcile_tabs` in `reducer.rs`; trivial to switch once/if a
+  `TabUpdated` variant is added upstream.
+
+- What: `federation/mod.rs` declares `pub(crate) mod client; pub(crate) mod reducer;` instead of the
+  phase file's literal `pub mod client; pub mod reducer;` wording.
+  Why: every type these modules expose (`FederationClient`, `RemoteMirror`, `MountError`, ...) is
+  itself `pub(crate)`, matching this file's existing `serve`/`tee` visibility pattern (also
+  `pub(crate)`) — a `pub mod` wrapping only-`pub(crate)` items would just be a visibility mismatch
+  with no crate-external consumer (herdr is a bin crate; nothing outside the crate can see either).
+  Evidence: `src/remote/federation/mod.rs` (pre-existing `pub(crate) mod serve; pub(crate) mod tee;`).
+  Reversibility: trivial — flip both keywords if a later phase needs true crate-external `pub`.
+
+- What: `App`/`AppState`'s real event loop (`src/app/mod.rs`, `src/server/headless.rs`) is not
+  modified to ever construct a `FederationClient` or drive `client::drive_event_channel` — the new
+  `AppState.remote_mirror` field is always `None` in this phase; `client.rs`/`reducer.rs` are
+  exercised only by their own `#[cfg(test)]` modules (against the P3 loopback substrate), matching
+  the plan's own risk/rollback note ("new modules unused by any live path until P8 triggers a
+  mount"). Both new modules carry a module-level `#![allow(dead_code)]` for this reason (mirrors
+  `FixtureHost::set_agent_status`'s existing per-item precedent, applied at module scope since almost
+  everything in these two files is test-only-consumed until P8/P9).
+  Why: requirement 5 ("non-interactive mount... runs on its own task off the main event loop") and
+  the phase's Files section explicitly defer the real SSH/CLI trigger to P8 ("P8 wires the CLI
+  trigger") — wiring a real call site here would be scope creep into P8's ownership.
+  Evidence: phase-04 Files section; plan.md P4 risk/rollback ("new modules unused by any live path
+  until P8 triggers a mount"); P3's own `#[allow(dead_code)]` precedent on `FixtureHost::
+  set_agent_status`.
+  Reversibility: trivial — the dormant `#[allow(dead_code)]` gates are removed automatically in
+  practice once P8 adds a real call site (the lint stops firing; the attribute becomes inert, can be
+  deleted then).

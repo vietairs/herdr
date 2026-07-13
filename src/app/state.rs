@@ -1485,6 +1485,13 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+    /// Metadata-only mirror of a single mounted remote federation workspace
+    /// (P4 of the remote-workspace-federation plan). `None` when no mount is
+    /// live. Additive, alongside `workspaces` — no render switch here.
+    /// Always `None` until P8 wires the CLI trigger that mounts a remote and
+    /// sets this to `Some`.
+    #[allow(dead_code)]
+    pub(crate) remote_mirror: Option<crate::remote::federation::reducer::RemoteMirror>,
 }
 
 impl AppState {
@@ -1833,6 +1840,7 @@ impl AppState {
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            remote_mirror: None,
         }
     }
 
