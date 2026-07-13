@@ -553,3 +553,83 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   this 1 new test), no hang. `cargo clippy --all-targets` clean in touched files.
   Reversibility: additive/isolated — one new trait method (default no-op), one impl, one call site,
   one test module; trivial to revert.
+
+- What: P9 Priority 2 — built the core mount->rendered-panes MECHANISM, not the interactive CLI wiring.
+  Added `App::materialize_federation_mount` (app/creation.rs): converts a mounted `RemoteMirror`'s
+  namespaced snapshot into real `Workspace`/`Tab`/`PaneState` entries, each pane spawned via P5's
+  `PaneRuntime::spawn_remote` and fed by a live `TerminalChannelRouter` channel — reusing the SAME
+  primitives an existing "move pane to a new workspace" flow already uses
+  (`Workspace::from_existing_pane`/`create_tab_from_existing_pane`/`Tab::insert_existing_pane`) and the
+  SAME `WorkspaceCreated`/`TabCreated` event-emission path every other workspace creation uses, rather
+  than inventing a parallel construction path. Sets the materialized `Workspace::id` to the mirror's own
+  namespaced id and a `worktree_space.key = "federation:<host_key>"`, which is what
+  `ui::sidebar::workspace_federation_origin`/`federation_origin_badge` (P8, unmodified) key off — proven
+  by a new test asserting `remote::federation::id::classify(&ws.id)` returns `IdClass::Remote` for a
+  materialized workspace. v1 eagerly spawns every mirrored pane at mount time rather than phase-05's
+  anticipated lazy hydrate-on-focus (S12.1) — smaller, more reversible; lazy hydrate can be layered on
+  later without reworking this call site.
+  Why (design fork, latitude used per the assigning prompt): the plan's own P8 deviation entry above
+  already narrowed this to "a new local JSON API method... or direct App/app/creation.rs construction
+  wiring" — both require the mount to live in the SAME process/tokio runtime as the target `App`. But
+  `App`/`AppState` in the normal (non-`--no-session`) launch path live in a separate SERVER process from
+  the interactive TUI client (`main.rs`: `server::autodetect::auto_detect_launch()`), while
+  `run_remote`/`attempt_federation_mount` (`remote/unix.rs`) is a third, standalone CLI process that
+  performs the real SSH dial+handshake+mount and then exits or attaches classically — it never
+  constructs an `App` at all. Merging a live mount into an *already-running* local server session
+  (the phase-08 ideal, "coexist in one chrome") needs either a new async-deferred JSON API method whose
+  response streams back over the existing socket/event-hub machinery, or forwarding the mount's SSH
+  child stdio through a second `SshStdioBridge`-style local socket the server connects to — both real,
+  identified, buildable designs, but each independently developer-week-scale (matches P8's own estimate,
+  "P5-scale effort... 4-6 days", for the *materialization* half alone; the *live-session-merge* half is
+  additional scope on top of that). Building that blind, un-reviewable, and un-buildable-locally (this
+  workstation cannot compile herdr at all; every check is a remote round trip) risked a large, wrong,
+  hard-to-revert commit for the CLI half. Per the assigning prompt's own instruction for a fork with
+  material product implications ("pick the more conservative/reversible one, log it, and continue"), the
+  conservative choice made here is: ship the materialization MECHANISM as a real, fully tested,
+  independently reviewable unit — proven against a hand-built loopback-shaped `RemoteMirror` snapshot,
+  exercising the exact same `spawn_remote`/`TerminalChannelRouter`/id-namespacing primitives a live mount
+  would use — and leave the interactive CLI/session-merge wiring (`remote/unix.rs`'s `FederationRoute::
+  Federated` arm, still printing today's P8 notice and falling back to classic attach) as clearly-scoped
+  follow-up. `#[allow(dead_code)]` on the new functions until that live call site lands matches this
+  codebase's own established precedent (P4's `client.rs`/`reducer.rs`, P5's `spawn_remote` itself, P8's
+  sidebar badge helpers all shipped dormant before their live call sites landed in a later phase).
+  Supporting plumbing added: `remote/federation/id::strip_mount_namespace` (reverses the reducer's P7
+  ingest-time id-namespacing so a materialized pane can re-open its federation `Terminal` channel by the
+  remote's raw, un-namespaced id — the wire protocol addresses channels by that raw id, never the local
+  public one) and `remote/federation/client::spawn_mount_writer` (extracts the client-side writer-pump
+  loop `client.rs`'s own `local_clipboard_paste_crosses_the_wire_origin_tagged` test already hand-rolled
+  inline, mirroring `serve.rs`'s existing `run`'s `writer_task` pattern, into a reusable, independently
+  tested helper).
+  Evidence: `src/app/creation.rs` `App::materialize_federation_mount`/`build_remote_pane` + test module
+  `federation_materialization_tests` (2 tests: a two-pane single-tab mount materializes a real
+  `Workspace`/`Tab` with both panes' terminals reachable via `AppState.terminals`/`App.terminal_runtimes`,
+  the workspace id classifies `IdClass::Remote` and carries the `federation:<host_key>` worktree-space
+  key, and the router opens both panes' federation `Terminal` channels under their raw un-namespaced
+  ids; an empty mirror materializes nothing). `src/remote/federation/id.rs`
+  `strip_mount_namespace`+2 round-trip tests. `src/remote/federation/client.rs` `spawn_mount_writer`+1
+  test. Commits (appn-ltu-vm-100, `~/Projects/herdr` pulled to each): dfafd76 (materialization+writer+
+  strip_mount_namespace), 6110d05 (materialization tests), a593d59 (fix 2 test compile errors — private
+  `ui::sidebar` module, `TerminalRuntimeRegistry` has no `contains_key`, fixed via `classify()` directly
+  and `.get(...).is_some()`), 70555f2 (`#[allow(dead_code)]` on the 3 still-dormant items). Full suite
+  `cargo test -- --test-threads=4`: 2835 passed/0 failed (main lib 2647 + 9 integration binaries 188; was
+  2830 baseline + 5 new tests), no hang. `cargo clippy --all-targets`: zero new warnings in any touched
+  file (the 4 remaining warnings — `map_out`, `Capability::CLIPBOARD`, `TerminalChannelMessage::
+  terminal_id`, `pane_source.rs` type_complexity — are all pre-existing, none in code this entry added).
+  Reversibility: fully additive; nothing here changes behavior for any existing launch path (no live
+  call site exists yet, matching P4/P5/P6/P8 precedent). Follow-up (P9 continuation, or a dedicated
+  phase): wire `remote/unix.rs`'s `FederationRoute::Federated` arm to a real call site — either (a) a new
+  async-deferred JSON API method (`api/schema.rs`, `app/api.rs`) that runs the mount+materialization
+  inside the already-running local server's tokio runtime and streams the resulting `WorkspaceCreated`/
+  `TabCreated`/`PaneCreated` events back over the existing socket (the phase-08 ideal — federated panes
+  coexist with local ones in one chrome), or (b) a smaller, more isolated v1 where `run_remote`'s
+  federation branch runs its own dedicated in-process interactive session (own tokio runtime + ratatui
+  terminal + `App`, no server-process merge) rendering only the federated workspace — both were scoped
+  during this session (see Why above) but neither was implemented; also not yet wired: live agent-status
+  relay (P6) and remote-origin clipboard writes (P7) into the materialized entries — both already have
+  dormant, independently-tested call-site-ready functions (`PaneRuntime::relayed_agent_status_sender()`,
+  `pane_source::apply_remote_clipboard_writes`) per their own phase notes above; wiring them is a small
+  addition once a live CLI call site exists. A true two-machine live render was not attempted (needs a
+  buildable second machine + a real remote target; out of reach in this environment per the P1 entry
+  above) — everything here is validated against the loopback-shaped `RemoteMirror`/`spawn_remote`/
+  `TerminalChannelRouter` substrate, same class of validation P4/P5/P6/P7 used for their own dormant
+  surfaces before a live call site existed.
