@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, mpsc, Notify};
 use tracing::debug;
 use tracing::{error, info, warn};
 
+use crate::api::schema::common::AgentStatus;
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
@@ -539,6 +540,56 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
     )
 }
 
+/// Maps a relayed remote `AgentStatus` (P3's foreground-process signal,
+/// relayed over the P1 agent-status stream — see `remote::federation::
+/// reducer::RemoteMirror::apply_agent_status`) onto the local `AgentState`
+/// vocabulary a pane's detection loop already speaks (P6 requirement 1).
+/// `Done` collapses to `Idle` (no local "finished" state — a finished agent
+/// reads the same as an idle prompt); `Unknown` passes through unchanged so
+/// an ambiguous remote probe never fabricates a stronger claim than the
+/// source itself made (S14.1).
+fn map_relayed_agent_status(status: AgentStatus) -> AgentState {
+    match status {
+        AgentStatus::Idle | AgentStatus::Done => AgentState::Idle,
+        AgentStatus::Working => AgentState::Working,
+        AgentStatus::Blocked => AgentState::Blocked,
+        AgentStatus::Unknown => AgentState::Unknown,
+    }
+}
+
+/// Cadence gate for relayed remote agent-status ingestion (P6 requirement
+/// 4 / S12.2). The local per-pane screen-text timer in
+/// `spawn_basic_detection_task` already runs unconditionally for every pane
+/// (needed regardless of byte source), but the *relay* is additive extra
+/// plumbing per remote pane and must not be ported to every backgrounded
+/// remote pane — only attended/visible ones stay active. A pane never
+/// marked visible here defaults to inactive: relay ingestion is opt-in per
+/// visibility, not opt-out.
+#[derive(Debug, Default)]
+pub(crate) struct RemoteAgentStatusGate {
+    visible: std::collections::HashSet<PaneId>,
+}
+
+impl RemoteAgentStatusGate {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks a pane visible/attended (relay active) or hidden (relay
+    /// throttled off).
+    pub(crate) fn set_visible(&mut self, pane_id: PaneId, visible: bool) {
+        if visible {
+            self.visible.insert(pane_id);
+        } else {
+            self.visible.remove(&pane_id);
+        }
+    }
+
+    pub(crate) fn is_active(&self, pane_id: PaneId) -> bool {
+        self.visible.contains(&pane_id)
+    }
+}
+
 #[cfg(unix)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
@@ -547,6 +598,13 @@ fn spawn_basic_detection_task(
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     state_events: mpsc::Sender<AppEvent>,
+    // P6 requirement 1/2: `Some` only for `spawn_remote`-constructed
+    // runtimes (a real local `LocalChild` runtime already has a real
+    // process to probe and passes `None`). When present, a relayed
+    // `AgentStatus` update is applied directly — never via
+    // `probe_foreground_process`, which targets a local PID that simply
+    // does not exist for a remote pane.
+    mut relayed_status_rx: Option<mpsc::Receiver<AgentStatus>>,
 ) -> (
     tokio::task::AbortHandle,
     Arc<Notify>,
@@ -583,6 +641,13 @@ fn spawn_basic_detection_task(
             } else {
                 std::time::Duration::from_millis(300)
             };
+            let relayed_status_recv = async {
+                match relayed_status_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
+
             tokio::select! {
                 _ = tokio::time::sleep(sleep_duration) => {}
                 _ = detect_reset.notified() => {
@@ -604,6 +669,34 @@ fn spawn_basic_detection_task(
                     last_screen_scan_detection_content_seq = None;
                     agent_startup_grace_until = None;
                     pending_idle.clear();
+                }
+                Some(relayed_status) = relayed_status_recv => {
+                    // P6 requirement 1/2: the remote's real foreground-
+                    // process signal (P3), relayed through P4's reducer —
+                    // applied directly, with zero involvement of
+                    // `probe_foreground_process`. Screen-text detection
+                    // (below, unmodified) still supplies agent *identity*;
+                    // this only refines the *state* dimension.
+                    let mapped = map_relayed_agent_status(relayed_status);
+                    if mapped != state {
+                        state = mapped;
+                        last_visible_idle = mapped == AgentState::Idle;
+                        last_visible_blocker = mapped == AgentState::Blocked;
+                        last_visible_working = mapped == AgentState::Working;
+                        publish_state_changed_event(
+                            state_events.clone(),
+                            pane_id,
+                            agent_presence.current_agent(),
+                            mapped,
+                            last_visible_blocker,
+                            last_visible_working,
+                            false,
+                            std::time::Instant::now(),
+                        )
+                        .await;
+                    }
+                    pending_idle.clear();
+                    continue;
                 }
             }
 
@@ -927,6 +1020,13 @@ pub struct PaneRuntime {
     // with zero subscribers is a cheap no-op and never perturbs the local
     // render path. See `remote::federation::tee`.
     output_tee: broadcast::Sender<Bytes>,
+    // P6: sender for relaying a remote's foreground-process-equivalent
+    // `AgentStatus` into this pane's detection loop. `Some` only for
+    // `spawn_remote`-constructed runtimes (a real local runtime already has
+    // a real process to probe); `None` everywhere else. Dormant until a
+    // live federation call site (P8/P9) drives it from
+    // `RemoteMirror::apply_agent_status`.
+    relayed_agent_status_tx: Option<mpsc::Sender<AgentStatus>>,
 }
 
 /// Capacity (in messages, not bytes) of each pane's raw-output broadcast
@@ -935,6 +1035,12 @@ pub struct PaneRuntime {
 /// falls further behind than this observes `RecvError::Lagged` and must
 /// treat it as a gap (never silently missed).
 const OUTPUT_TEE_CAPACITY: usize = 4096;
+
+/// Bounded capacity of a `spawn_remote` pane's relayed-agent-status queue
+/// (P6). Deliberately small: this carries coarse state transitions
+/// (idle/working/blocked), not a byte stream — a slow consumer only ever
+/// needs the latest status, not a long backlog.
+const RELAYED_AGENT_STATUS_CHANNEL_CAPACITY: usize = 8;
 
 enum PaneRuntimeIo {
     Actor(PtyIoActorHandle),
@@ -1756,6 +1862,14 @@ impl PaneRuntime {
         };
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        // P6: dormant relayed-agent-status channel — `None` for every
+        // locally-spawned runtime, `Some` only here. Nothing in production
+        // code drives `relayed_agent_status_tx` yet (same "additive,
+        // dormant until a live call site" precedent as `pane_source.rs`);
+        // it exists so a future federation call site (P8/P9) has somewhere
+        // to feed `RemoteMirror::apply_agent_status`'s output.
+        let (relayed_agent_status_tx, relayed_agent_status_rx) =
+            mpsc::channel::<AgentStatus>(RELAYED_AGENT_STATUS_CHANNEL_CAPACITY);
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
             pane_id,
             child_pid.clone(),
@@ -1763,6 +1877,7 @@ impl PaneRuntime {
             detection_content_seq.clone(),
             full_lifecycle_authority_active.clone(),
             events,
+            Some(relayed_agent_status_rx),
         );
 
         Ok(Self {
@@ -1781,6 +1896,7 @@ impl PaneRuntime {
             preserve_processes_on_drop: true,
             detect_handle,
             output_tee,
+            relayed_agent_status_tx: Some(relayed_agent_status_tx),
         })
     }
 
@@ -1992,6 +2108,9 @@ impl PaneRuntime {
             detection_content_seq.clone(),
             full_lifecycle_authority_active.clone(),
             events,
+            // Local, `LocalChild`-backed runtime: a real process exists to
+            // probe; no relay input.
+            None,
         );
 
         Ok(Self {
@@ -2010,6 +2129,7 @@ impl PaneRuntime {
             preserve_processes_on_drop: true,
             detect_handle,
             output_tee,
+            relayed_agent_status_tx: None,
         })
     }
 
@@ -2524,6 +2644,10 @@ impl PaneRuntime {
             preserve_processes_on_drop: false,
             detect_handle,
             output_tee,
+            // Handoff-resume: the resumed runtime is always a
+            // `LocalChild`-backed pane, never remote (RT-F: federated panes
+            // are excluded from warm handoff, P9 scope).
+            relayed_agent_status_tx: None,
         })
     }
 
@@ -2684,6 +2808,16 @@ impl PaneRuntime {
 
     pub fn detection_text(&self) -> String {
         self.terminal.detection_text()
+    }
+
+    /// Sender for relaying a remote's foreground-process-equivalent
+    /// `AgentStatus` into this pane's detection loop (P6). `None` for
+    /// locally-spawned runtimes (which already have a real process to
+    /// probe); `Some` only for `spawn_remote`-constructed runtimes. Dormant
+    /// until a live federation call site (P8/P9) drives it from
+    /// `remote::federation::reducer::RemoteMirror::apply_agent_status`.
+    pub(crate) fn relayed_agent_status_sender(&self) -> Option<mpsc::Sender<AgentStatus>> {
+        self.relayed_agent_status_tx.clone()
     }
 
     pub fn terminal_title(&self) -> Option<String> {
@@ -2987,6 +3121,7 @@ impl PaneRuntime {
                 preserve_processes_on_drop: true,
                 detect_handle: tokio::spawn(async {}).abort_handle(),
                 output_tee: broadcast::channel::<Bytes>(OUTPUT_TEE_CAPACITY).0,
+                relayed_agent_status_tx: None,
             },
             rx,
         )
@@ -3450,6 +3585,7 @@ mod tests {
             preserve_processes_on_drop: true,
             detect_handle: tokio::spawn(async {}).abort_handle(),
             output_tee: broadcast::channel::<Bytes>(OUTPUT_TEE_CAPACITY).0,
+            relayed_agent_status_tx: None,
         };
 
         assert!(runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
@@ -3482,6 +3618,7 @@ mod tests {
             preserve_processes_on_drop: true,
             detect_handle: tokio::spawn(async {}).abort_handle(),
             output_tee: broadcast::channel::<Bytes>(OUTPUT_TEE_CAPACITY).0,
+            relayed_agent_status_tx: None,
         };
 
         assert!(!runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
@@ -4306,5 +4443,95 @@ mod remote_spawn_tests {
         assert!(remote_runtime.duplicate_handoff_fd().is_err());
         assert!(remote_runtime.pause_handoff_reader(std::time::Duration::from_millis(10)).is_ok());
         remote_runtime.set_handoff_reader_paused(false);
+    }
+
+    // Phase 06 test 2 (requirement 1/2, E2E through pane.rs): feeding a
+    // relayed `AgentStatus` into a remote pane's dormant channel updates
+    // the pane's published detection state — with `child_pid` staying 0 for
+    // the runtime's whole life, so `probe_foreground_process` (which reads
+    // that pid) is structurally never invoked for this update.
+    #[tokio::test]
+    async fn relayed_agent_status_updates_detection_state_without_any_local_probe() {
+        let (remote_runtime, _output_tx, _out_rx, mut events_rx) =
+            spawn_test_remote_pane("term_1", 1);
+
+        // Structural half of the assertion: a remote-backed runtime never
+        // acquires a local pid to probe.
+        assert_eq!(remote_runtime.child_pid.load(Ordering::Acquire), 0);
+
+        let sender = remote_runtime
+            .relayed_agent_status_sender()
+            .expect("spawn_remote runtimes must expose a relay sender");
+        sender.send(AgentStatus::Working).await.unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(200), events_rx.recv())
+            .await
+            .expect("relayed status must publish a StateChanged event")
+            .expect("sender still alive");
+        assert!(matches!(
+            event,
+            AppEvent::StateChanged {
+                state: AgentState::Working,
+                visible_working: true,
+                visible_blocker: false,
+                ..
+            }
+        ));
+
+        // `child_pid` is still 0 after the relayed update — the process
+        // probe path was never exercised.
+        assert_eq!(remote_runtime.child_pid.load(Ordering::Acquire), 0);
+    }
+
+    // Locally-spawned (non-remote) runtimes have no relay sender at all —
+    // there is nothing to suppress a probe for; they have a real process.
+    #[test]
+    fn local_runtime_has_no_relayed_agent_status_sender() {
+        let local = PaneRuntime::test_with_channel(80, 24).0;
+        assert!(local.relayed_agent_status_sender().is_none());
+    }
+}
+
+/// Phase 06 (agent-status relay): pure mapping + cadence-gate tests, plus
+/// the reducer's own coverage in `remote::federation::reducer`.
+#[cfg(test)]
+mod agent_status_relay_tests {
+    use super::*;
+
+    // Phase 06 requirement 1: relayed `AgentStatus` maps onto the local
+    // `AgentState` vocabulary; `Done` collapses to `Idle` (no local
+    // "finished" state) and `Unknown` never claims a stronger signal than
+    // the source gave.
+    #[test]
+    fn relayed_status_maps_onto_local_agent_state() {
+        assert_eq!(map_relayed_agent_status(AgentStatus::Idle), AgentState::Idle);
+        assert_eq!(map_relayed_agent_status(AgentStatus::Done), AgentState::Idle);
+        assert_eq!(map_relayed_agent_status(AgentStatus::Working), AgentState::Working);
+        assert_eq!(map_relayed_agent_status(AgentStatus::Blocked), AgentState::Blocked);
+        assert_eq!(map_relayed_agent_status(AgentStatus::Unknown), AgentState::Unknown);
+    }
+
+    // Phase 06 test 5 (S12.2 cadence): of N remote panes with only one
+    // visible, only that one's relay gate reports active.
+    #[test]
+    fn only_the_visible_pane_has_an_active_relay_gate() {
+        let mut gate = RemoteAgentStatusGate::new();
+        let visible = PaneId::from_raw(1);
+        let hidden_a = PaneId::from_raw(2);
+        let hidden_b = PaneId::from_raw(3);
+
+        // Default: nothing is active until explicitly marked visible.
+        assert!(!gate.is_active(visible));
+        assert!(!gate.is_active(hidden_a));
+        assert!(!gate.is_active(hidden_b));
+
+        gate.set_visible(visible, true);
+        assert!(gate.is_active(visible));
+        assert!(!gate.is_active(hidden_a));
+        assert!(!gate.is_active(hidden_b));
+
+        // Switching visibility away deactivates it again.
+        gate.set_visible(visible, false);
+        assert!(!gate.is_active(visible));
     }
 }
