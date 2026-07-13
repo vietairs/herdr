@@ -252,12 +252,12 @@ where
                 }
             }
             _ = event_ticker.tick() => {
-                if !poll_events(&host, &mut event_cursor, &out_tx) {
+                if !poll_events(&*host, &mut event_cursor, &out_tx) {
                     break Ok(());
                 }
             }
             _ = agent_status_ticker.tick() => {
-                if !poll_agent_statuses(&host, &mut last_agent_statuses, &out_tx) {
+                if !poll_agent_statuses(&*host, &mut last_agent_statuses, &out_tx) {
                     break Ok(());
                 }
             }
