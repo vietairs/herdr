@@ -533,3 +533,23 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   `tokio::process::Command` SSH dial; not in P8's declared file list but a mechanical, zero-risk additive
   Cargo feature flag necessary for the phase's own requirement 2 to compile as real (not stubbed) code.
   Reversibility: trivial, additive dependency feature.
+
+- What: P9 Priority 1 — closed GAP #1. Added `FederationHost::drain_internal_events` (default no-op)
+  and an `AppFederationHost` impl that locks `app`, drains up to 256 pending `AppEvent`s per tick via
+  `event_rx.try_recv()`, and applies each via the existing `pub(crate) App::handle_internal_event`
+  (`app/api.rs:60`) — the same call `HeadlessServer::handle_internal_event_with_forwarding` makes,
+  minus client-forwarding (sound/clipboard/prefix-input relay), which has no meaning for a
+  `federation-serve` process with no attached interactive client. Wired into `serve::run`'s existing
+  `event_ticker` arm, before `poll_events`, so a drained event's `EventHub` push is visible in the
+  same tick. Proved with a new test driving a REAL `App` (not `FixtureHost`) through the real
+  `serve::run` protocol handler over an in-memory duplex: sends `AppEvent::PaneDied` via
+  `app.event_tx`, asserts a `pane.exited` `Frame` arrives on the federation event stream.
+  Why: `AppFederationHost::boot()` built a real `App` but nothing drove its `event_rx` (documented gap
+  in the P8 entry above); this closes it without needing `HeadlessServer`'s render/client-forwarding
+  machinery, which does not apply to a headless federation host.
+  Evidence: `src/remote/federation/serve.rs` `drain_internal_events`,
+  `gap1_app_event_drain_tests::a_real_app_event_reaches_the_federation_event_stream` (passes,
+  appn-ltu-vm-100). Full suite: `cargo test -- --test-threads=4` → 2830 passed/0 failed (was 2829/0 +
+  this 1 new test), no hang. `cargo clippy --all-targets` clean in touched files.
+  Reversibility: additive/isolated — one new trait method (default no-op), one impl, one call site,
+  one test module; trivial to revert.
