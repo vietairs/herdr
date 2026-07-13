@@ -713,6 +713,10 @@ mod gap1_app_event_drain_tests {
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
 
+        // Same non-Send/Sync situation as `run_federation_serve_over_stdio`'s
+        // own `Arc::new(AppFederationHost::boot())` — never handed to
+        // `tokio::spawn`, only driven via `tokio::join!` on this one task.
+        #[allow(clippy::arc_with_non_send_sync)]
         let host = Arc::new(AppFederationHost {
             server_instance_id: ServerInstanceId("gap1-test".to_string()),
             event_hub: event_hub.clone(),
