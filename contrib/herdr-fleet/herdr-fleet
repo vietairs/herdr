@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# herdr-fleet — surface agents from a local + remote herdr servers in ONE local sidebar.
+#
+# herdr has no built-in multi-server federation: each server (local or reached
+# via `herdr --remote`) is standalone. This helper works around that by (a)
+# aggregating every server's `herdr agent list` into one table, and (b) "pulling"
+# a remote agent into a LOCAL herdr pane via `ssh -t host herdr agent attach`.
+# `herdr agent start <name> -- <argv>` labels that pane as an agent named
+# <host>:<agent>, so it appears in your local sidebar by construction.
+#
+# Fidelity caveat: the pulled pane's rich status/session-resume live on the
+# REMOTE server; locally it is a labelled attach pane (screen detection may
+# refine the label). See README.md.
+set -euo pipefail
+
+HOSTS_FILE="${HERDR_FLEET_HOSTS:-$HOME/.config/herdr-fleet/hosts}"
+SSH="${HERDR_FLEET_SSH:-ssh}"
+# Defensive: never let the local server's socket env leak over the ssh hop.
+REMOTE_ENV_GUARD="env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH"
+
+die() { printf 'herdr-fleet: %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+have jq   || die "jq is required (brew install jq)"
+have herdr || die "herdr binary not found on PATH"
+
+usage() {
+  cat <<'EOF'
+herdr-fleet — one sidebar for agents across local + remote herdr servers
+
+USAGE
+  herdr-fleet list [host...]              Aggregate agents from all (or named) hosts
+  herdr-fleet pull <host> [target] [opts] Open a local pane attached to a remote agent
+  herdr-fleet board [host...] [opts]      Pull EVERY agent from the hosts into one workspace
+  herdr-fleet hosts                       Show configured hosts
+
+pull/board options:
+  -w, --workspace <id>   Target workspace for the new pane(s)
+      --split <right|down> Split direction (default: right)
+      --focus            Focus the new pane (default: no-focus)
+      --label <text>     Workspace label for `board` (default: fleet)
+  -n, --dry-run          Print the herdr commands instead of running them
+
+HOSTS FILE ($HERDR_FLEET_HOSTS, default ~/.config/herdr-fleet/hosts)
+  One ssh alias per line. The literal word `local` (or `localhost` handled as
+  local) means this machine's herdr server with no ssh hop. `#` starts a comment.
+    local
+    gpu-ml
+    build-box
+EOF
+}
+
+# --- host plumbing --------------------------------------------------------
+
+read_hosts() {
+  [ -f "$HOSTS_FILE" ] || return 0
+  # strip comments/blank lines
+  sed 's/#.*//' "$HOSTS_FILE" | awk 'NF'
+}
+
+is_local() { [ "$1" = "local" ] || [ "$1" = "localhost" ]; }
+
+# Run a herdr subcommand against a host (local => no ssh). Args are the herdr args.
+herdr_on() {
+  local host="$1"; shift
+  if is_local "$host"; then
+    herdr "$@"
+  else
+    # shellcheck disable=SC2029  # intentional client-side expansion of "$@"
+    $SSH "$host" "$REMOTE_ENV_GUARD herdr $*"
+  fi
+}
+
+# Emit the agents of one host as a JSON array, each element annotated with .host.
+agents_json() {
+  local host="$1" raw
+  if ! raw="$(herdr_on "$host" agent list 2>/dev/null)"; then
+    printf '[]'; return 0
+  fi
+  printf '%s' "$raw" | jq --arg h "$host" \
+    '(.result.agents // []) | map(. + {host:$h})' 2>/dev/null || printf '[]'
+}
+
+# --- commands -------------------------------------------------------------
+
+cmd_hosts() {
+  local hs; hs="$(read_hosts)"
+  [ -n "$hs" ] || die "no hosts configured. Add ssh aliases (one per line) to $HOSTS_FILE"
+  printf '%s\n' "$hs"
+}
+
+cmd_list() {
+  local hosts=("$@")
+  if [ "${#hosts[@]}" -eq 0 ]; then
+    mapfile -t hosts < <(read_hosts)
+  fi
+  [ "${#hosts[@]}" -gt 0 ] || die "no hosts. Pass some as args or configure $HOSTS_FILE"
+
+  local all='[]' h
+  for h in "${hosts[@]}"; do
+    all="$(jq -c --argjson a "$(agents_json "$h")" '. + $a' <<<"$all")"
+  done
+
+  local n; n="$(jq 'length' <<<"$all")"
+  if [ "$n" -eq 0 ]; then echo "no agents found across: ${hosts[*]}"; return 0; fi
+
+  { printf 'HOST\tAGENT\tSTATUS\tWS\tTARGET\tCWD\n'
+    jq -r '.[] | [
+      .host,
+      (.agent // .name // "?"),
+      (.agent_status // "?"),
+      (.workspace_id // "?"),
+      (.pane_id // .terminal_id // "?"),
+      (.foreground_cwd // .cwd // "")
+    ] | @tsv' <<<"$all"
+  } | column -t -s$'\t'
+}
+
+# Resolve options shared by pull/board.
+SPLIT="right"; FOCUS="--no-focus"; WORKSPACE=""; DRYRUN=0; BOARD_LABEL="fleet"
+parse_opts() {
+  REST=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -w|--workspace) WORKSPACE="$2"; shift 2;;
+      --split) SPLIT="$2"; shift 2;;
+      --focus) FOCUS="--focus"; shift;;
+      --label) BOARD_LABEL="$2"; shift 2;;
+      -n|--dry-run) DRYRUN=1; shift;;
+      --) shift; while [ "$#" -gt 0 ]; do REST+=("$1"); shift; done;;
+      -*) die "unknown option: $1";;
+      *) REST+=("$1"); shift;;
+    esac
+  done
+}
+
+# Build the argv that a local pane runs to attach to <host>:<target>.
+attach_argv() {
+  local host="$1" target="$2"
+  if is_local "$host"; then
+    printf 'herdr agent attach %q --takeover' "$target"
+  else
+    # -t forces a remote PTY so `herdr agent attach` gets a terminal to render into.
+    printf '%s -t %q %s herdr agent attach %q --takeover' \
+      "$SSH" "$host" "$REMOTE_ENV_GUARD" "$target"
+  fi
+}
+
+run_or_echo() {
+  if [ "$DRYRUN" -eq 1 ]; then printf 'DRY: %s\n' "$*"; else eval "$*"; fi
+}
+
+# Start a local pane attached to one remote agent.
+pull_one() {
+  local host="$1" target="$2"
+  local label="${host}:${target}" argv ws_args=""
+  argv="$(attach_argv "$host" "$target")"
+  [ -n "$WORKSPACE" ] && ws_args="--workspace $WORKSPACE"
+  run_or_echo "herdr agent start $(printf '%q' "$label") $ws_args --split $SPLIT $FOCUS -- $argv"
+}
+
+cmd_pull() {
+  parse_opts "$@"
+  local host="${REST[0]:-}" target="${REST[1]:-}"
+  [ -n "$host" ] || die "usage: herdr-fleet pull <host> [target]"
+  if [ -z "$target" ]; then
+    local aj; aj="$(agents_json "$host")"
+    [ "$(jq 'length' <<<"$aj")" -gt 0 ] || die "no agents on host '$host'"
+    if have fzf; then
+      target="$(jq -r '.[] | "\(.pane_id // .terminal_id)\t\(.agent) [\(.agent_status)] \(.foreground_cwd // .cwd)"' <<<"$aj" \
+        | fzf --with-nth=2.. --delimiter='\t' --prompt="pull ${host} agent> " | cut -f1)"
+      [ -n "$target" ] || die "no selection"
+    else
+      echo "agents on $host (pass one as target):" >&2
+      jq -r '.[] | "  \(.pane_id // .terminal_id)\t\(.agent) [\(.agent_status)]"' <<<"$aj" | column -t -s$'\t' >&2
+      die "target required (or install fzf for a picker)"
+    fi
+  fi
+  pull_one "$host" "$target"
+}
+
+cmd_board() {
+  parse_opts "$@"
+  local hosts=("${REST[@]}")
+  if [ "${#hosts[@]}" -eq 0 ]; then mapfile -t hosts < <(read_hosts); fi
+  [ "${#hosts[@]}" -gt 0 ] || die "no hosts. Pass some as args or configure $HOSTS_FILE"
+
+  # One workspace holds every pulled agent.
+  if [ -z "$WORKSPACE" ] && [ "$DRYRUN" -eq 0 ]; then
+    local created
+    created="$(herdr workspace create --label "$BOARD_LABEL" --no-focus)"
+    WORKSPACE="$(jq -r '.result.workspace.workspace_id // .result.workspace_id // empty' <<<"$created")"
+    [ -n "$WORKSPACE" ] || die "could not create board workspace (got: $created)"
+    echo "board workspace: $WORKSPACE ($BOARD_LABEL)"
+  fi
+
+  local h aj cnt=0
+  for h in "${hosts[@]}"; do
+    aj="$(agents_json "$h")"
+    while IFS= read -r t; do
+      [ -n "$t" ] || continue
+      pull_one "$h" "$t"; cnt=$((cnt+1))
+    done < <(jq -r '.[] | (.pane_id // .terminal_id)' <<<"$aj")
+  done
+  echo "pulled $cnt agent(s) into workspace ${WORKSPACE:-<dry-run>}"
+}
+
+# --- dispatch -------------------------------------------------------------
+
+case "${1:-}" in
+  list)  shift; cmd_list "$@";;
+  pull)  shift; cmd_pull "$@";;
+  board) shift; cmd_board "$@";;
+  hosts) shift; cmd_hosts "$@";;
+  ""|-h|--help|help) usage;;
+  *) die "unknown command: $1 (try: herdr-fleet --help)";;
+esac
