@@ -669,6 +669,24 @@
           ]
         },
         {
+          "key": "ui.sidebar.agents.rows",
+          "type": "list of token rows",
+          "default": "[[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]",
+          "description": "Default expanded Agent sidebar layout. Supports built-in tokens and $name metadata tokens; at most 16 rows and 16 tokens per row."
+        },
+        {
+          "key": "ui.sidebar.agents.rows_by_agent",
+          "type": "table of token rows",
+          "default": "{}",
+          "description": "Complete Agent-row overrides keyed by strict canonical agent id. Agents without an override use ui.sidebar.agents.rows."
+        },
+        {
+          "key": "ui.sidebar.spaces.rows",
+          "type": "list of token rows",
+          "default": "[[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]",
+          "description": "Expanded Space sidebar layout. Supports built-in tokens and $name metadata tokens; at most 16 rows and 16 tokens per row."
+        },
+        {
           "key": "ui.accent",
           "type": "color",
           "default": "\"cyan\"",

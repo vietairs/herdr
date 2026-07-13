@@ -325,6 +325,29 @@ accent = "cyan"
 
 エージェントパネルはすべてのスペースをまたいですべてのエージェントを表示します。`agent_panel_sort` には `spaces` または `priority` を指定できます。`workspaces` は `spaces` のエイリアスとして受け付けられます。デフォルトは `spaces` で、エージェントをスペース順にグループ化したまま保ちます。`priority` は注意の優先度順に並べます: blocked、done、working、idle、そして unknown です。同じステータス内では、最近状態が変わったエージェントが先に表示されます。
 
+展開されたサイドバーの行は、順序付きトークンとして設定できます:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace", "tab"], ["agent"]]
+
+[ui.sidebar.agents.rows_by_agent]
+claude = [
+  ["state_icon", "workspace", "tab"],
+  ["terminal_title_stripped"],
+  ["agent"],
+]
+
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["branch", "git_status", "$jj_status"]]
+```
+
+`rows` はエージェントのデフォルトレイアウトです。`rows_by_agent` は、一致する既知のエージェントについてレイアウト全体を置き換えます。キーには `claude`、`codex`、`pi` など、大文字と小文字を区別する Herdr の正規エージェント ID を使います。`claude-code` などの検出用エイリアスは使用できません。オーバーライドがないエージェントと、独自に報告されたエージェントには `rows` が使われます。
+
+各サイドバーレイアウトは最大 16 行、各行は最大 16 トークンです。
+
+エージェントの組み込みトークンは `state_icon`、`state_text`、`workspace`、`tab`、`pane`、`agent`、`terminal_title`、`terminal_title_stripped` です。2 つのターミナルタイトル用トークンは任意で、デフォルト行には含まれません。`terminal_title` は、安全性のための正規化を行った最新の OSC 0/2 ターミナルタイトルです。`terminal_title_stripped` はさらに、先頭にある認識済みのアクティビティまたはスピナーのグリフ 1 つと、それに続く空白を除去します。スペースの組み込みトークンは `state_icon`、`state_text`、`workspace`、`branch`、`git_status` です。`$` で始まる名前は、スクリプトやプラグインが報告した任意の表示メタデータを参照します。値がないトークンと区切りは表示されず、空の行は折りたたまれます。これらの設定は展開されたデスクトップサイドバーだけに適用され、折りたたみ表示とモバイル表示はコンパクトなままです。
+
 `confirm_close` はワークスペースを閉じるときに確認を求めるかどうかを制御します。`prompt_new_tab_name` は新しいタブで先にラベルを尋ねるかどうかを制御します。
 
 URL の command+クリックなど、通常のクリックをターミナルに処理させたい場合は `mouse_capture = false` を設定してください。マウスキャプチャが有効な場合、ターミナルが修飾キー付きクリックを Herdr に送れば、Ctrl+クリックでペインのリンクを開けます。これは macOS も含みます。Herdr がマウス入力をキャプチャしている間、Cmd+クリックは通常のクリックと区別して報告されません。ターミナルネイティブのバイパス経路には、Linux では Shift+Ctrl+クリック、macOS では Shift+Cmd+クリックを使ってください。
