@@ -761,3 +761,185 @@ fn terminal_agent_session_info(
             value: session.session_ref.value.clone(),
         })
 }
+
+#[cfg(test)]
+mod federation_materialization_tests {
+    use super::*;
+    use crate::api::schema::common::AgentStatus;
+    use crate::api::schema::session::SessionSnapshot;
+    use crate::api::schema::{PaneInfo as RemotePaneInfo, TabInfo as RemoteTabInfo, WorkspaceInfo};
+    use crate::remote::federation::id::{HostKey, ServerInstanceId};
+    use crate::remote::federation::protocol::{EventCursor, TerminalChannelMessage};
+    use crate::ui::sidebar::{federation_origin_badge, workspace_federation_origin};
+
+    fn test_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
+
+    fn mount(generation: u64) -> Mount {
+        Mount {
+            host_key: HostKey::new("alice@10.0.0.1", "s1"),
+            server_instance_id: ServerInstanceId("inst-a".to_string()),
+            mount_generation: generation,
+        }
+    }
+
+    fn workspace_info() -> WorkspaceInfo {
+        WorkspaceInfo {
+            workspace_id: "w1".to_string(),
+            number: 1,
+            label: "remote workspace".to_string(),
+            focused: false,
+            pane_count: 2,
+            tab_count: 1,
+            active_tab_id: "w1-tab".to_string(),
+            agent_status: AgentStatus::Idle,
+            tokens: Default::default(),
+            worktree: None,
+        }
+    }
+
+    fn tab_info() -> RemoteTabInfo {
+        RemoteTabInfo {
+            tab_id: "w1-tab".to_string(),
+            workspace_id: "w1".to_string(),
+            number: 1,
+            label: "remote tab".to_string(),
+            focused: false,
+            pane_count: 2,
+            agent_status: AgentStatus::Idle,
+        }
+    }
+
+    fn pane_info(pane_id: &str, terminal_id: &str) -> RemotePaneInfo {
+        RemotePaneInfo {
+            pane_id: pane_id.to_string(),
+            terminal_id: terminal_id.to_string(),
+            workspace_id: "w1".to_string(),
+            tab_id: "w1-tab".to_string(),
+            focused: false,
+            cwd: Some("/home/alice/project".to_string()),
+            foreground_cwd: None,
+            label: Some("remote pane".to_string()),
+            agent: None,
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            display_agent: None,
+            agent_status: AgentStatus::Idle,
+            state_labels: Default::default(),
+            tokens: Default::default(),
+            agent_session: None,
+            scroll: None,
+            revision: 0,
+        }
+    }
+
+    fn two_pane_snapshot() -> SessionSnapshot {
+        SessionSnapshot {
+            version: "0.0.0-test".to_string(),
+            protocol: 1,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: vec![workspace_info()],
+            tabs: vec![tab_info()],
+            panes: vec![pane_info("p1", "t1"), pane_info("p2", "t2")],
+            layouts: Vec::new(),
+            agents: Vec::new(),
+        }
+    }
+
+    // Core acceptance criterion: a successful mount materializes into real
+    // rendered Workspace/Tab/Pane entries (remote-backed via spawn_remote),
+    // and the RT-F8 origin badge / per-host grouping — which classify purely
+    // from `Workspace::id`'s `r:<host_key>:` prefix (ui::sidebar) — pick the
+    // materialized workspace up correctly.
+    #[tokio::test]
+    async fn successful_mount_materializes_into_rendered_workspace_tab_and_two_panes() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed against a loopback-shaped snapshot");
+
+        assert_eq!(created.len(), 1, "exactly one remote workspace was mounted");
+        let ws_idx = created[0];
+        let ws = &app.state.workspaces[ws_idx];
+
+        // RT-F8/S11.4: badge + grouping key off `Workspace::id`'s namespace,
+        // never off `custom_name` — assert both actually fire for the
+        // materialized workspace.
+        assert!(ws.id.starts_with("r:alice@10.0.0.1#s1:"));
+        assert!(workspace_federation_origin(ws).is_some());
+        assert!(federation_origin_badge(ws)
+            .expect("materialized workspace must carry the remote badge")
+            .contains("alice@10.0.0.1#s1"));
+        assert_eq!(
+            ws.worktree_space.as_ref().map(|space| space.key.as_str()),
+            Some("federation:alice@10.0.0.1#s1")
+        );
+
+        assert_eq!(ws.tabs.len(), 1, "one remote tab materialized");
+        let tab = &ws.tabs[0];
+        assert_eq!(tab.panes.len(), 2, "both remote panes materialized (root + split)");
+
+        // Every materialized pane's attached terminal is reachable in both
+        // App-level maps a real pane needs (mirrors what
+        // create_tab_with_options/create_workspace_with_launch_env do for a
+        // local pane).
+        for pane in tab.panes.values() {
+            let terminal_id = &pane.attached_terminal_id;
+            assert!(app.state.terminals.contains_key(terminal_id));
+            assert!(app.terminal_runtimes.contains_key(terminal_id));
+        }
+
+        // The router opened a federation Terminal channel for each pane
+        // under the RAW (un-namespaced) remote terminal id, not the local
+        // public one — this is what re-registers correctly when the wire
+        // sends `Output` back for it.
+        out_rx.close();
+        let mut opened_raw_ids = Vec::new();
+        while let Ok(msg) = out_rx.try_recv() {
+            if let FederationMessage::Terminal(TerminalChannelMessage::Open { terminal_id, .. }) =
+                msg
+            {
+                opened_raw_ids.push(terminal_id);
+            }
+        }
+        opened_raw_ids.sort();
+        assert_eq!(opened_raw_ids, vec!["t1".to_string(), "t2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn materializing_an_empty_mirror_creates_nothing() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mirror = RemoteMirror::new(mount);
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materializing an empty mirror must not error");
+
+        assert!(created.is_empty());
+        assert!(app.state.workspaces.is_empty());
+    }
+}
