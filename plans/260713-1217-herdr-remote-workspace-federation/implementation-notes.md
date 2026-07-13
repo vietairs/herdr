@@ -425,3 +425,30 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   Evidence: `remote/federation/mod.rs` docs section: "Trust model (P7 — read before adding a new
   ingestion field)".
   Reversibility: trivial — a doc comment; no behavior change.
+
+- What: P7's own new test `client::tests::oversized_clipboard_frame_is_rejected_by_the_shared_codec_
+  not_a_bypass` deadlocked the whole suite (`cargo test` never printed `test result:` for the main lib
+  binary). Fixed by sizing the test's `tokio::io::duplex` buffer off the actual `codec::encode`d frame
+  length instead of the raw payload length.
+  Why (root cause, proven not assumed): the test writes a 16 MiB+1 `Vec<u8>` `ClipboardMessage` through
+  `write_frame`, but `codec::encode` uses `serde_json`, which serializes a raw `Vec<u8>` as a numeric
+  JSON array (`[0,0,...]`, ~2 bytes/element) — the encoded frame is ~33.5 MB, roughly 2x the raw payload
+  it sized the duplex buffer against (~17 MB). `write_frame`'s `writer.write_all(&frame).await` therefore
+  blocked forever waiting for buffer space, because the test's `read_frame(&mut client_reader)` call
+  (the only thing that would drain the duplex) runs *after* `write_frame` returns in the same task —
+  never concurrently. This is the exact JSON-bloat effect P1 already flagged as a follow-up
+  ("raw terminal Output/Input bytes JSON-bloat ~4x") biting a P7 test that (unlike P1's own terminal-byte
+  tests) drives a full-size (16 MiB) payload through the JSON codec for the first time. Not a production
+  deadlock: no production code path constructs an in-memory duplex sized off a raw payload length: this
+  bug was 100% contained to the test's own fixture setup.
+  Evidence: local reasoning confirmed on the remote runner — `timeout 180 nix develop -c cargo test
+  remote::federation:: -- --test-threads=1 --nocapture` printed every federation test up through this
+  one's name with no trailing `ok`/`FAILED`, then hung past the timeout; after the fix, the same command
+  completes in 3.90s with `60 passed; 0 failed`. Full suite: `nix develop -c cargo test -- --test-threads=4`
+  now completes (previously hung indefinitely) — `2622 passed; 0 failed` (main lib bin) + 9 integration
+  binaries (188 more passed, 0 failed) = 2810/0 total, no hang. `cargo clippy --all-targets` shows zero
+  warnings in the touched file (`client.rs`).
+  Reversibility: trivial, test-only — one buffer-sizing expression changed
+  (`Channel::Clipboard.max_len() + 1_048_576` -> `frame.len() + 1_048_576`); no production file touched,
+  P7's bounded-clipboard-channel security property (`try_send`, `CLIPBOARD_CHANNEL_CAPACITY`) is
+  completely unchanged. Commit 05ab278.
