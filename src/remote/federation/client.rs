@@ -398,7 +398,13 @@ mod tests {
         let (duplex, _server) = LoopbackFederationServer::spawn(host);
         let (reader, writer) = tokio::io::split(duplex);
 
-        let client = FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new());
+        // `agreed_capabilities` is the *intersection* of local and remote
+        // capabilities (`negotiate`) — advertise SCROLLBACK_REPLAY locally
+        // too, matching what `FixtureHost` advertises, so the assertion
+        // below actually exercises a non-empty agreed set.
+        let local_capabilities: BTreeSet<Capability> =
+            [Capability::new(Capability::SCROLLBACK_REPLAY)].into();
+        let client = FederationClient::new(host_key(), local_capabilities, BTreeSet::new());
         let mut mounted = client.connect_and_mount(reader, writer).await.unwrap();
         assert!(mounted
             .agreed_capabilities
