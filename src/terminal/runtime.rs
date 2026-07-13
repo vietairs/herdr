@@ -449,6 +449,13 @@ impl TerminalRuntime {
     pub(crate) fn current_size(&self) -> (u16, u16) {
         self.0.current_size()
     }
+
+    /// Raw-byte tee at the `on_read` source (see `pane::PaneRuntime::subscribe_output_bytes`).
+    /// Consumed by `remote::federation::serve`; additive, no-op for every
+    /// other caller.
+    pub(crate) fn subscribe_output_bytes(&self) -> tokio::sync::broadcast::Receiver<Bytes> {
+        self.0.subscribe_output_bytes()
+    }
 }
 
 #[cfg(test)]
@@ -476,6 +483,10 @@ impl TerminalRuntime {
 
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
         self.0.test_process_pty_bytes(bytes);
+    }
+
+    pub(crate) fn test_process_pty_bytes_and_tee(&self, bytes: &[u8]) {
+        self.0.test_process_pty_bytes_and_tee(bytes);
     }
 
     pub(crate) fn test_with_scrollback_bytes(

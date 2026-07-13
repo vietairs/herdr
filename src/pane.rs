@@ -13,7 +13,7 @@ use portable_pty::{native_pty_system, PtySize};
 use ratatui::{layout::Rect, Frame};
 #[cfg(test)]
 use tokio::sync::watch;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{broadcast, mpsc, Notify};
 #[cfg(not(windows))]
 use tracing::debug;
 use tracing::{error, info, warn};
@@ -919,7 +919,20 @@ pub struct PaneRuntime {
     preserve_processes_on_drop: bool,
     // Task handles for deterministic shutdown
     detect_handle: tokio::task::AbortHandle,
+    // Broadcast tee of raw PTY bytes, forked at the `on_read` source (the
+    // exact bytes `process_pty_bytes` consumes). Additive: dormant unless a
+    // federation channel subscribes (`subscribe_output_bytes`); a `send`
+    // with zero subscribers is a cheap no-op and never perturbs the local
+    // render path. See `remote::federation::tee`.
+    output_tee: broadcast::Sender<Bytes>,
 }
+
+/// Capacity (in messages, not bytes) of each pane's raw-output broadcast
+/// tee. Sized generously so a federation consumer reading slightly slower
+/// than the PTY produces bytes does not immediately lag; a consumer that
+/// falls further behind than this observes `RecvError::Lagged` and must
+/// treat it as a gap (never silently missed).
+const OUTPUT_TEE_CAPACITY: usize = 4096;
 
 enum PaneRuntimeIo {
     Actor(PtyIoActorHandle),
@@ -1714,10 +1727,12 @@ impl PaneRuntime {
         let reported_cwd = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let (output_tee, _) = broadcast::channel::<Bytes>(OUTPUT_TEE_CAPACITY);
 
         let io = {
             let terminal = terminal.clone();
             let response_writer = response_tx.clone();
+            let output_tee = output_tee.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let detection_content_seq = detection_content_seq.clone();
@@ -1731,6 +1746,11 @@ impl PaneRuntime {
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 observe_detection_content_change(bytes, &detection_content_seq);
+                // Fork the exact bytes just consumed to any federation
+                // subscribers. `send` errors when there are zero
+                // subscribers (the common case) — ignored, no perturbation
+                // of the local render path either way.
+                let _ = output_tee.send(Bytes::copy_from_slice(bytes));
                 if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                     render_notify.notify_one();
                 }
@@ -1799,6 +1819,7 @@ impl PaneRuntime {
             pending_release,
             preserve_processes_on_drop: true,
             detect_handle,
+            output_tee,
         })
     }
 
@@ -1848,6 +1869,7 @@ impl PaneRuntime {
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let (output_tee, _) = broadcast::channel::<Bytes>(OUTPUT_TEE_CAPACITY);
         {
             let child_pid = child_pid.clone();
             let child_wait_completed = child_wait_completed.clone();
@@ -1884,11 +1906,15 @@ impl PaneRuntime {
             let events = events.clone();
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
+            let output_tee = output_tee.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
                 let shell_pid = child_pid.load(Ordering::Acquire);
                 let result =
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 observe_detection_content_change(bytes, &detection_content_seq);
+                // See the sibling `from_handoff_fd` on_read: forks raw bytes
+                // to any federation subscribers, no-op when none exist.
+                let _ = output_tee.send(Bytes::copy_from_slice(bytes));
                 if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                     render_notify.notify_one();
                 }
@@ -2307,6 +2333,7 @@ impl PaneRuntime {
             pending_release,
             preserve_processes_on_drop: false,
             detect_handle,
+            output_tee,
         })
     }
 
@@ -2341,6 +2368,15 @@ impl PaneRuntime {
     pub(crate) fn current_size(&self) -> (u16, u16) {
         let (rows, cols, _, _) = self.current_size.get();
         (rows, cols)
+    }
+
+    /// Subscribe to the raw-byte tee attached at the `on_read` source: the
+    /// exact bytes `process_pty_bytes` consumes, not rendered frames. Used
+    /// by federation (`herdr federation-serve`) to fork PTY output without
+    /// taking over the single-writer render/attach path. Multiple
+    /// subscribers may coexist with the local render path.
+    pub(crate) fn subscribe_output_bytes(&self) -> broadcast::Receiver<Bytes> {
+        self.output_tee.subscribe()
     }
 
     /// Resize if the dimensions actually changed.
@@ -2708,6 +2744,15 @@ impl PaneRuntime {
         let _ = self.terminal.process_pty_bytes(self.pane_id, 0, bytes, &tx);
     }
 
+    /// Test-only stand-in for the `on_read` seam: drives both the terminal
+    /// parser (as `test_process_pty_bytes` does) and the raw-byte tee, so
+    /// federation loopback tests can assert the tee delivers the exact bytes
+    /// the local grid consumed (CX-4 raw-vs-rendered fidelity).
+    pub(crate) fn test_process_pty_bytes_and_tee(&self, bytes: &[u8]) {
+        self.test_process_pty_bytes(bytes);
+        let _ = self.output_tee.send(Bytes::copy_from_slice(bytes));
+    }
+
     pub(crate) fn test_with_scrollback_bytes(
         cols: u16,
         rows: u16,
@@ -2751,6 +2796,7 @@ impl PaneRuntime {
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
                 detect_handle: tokio::spawn(async {}).abort_handle(),
+                output_tee: broadcast::channel::<Bytes>(OUTPUT_TEE_CAPACITY).0,
             },
             rx,
         )

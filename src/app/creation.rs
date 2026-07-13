@@ -440,6 +440,21 @@ impl App {
             .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
     }
 
+    /// Resolves a `terminal_id` (the same id space `AgentInfo::terminal_id`
+    /// and `resolve_terminal_target` use) straight to its `TerminalRuntime`.
+    /// Added for `remote::federation::serve` (P3): the federation raw-byte
+    /// tap and terminal input/resize routing need the runtime itself, not a
+    /// JSON-API-shaped response. Thin combinator over already-existing
+    /// `resolve_terminal_target` + `lookup_runtime_sender`; no new
+    /// resolution logic.
+    pub(crate) fn terminal_runtime_for_terminal_id(
+        &self,
+        terminal_id: &str,
+    ) -> Option<&crate::terminal::TerminalRuntime> {
+        let target = self.resolve_terminal_target(terminal_id).ok()?;
+        self.lookup_runtime_sender(target.ws_idx, target.pane_id)
+    }
+
     pub(super) fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {
         let ws = &self.state.workspaces[index];
         let (agg_state, seen) = ws.aggregate_state(&self.state.terminals);

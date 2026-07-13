@@ -80,3 +80,70 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   oracle per the phase's own req 4/TDD item 1.
   Evidence: `grep -n "PaneDied\|#\[test\]" src/pane.rs` — zero existing real-spawn PaneDied tests.
   Reversibility: additive — a real fixture test can be added later without touching this one.
+
+- What: P3 touched two files outside its stated ownership list (main.rs/pane.rs/serve.rs/tee.rs/
+  loopback.rs/mod.rs): added one `pub(crate)` accessor each to `src/app/creation.rs`
+  (`terminal_runtime_for_terminal_id`, a thin combinator over the already-`pub(crate)`
+  `resolve_terminal_target` + `lookup_runtime_sender`) and `src/terminal/runtime.rs`
+  (`subscribe_output_bytes`/`test_process_pty_bytes_and_tee`, one-line pass-throughs matching that
+  file's existing 1:1-delegate style).
+  Why: the raw-byte tap (req 5) is structurally unreachable from `remote::federation::serve` without
+  a way to resolve a `terminal_id` to its live `TerminalRuntime`; that resolution logic
+  (`resolve_terminal_target`) already exists in `app/terminal_targets.rs` but is `pub(super)`-gated
+  one level short of crate-wide, and `TerminalRuntime` had no tee-subscribe wrapper at all.
+  Duplicating pane/workspace resolution logic into `serve.rs` was rejected (YAGNI/DRY; higher blast
+  radius than two 1-line accessors).
+  Evidence: `src/app/terminal_targets.rs:41` (`pub(crate) fn resolve_terminal_target`, pre-existing,
+  `#[allow(dead_code)]`, "Staged for #00f" — untested but panic-free: filter/find only, no unwraps);
+  `src/app/creation.rs` `lookup_runtime_sender` (pre-existing, `pub(super)`).
+  Reversibility: trivial — both additions are new methods, zero changes to existing signatures/logic.
+
+- What: Federation's `terminal_id` (protocol `TerminalChannelMessage`) is mapped to the SAME
+  namespace as `AgentInfo::terminal_id` / `resolve_terminal_target` (not the pane's public
+  `pane_id`). `AppFederationHost` resolves it via `resolve_terminal_target`, not `parse_pane_id`.
+  Why: `AgentInfo` (returned by the JSON API's `AgentList`, reused for the agent-status poller)
+  already carries a `terminal_id` field distinct from pane ids; using one resolver for both raw-tap
+  and agent-status keeps the two channels addressing the same terminal consistently.
+  Evidence: `src/api/schema/agents.rs:52` `AgentInfo.terminal_id`; `src/app/terminal_targets.rs`
+  `TerminalTarget{ pane_id, terminal_id, .. }`.
+  Reversibility: isolated to `AppFederationHost`'s four lookup call sites in `serve.rs`.
+
+- What: `AppFederationHost::boot()` constructs a full session-persistence-enabled `App` (mirrors
+  `server::headless::run_server`'s construction) but does NOT drive `App`'s internal `AppEvent`
+  channel (the loop `HeadlessServer::run()` normally owns — `PaneDied`, OSC-52 clipboard writes,
+  agent-detection publish, reported-cwd). `federation-serve`'s `EventHub`/`SessionSnapshot` state
+  therefore only advances via synchronous JSON-API calls this host issues itself
+  (`SessionSnapshot`, `AgentList`) — not from async pane activity.
+  Why: reimplementing/reusing `HeadlessServer`'s dispatch loop needs either an `Arc`-shared `App`
+  handle into a running `HeadlessServer` (would require modifying `server/headless.rs`, not owned by
+  this phase) or duplicating its event-handling match arms (large, error-prone, out of scope for one
+  phase's remaining budget). The raw-byte tap itself is unaffected (tapped directly at `on_read`,
+  independent of the `AppEvent` channel) — this gap is specifically PaneDied/clipboard/agent-status
+  *event* propagation into `EventHub`, not the terminal byte stream.
+  Evidence: `src/server/headless.rs:3919` `run_server` constructs `HeadlessServer::new(app, ...)`
+  then `server.run().await` — that `run()` loop (not `App::new`) is what drains `AppEvent`.
+  Reversibility: additive gap, does not corrupt state — a follow-up (P4 integration, or a small
+  `App::drain_pending_events()` accessor) can wire this without touching this phase's files.
+  FOLLOW-UP: required before `federation-serve` is genuinely production-usable end-to-end.
+
+- What: `federation/loopback.rs` (`FixtureHost`/`LoopbackFederationServer`) is gated
+  `#[cfg(test)]` at the `mod` declaration in `federation/mod.rs`, rather than compiled
+  unconditionally as the phase file's file list literally reads.
+  Why: nothing outside test code constructs `FixtureHost`/`LoopbackFederationServer` — compiling it
+  into release builds would make every item in it `dead_code` and fail the "no new clippy warnings"
+  acceptance gate. The phase file's own prose calls it "test infra" and "usable `#[cfg(test)]` from
+  P4+", which is exactly what this gate implements.
+  Evidence: phase-03 spec, Requirements item 9 wording; `cargo clippy --all-targets` still exercises
+  it (via the `test` target), satisfying the same acceptance criterion.
+  Reversibility: trivial — remove the `#[cfg(test)]` line if a later phase needs it unconditionally.
+
+- What: `federation-serve`'s event-stream/agent-status pollers use fixed-interval polling
+  (`tokio::time::interval`, 25ms/100ms) against `FederationHost::events_after`/`agent_statuses`
+  rather than an async notify-driven push.
+  Why: keeps `FederationHost` a plain synchronous trait (no `async-trait` dependency, no `Pin<Box<dyn
+  Future>>` boilerplate) — simpler, and the added latency (single-digit-to-low-double-digit ms) is
+  far below human-perceptible terminal-output/agent-status-change cadences.
+  Evidence: `src/remote/federation/serve.rs` `POLL_INTERVAL`, `spawn_event_stream_task`,
+  `spawn_agent_status_task`.
+  Reversibility: isolated — swapping to a notify-driven design only touches those two functions plus
+  adding an async method to the trait.

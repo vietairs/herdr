@@ -7,3 +7,11 @@
 
 pub mod id;
 pub mod protocol;
+
+// `LoopbackFederationServer`/`FixtureHost` are test-only substrate (this
+// phase's own tests plus P4-P9's, per the phase file) — gated so a release
+// build never carries never-constructed fixture types as dead code.
+#[cfg(test)]
+pub(crate) mod loopback;
+pub(crate) mod serve;
+pub(crate) mod tee;
