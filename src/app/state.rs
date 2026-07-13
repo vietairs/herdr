@@ -2356,29 +2356,37 @@ mod tests {
                 .unwrap();
         }
 
-        let mut a_seen = Vec::new();
-        while let Ok(msg) = a_rx.try_recv() {
-            let FederationMessage::Terminal(
-                crate::remote::federation::protocol::TerminalChannelMessage::Input { bytes, .. },
-            ) = msg
-            else {
-                panic!("expected an Input message");
-            };
-            a_seen.push(bytes);
+        async fn recv_n(
+            rx: &mut mpsc::UnboundedReceiver<FederationMessage>,
+            n: usize,
+        ) -> Vec<Vec<u8>> {
+            let mut seen = Vec::new();
+            for _ in 0..n {
+                let msg = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+                    .await
+                    .expect("forward task must deliver every queued keystroke")
+                    .expect("channel must stay open");
+                let FederationMessage::Terminal(
+                    crate::remote::federation::protocol::TerminalChannelMessage::Input {
+                        bytes, ..
+                    },
+                ) = msg
+                else {
+                    panic!("expected an Input message");
+                };
+                seen.push(bytes);
+            }
+            seen
         }
-        let mut b_seen = Vec::new();
-        while let Ok(msg) = b_rx.try_recv() {
-            let FederationMessage::Terminal(
-                crate::remote::federation::protocol::TerminalChannelMessage::Input { bytes, .. },
-            ) = msg
-            else {
-                panic!("expected an Input message");
-            };
-            b_seen.push(bytes);
-        }
+
+        let a_seen = recv_n(&mut a_rx, 3).await;
+        let b_seen = recv_n(&mut b_rx, 3).await;
 
         assert_eq!(a_seen, vec![b"a1".to_vec(), b"a2".to_vec(), b"a3".to_vec()]);
         assert_eq!(b_seen, vec![b"b1".to_vec(), b"b2".to_vec(), b"b3".to_vec()]);
+        // No extra cross-leaked message waiting on either channel.
+        assert!(a_rx.try_recv().is_err());
+        assert!(b_rx.try_recv().is_err());
     }
 
     #[test]
