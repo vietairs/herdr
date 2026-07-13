@@ -765,6 +765,17 @@ impl App {
     }
 
     pub(crate) fn sync_focus_events(&mut self) {
+        self.sync_focus_events_with_outer_event(None);
+    }
+
+    pub(super) fn send_outer_focus_event(&mut self, event: crate::ghostty::FocusEvent) {
+        self.sync_focus_events_with_outer_event(Some(event));
+    }
+
+    fn sync_focus_events_with_outer_event(
+        &mut self,
+        outer_event: Option<crate::ghostty::FocusEvent>,
+    ) {
         let current_focus = self.state.active.and_then(|idx| {
             self.state
                 .workspaces
@@ -772,6 +783,9 @@ impl App {
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
         if current_focus == self.last_focus {
+            if let (Some((ws_idx, pane_id)), Some(event)) = (current_focus, outer_event) {
+                self.send_pane_focus_event(ws_idx, pane_id, event);
+            }
             return;
         }
 
@@ -779,7 +793,14 @@ impl App {
             self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Lost);
         }
         if let Some((ws_idx, pane_id)) = current_focus {
-            self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Gained);
+            let event = outer_event.unwrap_or_else(|| {
+                if self.state.outer_terminal_focus == Some(false) {
+                    crate::ghostty::FocusEvent::Lost
+                } else {
+                    crate::ghostty::FocusEvent::Gained
+                }
+            });
+            self.send_pane_focus_event(ws_idx, pane_id, event);
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::WorkspaceFocused,
                 data: crate::api::schema::EventData::WorkspaceFocused {
