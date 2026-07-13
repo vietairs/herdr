@@ -16,8 +16,9 @@
     - [x] P4 federation client + replica reducer — VALIDATED suite green (2778/2778; no new clippy; commit 86453b4). CARRIED GAP #2: P1 EventFrame wire format has NO entity payload → per-event EventHub::push infeasible; impl = full-snapshot reconcile-by-diff on mount/gap-reset only (no incremental streaming). Affects P6 (event relay) + P8. Needs design review before P6/P9.
     - [x] P5 remote-backed panes (raw byte tee → TerminalSource) — VALIDATED suite green (2793/2793; no new clippy; commit 8929dca). Additive/dormant until P8. RT-F7 clipboard local-policy + agent-status suppression deferred to P7/P6 as planned.
     - [x] P6 agent-status relay — VALIDATED suite green (2801/0; clippy clean vs baseline; commit bc91b43). Relay + remote-probe-suppression tested in isolation; live call site is P8/P9 scope.
-    - [~] P7 security hardening (untrusted remote data) — in progress; required gate before P8 default-flip
-    - [ ] P8-P9 — pending
+    - [x] P7 security hardening (untrusted remote data) — VALIDATED suite green (2810/0; clippy clean; commits 4636fe9 impl + 05ab278 deadlock-fix). sanitize.rs OSC/ANSI strip at reducer ingest, bounded clipboard channel (try_send), RT-F7 clipboard policy parity, adversarial tests. FIX: oversized_clipboard_frame test sized duplex off raw payload not JSON-encoded (2x) frame → write_frame blocked; test-only fix, security intact.
+    - [~] P8 --remote federated CLI path + sidebar host labeling + capability fallback (HIGH-RISK default-flip) — in progress; user authorized continue
+    - [ ] P9 — pending
 - [ ] 9. /hvn:impl-notes review — pending
 - [ ] 10. /ck:code-review ‖ 11. /codex:adversarial-review <diff> — pending
 - [ ] 12. /hvn:ship-gate --hard — pending
