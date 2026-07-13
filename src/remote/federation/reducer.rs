@@ -736,6 +736,14 @@ mod tests {
     // to leave the mirror in a causally-backwards state.
     #[test]
     fn snapshot_reconcile_and_relayed_status_apply_in_causal_order() {
+        fn status_of(mirror: &RemoteMirror, raw_pane_id: &str) -> Option<AgentStatus> {
+            mirror
+                .panes()
+                .values()
+                .find(|p| p.pane_id.ends_with(&format!(":{raw_pane_id}")))
+                .map(|p| p.agent_status)
+        }
+
         let mut snapshot = empty_snapshot();
         snapshot.panes.push(pane("p1", "term_1", AgentStatus::Idle));
         let mut mirror = RemoteMirror::new(mount(1));
@@ -752,10 +760,7 @@ mod tests {
             1,
             &hub,
         );
-        assert_eq!(
-            mirror.panes().get("p1").map(|p| p.agent_status),
-            Some(AgentStatus::Working)
-        );
+        assert_eq!(status_of(&mirror, "p1"), Some(AgentStatus::Working));
 
         // A gap forces a fresh full resync whose own snapshot still shows
         // Idle (it was taken before the delta) — the resync wins, since it
@@ -763,10 +768,7 @@ mod tests {
         let mut fresh = empty_snapshot();
         fresh.panes.push(pane("p1", "term_1", AgentStatus::Idle));
         mirror.reconcile_by_diff(&fresh, EventCursor(5), &hub);
-        assert_eq!(
-            mirror.panes().get("p1").map(|p| p.agent_status),
-            Some(AgentStatus::Idle)
-        );
+        assert_eq!(status_of(&mirror, "p1"), Some(AgentStatus::Idle));
 
         // A delta applied after the resync still applies normally.
         mirror.apply_agent_status(
@@ -778,10 +780,7 @@ mod tests {
             1,
             &hub,
         );
-        assert_eq!(
-            mirror.panes().get("p1").map(|p| p.agent_status),
-            Some(AgentStatus::Blocked)
-        );
+        assert_eq!(status_of(&mirror, "p1"), Some(AgentStatus::Blocked));
     }
 
     // Phase 06 test 4 (S14.2 staleness): while the mount is marked
