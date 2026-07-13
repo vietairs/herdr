@@ -1627,9 +1627,11 @@ impl PaneRuntime {
     /// terminal (`Pane::render` is source-agnostic — same grid, same
     /// renderer) fed by the SAME `on_read` -> `process_pty_bytes` pathway
     /// every local pane uses; never spawns or waits on a local child
-    /// process (`PaneRuntimeIo::Remote` + `preserve_processes_on_drop: true`
-    /// + `child_pid` pinned at 0 for the runtime's whole lifetime — see
-    /// `shutdown_pane_processes`'s `child_pid == 0` early return).
+    /// process. `PaneRuntimeIo::Remote`, `preserve_processes_on_drop: true`,
+    /// and `child_pid` pinned at 0 for the runtime's whole lifetime (see
+    /// `shutdown_pane_processes`'s `child_pid == 0` early return) all
+    /// enforce this together.
+    ///
     /// `initial_history_ansi` seeds scrollback exactly like
     /// `spawn_with_initial_history` (RT-F6): the caller's `output_rx` is
     /// expected to carry the channel's replayed history bytes before any

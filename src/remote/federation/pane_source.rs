@@ -30,6 +30,13 @@ use super::protocol::{FederationMessage, TerminalChannelMessage};
 /// the local path already gives callers.
 const INPUT_CHANNEL_CAPACITY: usize = 256;
 
+/// The `on_read` closure shape: invoked for every byte chunk a remote pane
+/// receives (replay and live alike), mirroring the local `PtyIoActor`'s
+/// `on_read` in everything except its return type — there is no
+/// `PtyReadResult` here since a remote source has no PTY to write
+/// `terminal_responses` back to (see `RemoteTerminalSourceHandle::resize`).
+pub(crate) type RemoteOnRead = Box<dyn FnMut(&[u8]) + Send>;
+
 /// Everything needed to wire one remote pane's byte-in/out plumbing onto a
 /// mount's shared federation link.
 pub(crate) struct RemoteTerminalSourceConfig {
@@ -55,7 +62,7 @@ pub(crate) struct RemoteTerminalSourceConfig {
     /// 2). No return value and no reader-exit hook: unlike
     /// `PtyIoActorConfig`, there is nothing here that can ever produce a
     /// `PaneDied`.
-    pub(crate) on_read: Box<dyn FnMut(&[u8]) + Send>,
+    pub(crate) on_read: RemoteOnRead,
 }
 
 /// Handle for one remote-backed pane's `TerminalSource`.
@@ -193,15 +200,14 @@ mod tests {
 
     use super::*;
 
-    fn spawn_capturing(
-        terminal_id: &str,
-        mount_generation: u64,
-    ) -> (
+    type CapturingFixture = (
         RemoteTerminalSourceHandle,
         mpsc::Sender<Bytes>,
         mpsc::UnboundedReceiver<FederationMessage>,
         Arc<Mutex<Vec<u8>>>,
-    ) {
+    );
+
+    fn spawn_capturing(terminal_id: &str, mount_generation: u64) -> CapturingFixture {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let (output_tx, output_rx) = mpsc::channel::<Bytes>(64);
         let captured = Arc::new(Mutex::new(Vec::new()));
