@@ -85,6 +85,10 @@ impl TerminalSource for PtyIoActorHandle {
 /// relay connection means "disconnected", not "the remote process exited")
 /// — this trait pins that contract at the construction seam so P5 cannot
 /// add a remote policy that accidentally emits a local `PaneDied`.
+// Only exercised by tests in this phase (P5 wires a `Remote` policy that
+// makes production code query it); the contract is pinned now so P5 cannot
+// add a remote policy that silently emits a local `PaneDied`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) trait TerminalLifecyclePolicy: Send {
     fn emits_pane_died_on_reader_exit(&self) -> bool;
 }
