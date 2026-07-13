@@ -335,10 +335,14 @@ mod tests {
         let required: BTreeSet<Capability> = [Capability::new(Capability::AGENT_STATUS)].into();
         let client = FederationClient::new(host_key(), BTreeSet::new(), required);
 
-        let err = client
-            .connect_and_mount(reader, writer)
-            .await
-            .expect_err("missing a required capability must fail the mount");
+        // `MountedConnection` is not `Debug` (its `R`/`W` transport halves
+        // aren't), so `Result::expect_err` (which requires `T: Debug`)
+        // cannot be used here — match instead.
+        let result = client.connect_and_mount(reader, writer).await;
+        let err = match result {
+            Ok(_) => panic!("missing a required capability must fail the mount"),
+            Err(err) => err,
+        };
 
         assert!(matches!(err, MountError::MissingCapability(_)));
     }
@@ -373,10 +377,11 @@ mod tests {
         });
 
         let client = FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new());
-        let err = client
-            .connect_and_mount(client_reader, client_writer)
-            .await
-            .expect_err("a Reject response must never produce a mount");
+        let result = client.connect_and_mount(client_reader, client_writer).await;
+        let err = match result {
+            Ok(_) => panic!("a Reject response must never produce a mount"),
+            Err(err) => err,
+        };
 
         assert!(matches!(err, MountError::Rejected(RejectReason::Version { .. })));
         fake_server.await.unwrap();
