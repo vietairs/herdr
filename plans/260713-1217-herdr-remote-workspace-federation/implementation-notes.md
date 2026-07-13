@@ -237,3 +237,93 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   Reversibility: trivial — the dormant `#[allow(dead_code)]` gates are removed automatically in
   practice once P8 adds a real call site (the lint stops firing; the attribute becomes inert, can be
   deleted then).
+
+- What: P5's `RemoteTerminalSourceHandle` implements BOTH `TerminalSource` and P2's
+  `TerminalLifecyclePolicy` for one type, and lives entirely in the new (P5-owned)
+  `remote/federation/pane_source.rs` rather than adding a production `Remote` struct to
+  `terminal/source.rs`. Also had to add `TerminalLifecyclePolicy` to `terminal/mod.rs`'s
+  `pub(crate) use source::{...}` re-export (it was previously re-exporting only `LocalChild`/
+  `TerminalSource`, since P2 only ever implemented the policy in its own test module).
+  Why: phase-05's Files section explicitly lists `pane_source.rs`/`pane.rs`/`terminal/runtime.rs`/
+  `terminal/runtime_registry.rs`/`client.rs` as this phase's file ownership — `terminal/source.rs` is
+  not in it. The trait itself doesn't require a same-file impl, so combining both traits into one
+  type inside the owned file satisfies P2's "Remote lifecycle policy" seam without touching a file
+  P5 doesn't own. The `mod.rs` re-export line is a one-line mechanical necessity (the trait is
+  `pub(crate)`, unreachable cross-module otherwise) confirmed by a remote compile error, not a design
+  choice.
+  Evidence: phase-05.md "File ownership" section; `src/terminal/source.rs`'s own comment ("P5 wires a
+  `Remote` policy that makes production code query it" — written by P2, anticipating exactly this);
+  remote build error `E0432: unresolved import TerminalLifecyclePolicy... not accessible` before the
+  `mod.rs` fix.
+  Reversibility: trivial — moving the impl into `source.rs` later (if a future phase wants it there)
+  is a pure relocation, no behavior change.
+
+- What: `PaneRuntime::spawn_remote`'s `on_read` closure discards `process_pty_bytes`'s
+  `terminal_responses` field entirely (no `PtyReadResult`-shaped return value at all — the
+  `RemoteTerminalSourceConfig::on_read` type is `Box<dyn FnMut(&[u8]) + Send>`, not
+  `Box<dyn FnMut(&[u8]) -> PtyReadResult>`). Applies the same disposition to
+  `RemoteTerminalSourceHandle::resize`'s `terminal_responses` parameter (ignored, RT-F10).
+  Why: `terminal_responses` are what a real terminal would write back to the PTY master fd it's
+  attached to (e.g. answering an embedded CPR/DA query) — a remote-mirrored pane is not the terminal
+  driving the remote shell; the remote host's own real terminal already owns that responder role and
+  already answered the query before/independently of the federation tap. Writing these locally
+  re-synthesized responses back has no destination (no local PTY); sending them onward as `Input`
+  would inject a second, redundant, possibly-desyncing reply for a query the remote already resolved.
+  RT-F10 explicitly pins "default to remote-host-local handling; propagate only the visual resize" —
+  this generalizes that same call to the byte-in path too.
+  Evidence: phase-05.md requirement 10 + Context bullet 4 (RT-F10); `pane.rs`'s existing local
+  `on_read` closures write `terminal_responses` back via `PtyReadResult` specifically because
+  `PtyIoActor` owns a real `master_fd` to write them to (`src/pty/actor.rs`), which `RemoteTerminalSourceHandle`
+  structurally does not have.
+  Reversibility: isolated to two call sites; trivial to route responses somewhere else later if a
+  future phase finds a real need (none identified — remote's own PTY already handles this).
+
+- What: RT-F7's "write local clipboard from remote OSC" half is NOT wired into
+  `AppEvent::ClipboardWrite` (the path every local pane's `on_read` uses). `spawn_remote` instead
+  packages remote-origin OSC 52 writes as `ClipboardMessage { origin_tag: "remote", payload }` and
+  sends them on a caller-supplied `mpsc::UnboundedSender<ClipboardMessage>` — a plain queue, not an
+  `AppEvent`. `client.rs`'s new `drive_mount_channel` similarly forwards inbound `FederationMessage::
+  Clipboard` to a caller-supplied queue rather than applying it to any local state itself.
+  Why: `events.rs` (where `AppEvent`/`AppEvent::ClipboardWrite` live) is not in phase-05's file
+  ownership, and the findings-resolution table itself splits RT-F7 as "P5 + P7": P5 carries it on an
+  origin-tagged channel, P7 "routes through local policy with origin propagation" — i.e. actually
+  applying it to local state with origin-aware policy is explicitly P7's job, not P5's. Silently
+  wiring it into the existing untagged `AppEvent::ClipboardWrite` now would both overstep file
+  ownership and produce a fake "done" that P7 would have to partially undo to add real origin
+  propagation.
+  Evidence: plan.md findings-resolution table row "RT-F7 ... Resolved in: P5 + P7 ... How: Clipboard/
+  OSC carried on an origin-tagged channel (P5), routed through local policy with origin propagation
+  (P7)"; `src/events.rs` not in phase-05.md's Files section.
+  Reversibility: additive/isolated — P7 drains these queues into real local clipboard policy without
+  needing to revert anything P5 added; "not dropped" (the concrete, testable P5 guarantee) holds
+  either way.
+
+- What: `src/terminal/runtime_registry.rs` was left UNCHANGED, despite being listed in phase-05.md's
+  Files section as a file to modify ("4 `#[cfg(unix)]` registry handoff methods skip `Remote`").
+  Why: every `TerminalRuntimeRegistry` method (`set_handoff_readers_paused`, `assume_handoff_ownership`,
+  `nudge_child_redraw_after_handoff`, `drain_for_handoff`) is generic over `TerminalRuntime` — it
+  never matches on `PaneRuntimeIo` itself. Once `PaneRuntimeIo`'s own methods (in `pane.rs`, which
+  *is* owned) gained `Remote` no-op arms, every registry-level call already degrades correctly with
+  zero registry-level code changes needed; there was nothing left to modify without introducing a
+  no-op change purely to match the phase file's literal file list.
+  Evidence: `src/terminal/runtime_registry.rs`'s methods each just iterate `self.runtimes.values()`
+  calling opaque `TerminalRuntime`/`PaneRuntime` methods; `shutdown_pane_processes`'s `child_pid == 0`
+  early return additionally makes any registry-triggered process shutdown a guaranteed no-op for a
+  remote pane regardless.
+  Reversibility: N/A — no functional change was skipped, only a mechanically-unnecessary edit.
+
+- What: P5's TDD tests deliberately avoid reaching into `loopback.rs`'s private `FixtureHost.terminals`
+  field from `client.rs` (attempted once, would not compile: the field has no `pub`/`pub(crate)`
+  modifier, module-private to `loopback.rs`). `client.rs`'s router/drive_mount_channel tests either
+  inject synthetic `TerminalChannelMessage`s directly via `router.route_inbound(...)`, or drive a
+  fully hand-rolled fake server (raw `read_frame`/`write_frame` over a bare `tokio::io::duplex`, same
+  pattern as the pre-existing `version_mismatch_is_surfaced_as_a_typed_rejection` test) instead of
+  `FixtureHost`/`LoopbackFederationServer` for the parts that would have needed direct field access.
+  Why: `loopback.rs` is not in phase-05's file ownership (P3/P4 own it); CX-4 raw-byte-tap fidelity
+  against a real fixture terminal is already proven by `loopback.rs`'s own existing tests, so P5's
+  router-level tests only need to prove ordering/routing, which synthetic messages exercise just as
+  faithfully without requiring a new cross-module accessor.
+  Evidence: remote compile attempt — `terminals: Mutex<HashMap<...>>` field declared with no
+  visibility modifier in `src/remote/federation/loopback.rs`.
+  Reversibility: N/A — no scope was lost; if a future phase wants a shared test accessor, adding one
+  `pub(crate) fn` to `loopback.rs` is a one-line, purely-additive follow-up.
