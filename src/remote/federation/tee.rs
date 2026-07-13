@@ -13,11 +13,12 @@
 use bytes::Bytes;
 use tokio::sync::broadcast;
 
-/// Capacity (in messages) of a pane's output tee. Mirrors
-/// `pane::OUTPUT_TEE_CAPACITY` — kept as a named constant here too so
-/// federation code that reasons about lag tolerance has one place to look,
-/// independent of `pane.rs` internals.
-pub(crate) const CAPACITY: usize = 4096;
+/// Capacity (in messages) used by this module's own tests. Mirrors
+/// `pane::OUTPUT_TEE_CAPACITY` in spirit; kept test-local (rather than a
+/// production-visible constant) since production tees are always
+/// constructed by `pane.rs`, not by this module.
+#[cfg(test)]
+const CAPACITY: usize = 4096;
 
 /// Reads every available message currently buffered for `rx` without
 /// blocking, coalescing them into one `Vec<u8>` in order. Used by the
