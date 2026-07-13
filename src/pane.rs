@@ -941,7 +941,10 @@ enum PaneRuntimeIo {
     /// P5: fed by the federation raw terminal channel instead of a local
     /// PTY. See `RemoteTerminalSourceHandle`'s doc comment for the pinned
     /// lifecycle contract (never spawns/kills a local child, never emits a
-    /// local `PaneDied` on reader-exit).
+    /// local `PaneDied` on reader-exit). Unconstructed outside tests until
+    /// P8 wires a real `spawn_remote` call site (dormant, like
+    /// `remote::federation::pane_source` itself).
+    #[allow(dead_code)]
     Remote(RemoteTerminalSourceHandle),
     #[cfg(test)]
     TestChannel {
@@ -1638,7 +1641,10 @@ impl PaneRuntime {
     /// live bytes (see `remote::federation::client::TerminalChannelRouter`),
     /// so hydrate order falls out of wire order rather than needing a
     /// second seeding path here.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// Dormant outside tests until P8 wires a real call site (no CLI switch
+    /// yet, per the phase's shippability note).
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub(crate) fn spawn_remote(
         pane_id: PaneId,
         rows: u16,

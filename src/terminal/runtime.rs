@@ -142,8 +142,9 @@ impl TerminalRuntime {
     // P5: additive wrapper mirroring pane runtime construction arguments —
     // a remote-backed pane fed by the federation raw terminal channel
     // instead of a local PTY. Dormant until a live mount (P8) constructs
-    // one; every existing `spawn_*` site is untouched.
-    #[allow(clippy::too_many_arguments)]
+    // one; every existing `spawn_*` site is untouched. Dead outside tests
+    // until then (no CLI switch yet, per the phase's shippability note).
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub(crate) fn spawn_remote(
         pane_id: PaneId,
         rows: u16,
