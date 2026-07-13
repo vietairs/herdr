@@ -147,3 +147,31 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   `spawn_agent_status_task`.
   Reversibility: isolated — swapping to a notify-driven design only touches those two functions plus
   adding an async method to the trait.
+
+- What: Remote build loop surfaced 3 more issues after the first push, fixed in follow-up commits:
+  (1) `Cargo.toml` was missing tokio's `io-util`/`io-std` features — `AsyncReadExt`/`AsyncWriteExt`/
+  `split`/`duplex`/`stdin`/`stdout` were all unresolved (only `rt-multi-thread, macros, sync, time`
+  were enabled). (2) `App` (`src/app/mod.rs`) holds a `Box<dyn PrefixInputSource>` with no `Send`
+  bound, making `App` — and therefore any `Mutex<App>` — neither `Send` nor `Sync`; the original
+  `FederationHost: Send + Sync` supertrait bound made `impl FederationHost for AppFederationHost`
+  uncompilable. Fixed by dropping the supertrait bound entirely and restructuring `run()` so the
+  event-stream/agent-status pollers run inline via `tokio::select!` in the same future as the read
+  loop (never `tokio::spawn`'d), so no code path ever needs to move a `!Send` host across threads;
+  `LoopbackFederationServer::spawn` (test-only, always `FixtureHost`) adds `Send + Sync` back as a
+  local bound since it legitimately needs `tokio::spawn`. (3) `FixtureHost.terminals` held a bare
+  `HashMap` of real `TerminalRuntime`s; `pane::PaneRuntime` uses `Cell` internally (`Send`, not
+  `Sync`), which made `FixtureHost: !Sync` and broke that same `tokio::spawn` requirement — wrapped
+  in `std::sync::Mutex` (`Mutex<T>: Sync` holds for any `T: Send`) to restore it without touching
+  `pane.rs`.
+  Why: none of these were visible without a real compile — local macOS cannot build at all, so this
+  is the "P1/P2 precedent proved this loop" iteration in practice: edit → push → remote build → fix.
+  Evidence: appn-ltu-vm-100 `nix develop -c cargo build` errors (E0432 unresolved tokio imports,
+  E0277 `Box<dyn PrefixInputSource>` not Send, E0277 `Cell<...>` not Sync) across commits fb4dfac →
+  1796a50; final state: `cargo test` 2768 passed/0 failed (10/10 binaries green, includes the 11 new
+  federation::loopback/tee tests), `cargo clippy --all-targets` clean except the same 14 pre-existing
+  P1 `federation::id`/`Capability::CLIPBOARD`/`TerminalChannelMessage::terminal_id` dead-code warnings
+  (subset of the ~38/39 baseline — not new).
+  Reversibility: (1)/(3) are additive (feature flags, a `Mutex` wrapper). (2) is the more structural
+  one — reversing it (putting `Send + Sync` back on `FederationHost`) would require either making
+  `PrefixInputSource` `Send` (an `app.rs` change out of this phase's ownership) or never wiring a
+  real `App`-backed host at all; not expected to be revisited without a corresponding `app.rs` change.
