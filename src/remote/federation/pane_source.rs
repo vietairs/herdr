@@ -15,6 +15,16 @@
 //! `Remote` transport/lifecycle policy; it lives here rather than in
 //! `terminal::source` because that file is not in this phase's file
 //! ownership (see `implementation-notes.md`).
+//!
+//! Per the plan's risk/rollback note ("every phase is additive and dormant
+//! behind the absence of a live mount"), nothing in production code
+//! constructs a `RemoteTerminalSourceHandle` yet — only `pane::PaneRuntime::
+//! spawn_remote`/`terminal::TerminalRuntime::spawn_remote` (themselves
+//! uncalled outside tests until P8) and this module's own tests do — so most
+//! of this module is dead code outside `#[cfg(test)]` until P8 wires a real
+//! call site; allowed at module scope, matching `client.rs`'s identical
+//! precedent for the same reason.
+#![allow(dead_code)]
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
