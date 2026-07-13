@@ -10,6 +10,18 @@ use super::{
 };
 use crate::{config::NewTerminalCwdConfig, workspace::Workspace};
 
+// P9 materialization (mount -> rendered panes).
+use crate::api::schema::{PaneInfo as RemotePaneInfo, TabInfo as RemoteTabInfo};
+use crate::layout::PaneId;
+use crate::pane::PaneState;
+use crate::remote::federation::client::TerminalChannelRouter;
+use crate::remote::federation::id::{strip_mount_namespace, Mount};
+use crate::remote::federation::protocol::{ClipboardMessage, FederationMessage};
+use crate::remote::federation::reducer::RemoteMirror;
+use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
+use crate::workspace::{MovedPane, WorktreeSpaceMembership};
+use tokio::sync::mpsc::UnboundedSender;
+
 pub(crate) fn resolve_new_terminal_cwd(
     policy: &NewTerminalCwdConfig,
     follow_cwd: Option<PathBuf>,
@@ -480,6 +492,248 @@ impl App {
                     is_linked_worktree: space.is_linked_worktree,
                 }),
         }
+    }
+
+    /// P9 Priority 2 (mount -> rendered panes): materializes a successful
+    /// federation mount's already-namespaced `RemoteMirror` snapshot into
+    /// real `Workspace`/`Tab`/`PaneState` entries, each remote-backed pane
+    /// spawned via `PaneRuntime::spawn_remote` (P5) and fed by the live
+    /// `router`/`out_tx`/`clipboard_tx` channels riding the ONE mount
+    /// tunnel. v1 scope (logged in implementation-notes.md): eagerly spawns
+    /// every mirrored pane at mount time rather than the lazy
+    /// hydrate-on-focus design phase-05 anticipated (S12.1) — smaller and
+    /// more reversible; lazy hydrate can be layered on later without
+    /// reworking this call site. Reuses the SAME construction primitives an
+    /// existing "move pane to a new workspace" already uses
+    /// (`Workspace::from_existing_pane`, `create_tab_from_existing_pane`,
+    /// `Tab::insert_existing_pane`) rather than inventing a parallel
+    /// creation path, and the SAME event-emission path
+    /// (`emit_workspace_open_events`/`emit_tab_created_events`) every other
+    /// workspace/tab creation uses, so the sidebar refreshes exactly as it
+    /// would for a locally-created workspace. Returns the indices of the
+    /// newly created workspaces in `self.state.workspaces`.
+    pub(crate) fn materialize_federation_mount(
+        &mut self,
+        mirror: &RemoteMirror,
+        router: &mut TerminalChannelRouter,
+        out_tx: &UnboundedSender<FederationMessage>,
+        clipboard_tx: &UnboundedSender<ClipboardMessage>,
+    ) -> std::io::Result<Vec<usize>> {
+        let mount = mirror.mount().clone();
+        let (rows, cols) = self.state.estimate_pane_size();
+        let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+        let host_terminal_theme = self.state.host_terminal_theme;
+
+        let mut workspaces: Vec<_> = mirror.workspaces().values().collect();
+        workspaces.sort_by_key(|ws| ws.number);
+
+        let mut created_ws_idxs = Vec::new();
+
+        for ws_info in workspaces {
+            let mut tabs: Vec<&RemoteTabInfo> = mirror
+                .tabs()
+                .values()
+                .filter(|tab| tab.workspace_id == ws_info.workspace_id)
+                .collect();
+            tabs.sort_by_key(|tab| tab.number);
+            if tabs.is_empty() {
+                // A workspace with no tabs is not representable locally
+                // (every `Workspace` must have >=1 tab); skip it rather than
+                // constructing an invalid entry. Not expected from a real
+                // `federation-serve` host (every workspace it reports always
+                // has a root tab).
+                continue;
+            }
+
+            let mut ws_idx: Option<usize> = None;
+            for tab_info in tabs {
+                let mut panes: Vec<&RemotePaneInfo> = mirror
+                    .panes()
+                    .values()
+                    .filter(|pane| pane.tab_id == tab_info.tab_id)
+                    .collect();
+                // `PaneInfo` carries no explicit split-order field; sort by
+                // the (already-namespaced, stable) public pane id so
+                // materialization order is deterministic across runs against
+                // the same mirror snapshot.
+                panes.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
+                let Some((first_pane, rest_panes)) = panes.split_first() else {
+                    // A tab with no panes is similarly not representable;
+                    // skip it (not expected from a real host).
+                    continue;
+                };
+
+                let (root_pane_id, terminal, runtime, pane_state) = self.build_remote_pane(
+                    &mount,
+                    first_pane,
+                    rows,
+                    cols,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                    router,
+                    out_tx,
+                    clipboard_tx,
+                )?;
+                let terminal_id = terminal.id.clone();
+                self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+                self.state.terminals.insert(terminal_id, terminal);
+                let moved = MovedPane {
+                    pane_id: root_pane_id,
+                    pane_state,
+                };
+
+                let tab_idx = if let Some(existing_ws_idx) = ws_idx {
+                    self.state.workspaces[existing_ws_idx].create_tab_from_existing_pane(
+                        moved,
+                        Some(tab_info.label.clone()),
+                        self.event_tx.clone(),
+                        self.render_notify.clone(),
+                        self.render_dirty.clone(),
+                    )
+                } else {
+                    let mut workspace = Workspace::from_existing_pane(
+                        Some(ws_info.label.clone()),
+                        Some(tab_info.label.clone()),
+                        PathBuf::from(first_pane.cwd.clone().unwrap_or_else(|| "/".to_string())),
+                        moved,
+                        self.event_tx.clone(),
+                        self.render_notify.clone(),
+                        self.render_dirty.clone(),
+                    );
+                    // RT-F8/S11.4: the sidebar badge/grouping
+                    // (`ui::sidebar::workspace_federation_origin`) classifies
+                    // purely from `Workspace::id`'s `r:<host_key>:` prefix —
+                    // never from `custom_name` — so materialized workspaces
+                    // must carry the mirror's own namespaced id, not the
+                    // fresh local id `from_existing_pane` generates.
+                    workspace.id = ws_info.workspace_id.clone();
+                    workspace.worktree_space = Some(WorktreeSpaceMembership {
+                        key: format!("federation:{}", mount.host_key.as_str()),
+                        label: mount.host_key.as_str().to_string(),
+                        repo_root: PathBuf::new(),
+                        checkout_path: PathBuf::new(),
+                        is_linked_worktree: false,
+                    });
+                    self.state.workspaces.push(workspace);
+                    let idx = self.state.workspaces.len() - 1;
+                    ws_idx = Some(idx);
+                    created_ws_idxs.push(idx);
+                    0
+                };
+                let this_ws_idx = ws_idx.expect("set immediately above on first tab");
+                // `Workspace::from_existing_pane` always seeds exactly one
+                // tab at index 0; `emit_workspace_open_events` (below, once
+                // per newly created workspace) already covers that tab's
+                // creation event, so only a *subsequent* tab (index != 0)
+                // needs its own `TabCreated`/`PaneCreated` events here.
+                let created_this_tab = tab_idx != 0;
+
+                let mut prev_pane_id = root_pane_id;
+                for pane_info in rest_panes {
+                    let (split_pane_id, split_terminal, split_runtime, split_pane_state) = self
+                        .build_remote_pane(
+                            &mount,
+                            pane_info,
+                            rows,
+                            cols,
+                            scrollback_limit_bytes,
+                            host_terminal_theme,
+                            router,
+                            out_tx,
+                            clipboard_tx,
+                        )?;
+                    let split_terminal_id = split_terminal.id.clone();
+                    self.terminal_runtimes
+                        .insert(split_terminal_id.clone(), split_runtime);
+                    self.state.terminals.insert(split_terminal_id, split_terminal);
+                    let split_moved = MovedPane {
+                        pane_id: split_pane_id,
+                        pane_state: split_pane_state,
+                    };
+                    // Splits materialize as a simple horizontal chain (v1);
+                    // this does not attempt to reproduce the remote's exact
+                    // split geometry (not carried by `PaneInfo`).
+                    if self.state.workspaces[this_ws_idx].tabs[tab_idx]
+                        .insert_existing_pane(
+                            prev_pane_id,
+                            split_moved,
+                            ratatui::layout::Direction::Horizontal,
+                            0.5,
+                        )
+                        .is_ok()
+                    {
+                        prev_pane_id = split_pane_id;
+                    }
+                }
+
+                if created_this_tab {
+                    self.emit_tab_created_events(this_ws_idx, tab_idx);
+                }
+            }
+        }
+
+        for ws_idx in &created_ws_idxs {
+            self.emit_workspace_open_events(*ws_idx);
+            self.schedule_session_save();
+        }
+
+        Ok(created_ws_idxs)
+    }
+
+    /// Builds one remote-backed pane's `TerminalState`/`TerminalRuntime`/
+    /// `PaneState` triple for [`App::materialize_federation_mount`]. Opens
+    /// this pane's federation `Terminal` channel via `router.open_terminal`
+    /// (raw, un-namespaced remote terminal id — `strip_mount_namespace`
+    /// reverses the reducer's P7 ingest-time namespacing) and wires the
+    /// resulting byte receiver straight into `PaneRuntime::spawn_remote`
+    /// (P5), so scrollback replay + live output flow into the pane exactly
+    /// as they do for a focused pane in the (currently dormant) lazy-hydrate
+    /// design — this call site simply triggers it for every mirrored pane at
+    /// mount time instead of on focus (see the v1-scope note above).
+    #[allow(clippy::too_many_arguments)]
+    fn build_remote_pane(
+        &self,
+        mount: &Mount,
+        pane_info: &RemotePaneInfo,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        router: &mut TerminalChannelRouter,
+        out_tx: &UnboundedSender<FederationMessage>,
+        clipboard_tx: &UnboundedSender<ClipboardMessage>,
+    ) -> std::io::Result<(PaneId, TerminalState, TerminalRuntime, PaneState)> {
+        let raw_terminal_id = strip_mount_namespace(mount, &pane_info.terminal_id);
+        let output_rx = router.open_terminal(raw_terminal_id.clone(), mount.mount_generation, out_tx);
+        let pane_id = PaneId::alloc();
+        let terminal_id = TerminalId::alloc();
+        let runtime = TerminalRuntime::spawn_remote(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            None,
+            raw_terminal_id,
+            mount.mount_generation,
+            out_tx.clone(),
+            output_rx,
+            clipboard_tx.clone(),
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+        )?;
+        let mut terminal = TerminalState::new(
+            terminal_id.clone(),
+            pane_info
+                .cwd
+                .clone()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/")),
+        );
+        terminal.manual_label = pane_info.label.clone();
+        let pane_state = PaneState::new(terminal_id);
+        Ok((pane_id, terminal, runtime, pane_state))
     }
 }
 
