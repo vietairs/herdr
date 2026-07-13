@@ -512,6 +512,12 @@ impl App {
     /// workspace/tab creation uses, so the sidebar refreshes exactly as it
     /// would for a locally-created workspace. Returns the indices of the
     /// newly created workspaces in `self.state.workspaces`.
+    ///
+    /// Dormant outside tests until a live CLI call site wires a real mount
+    /// into it (same `#[allow(dead_code)]` precedent as P5's
+    /// `PaneRuntime::spawn_remote` itself, P4's `client.rs`/`reducer.rs`, and
+    /// P8's sidebar badge helpers before their own live call sites landed).
+    #[allow(dead_code)]
     pub(crate) fn materialize_federation_mount(
         &mut self,
         mirror: &RemoteMirror,
@@ -690,7 +696,7 @@ impl App {
     /// as they do for a focused pane in the (currently dormant) lazy-hydrate
     /// design — this call site simply triggers it for every mirrored pane at
     /// mount time instead of on focus (see the v1-scope note above).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     fn build_remote_pane(
         &self,
         mount: &Mount,
