@@ -301,7 +301,7 @@ fn poll_events<H: FederationHost>(
             .send(FederationMessage::Event(EventChannelMessage::Frame(
                 EventFrame {
                     source_seq: *seq,
-                    kind: kind.clone(),
+                    kind: *kind,
                 },
             )))
             .is_err()
@@ -632,6 +632,11 @@ pub(crate) fn run_federation_serve_over_stdio() -> std::io::Result<()> {
         .map_err(std::io::Error::other)?;
 
     rt.block_on(async {
+        // `AppFederationHost` is intentionally `!Send`/`!Sync` (see the
+        // `FederationHost` trait doc comment) — this `Arc` is never handed
+        // to `tokio::spawn`/another thread, only driven via `block_on` on
+        // this one, which has no `Send` requirement.
+        #[allow(clippy::arc_with_non_send_sync)]
         let host = Arc::new(AppFederationHost::boot());
         let stdin = tokio::io::stdin();
         let stdout = tokio::io::stdout();
