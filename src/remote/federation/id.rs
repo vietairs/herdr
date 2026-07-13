@@ -142,7 +142,10 @@ pub fn map_out(fed_ref: &FedRef) -> &str {
 /// so stripping the known `r:<host_key>:` prefix is unambiguous. Falls back
 /// to `public_id` unchanged if it is not actually namespaced under `mount`
 /// (defensive; callers only ever pass ids sourced from `mount`'s own
-/// `RemoteMirror`).
+/// `RemoteMirror`). Dormant outside tests until a live CLI call site drives
+/// `App::materialize_federation_mount`, matching this module's own existing
+/// `map_in`/`map_out` precedent before P4/P5 wired their live call sites.
+#[allow(dead_code)]
 pub(crate) fn strip_mount_namespace(mount: &Mount, public_id: &str) -> String {
     let prefix = format!("{REMOTE_PREFIX}{}:", mount.host_key.as_str());
     public_id
