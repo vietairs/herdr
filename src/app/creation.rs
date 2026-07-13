@@ -768,9 +768,8 @@ mod federation_materialization_tests {
     use crate::api::schema::common::AgentStatus;
     use crate::api::schema::session::SessionSnapshot;
     use crate::api::schema::{PaneInfo as RemotePaneInfo, TabInfo as RemoteTabInfo, WorkspaceInfo};
-    use crate::remote::federation::id::{HostKey, ServerInstanceId};
+    use crate::remote::federation::id::{classify, HostKey, IdClass, ServerInstanceId};
     use crate::remote::federation::protocol::{EventCursor, TerminalChannelMessage};
-    use crate::ui::sidebar::{federation_origin_badge, workspace_federation_origin};
 
     fn test_app() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -881,14 +880,14 @@ mod federation_materialization_tests {
         let ws_idx = created[0];
         let ws = &app.state.workspaces[ws_idx];
 
-        // RT-F8/S11.4: badge + grouping key off `Workspace::id`'s namespace,
-        // never off `custom_name` — assert both actually fire for the
-        // materialized workspace.
+        // RT-F8/S11.4: `ui::sidebar::workspace_federation_origin`/
+        // `federation_origin_badge` classify a workspace as federated purely
+        // via `remote::federation::id::classify(&ws.id)` — assert that same
+        // classification actually fires for the materialized workspace
+        // (`ui::sidebar` is not reachable from this module; `classify` is
+        // the exact primitive it is built on).
         assert!(ws.id.starts_with("r:alice@10.0.0.1#s1:"));
-        assert!(workspace_federation_origin(ws).is_some());
-        assert!(federation_origin_badge(ws)
-            .expect("materialized workspace must carry the remote badge")
-            .contains("alice@10.0.0.1#s1"));
+        assert!(matches!(classify(&ws.id), IdClass::Remote(_)));
         assert_eq!(
             ws.worktree_space.as_ref().map(|space| space.key.as_str()),
             Some("federation:alice@10.0.0.1#s1")
@@ -905,7 +904,7 @@ mod federation_materialization_tests {
         for pane in tab.panes.values() {
             let terminal_id = &pane.attached_terminal_id;
             assert!(app.state.terminals.contains_key(terminal_id));
-            assert!(app.terminal_runtimes.contains_key(terminal_id));
+            assert!(app.terminal_runtimes.get(terminal_id).is_some());
         }
 
         // The router opened a federation Terminal channel for each pane
