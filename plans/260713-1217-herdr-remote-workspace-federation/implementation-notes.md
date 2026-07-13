@@ -452,3 +452,84 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   (`Channel::Clipboard.max_len() + 1_048_576` -> `frame.len() + 1_048_576`); no production file touched,
   P7's bounded-clipboard-channel security property (`try_send`, `CLIPBOARD_CHANNEL_CAPACITY`) is
   completely unchanged. Commit 05ab278.
+
+- What: P8 GAP #1 (carried from P3): the real `AppFederationHost::run` never drains `App::event_rx`, so
+  a real running `federation-serve` process never applies `AppEvent`s (`handle_internal_event`/the
+  `emit_pane_updated`-producing call sites in `app/runtime.rs`/`app/terminal_titles.rs`) into its own
+  `App`, meaning `events_after`/`EventHub` on that host never observes pane-content-changed events even
+  though raw PTY bytes ARE tapped correctly (`on_read` already sets `render_dirty` directly, independent
+  of `event_rx`). NOT closed in P8. Deferred to P9, explicitly.
+  Why not closed here: closing it means porting a meaningful slice of `HeadlessServer::run`'s loop
+  (`server/headless.rs:564-609` — the `event_rx`/`api_rx`/render-tick/git-refresh machinery that
+  actually calls `handle_internal_event_with_forwarding` and drives the dirty-pane detection that leads
+  to `emit_pane_updated`) into `AppFederationHost`/`serve::run` — both of which are P3-owned files
+  (`src/remote/federation/serve.rs`), not P8's declared file set (`main.rs`, `remote/unix.rs`,
+  `ui/sidebar.rs`, `app/state.rs`). Doing it well (without also accidentally wiring rendering the
+  federation host itself doesn't need) is a real design decision, not a mechanical fix; attempting it
+  inside P8's file boundary would mean reaching into a file this phase does not own.
+  Evidence: `grep -n "event_rx" src/app/mod.rs src/server/headless.rs` — `HeadlessServer::run`'s
+  `tokio::select!` (`headless.rs:564-580`) is the only production drain of `app.event_rx`;
+  `AppFederationHost::boot`/`run_federation_serve_over_stdio` (`serve.rs`) never construct or run
+  anything equivalent. `emit_pane_updated` call sites (`app/runtime.rs:349`, `app/terminal_titles.rs:52`)
+  are reached only through paths that assume that same drain loop is running.
+  Reversibility: N/A (nothing closed, nothing changed in `serve.rs`); this note exists so P9 does not
+  have to re-derive the finding.
+
+- What: P8's "instead of `run_client_process`, the running local server triggers a P4 mount"
+  (requirement 2) and "sidebar host group + badge" (requirement 3) are split into two halves. The
+  CAPABILITY-NEGOTIATION half is real and fully wired: `remote/unix.rs`'s `attempt_federation_mount`
+  really dials `ssh <target> ... federation-serve`, builds a real `FederationClient`, and performs the
+  real P1 handshake + P4 atomic mount; `decide_federation_route` (pure, unit-tested) turns the outcome
+  into `Federated` / `ClassicFallback { notice }` / `ClassicUnchanged`. The MATERIALIZATION half — turning
+  a successful mount's `RemoteMirror` (`WorkspaceInfo`/`TabInfo`/`PaneInfo`) into real `Workspace`/`Tab`/
+  `Pane` entries inside an *already-running* local interactive session (spawning
+  `pane::PaneRuntime::spawn_remote`, which P5 already built and left dormant for exactly this call site)
+  is NOT wired in P8. On a successful mount, `run_remote` prints an explicit notice
+  ("interactive federated rendering is not yet wired ... attaching via the classic full-screen view
+  instead") and falls through to the existing `run_client_process` full-screen attach — the mount itself
+  is real and torn down cleanly (`child.start_kill()`), never silently pretended to be live UI.
+  Why deferred: `run_remote` (`remote/unix.rs`) is architecturally the STANDALONE CLIENT PROCESS for the
+  classic full-screen `--remote` path — it never touches a local `AppState`/interactive session at all
+  (`run_client_process` renders the *remote* session as the whole screen). The real target for
+  requirement 2 ("triggers a P4 mount" inside "the running local server") is the *already-running local
+  session* (server+client architecture reached via `server::autodetect::auto_detect_launch()`), which
+  would need either a new local JSON API method (`api/schema.rs`, not P8-owned) or direct `App`/
+  `app/creation.rs` construction wiring (also not P8-owned) to accept a live mount and call
+  `pane::PaneRuntime::spawn_remote` for each remote pane. Building that well is realistically
+  P5-scale effort (P5's own estimate: 4-6d) and spans files outside this phase's declared ownership
+  (`main.rs`, `remote/unix.rs`, `ui/sidebar.rs`, `app/state.rs`). Single-mount enforcement
+  (`AppState::begin_federation_mount`/`FederationMountConflict`), the double-attach registry
+  (`AppState::double_attach_conflict`), and the sidebar origin badge/grouping
+  (`ui/sidebar.rs::workspace_federation_origin`/`federation_origin_badge`/
+  `workspace_display_label_with_origin_badge`) are all real and fully wired against whatever `Workspace`
+  entries eventually get inserted (proven by unit tests constructing such a `Workspace` directly) — only
+  the "construct those `Workspace` entries from a live mount inside a running session" step is deferred.
+  Evidence: `grep -n "fn spawn_remote" src/pane.rs` shows P5's `PaneRuntime::spawn_remote` already exists,
+  fully built, `#[allow(dead_code)]`'d, with a doc comment stating "Dormant outside tests until P8 wires a
+  real call site" — confirming this exact gap was anticipated by P5, not discovered late.
+  Reversibility: fully additive; nothing here changes behavior for `--remote-workspace`/
+  `HERDR_REMOTE_FEDERATION` unset (default OFF, classic path byte-for-byte unchanged, requirement 1
+  test 1). Follow-up: wire local-session mount materialization in P9 or a dedicated follow-up phase,
+  reusing `pane::PaneRuntime::spawn_remote` and `RemoteMirror`'s already-namespaced (`FedRef`) ids.
+
+- What: RT-F11 double-attach guard (`AppState::double_attach_conflict`) is a real, tested detection
+  function keyed on `HostKey`, but per the phase file's explicit allowance ("If detection proves costly,
+  downgrade to documented-not-enforced for v1"), it is downgraded to documented-not-enforced ACROSS
+  PROCESS BOUNDARIES: `run_remote` (a separate, standalone CLI process) has no way to query a *different*,
+  already-running local server's mount registry (no JSON API method exists for it — `api/schema.rs` is
+  not P8-owned). The function is real and correct for same-process callers (proven by unit test); wiring
+  it into the classic `--remote` attach path's pre-flight check requires the same missing API surface as
+  the materialization gap above.
+  Reversibility: additive; adding the API method later is a pure extension, no behavior to revert.
+
+- What: `--remote-workspace` requires `--remote` (mirrors `--remote-keybindings requires --remote`);
+  `HERDR_REMOTE_FEDERATION=1` alone (without `--remote-workspace`) only takes effect on a launch that also
+  passes `--remote` — there is no bare "federation on but no target" mode, matching the phase's framing of
+  federation as something `--remote` opts into, not a separate launch mode.
+  Reversibility: trivial, pure parsing logic.
+
+- What: Cargo.toml — added tokio's `"process"` feature (previously absent: `rt-multi-thread`, `macros`,
+  `sync`, `time`, `io-util`, `io-std` only). Required for `attempt_federation_mount`'s real
+  `tokio::process::Command` SSH dial; not in P8's declared file list but a mechanical, zero-risk additive
+  Cargo feature flag necessary for the phase's own requirement 2 to compile as real (not stubbed) code.
+  Reversibility: trivial, additive dependency feature.
