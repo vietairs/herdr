@@ -43,6 +43,7 @@ use crate::api::EventHub;
 
 use super::id::{fence, map_in, FenceResult, Mount};
 use super::protocol::{AgentStatusMessage, EventChannelMessage, EventCursor};
+use super::sanitize::{sanitize_remote_string, sanitize_remote_string_opt};
 
 /// Outcome of applying one [`EventChannelMessage`] to the reducer's cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,26 +279,67 @@ impl RemoteMirror {
     }
 }
 
+/// Namespaces `workspace`'s ids and — the single P7 ingest choke point for
+/// this entity kind (S11.1) — neutralizes its remote-sourced chrome string
+/// (`label`) of any control/ANSI/OSC sequence before it can ever reach a
+/// mirrored `WorkspaceInfo` a caller renders. Ids are namespaced identifiers
+/// (`FedRef`-encoded), not free-form remote text, so they are not sanitized
+/// here (a raw remote id containing control bytes would already fail to
+/// round-trip as a valid public id).
 fn namespace_workspace(mount: &Mount, workspace: &WorkspaceInfo) -> WorkspaceInfo {
     let mut namespaced = workspace.clone();
     namespaced.workspace_id = map_in(workspace.workspace_id.clone(), mount).to_public_id();
     namespaced.active_tab_id = map_in(workspace.active_tab_id.clone(), mount).to_public_id();
+    namespaced.label = sanitize_remote_string(&namespaced.label);
+    if let Some(worktree) = namespaced.worktree.as_mut() {
+        worktree.repo_key = sanitize_remote_string(&worktree.repo_key);
+        worktree.repo_name = sanitize_remote_string(&worktree.repo_name);
+        worktree.repo_root = sanitize_remote_string(&worktree.repo_root);
+    }
     namespaced
 }
 
+/// Namespaces `tab`'s ids and sanitizes its remote-sourced `label` (S11.1),
+/// same choke-point contract as [`namespace_workspace`].
 fn namespace_tab(mount: &Mount, tab: &TabInfo) -> TabInfo {
     let mut namespaced = tab.clone();
     namespaced.tab_id = map_in(tab.tab_id.clone(), mount).to_public_id();
     namespaced.workspace_id = map_in(tab.workspace_id.clone(), mount).to_public_id();
+    namespaced.label = sanitize_remote_string(&namespaced.label);
     namespaced
 }
 
+/// Namespaces `pane`'s ids and sanitizes every remote-sourced chrome string
+/// it carries (S11.1: `custom_name`/`identity_cwd`/`agent_name`-class
+/// fields) — `cwd`, `foreground_cwd`, `label`, `agent`, `title`,
+/// `terminal_title`, `terminal_title_stripped`, `display_agent`, the values
+/// of `state_labels`/`tokens`, and a mirrored `agent_session`'s `value`.
+/// Raw PTY bytes destined for the ghostty pane emulator never pass through
+/// this function (see module docs / `pane_source`); only this
+/// `PaneInfo`-shaped metadata does.
 fn namespace_pane(mount: &Mount, pane: &PaneInfo) -> PaneInfo {
     let mut namespaced = pane.clone();
     namespaced.pane_id = map_in(pane.pane_id.clone(), mount).to_public_id();
     namespaced.terminal_id = map_in(pane.terminal_id.clone(), mount).to_public_id();
     namespaced.workspace_id = map_in(pane.workspace_id.clone(), mount).to_public_id();
     namespaced.tab_id = map_in(pane.tab_id.clone(), mount).to_public_id();
+    namespaced.cwd = sanitize_remote_string_opt(namespaced.cwd);
+    namespaced.foreground_cwd = sanitize_remote_string_opt(namespaced.foreground_cwd);
+    namespaced.label = sanitize_remote_string_opt(namespaced.label);
+    namespaced.agent = sanitize_remote_string_opt(namespaced.agent);
+    namespaced.title = sanitize_remote_string_opt(namespaced.title);
+    namespaced.terminal_title = sanitize_remote_string_opt(namespaced.terminal_title);
+    namespaced.terminal_title_stripped = sanitize_remote_string_opt(namespaced.terminal_title_stripped);
+    namespaced.display_agent = sanitize_remote_string_opt(namespaced.display_agent);
+    for value in namespaced.state_labels.values_mut() {
+        *value = sanitize_remote_string(value);
+    }
+    for value in namespaced.tokens.values_mut() {
+        *value = sanitize_remote_string(value);
+    }
+    if let Some(agent_session) = namespaced.agent_session.as_mut() {
+        agent_session.value = sanitize_remote_string(&agent_session.value);
+    }
     namespaced
 }
 
@@ -814,5 +856,104 @@ mod tests {
         );
 
         assert_eq!(mirror.agent_status_display("no-such-pane"), None);
+    }
+
+    // Phase 07 test 1 (S11.1 Blocker): a crafted remote workspace/pane
+    // carrying ANSI/OSC injection in every rendered chrome string field is
+    // neutralized at the single P4 ingest choke point (`apply_snapshot`) —
+    // no active control sequence survives into the mirror, and this is
+    // proven for BOTH the initial `apply_snapshot` path and the
+    // `reconcile_by_diff` resync path, so neither choke point can be
+    // bypassed.
+    #[test]
+    fn remote_chrome_strings_are_sanitized_on_ingest_via_both_snapshot_paths() {
+        let evil = "name\x1b[2J\x1b]52;c;ZXZpbA==\x07tail";
+        let expect_sanitized = "name[2J]52;c;ZXZpbA==tail";
+
+        let mut snapshot = empty_snapshot();
+        let mut ws = workspace("w1");
+        ws.label = evil.to_string();
+        snapshot.workspaces.push(ws);
+        let mut poisoned_pane = pane("p1", "term_1", AgentStatus::Idle);
+        poisoned_pane.cwd = Some(evil.to_string());
+        poisoned_pane.label = Some(evil.to_string());
+        poisoned_pane.agent = Some(evil.to_string());
+        poisoned_pane
+            .state_labels
+            .insert("k".to_string(), evil.to_string());
+        snapshot.panes.push(poisoned_pane);
+
+        // Path 1: initial mount (`apply_snapshot`).
+        let mut mirror = RemoteMirror::new(mount(1));
+        mirror.apply_snapshot(&snapshot, EventCursor(1));
+
+        let ws_info = mirror.workspaces().values().next().unwrap();
+        assert_eq!(ws_info.label, expect_sanitized);
+        assert!(!ws_info.label.contains('\x1b'));
+        assert!(!ws_info.label.contains('\x07'));
+
+        let pane_info = mirror.panes().values().next().unwrap();
+        assert_eq!(pane_info.cwd.as_deref(), Some(expect_sanitized));
+        assert_eq!(pane_info.label.as_deref(), Some(expect_sanitized));
+        assert_eq!(pane_info.agent.as_deref(), Some(expect_sanitized));
+        assert_eq!(pane_info.state_labels.get("k").map(String::as_str), Some(expect_sanitized));
+
+        // Path 2: gap-triggered resync (`reconcile_by_diff`) — the OTHER
+        // choke point a caller reaches after a `Gap`/`Reset`. A hand-rolled
+        // second decode path would be exactly how a sanitize step gets
+        // silently skipped (the Risks section's named failure mode); prove
+        // it is not.
+        let mut fresh = empty_snapshot();
+        let mut ws2 = workspace("w2");
+        ws2.label = evil.to_string();
+        fresh.workspaces.push(ws2);
+        let hub = EventHub::default();
+        mirror.reconcile_by_diff(&fresh, EventCursor(5), &hub);
+
+        let ws2_info = mirror
+            .workspaces()
+            .values()
+            .find(|w| w.label == expect_sanitized || w.workspace_id.ends_with(":w2"))
+            .expect("w2 must be present and sanitized");
+        assert_eq!(ws2_info.label, expect_sanitized);
+
+        // Visible, non-control text is preserved untouched.
+        assert!(expect_sanitized.starts_with("name"));
+        assert!(expect_sanitized.ends_with("tail"));
+    }
+
+    // Phase 07 test 3 (S11.4 substrate): a mirrored remote entity carries
+    // the correct `HostKey`/`server_instance_id` end to end via
+    // `RemoteMirror::mount()` — the substrate P8 will render as an
+    // unspoofable badge. Distinct hosts never collide.
+    #[test]
+    fn mirrored_entity_carries_the_correct_host_key_end_to_end() {
+        let mut snapshot = empty_snapshot();
+        snapshot.workspaces.push(workspace("w1"));
+        let alice_mount = Mount {
+            host_key: HostKey::new("alice@10.0.0.1", "s1"),
+            server_instance_id: ServerInstanceId("inst-alice".to_string()),
+            mount_generation: 1,
+        };
+        let mut mirror = RemoteMirror::new(alice_mount.clone());
+        mirror.apply_snapshot(&snapshot, EventCursor(1));
+
+        assert_eq!(mirror.mount().host_key, alice_mount.host_key);
+        assert_eq!(mirror.mount().server_instance_id, alice_mount.server_instance_id);
+
+        let public_id = mirror.workspaces().keys().next().unwrap();
+        assert!(public_id.starts_with("r:alice@10.0.0.1#s1:"));
+
+        // A different host's mirror never produces a colliding id prefix.
+        let bob_mount = Mount {
+            host_key: HostKey::new("bob@10.0.0.2", "s1"),
+            server_instance_id: ServerInstanceId("inst-bob".to_string()),
+            mount_generation: 1,
+        };
+        let mut bob_mirror = RemoteMirror::new(bob_mount);
+        bob_mirror.apply_snapshot(&snapshot, EventCursor(1));
+        let bob_public_id = bob_mirror.workspaces().keys().next().unwrap();
+        assert_ne!(public_id, bob_public_id);
+        assert!(bob_public_id.starts_with("r:bob@10.0.0.2#s1:"));
     }
 }

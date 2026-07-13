@@ -278,6 +278,18 @@ pub(crate) async fn drive_event_channel<R: AsyncRead + Unpin>(
 /// single read loop must never block on one slow/unfocused pane).
 const TERMINAL_OUTPUT_CHANNEL_CAPACITY: usize = 4096;
 
+/// Capacity (in messages) of one mount's inbound `Clipboard`-channel queue
+/// (P7 requirement 5 / S2.2: per-mount channel budget). Each individual
+/// `ClipboardMessage` is already bounded by `Channel::Clipboard::max_len()`
+/// (16 MiB) at the codec, but an unbounded *queue depth* would still let a
+/// remote that floods `Clipboard` frames faster than the consumer drains
+/// them grow this buffer without limit; bounding it here closes that gap.
+/// `drive_mount_channel` uses `try_send` (never `.await`s), so a full queue
+/// degrades by dropping the newest overflow message rather than stalling
+/// the ONE mount tunnel's shared read loop (same isolation shape as
+/// `TerminalChannelRouter::route_inbound`).
+const CLIPBOARD_CHANNEL_CAPACITY: usize = 64;
+
 /// Demultiplexes ONE mount's single `Terminal`-channel wire stream by
 /// `terminal_id` (requirement 9: every open remote pane's byte channel rides
 /// the ONE mount tunnel, never a per-pane connection). Built once per mount;
@@ -381,7 +393,7 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
     generation: u64,
     hub: &EventHub,
     router: &mut TerminalChannelRouter,
-    clipboard_tx: &mpsc::UnboundedSender<ClipboardMessage>,
+    clipboard_tx: &mpsc::Sender<ClipboardMessage>,
 ) -> Result<DriveOutcome, std::io::Error> {
     let _ = hub;
     loop {
@@ -403,7 +415,10 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                 router.route_inbound(term_msg);
             }
             FederationMessage::Clipboard(clip_msg) => {
-                let _ = clipboard_tx.send(clip_msg);
+                // Bounded, non-blocking (S2.2): a full clipboard queue must
+                // never stall this router's single read loop, which also
+                // services the event/terminal channels for the whole mount.
+                let _ = clipboard_tx.try_send(clip_msg);
             }
             // Handshake/HandshakeResponse/MountSnapshot are already
             // consumed during `connect_and_mount`; AgentStatus relay is P6
@@ -888,7 +903,8 @@ mod tests {
         let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
         let mut output_rx = router.open_terminal("term_1".to_string(), generation, &out_tx);
 
-        let (clipboard_tx, mut clipboard_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let (clipboard_tx, mut clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
         let hub = EventHub::default();
         let _ = tokio::time::timeout(
             std::time::Duration::from_millis(300),
@@ -917,5 +933,83 @@ mod tests {
         assert_eq!(clip.payload, b"remote clip".to_vec());
 
         fake_server.await.unwrap();
+    }
+
+    // Phase 07 test 2 (S11.2 Blocker): an over-cap `Clipboard` frame placed
+    // directly on the wire (bypassing every higher-level API this module
+    // exposes) is rejected by `read_frame` — the ONE choke point every
+    // federation call site in this file uses (see the module's `use super::
+    // serve::{read_frame, write_frame}` at the top) — with the exact same
+    // typed rejection `codec::decode` produces when called directly. A
+    // hand-rolled second decode path that forgot the cap would diverge from
+    // this assertion.
+    #[tokio::test]
+    async fn oversized_clipboard_frame_is_rejected_by_the_shared_codec_not_a_bypass() {
+        use crate::remote::federation::protocol::codec;
+        use crate::remote::federation::protocol::Channel;
+
+        let oversized = FederationMessage::Clipboard(ClipboardMessage {
+            origin_tag: "remote".to_string(),
+            payload: vec![0u8; Channel::Clipboard.max_len() + 1],
+        });
+
+        let frame = codec::encode(&oversized).expect("encode has no cap (read-side check only)");
+        let direct_err = codec::decode::<FederationMessage>(&frame, Channel::Clipboard.max_len())
+            .expect_err("direct codec::decode must reject an over-cap clipboard payload");
+
+        // Buffer sized comfortably above the frame so `write_frame` never
+        // blocks waiting for a concurrent reader (this test only needs the
+        // header + a header-only rejection, never the full payload consumed).
+        let (client_side, server_side) =
+            tokio::io::duplex(Channel::Clipboard.max_len() + 1_048_576);
+        let (mut client_reader, _client_writer) = tokio::io::split(client_side);
+        let (_server_reader, mut server_writer) = tokio::io::split(server_side);
+        write_frame(&mut server_writer, &oversized)
+            .await
+            .expect("the cap is enforced on read, not write");
+
+        let wire_err = read_frame(&mut client_reader)
+            .await
+            .expect_err("read_frame must reject the same over-cap frame the wire delivered");
+
+        assert!(
+            wire_err.to_string().contains("exceeds"),
+            "read_frame rejection: {wire_err}"
+        );
+        assert!(
+            direct_err.to_string().contains("exceeds"),
+            "direct codec::decode rejection: {direct_err}"
+        );
+    }
+
+    // Phase 07 test 5 (S2.2 Bounded ingestion): a remote flooding the
+    // `Clipboard` channel faster than the local consumer drains it can never
+    // grow the ingestion queue past its fixed per-mount budget — `try_send`
+    // degrades by dropping the newest overflow message, never blocking the
+    // shared mount read loop and never allocating unbounded memory.
+    #[test]
+    fn flooding_the_clipboard_channel_never_exceeds_its_bounded_budget() {
+        let (clipboard_tx, mut clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+
+        // Flood well past capacity; every send after the channel fills must
+        // fail fast (never block) rather than growing the queue.
+        for i in 0..(CLIPBOARD_CHANNEL_CAPACITY * 10) {
+            let _ = clipboard_tx.try_send(ClipboardMessage {
+                origin_tag: "remote".to_string(),
+                payload: vec![i as u8],
+            });
+        }
+
+        // The queue never holds more than its configured capacity.
+        let mut drained = 0usize;
+        while clipboard_rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert!(
+            drained <= CLIPBOARD_CHANNEL_CAPACITY,
+            "drained {drained} messages, expected at most the configured budget of {CLIPBOARD_CHANNEL_CAPACITY}"
+        );
+        assert!(drained > 0, "at least the first burst up to capacity must have been queued");
     }
 }

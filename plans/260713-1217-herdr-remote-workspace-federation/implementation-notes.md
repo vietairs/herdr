@@ -364,3 +364,64 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   field, unlike `EventFrame`.
   Reversibility: trivial — cosmetic only; no test asserts a specific `source_seq` value for
   `apply_agent_status`'s `Applied` variant.
+
+- What: P7 — new `sanitize.rs` strips the full C0 (`0x00..=0x1F`) + DEL (`0x7F`) + C1 (`0x80..=0x9F`)
+  control range from remote chrome strings, rather than reusing `terminal_notify::sanitize_text`
+  (which strips only ESC/BEL/ST and is `fn`-private).
+  Why (trust-boundary decision): the threat is ANSI/OSC/cursor-move/OSC52 injection via any rendered
+  remote field (S11.1 Blocker) — filtering the byte *ranges* that open/close every such sequence (not
+  a curated 3-byte blocklist) is the narrower, harder-to-miss mitigation, and DRY-reusing a
+  notification-scoped private helper would couple an unrelated module to this new adversarial
+  boundary's contract. Mitigation: filter-not-escape at ONE ingest choke point
+  (`reducer::namespace_workspace/_tab/_pane`), covering both `apply_snapshot` and
+  `reconcile_by_diff` (the only two paths that construct a mirrored entity).
+  Evidence: `grep -rn "fn sanitize\|fn strip" src/` found only `terminal_notify::sanitize_text`
+  (private, 3-byte filter, single-line-notification-scoped); `reducer.rs` tests
+  `remote_chrome_strings_are_sanitized_on_ingest_via_both_snapshot_paths` exercises both choke points.
+  Reversibility: additive/pure function; trivially revertible without touching wire format.
+
+- What: P7 — remote-origin OSC52 clipboard writes are NOT wired to a live consumer in this phase;
+  `pane_source::apply_remote_clipboard_writes` is built + tested against the exact
+  `mpsc::UnboundedReceiver<ClipboardMessage>` type `pane.rs`'s dormant `spawn_remote(..., clipboard_tx,
+  ...)` parameter already produces, but nothing calls it in production yet.
+  Why (trust-boundary decision): `pane.rs` is not in P7's file ownership (exclusive: sanitize.rs;
+  shared: reducer.rs/pane_source.rs/client.rs only), and wiring the real receiver is P8/P9 CLI-mount
+  scope per the same "additive, dormant until a live call site" precedent P4/P5/P6 already established
+  for this codebase. The policy itself (S11.3 parity: remote-origin gets no more/less trust than
+  local — herdr's actual local OSC52 policy auto-applies unconditionally today, so parity means
+  auto-apply, flagged as a known consideration rather than silently escalated with a new confirmation
+  gate) is fully implemented, tested, and origin-tag-preserving; only the live call site is deferred.
+  Evidence: `grep -rn "clipboard_tx" src/pane.rs` shows only the dormant P5 parameter + a
+  `#[cfg(test)]`-only `_clipboard_rx`; `pane_source.rs` tests
+  `remote_and_local_origin_clipboard_writes_are_applied_through_the_same_policy` prove parity in
+  isolation.
+  Reversibility: additive; P8/P9 adds one `tokio::spawn(apply_remote_clipboard_writes(rx, |origin_tag,
+  bytes| ...))` call site with the real `write_osc52_bytes`-equivalent as `apply`; no revert needed.
+
+- What: P7 — `client.rs`'s `drive_mount_channel` clipboard parameter changed from
+  `mpsc::UnboundedSender<ClipboardMessage>` to a bounded `mpsc::Sender<ClipboardMessage>`
+  (`CLIPBOARD_CHANNEL_CAPACITY = 64`), routed via `try_send` instead of `send`.
+  Why (trust-boundary decision): the wire codec already caps a single `Clipboard` frame's payload
+  (16 MiB), but the *queue depth* behind an unbounded channel was still unbounded — a remote flooding
+  `Clipboard` frames faster than a (currently nonexistent) consumer drains them could grow local
+  memory without limit (S2.2/S10.2 requirement 5). `try_send` (never `.await`) preserves the existing
+  isolation invariant that the ONE mount tunnel's single read loop must never block on a slow/absent
+  consumer, matching `TerminalChannelRouter::route_inbound`'s established pattern.
+  Evidence: `client.rs` test `flooding_the_clipboard_channel_never_exceeds_its_bounded_budget` proves
+  the queue never exceeds capacity under a 10x-capacity flood; `TerminalChannelRouter`'s own
+  `TERMINAL_OUTPUT_CHANNEL_CAPACITY` (4096, pre-existing) was already bounded — confirmed, not changed.
+  Reversibility: trivial — one type change + one call-site `send`→`try_send`; the one call site
+  (drive_mount_channel test) updated in the same commit.
+
+- What: P7 — added a trust-model doc section to `remote/federation/mod.rs`'s module doc comment
+  (not a new `docs/*.md` file) to satisfy the phase's "Docs — trust-model note … in federation docs"
+  bullet.
+  Why: `mod.rs` is not in P7's explicit file-ownership list (only `sanitize.rs` exclusive +
+  `reducer.rs`/`pane_source.rs`/`client.rs` shared), but it already required a one-line edit to
+  register the new `sanitize` module — a `docs/*.md` file was not listed anywhere in the plan's
+  documentation-management structure for this feature, and the module doc comment is this crate's
+  existing convention for module-level "what/why" documentation (every other `federation/*` module
+  carries one). Adding the trust-model paragraph there is the narrowest-scope way to satisfy the bullet.
+  Evidence: `remote/federation/mod.rs` docs section: "Trust model (P7 — read before adding a new
+  ingestion field)".
+  Reversibility: trivial — a doc comment; no behavior change.
