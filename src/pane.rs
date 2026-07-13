@@ -4485,8 +4485,8 @@ mod remote_spawn_tests {
 
     // Locally-spawned (non-remote) runtimes have no relay sender at all —
     // there is nothing to suppress a probe for; they have a real process.
-    #[test]
-    fn local_runtime_has_no_relayed_agent_status_sender() {
+    #[tokio::test]
+    async fn local_runtime_has_no_relayed_agent_status_sender() {
         let local = PaneRuntime::test_with_channel(80, 24).0;
         assert!(local.relayed_agent_status_sender().is_none());
     }
