@@ -34,7 +34,13 @@ pub(crate) struct FixtureHost {
     server_instance_id: ServerInstanceId,
     capabilities: BTreeSet<Capability>,
     event_hub: EventHub,
-    terminals: HashMap<String, FixtureTerminal>,
+    // `Mutex`-wrapped (not a bare field): `FixtureTerminal` holds a real
+    // `TerminalRuntime`, which is `Send` but not `Sync` (`pane::PaneRuntime`
+    // uses `Cell` internally). `LoopbackFederationServer::spawn` needs
+    // `FixtureHost: Sync` to hand it to `tokio::spawn` — `Mutex<T>: Sync`
+    // holds for any `T: Send`, so wrapping restores it without touching
+    // `pane.rs`.
+    terminals: Mutex<HashMap<String, FixtureTerminal>>,
     agent_statuses: Mutex<HashMap<String, AgentStatus>>,
     sent_input: Mutex<Vec<(String, Vec<u8>)>>,
     resizes: Mutex<Vec<(String, u16, u16)>>,
@@ -48,7 +54,7 @@ impl FixtureHost {
                 .into_iter()
                 .collect(),
             event_hub: EventHub::default(),
-            terminals: HashMap::new(),
+            terminals: Mutex::new(HashMap::new()),
             agent_statuses: Mutex::new(HashMap::new()),
             sent_input: Mutex::new(Vec::new()),
             resizes: Mutex::new(Vec::new()),
@@ -56,12 +62,14 @@ impl FixtureHost {
     }
 
     pub(crate) fn with_terminal(
-        mut self,
+        self,
         terminal_id: impl Into<String>,
         runtime: crate::terminal::TerminalRuntime,
         scrollback: Vec<u8>,
     ) -> Self {
         self.terminals
+            .lock()
+            .unwrap()
             .insert(terminal_id.into(), FixtureTerminal { runtime, scrollback });
         self
     }
@@ -149,12 +157,16 @@ impl FederationHost for FixtureHost {
 
     fn subscribe_output(&self, terminal_id: &str) -> Option<broadcast::Receiver<Bytes>> {
         self.terminals
+            .lock()
+            .unwrap()
             .get(terminal_id)
             .map(|terminal| terminal.runtime.subscribe_output_bytes())
     }
 
     fn scrollback_replay(&self, terminal_id: &str) -> Vec<u8> {
         self.terminals
+            .lock()
+            .unwrap()
             .get(terminal_id)
             .map(|terminal| terminal.scrollback.clone())
             .unwrap_or_default()
@@ -190,7 +202,12 @@ impl FederationHost for FixtureHost {
 pub(crate) struct LoopbackFederationServer;
 
 impl LoopbackFederationServer {
-    pub(crate) fn spawn<H: FederationHost>(
+    /// `H: Send + Sync` (stronger than the base `FederationHost` bound) is
+    /// required here — and only here — because this helper hands `host` to
+    /// a `tokio::spawn`'d task (needed so the test driving the client side
+    /// and the in-process server run concurrently). `FixtureHost` (the only
+    /// type ever passed here) satisfies it.
+    pub(crate) fn spawn<H: FederationHost + Send + Sync>(
         host: std::sync::Arc<H>,
     ) -> (
         tokio::io::DuplexStream,
@@ -318,8 +335,8 @@ mod tests {
         let (mut reader, _writer, _server_handle, _hs, mount) = connect_and_mount(host).await;
 
         event_hub.push(crate::api::schema::EventEnvelope {
-            event: EventKind::LayoutUpdated,
-            data: crate::api::schema::EventData::LayoutUpdated {},
+            event: EventKind::WorkspaceFocused,
+            data: crate::api::schema::EventData::WorkspaceFocused { workspace_id: "w1".to_string() },
         });
 
         let frame = loop {
@@ -331,7 +348,7 @@ mod tests {
         };
 
         assert_eq!(frame.source_seq, mount.cursor.0 + 1);
-        assert_eq!(frame.kind, EventKind::LayoutUpdated);
+        assert_eq!(frame.kind, EventKind::WorkspaceFocused);
     }
 
     #[tokio::test]
@@ -360,6 +377,8 @@ mod tests {
 
         let known_bytes = b"hello federation\r\n";
         host.terminals
+            .lock()
+            .unwrap()
             .get("term_1")
             .unwrap()
             .runtime
@@ -400,6 +419,8 @@ mod tests {
         let _ = serve::read_frame(&mut reader).await.unwrap();
 
         host.terminals
+            .lock()
+            .unwrap()
             .get("term_1")
             .unwrap()
             .runtime
@@ -444,6 +465,8 @@ mod tests {
         assert_eq!(replay.bytes, scrollback);
 
         host.terminals
+            .lock()
+            .unwrap()
             .get("term_1")
             .unwrap()
             .runtime
@@ -466,8 +489,8 @@ mod tests {
         // chance to drain any of them, forcing the ring to overflow.
         for _ in 0..600 {
             event_hub.push(crate::api::schema::EventEnvelope {
-                event: EventKind::LayoutUpdated,
-                data: crate::api::schema::EventData::LayoutUpdated {},
+                event: EventKind::WorkspaceFocused,
+                data: crate::api::schema::EventData::WorkspaceFocused { workspace_id: "w1".to_string() },
             });
         }
 
@@ -496,8 +519,8 @@ mod tests {
         assert!(!mount.server_instance_id.0.is_empty());
 
         event_hub.push(crate::api::schema::EventEnvelope {
-            event: EventKind::LayoutUpdated,
-            data: crate::api::schema::EventData::LayoutUpdated {},
+            event: EventKind::WorkspaceFocused,
+            data: crate::api::schema::EventData::WorkspaceFocused { workspace_id: "w1".to_string() },
         });
         let _ = serve::read_frame(&mut reader).await.unwrap();
 
