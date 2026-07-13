@@ -32,6 +32,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::api::schema::common::AgentStatus;
 use crate::api::schema::events::{EventData, EventKind};
 use crate::api::schema::panes::PaneInfo;
 use crate::api::schema::session::SessionSnapshot;
@@ -41,7 +42,7 @@ use crate::api::schema::EventEnvelope;
 use crate::api::EventHub;
 
 use super::id::{fence, map_in, FenceResult, Mount};
-use super::protocol::{EventChannelMessage, EventCursor};
+use super::protocol::{AgentStatusMessage, EventChannelMessage, EventCursor};
 
 /// Outcome of applying one [`EventChannelMessage`] to the reducer's cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,16 @@ pub(crate) enum ReducerAction {
     ResetRequired,
 }
 
+/// Honest rendering of a mirrored pane's agent status (S14.1/S14.2):
+/// distinguishes a value the mirror believes is currently live from one
+/// that is only "last known" because the mount is disconnected. A UI
+/// consumer (P8/P9) must never render `Stale` as if it were `Live`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentStatusDisplay {
+    Live(AgentStatus),
+    Stale(AgentStatus),
+}
+
 /// Per-mount replica mirror: namespaced (`FedRef`-encoded) copies of the
 /// remote's workspaces/tabs/panes. Metadata only — no pane bytes (P5).
 pub(crate) struct RemoteMirror {
@@ -73,6 +84,13 @@ pub(crate) struct RemoteMirror {
     workspaces: HashMap<String, WorkspaceInfo>,
     tabs: HashMap<String, TabInfo>,
     panes: HashMap<String, PaneInfo>,
+    /// P6/S14.2: set by the (P9-owned) disconnect surface. While `true`,
+    /// [`RemoteMirror::agent_status_display`] must report every pane's
+    /// agent status as "last known/stale", never live truth — the mirror
+    /// itself keeps mutating normally (a message that legitimately arrives
+    /// right before/after a flip still applies); only the *display*
+    /// decision changes.
+    stale: bool,
 }
 
 impl RemoteMirror {
@@ -83,6 +101,77 @@ impl RemoteMirror {
             workspaces: HashMap::new(),
             tabs: HashMap::new(),
             panes: HashMap::new(),
+            stale: false,
+        }
+    }
+
+    /// Flips the disconnect/stale marker (P9 call site). Does not itself
+    /// touch mirrored data.
+    pub(crate) fn set_stale(&mut self, stale: bool) {
+        self.stale = stale;
+    }
+
+    pub(crate) fn is_stale(&self) -> bool {
+        self.stale
+    }
+
+    /// Honest read of one namespaced pane's agent status (S14.1/S14.2):
+    /// wraps the mirrored value in [`AgentStatusDisplay::Stale`] whenever
+    /// this mount is marked disconnected, so a caller can never render a
+    /// stale value as if it were live. Returns `None` if the pane id is
+    /// unknown to this mirror.
+    pub(crate) fn agent_status_display(&self, pane_id: &str) -> Option<AgentStatusDisplay> {
+        let status = self.panes.get(pane_id)?.agent_status;
+        Some(if self.stale {
+            AgentStatusDisplay::Stale(status)
+        } else {
+            AgentStatusDisplay::Live(status)
+        })
+    }
+
+    /// Applies one relayed [`AgentStatusMessage`] — the remote's real
+    /// foreground-process signal (P3), the only honest source for a remote
+    /// pane's process-derived status (requirement 1). Fenced identically to
+    /// [`Self::apply_event_message`] (S14.3: same discipline, no ad-hoc
+    /// channel). Looks the target pane up by its *namespaced* terminal id
+    /// rather than trusting a pane id on the wire (there isn't one — the
+    /// message only carries the remote's raw `terminal_id`); an id this
+    /// mirror hasn't hydrated (raced with close, or not yet mounted) is
+    /// silently dropped rather than fabricating a pane to attach it to
+    /// (S14.1: never show wrong status).
+    pub(crate) fn apply_agent_status(
+        &mut self,
+        msg: &AgentStatusMessage,
+        generation: u64,
+        hub: &EventHub,
+    ) -> ReducerAction {
+        if let FenceResult::RejectStale { .. } = fence(&self.mount, generation) {
+            return ReducerAction::RejectedStale;
+        }
+        let namespaced_terminal_id = map_in(msg.terminal_id.clone(), &self.mount).to_public_id();
+        let Some(pane_id) = self
+            .panes
+            .values()
+            .find(|pane| pane.terminal_id == namespaced_terminal_id)
+            .map(|pane| pane.pane_id.clone())
+        else {
+            return ReducerAction::Ignored;
+        };
+        let pane = self
+            .panes
+            .get_mut(&pane_id)
+            .expect("pane_id was just looked up from this same map");
+        if pane.agent_status == msg.status {
+            return ReducerAction::Ignored;
+        }
+        pane.agent_status = msg.status;
+        hub.push(EventEnvelope {
+            event: EventKind::PaneUpdated,
+            data: EventData::PaneUpdated { pane: pane.clone() },
+        });
+        ReducerAction::Applied {
+            source_seq: self.cursor,
+            kind: EventKind::PaneUpdated,
         }
     }
 
@@ -392,6 +481,30 @@ mod tests {
         }
     }
 
+    fn pane(id: &str, terminal_id: &str, agent_status: AgentStatus) -> PaneInfo {
+        PaneInfo {
+            pane_id: id.to_string(),
+            terminal_id: terminal_id.to_string(),
+            workspace_id: "w1".to_string(),
+            tab_id: "w1-tab".to_string(),
+            focused: false,
+            cwd: None,
+            foreground_cwd: None,
+            label: None,
+            agent: None,
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            display_agent: None,
+            agent_status,
+            state_labels: Default::default(),
+            tokens: Default::default(),
+            agent_session: None,
+            scroll: None,
+            revision: 0,
+        }
+    }
+
     // Test 1 (phase TDD plan): mirror populated with namespaced ids; no
     // collision with a pre-existing local `w1`.
     #[test]
@@ -540,5 +653,167 @@ mod tests {
         let mut mirror = RemoteMirror::new(mount(1));
         let action = mirror.apply_event_message(&EventChannelMessage::Reset, 1);
         assert_eq!(action, ReducerAction::ResetRequired);
+    }
+
+    // Phase 06 test 2: a relayed `AgentStatus` (P3's foreground-process
+    // equivalent) updates the namespaced pane's status and pushes a
+    // `PaneUpdated` local event — with zero involvement of any local
+    // process probe (this test never touches `pane.rs`/`detect` at all,
+    // proving the update is entirely wire-driven).
+    #[test]
+    fn relayed_agent_status_updates_the_namespaced_pane_and_pushes_pane_updated() {
+        let mut snapshot = empty_snapshot();
+        snapshot.panes.push(pane("p1", "term_1", AgentStatus::Idle));
+        let mut mirror = RemoteMirror::new(mount(1));
+        mirror.apply_snapshot(&snapshot, EventCursor(1));
+        let hub = EventHub::default();
+
+        let action = mirror.apply_agent_status(
+            &AgentStatusMessage {
+                terminal_id: "term_1".to_string(),
+                mount_generation: 1,
+                status: AgentStatus::Working,
+            },
+            1,
+            &hub,
+        );
+
+        assert!(matches!(action, ReducerAction::Applied { .. }));
+        let (_, updated) = mirror
+            .panes()
+            .iter()
+            .find(|(_, p)| p.terminal_id.ends_with(":term_1"))
+            .expect("namespaced pane must exist");
+        assert_eq!(updated.agent_status, AgentStatus::Working);
+        let events = hub.events_after(0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1.event, EventKind::PaneUpdated);
+
+        // An unknown terminal id (raced with close / not-yet-hydrated) is
+        // dropped silently — S14.1: never fabricate a pane to attach it to.
+        let unknown = mirror.apply_agent_status(
+            &AgentStatusMessage {
+                terminal_id: "term_ghost".to_string(),
+                mount_generation: 1,
+                status: AgentStatus::Blocked,
+            },
+            1,
+            &hub,
+        );
+        assert_eq!(unknown, ReducerAction::Ignored);
+        assert_eq!(hub.events_after(0).len(), 1, "no spurious event for an unknown pane");
+    }
+
+    // Phase 06: relayed status is fenced exactly like event-channel traffic
+    // (S14.3: same discipline, no ad-hoc channel) — a message observed
+    // under a stale generation is rejected, never applied.
+    #[test]
+    fn relayed_agent_status_under_a_stale_generation_is_fenced_and_rejected() {
+        let mut snapshot = empty_snapshot();
+        snapshot.panes.push(pane("p1", "term_1", AgentStatus::Idle));
+        let mut mirror = RemoteMirror::new(mount(3));
+        mirror.apply_snapshot(&snapshot, EventCursor(0));
+        let hub = EventHub::default();
+
+        let stale = mirror.apply_agent_status(
+            &AgentStatusMessage {
+                terminal_id: "term_1".to_string(),
+                mount_generation: 2,
+                status: AgentStatus::Working,
+            },
+            2,
+            &hub,
+        );
+        assert_eq!(stale, ReducerAction::RejectedStale);
+        assert!(hub.events_after(0).is_empty());
+    }
+
+    // Phase 06 test 3 (S14.3 ordering): a full-resync (`reconcile_by_diff`,
+    // driven by the gap/reset path) is always the authoritative truth for
+    // whatever it carries — it overwrites an in-between relayed delta the
+    // resync's own source snapshot didn't yet reflect — but a delta applied
+    // *after* a resync still takes effect normally. No channel is allowed
+    // to leave the mirror in a causally-backwards state.
+    #[test]
+    fn snapshot_reconcile_and_relayed_status_apply_in_causal_order() {
+        let mut snapshot = empty_snapshot();
+        snapshot.panes.push(pane("p1", "term_1", AgentStatus::Idle));
+        let mut mirror = RemoteMirror::new(mount(1));
+        mirror.apply_snapshot(&snapshot, EventCursor(1));
+        let hub = EventHub::default();
+
+        // A relayed delta arrives first.
+        mirror.apply_agent_status(
+            &AgentStatusMessage {
+                terminal_id: "term_1".to_string(),
+                mount_generation: 1,
+                status: AgentStatus::Working,
+            },
+            1,
+            &hub,
+        );
+        assert_eq!(
+            mirror.panes().get("p1").map(|p| p.agent_status),
+            Some(AgentStatus::Working)
+        );
+
+        // A gap forces a fresh full resync whose own snapshot still shows
+        // Idle (it was taken before the delta) — the resync wins, since it
+        // is the mirror's only authoritative resync mechanism.
+        let mut fresh = empty_snapshot();
+        fresh.panes.push(pane("p1", "term_1", AgentStatus::Idle));
+        mirror.reconcile_by_diff(&fresh, EventCursor(5), &hub);
+        assert_eq!(
+            mirror.panes().get("p1").map(|p| p.agent_status),
+            Some(AgentStatus::Idle)
+        );
+
+        // A delta applied after the resync still applies normally.
+        mirror.apply_agent_status(
+            &AgentStatusMessage {
+                terminal_id: "term_1".to_string(),
+                mount_generation: 1,
+                status: AgentStatus::Blocked,
+            },
+            1,
+            &hub,
+        );
+        assert_eq!(
+            mirror.panes().get("p1").map(|p| p.agent_status),
+            Some(AgentStatus::Blocked)
+        );
+    }
+
+    // Phase 06 test 4 (S14.2 staleness): while the mount is marked
+    // disconnected, a status query must report "last known/stale", never
+    // live truth.
+    #[test]
+    fn agent_status_display_reports_stale_while_disconnected() {
+        let mut snapshot = empty_snapshot();
+        snapshot.panes.push(pane("p1", "term_1", AgentStatus::Working));
+        let mut mirror = RemoteMirror::new(mount(1));
+        mirror.apply_snapshot(&snapshot, EventCursor(1));
+
+        let pane_id = mirror.panes().keys().next().cloned().unwrap();
+        assert_eq!(
+            mirror.agent_status_display(&pane_id),
+            Some(AgentStatusDisplay::Live(AgentStatus::Working))
+        );
+
+        mirror.set_stale(true);
+        assert!(mirror.is_stale());
+        assert_eq!(
+            mirror.agent_status_display(&pane_id),
+            Some(AgentStatusDisplay::Stale(AgentStatus::Working)),
+            "must render last-known, never live truth, while disconnected"
+        );
+
+        mirror.set_stale(false);
+        assert_eq!(
+            mirror.agent_status_display(&pane_id),
+            Some(AgentStatusDisplay::Live(AgentStatus::Working))
+        );
+
+        assert_eq!(mirror.agent_status_display("no-such-pane"), None);
     }
 }
