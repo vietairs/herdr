@@ -47,7 +47,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// session (real `AppState`-backed in production, a fixture in tests). Plain
 /// sync methods only — implementations that need interior locking use a
 /// `std::sync::Mutex`, never held across an `.await`.
-pub(crate) trait FederationHost: Send + Sync + 'static {
+///
+/// Deliberately NOT `Send + Sync`: the real production host wraps `App`
+/// (`src/app/mod.rs`), which holds a `Box<dyn PrefixInputSource>` with no
+/// `Send` bound and is therefore itself `!Send`. `run()` below never spawns
+/// a separate task that needs to move a host reference across threads — the
+/// event-stream and agent-status polling loops run inline in the same
+/// future as the read loop — so this bound is never required. Only
+/// `LoopbackFederationServer::spawn` (test-only, always instantiated with
+/// `FixtureHost`) needs `Send + Sync`, and adds it locally.
+pub(crate) trait FederationHost: 'static {
     fn server_instance_id(&self) -> ServerInstanceId;
     fn capabilities(&self) -> BTreeSet<Capability>;
 
@@ -222,28 +231,114 @@ where
         }
     });
 
-    let event_task = spawn_event_stream_task(host.clone(), cursor.0, out_tx.clone());
-    let agent_status_task = spawn_agent_status_task(host.clone(), out_tx.clone());
-
     let mut open_terminals: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut event_cursor = cursor.0;
+    let mut event_ticker = tokio::time::interval(POLL_INTERVAL);
+    let mut agent_status_ticker = tokio::time::interval(POLL_INTERVAL.saturating_mul(4));
+    let mut last_agent_statuses: HashMap<String, AgentStatus> = HashMap::new();
 
+    // Everything below runs in this one future (never a separately spawned
+    // task) so `H` never needs to be `Send`/`Sync` — see the trait doc
+    // comment. `select!` interleaves the read loop with the two poll
+    // tickers without giving up single-task ownership of `host`.
     let result = loop {
-        match read_frame(&mut reader).await {
-            Ok(Some(msg)) => handle_inbound(&host, msg, &out_tx, &mut open_terminals),
-            Ok(None) => break Ok(()),
-            Err(err) => break Err(err),
+        tokio::select! {
+            biased;
+            frame = read_frame(&mut reader) => {
+                match frame {
+                    Ok(Some(msg)) => handle_inbound(&host, msg, &out_tx, &mut open_terminals),
+                    Ok(None) => break Ok(()),
+                    Err(err) => break Err(err),
+                }
+            }
+            _ = event_ticker.tick() => {
+                if !poll_events(&host, &mut event_cursor, &out_tx) {
+                    break Ok(());
+                }
+            }
+            _ = agent_status_ticker.tick() => {
+                if !poll_agent_statuses(&host, &mut last_agent_statuses, &out_tx) {
+                    break Ok(());
+                }
+            }
         }
     };
 
     for (_, handle) in open_terminals.drain() {
         handle.abort();
     }
-    event_task.abort();
-    agent_status_task.abort();
     drop(out_tx);
     let _ = writer_task.await;
 
     result
+}
+
+/// Polls `host.events_after` once, emitting `Gap`/`Frame` messages and
+/// advancing `cursor`. Returns `false` if the outbound channel closed (the
+/// writer task exited) and the caller should stop the connection.
+fn poll_events<H: FederationHost>(
+    host: &H,
+    cursor: &mut u64,
+    out_tx: &mpsc::UnboundedSender<FederationMessage>,
+) -> bool {
+    let frames = host.events_after(*cursor);
+    if frames.is_empty() {
+        return true;
+    }
+    let first_seq = frames[0].0;
+    if first_seq != *cursor + 1
+        && out_tx
+            .send(FederationMessage::Event(EventChannelMessage::Gap {
+                from: *cursor,
+                to: first_seq - 1,
+            }))
+            .is_err()
+    {
+        return false;
+    }
+    for (seq, kind) in &frames {
+        if out_tx
+            .send(FederationMessage::Event(EventChannelMessage::Frame(
+                EventFrame {
+                    source_seq: *seq,
+                    kind: kind.clone(),
+                },
+            )))
+            .is_err()
+        {
+            return false;
+        }
+    }
+    *cursor = frames.last().map(|(seq, _)| *seq).unwrap_or(*cursor);
+    true
+}
+
+/// Polls `host.agent_statuses` once, emitting only the entries that changed
+/// since the last poll. Returns `false` if the outbound channel closed.
+fn poll_agent_statuses<H: FederationHost>(
+    host: &H,
+    last: &mut HashMap<String, AgentStatus>,
+    out_tx: &mpsc::UnboundedSender<FederationMessage>,
+) -> bool {
+    for (terminal_id, status) in host.agent_statuses() {
+        if last.get(&terminal_id) == Some(&status) {
+            continue;
+        }
+        last.insert(terminal_id.clone(), status);
+        if out_tx
+            .send(FederationMessage::AgentStatus(
+                super::protocol::AgentStatusMessage {
+                    terminal_id,
+                    mount_generation: MOUNT_GENERATION,
+                    status,
+                },
+            ))
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn handle_inbound<H: FederationHost>(
@@ -340,80 +435,6 @@ fn spawn_terminal_forward_task(
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
-            }
-        }
-    })
-}
-
-fn spawn_event_stream_task<H: FederationHost>(
-    host: Arc<H>,
-    start_cursor: u64,
-    out_tx: mpsc::UnboundedSender<FederationMessage>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut last_seq = start_cursor;
-        let mut ticker = tokio::time::interval(POLL_INTERVAL);
-        loop {
-            ticker.tick().await;
-            let frames = host.events_after(last_seq);
-            if frames.is_empty() {
-                continue;
-            }
-            let first_seq = frames[0].0;
-            if first_seq != last_seq + 1
-                && out_tx
-                    .send(FederationMessage::Event(EventChannelMessage::Gap {
-                        from: last_seq,
-                        to: first_seq - 1,
-                    }))
-                    .is_err()
-            {
-                return;
-            }
-            for (seq, kind) in &frames {
-                if out_tx
-                    .send(FederationMessage::Event(EventChannelMessage::Frame(
-                        EventFrame {
-                            source_seq: *seq,
-                            kind: kind.clone(),
-                        },
-                    )))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            last_seq = frames.last().map(|(seq, _)| *seq).unwrap_or(last_seq);
-        }
-    })
-}
-
-fn spawn_agent_status_task<H: FederationHost>(
-    host: Arc<H>,
-    out_tx: mpsc::UnboundedSender<FederationMessage>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut last: HashMap<String, AgentStatus> = HashMap::new();
-        let mut ticker = tokio::time::interval(POLL_INTERVAL.saturating_mul(4));
-        loop {
-            ticker.tick().await;
-            for (terminal_id, status) in host.agent_statuses() {
-                if last.get(&terminal_id) == Some(&status) {
-                    continue;
-                }
-                last.insert(terminal_id.clone(), status);
-                if out_tx
-                    .send(FederationMessage::AgentStatus(
-                        super::protocol::AgentStatusMessage {
-                            terminal_id,
-                            mount_generation: MOUNT_GENERATION,
-                            status,
-                        },
-                    ))
-                    .is_err()
-                {
-                    return;
-                }
             }
         }
     })

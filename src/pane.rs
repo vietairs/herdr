@@ -3259,6 +3259,7 @@ mod tests {
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             detect_handle: tokio::spawn(async {}).abort_handle(),
+            output_tee: broadcast::channel::<Bytes>(OUTPUT_TEE_CAPACITY).0,
         };
 
         assert!(runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
@@ -3290,6 +3291,7 @@ mod tests {
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             detect_handle: tokio::spawn(async {}).abort_handle(),
+            output_tee: broadcast::channel::<Bytes>(OUTPUT_TEE_CAPACITY).0,
         };
 
         assert!(!runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
