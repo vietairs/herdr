@@ -49,8 +49,11 @@ impl std::error::Error for CodecError {}
 /// Encodes a message as a length-prefixed, version-tagged frame:
 /// `[u32LE federation_protocol_version][u32LE payload length][bincode payload]`.
 pub fn encode<M: Serialize>(msg: &M) -> Result<Vec<u8>, CodecError> {
-    let payload = bincode::serde::encode_to_vec(msg, bincode::config::standard())
-        .map_err(|e| CodecError::Malformed(e.to_string()))?;
+    // serde_json (not bincode): federation frames carry api-schema types
+    // (SessionSnapshot, EventKind) that use `#[serde(skip_serializing_if)]` /
+    // `default`, which bincode's non-self-describing format cannot round-trip.
+    // JSON is self-describing and is exactly what these types are designed for.
+    let payload = serde_json::to_vec(msg).map_err(|e| CodecError::Malformed(e.to_string()))?;
 
     if payload.len() > u32::MAX as usize {
         return Err(CodecError::Malformed(format!(
@@ -104,14 +107,10 @@ pub fn decode<M: DeserializeOwned>(buf: &[u8], max_len: usize) -> Result<(M, usi
     }
 
     let payload = &buf[FRAME_HEADER_LEN..payload_end];
-    let (msg, consumed) = bincode::serde::decode_from_slice(payload, bincode::config::standard())
-        .map_err(|e| CodecError::Malformed(e.to_string()))?;
-
-    if consumed != claimed_len {
-        return Err(CodecError::Malformed(format!(
-            "decoded {consumed} bytes but payload length was {claimed_len}; trailing bytes are not allowed"
-        )));
-    }
+    // serde_json::from_slice consumes the whole payload or errors on trailing
+    // non-whitespace, so an explicit trailing-bytes check is unnecessary.
+    let msg =
+        serde_json::from_slice(payload).map_err(|e| CodecError::Malformed(e.to_string()))?;
 
     Ok((msg, payload_end))
 }
