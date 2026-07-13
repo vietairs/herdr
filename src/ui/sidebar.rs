@@ -132,22 +132,29 @@ fn agent_panel_entries_with_runtimes(
             let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
             ws.pane_details(&app.terminals)
                 .into_iter()
-                .map(move |detail| AgentPanelEntry {
-                    ws_idx,
-                    tab_idx: detail.tab_idx,
-                    pane_id: detail.pane_id,
-                    primary_label: workspace_label.clone(),
-                    primary_tab_label: multi_tab.then_some(detail.tab_label),
-                    pane_label: detail.pane_label,
-                    terminal_title: detail.terminal_title,
-                    terminal_title_stripped: detail.terminal_title_stripped,
-                    agent_label: Some(detail.agent_label),
-                    agent: detail.agent,
-                    state: detail.state,
-                    seen: detail.seen,
-                    last_agent_state_change_seq: detail.last_agent_state_change_seq,
-                    state_labels: detail.state_labels,
-                    tokens: detail.tokens,
+                .map(move |detail| {
+                    let show_tab = multi_tab
+                        || ws
+                            .tabs
+                            .get(detail.tab_idx)
+                            .is_some_and(|tab| !tab.is_auto_named());
+                    AgentPanelEntry {
+                        ws_idx,
+                        tab_idx: detail.tab_idx,
+                        pane_id: detail.pane_id,
+                        primary_label: workspace_label.clone(),
+                        primary_tab_label: show_tab.then_some(detail.tab_label),
+                        pane_label: detail.pane_label,
+                        terminal_title: detail.terminal_title,
+                        terminal_title_stripped: detail.terminal_title_stripped,
+                        agent_label: Some(detail.agent_label),
+                        agent: detail.agent,
+                        state: detail.state,
+                        seen: detail.seen,
+                        last_agent_state_change_seq: detail.last_agent_state_change_seq,
+                        state_labels: detail.state_labels,
+                        tokens: detail.tokens,
+                    }
                 })
         })
         .collect();
@@ -1629,40 +1636,49 @@ mod tests {
     }
 
     #[test]
-    fn all_workspaces_agent_panel_entries_use_workspace_and_optional_tab_labels() {
+    fn agent_panel_tab_label_visibility_tracks_tab_identity() {
         let mut app = crate::app::state::AppState::test_new();
-        let first = Workspace::test_new("one");
-        let first_pane = first.tabs[0].root_pane;
-        let mut second = Workspace::test_new("two");
-        let second_tab = second.test_add_tab(Some("logs"));
-        let second_pane = second.tabs[second_tab].root_pane;
+        let single_auto = Workspace::test_new("auto");
+        let mut single_custom = Workspace::test_new("custom");
+        single_custom.tabs[0].set_custom_name("focus".into());
+        let mut multi = Workspace::test_new("multi");
+        multi.test_add_tab(Some("logs"));
 
-        app.workspaces = vec![first, second];
+        app.workspaces = vec![single_auto, single_custom, multi];
         app.ensure_test_terminals();
-        let first_terminal_id = app.workspaces[0].tabs[0].panes[&first_pane]
-            .attached_terminal_id
-            .clone();
-        app.terminals
-            .get_mut(&first_terminal_id)
-            .unwrap()
-            .detected_agent = Some(Agent::Pi);
-        let second_terminal_id = app.workspaces[1].tabs[second_tab].panes[&second_pane]
-            .attached_terminal_id
-            .clone();
-        app.terminals
-            .get_mut(&second_terminal_id)
-            .unwrap()
-            .detected_agent = Some(Agent::Claude);
-        app.active = Some(0);
-        app.selected = 0;
+        for (ws_idx, tab_idx, agent) in [
+            (0, 0, Agent::Pi),
+            (1, 0, Agent::Claude),
+            (2, 0, Agent::Codex),
+            (2, 1, Agent::Pi),
+        ] {
+            let pane_id = app.workspaces[ws_idx].tabs[tab_idx].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(agent);
+        }
 
         let entries = agent_panel_entries(&app);
-        assert_eq!(entries[0].primary_label, "one");
-        assert!(entries[0].primary_tab_label.is_none());
-        assert_eq!(entries[0].agent_label.as_deref(), Some("pi"));
-        assert_eq!(entries[1].primary_label, "two");
-        assert_eq!(entries[1].primary_tab_label.as_deref(), Some("logs"));
-        assert_eq!(entries[1].agent_label.as_deref(), Some("claude"));
+        let labels: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.primary_label.as_str(),
+                    entry.primary_tab_label.as_deref(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            labels,
+            [
+                ("auto", None),
+                ("custom", Some("focus")),
+                ("multi", Some("1")),
+                ("multi", Some("logs")),
+            ]
+        );
     }
 
     #[test]
