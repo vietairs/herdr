@@ -132,6 +132,25 @@ pub fn map_out(fed_ref: &FedRef) -> &str {
     &fed_ref.remote_id
 }
 
+/// Reverses `map_in(remote_id, mount).to_public_id()` given only the public
+/// id string (not a full `FedRef`) — needed where a namespaced id (e.g. a
+/// `RemoteMirror`'s already-sanitized `PaneInfo::terminal_id`, P9
+/// materialization) must become the raw wire id again to re-open a
+/// federation `Terminal` channel, which the wire protocol addresses by the
+/// remote's own un-namespaced id, never the local public one. `HostKey::new`
+/// guarantees neither `user@ip` nor the session discriminator contains `:`,
+/// so stripping the known `r:<host_key>:` prefix is unambiguous. Falls back
+/// to `public_id` unchanged if it is not actually namespaced under `mount`
+/// (defensive; callers only ever pass ids sourced from `mount`'s own
+/// `RemoteMirror`).
+pub(crate) fn strip_mount_namespace(mount: &Mount, public_id: &str) -> String {
+    let prefix = format!("{REMOTE_PREFIX}{}:", mount.host_key.as_str());
+    public_id
+        .strip_prefix(prefix.as_str())
+        .unwrap_or(public_id)
+        .to_string()
+}
+
 /// Result of fencing an inbound message's generation against a live mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FenceResult {
@@ -205,6 +224,21 @@ mod tests {
             mount.host_key.as_str(),
             mount.host_key.as_str()
         )));
+    }
+
+    #[test]
+    fn strip_mount_namespace_reverses_map_in_to_public_id() {
+        let mount = mount("alice@10.0.0.1", "inst-a", 1);
+        let public_id = map_in("term-7", &mount).to_public_id();
+
+        assert_eq!(strip_mount_namespace(&mount, &public_id), "term-7");
+    }
+
+    #[test]
+    fn strip_mount_namespace_is_a_defensive_noop_for_a_plain_local_id() {
+        let mount = mount("alice@10.0.0.1", "inst-a", 1);
+
+        assert_eq!(strip_mount_namespace(&mount, "w1"), "w1");
     }
 
     #[test]

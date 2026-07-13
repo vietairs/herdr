@@ -431,6 +431,36 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
     }
 }
 
+/// Spawns the client-side counterpart of `serve::run`'s `writer_task`:
+/// drains an internal outbound queue and writes each `FederationMessage` to
+/// `writer` in order. Returns the sender callers use — directly, or via
+/// `TerminalChannelRouter::open_terminal`/`send_local_clipboard_to_remote` —
+/// to enqueue outbound frames, plus the task's `JoinHandle` so a caller can
+/// await it on teardown (drop the sender to end the loop, mirroring
+/// `serve.rs`'s `drop(out_tx); let _ = writer_task.await;` shutdown
+/// sequence). P9 materialization's first real production call site for this
+/// exact pattern (client-side); `serve.rs`'s `run` has carried the identical
+/// shape since P3.
+pub(crate) fn spawn_mount_writer<W>(
+    mut writer: W,
+) -> (
+    mpsc::UnboundedSender<FederationMessage>,
+    tokio::task::JoinHandle<()>,
+)
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+    let handle = tokio::spawn(async move {
+        while let Some(msg) = out_rx.recv().await {
+            if write_frame(&mut writer, &msg).await.is_err() {
+                break;
+            }
+        }
+    });
+    (out_tx, handle)
+}
+
 /// Runs `connect_and_mount` on its own task so the caller's event loop is
 /// never blocked by federation I/O — including a peer that never responds
 /// at all (e.g. an SSH prompt; the actual TTY-prompt pre-resolution is
@@ -806,6 +836,35 @@ mod tests {
         assert_eq!(payload, b"pasted payload".to_vec());
 
         writer_task.abort();
+    }
+
+    // P9 materialization: `spawn_mount_writer` is the extracted, reusable
+    // form of the writer-pump loop the test above hand-rolls inline — proves
+    // the extraction behaves identically (frame arrives, in order) and that
+    // dropping the returned sender cleanly ends the spawned task (mirrors
+    // `serve.rs`'s own `drop(out_tx); let _ = writer_task.await;` shutdown).
+    #[tokio::test]
+    async fn spawn_mount_writer_delivers_frames_and_exits_when_sender_drops() {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (_client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, _server_writer) = tokio::io::split(server_side);
+
+        let (out_tx, handle) = spawn_mount_writer(client_writer);
+        send_local_clipboard_to_remote(&out_tx, "local", b"via spawn_mount_writer".to_vec());
+
+        let Some(FederationMessage::Clipboard(ClipboardMessage { origin_tag, payload })) =
+            read_frame(&mut server_reader).await.unwrap()
+        else {
+            panic!("expected a Clipboard message");
+        };
+        assert_eq!(origin_tag, "local");
+        assert_eq!(payload, b"via spawn_mount_writer".to_vec());
+
+        drop(out_tx);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("writer task must exit once its sender is dropped")
+            .expect("writer task must not panic");
     }
 
     // Test 8 (RT-F7 clipboard, inbound half) + Test 9 (event-channel
