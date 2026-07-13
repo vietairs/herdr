@@ -15,3 +15,11 @@ pub mod protocol;
 pub(crate) mod loopback;
 pub(crate) mod serve;
 pub(crate) mod tee;
+
+// P4: local federation client + per-mount replica reducer. `pub(crate)`
+// (not `pub`) to match every type these modules expose (`FederationClient`,
+// `RemoteMirror`, ...), which are all `pub(crate)` — matches the existing
+// `serve`/`tee` visibility pattern in this file rather than the phase file's
+// literal `pub mod` wording (logged in implementation-notes.md).
+pub(crate) mod client;
+pub(crate) mod reducer;
