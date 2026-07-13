@@ -9,7 +9,7 @@
 - [x] PLAN-GATE — user chose: build full two-server system, our herdr on both ends (remote = headless federation server)
 - [ ] 4b. /ck:plan REVISION (fold findings + both-ends federation protocol) — in progress
 - [ ] 7. /hvn:impl-notes init — pending
-- [ ] 8. /ck:cook (no --auto) — phase by phase, TDD — pending
+- [ ] 8. /ck:cook — BLOCKED (env cannot build: zig 0.15 vs macOS 27) — P1 code written+committed b436cdc, UNVALIDATED; needs buildable env (linux remote / nix / older mac)
 - [ ] 9. /hvn:impl-notes review — pending
 - [ ] 10. /ck:code-review ‖ 11. /codex:adversarial-review <diff> — pending
 - [ ] 12. /hvn:ship-gate --hard — pending

@@ -26,3 +26,12 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   Reversibility: N/A (environment). P1 code is written+committed (WIP, unvalidated: cannot cargo
   build/test). Unblock options: build on a Linux remote, install nix + `nix develop`, use an older
   macOS, or wait for zig macOS-27 support. Cook is PAUSED at P1 pending a buildable environment.
+
+- What: P1 codec payload switched bincode → serde_json (encode/decode in protocol/codec.rs).
+  Why: federation frames carry api-schema types (SessionSnapshot, EventKind) using
+  `#[serde(default, skip_serializing_if=Option::is_none)]`; bincode is non-self-describing and
+  cannot round-trip omitted fields → test failed `UnexpectedEnd{additional:1}`. serde_json is
+  self-describing, already a dep, and is the format these types are authored for.
+  Evidence: cargo test on remote (gpu-ml/nix): 15 pass/1 fail; src/api/schema/*.rs skip_serializing_if.
+  Reversibility: trivial (2 fns). FOLLOW-UP (P5): raw terminal Output/Input bytes JSON-bloat ~4x —
+  move the high-volume terminal byte path off the serde codec onto a raw length-prefixed sub-framing.
