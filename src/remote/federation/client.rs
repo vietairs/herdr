@@ -957,11 +957,19 @@ mod tests {
         let direct_err = codec::decode::<FederationMessage>(&frame, Channel::Clipboard.max_len())
             .expect_err("direct codec::decode must reject an over-cap clipboard payload");
 
-        // Buffer sized comfortably above the frame so `write_frame` never
-        // blocks waiting for a concurrent reader (this test only needs the
-        // header + a header-only rejection, never the full payload consumed).
-        let (client_side, server_side) =
-            tokio::io::duplex(Channel::Clipboard.max_len() + 1_048_576);
+        // `serde_json` encodes a raw `Vec<u8>` payload as a numeric array
+        // (e.g. `[0,0,...]`), which bloats a 16 MiB+1 byte payload to roughly
+        // 2x its raw size on the wire (see `implementation-notes.md`'s P1
+        // JSON-bloat follow-up). A duplex buffer sized off the *raw* payload
+        // length is therefore smaller than the actual encoded frame, and
+        // `write_frame`'s `write_all` would block forever waiting for buffer
+        // space with no concurrent reader draining it (deadlock — this is
+        // exactly what hung the suite). Sizing the buffer off the already-
+        // encoded `frame`'s own length sidesteps the encoding-format detail
+        // entirely and keeps this test's single-task, no-concurrent-reader
+        // shape (it only needs the header-only rejection, never the full
+        // payload consumed).
+        let (client_side, server_side) = tokio::io::duplex(frame.len() + 1_048_576);
         let (mut client_reader, _client_writer) = tokio::io::split(client_side);
         let (_server_reader, mut server_writer) = tokio::io::split(server_side);
         write_frame(&mut server_writer, &oversized)
