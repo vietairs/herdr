@@ -85,6 +85,14 @@ pub(crate) trait FederationHost: 'static {
     /// Snapshot of every known terminal's current agent status, polled and
     /// diffed by this module so only changes are sent over the wire.
     fn agent_statuses(&self) -> Vec<(String, AgentStatus)>;
+
+    /// Drain and apply any pending internal `AppEvent`s (pane-content
+    /// changed, agent state changed, clipboard writes, ...) so this host's
+    /// `EventHub`/session state actually advances from live pane activity
+    /// between mount and the next `events_after`/`agent_statuses` poll
+    /// (GAP #1, `implementation-notes.md`). Default no-op: test hosts
+    /// (`loopback::FixtureHost`) have no such channel to drain.
+    fn drain_internal_events(&self) {}
 }
 
 /// Minimal, valid `SessionSnapshot` with no workspaces/tabs/panes. Used as
@@ -252,6 +260,12 @@ where
                 }
             }
             _ = event_ticker.tick() => {
+                // Apply any pending internal `AppEvent`s BEFORE polling the
+                // event hub for this tick, so state that just changed (a
+                // pane's content, an agent's status, a clipboard write) is
+                // visible to `events_after`/`agent_statuses` in the same
+                // tick that produced it, not one tick later.
+                host.drain_internal_events();
                 if !poll_events(&*host, &mut event_cursor, &out_tx) {
                     break Ok(());
                 }
@@ -615,6 +629,29 @@ impl FederationHost for AppFederationHost {
             _ => Vec::new(),
         }
     }
+
+    /// Closes GAP #1 (`implementation-notes.md`, P8 entry): drains `App`'s
+    /// `event_rx` and applies each pending `AppEvent` via
+    /// `App::handle_internal_event` — the same call `HeadlessServer::
+    /// handle_internal_event_with_forwarding` (`server/headless.rs:1845`)
+    /// makes, minus the client-forwarding side effects (sound/clipboard/
+    /// prefix-input relayed to an attached terminal client), which do not
+    /// apply here: `federation-serve` has no attached interactive client of
+    /// its own, only federation-protocol subscribers reading `EventHub`/
+    /// `agent_statuses`/the raw-byte tee, none of which this drain bypasses.
+    /// Bounded per tick (not drained to exhaustion) so a burst of internal
+    /// events cannot starve the read loop that shares this task via
+    /// `tokio::select!`.
+    fn drain_internal_events(&self) {
+        const MAX_EVENTS_PER_DRAIN: usize = 256;
+        let mut app = self.app.lock().expect("federation host app mutex poisoned");
+        for _ in 0..MAX_EVENTS_PER_DRAIN {
+            match app.event_rx.try_recv() {
+                Ok(ev) => app.handle_internal_event(ev),
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 /// Entry point for the `herdr federation-serve` subcommand (`main.rs`).
@@ -642,4 +679,114 @@ pub(crate) fn run_federation_serve_over_stdio() -> std::io::Result<()> {
         let stdout = tokio::io::stdout();
         run(host, stdin, stdout).await
     })
+}
+
+#[cfg(test)]
+mod gap1_app_event_drain_tests {
+    //! Proves GAP #1 is closed: an `AppEvent` emitted by a real, in-process
+    //! `App` (not a fixture stand-in) reaches the federation event stream
+    //! over the actual `serve::run` protocol handler. `AppFederationHost` is
+    //! `!Send`/`!Sync`, so — like production's `run_federation_serve_over_stdio`
+    //! — this drives `run()` via `tokio::join!` on one `#[tokio::test]` task
+    //! rather than `tokio::spawn`ing the host across threads.
+
+    use super::*;
+    use crate::api::EventHub;
+    use crate::app::App;
+    use crate::events::AppEvent;
+
+    #[tokio::test]
+    async fn a_real_app_event_reaches_the_federation_event_stream() {
+        let event_hub = EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        let event_tx = app.event_tx.clone();
+
+        let mut workspace = crate::workspace::Workspace::test_new("gap1-drain");
+        let dead_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+
+        let host = Arc::new(AppFederationHost {
+            server_instance_id: ServerInstanceId("gap1-test".to_string()),
+            event_hub: event_hub.clone(),
+            app: std::sync::Mutex::new(app),
+        });
+
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let (server_reader, server_writer) = tokio::io::split(server);
+        let (mut client_reader, mut client_writer) = tokio::io::split(client);
+
+        let run_fut = run(host, server_reader, server_writer);
+        let drive_fut = async move {
+            write_frame(
+                &mut client_writer,
+                &FederationMessage::Handshake(Handshake {
+                    federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+                    capabilities: BTreeSet::new(),
+                    server_instance_id: ServerInstanceId("gap1-test-client".to_string()),
+                }),
+            )
+            .await
+            .unwrap();
+
+            // Handshake accept, then the atomic mount — both server->client
+            // only, unconditional on a successful negotiation.
+            assert!(matches!(
+                read_frame(&mut client_reader).await.unwrap(),
+                Some(FederationMessage::HandshakeResponse(
+                    HandshakeResponse::Accept { .. }
+                ))
+            ));
+            assert!(matches!(
+                read_frame(&mut client_reader).await.unwrap(),
+                Some(FederationMessage::MountSnapshot(_))
+            ));
+
+            // Now that the mount is established, emit a real `AppEvent` the
+            // same way local pane activity would — through `event_tx`, the
+            // exact channel `App::handle_internal_event` normally only gets
+            // drained from by `HeadlessServer::run`'s select loop
+            // (`server/headless.rs:570`). Before GAP #1's fix, nothing drove
+            // this channel inside `federation-serve`, so this event would
+            // never reach `event_hub` and this test would time out below.
+            event_tx
+                .send(AppEvent::PaneDied {
+                    pane_id: dead_pane,
+                })
+                .await
+                .unwrap();
+
+            // Poll the federation event stream (server-driven, `POLL_INTERVAL`
+            // = 25ms) until the `pane.exited` frame produced by that event
+            // arrives, or fail on timeout — proving the drain path is live.
+            let saw_pane_exited = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match read_frame(&mut client_reader).await.unwrap() {
+                        Some(FederationMessage::Event(EventChannelMessage::Frame(frame))) => {
+                            if frame.kind == EventKind::PaneExited {
+                                return;
+                            }
+                        }
+                        Some(_) => continue,
+                        None => panic!("federation link closed before pane.exited arrived"),
+                    }
+                }
+            })
+            .await;
+            assert!(
+                saw_pane_exited.is_ok(),
+                "pane.exited never reached the federation event stream (GAP #1 regressed)"
+            );
+        };
+
+        let (run_result, ()) = tokio::join!(run_fut, drive_fut);
+        assert!(run_result.is_ok());
+    }
 }
