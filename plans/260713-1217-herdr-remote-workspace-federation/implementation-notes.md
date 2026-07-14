@@ -1094,3 +1094,24 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   oneshot::blocking_recv) + the command loop (reader thread → SendInput/Resize; writer thread draining an
   mpsc<FederationMessage>; output-pump threads on broadcast::Receiver::blocking_recv; event/agent ticker)
   + first-cause supervisor + lease Release on EOF. This is the big one — wires the dormant actor commands.
+
+- 260714 b0.4 2c DESIGN scouted WITH 2 PARALLEL AGENTS (hvn-root-causer: lease lifecycle; hvn-scout:
+  TerminalRuntime output/mount-gen API). Two decisions locked:
+  (D-accept-epoch) The accept loop reads self.federation_lease.current_epoch() SYNCHRONOUSLY in
+  accept_federation_connections(&mut self) — same single-threaded event-loop context that owns the lease,
+  so no RegisterConnection actor round-trip; epoch threaded into the spawned connection thread + carried on
+  every command. Matches federation_lease.rs:91-93 doc + v5-endorsed ordering (register {epoch,connid} THEN
+  spawn). AcquireController takes epoch as INPUT, never returns it.
+  (D-dead-reserved) THE HOLE: a connection that wins AcquireController (slot Reserved) then dies before
+  Mount with NO handoff → slot stuck Held forever (begin_revocation only runs on live-handoff, not on a
+  connection dying; codex v4/v5 flagged it + slated an unspecified "reservation expiry"). FIX for 2c-1 = a
+  RAII LeaseReleaseGuard: once acquired, a guard whose Drop blocking_sends Release covers EVERY observable
+  thread exit incl. panic (stack unwinds → Drop runs). release() is compare-and-clear so a race vs a newer
+  lease is inert. Reservation-expiry stays DEFERRED as the wedged-thread backstop (rare; bounded by the 4s
+  handshake timeout + bounded reads). blocking_send legal in Drop (plain std::thread, no tokio runtime;
+  errors instantly if the loop/receiver is gone → never hangs).
+  CORRECTION from scout: this tokio's broadcast::Receiver<Bytes> has NO blocking_recv — the 2c-3 output
+  pump must use try_recv() polling (tee.rs:27-42 drain_available coalesce), NOT blocking_recv. mount_
+  generation is a fixed const=1 (serve.rs:38). subscribe_output_bytes()->broadcast::Receiver<Bytes>
+  (runtime.rs:497). ServerEvent channel is bounded mpsc::channel(64).
+  Reversibility: decisions, not code; revert = re-open. Guard is additive.
