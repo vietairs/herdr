@@ -121,8 +121,8 @@ mod tests {
 
     use super::super::{
         AgentStatusMessage, Capability, Channel, ClipboardMessage, EventChannelMessage,
-        EventCursor, EventFrame, FederationMessage, Handshake, HandshakeResponse, MountSnapshot,
-        RejectReason, ScrollbackReplay, TerminalChannelMessage,
+        EventCursor, EventFrame, FaultMessage, FaultReason, FederationMessage, Handshake,
+        HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, TerminalChannelMessage,
     };
     use super::*;
     use crate::api::schema::common::AgentStatus;
@@ -207,6 +207,9 @@ mod tests {
             FederationMessage::Clipboard(ClipboardMessage {
                 origin_tag: "local".to_string(),
                 payload: vec![10, 11, 12],
+            }),
+            FederationMessage::Fault(FaultMessage {
+                reason: FaultReason::EgressOverflow,
             }),
         ]
     }

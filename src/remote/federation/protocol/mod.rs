@@ -22,7 +22,9 @@ use super::id::ServerInstanceId;
 
 /// Current federation protocol version. Independent of
 /// `crate::protocol::wire::PROTOCOL_VERSION` (the client/UI wire protocol).
-pub const FEDERATION_PROTOCOL_VERSION: u32 = 1;
+/// Bumped 1 -> 2 with the addition of the control-channel `Fault` frame
+/// (b0.3-tail): a peer on v1 cannot decode a `Fault`, so the version gates it.
+pub const FEDERATION_PROTOCOL_VERSION: u32 = 2;
 
 /// An optional feature two federation peers may support. Modeled as an
 /// opaque name rather than a closed enum so an older peer can simply not
@@ -55,6 +57,32 @@ pub struct Handshake {
 pub enum RejectReason {
     /// The peers' `federation_protocol_version`s do not match.
     Version { local: u32, remote: u32 },
+}
+
+/// Why a federation link is being torn down, carried on the control channel so
+/// the peer learns the cause instead of only seeing an EOF. The wire mirror of
+/// `server::federation_fault::TunnelExit` (converted at the edge); a versioned
+/// closed enum so an unknown future reason is a decode error the version bump
+/// guards against, not a silent misinterpretation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FaultReason {
+    PeerClosed,
+    WriterFailed,
+    ChildExited,
+    TaskPanicked,
+    ServerTerminalClosed,
+    Lagged,
+    EgressOverflow,
+    LocalQueueOverflow,
+    GenerationMismatch,
+    EventGap,
+}
+
+/// Control-channel fault frame: a best-effort "I am closing because <reason>"
+/// sent before (or instead of) a bare EOF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FaultMessage {
+    pub reason: FaultReason,
 }
 
 /// Response to a `Handshake`.
@@ -197,6 +225,9 @@ pub enum Channel {
     Terminal,
     AgentStatus,
     Clipboard,
+    /// Small out-of-band control frames (fault/teardown). Kept tiny so a fault
+    /// can never be mistaken for a bulk channel and its cap is trivially met.
+    Control,
 }
 
 impl Channel {
@@ -212,6 +243,7 @@ impl Channel {
             Channel::Terminal => 2 * 1024 * 1024,
             Channel::AgentStatus => 64 * 1024,
             Channel::Clipboard => 16 * 1024 * 1024,
+            Channel::Control => 4 * 1024,
         }
     }
 }
@@ -226,6 +258,7 @@ pub enum FederationMessage {
     Terminal(TerminalChannelMessage),
     AgentStatus(AgentStatusMessage),
     Clipboard(ClipboardMessage),
+    Fault(FaultMessage),
 }
 
 impl FederationMessage {
@@ -238,6 +271,7 @@ impl FederationMessage {
             Self::Terminal(_) => Channel::Terminal,
             Self::AgentStatus(_) => Channel::AgentStatus,
             Self::Clipboard(_) => Channel::Clipboard,
+            Self::Fault(_) => Channel::Control,
         }
     }
 }

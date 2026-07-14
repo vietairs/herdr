@@ -34,8 +34,9 @@ use crate::api::EventHub;
 
 use super::id::{HostKey, Mount, ServerInstanceId};
 use super::protocol::{
-    Capability, ClipboardMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot,
-    RejectReason, ScrollbackReplay, TerminalChannelMessage, FEDERATION_PROTOCOL_VERSION,
+    Capability, ClipboardMessage, FaultReason, FederationMessage, Handshake, HandshakeResponse,
+    MountSnapshot, RejectReason, ScrollbackReplay, TerminalChannelMessage,
+    FEDERATION_PROTOCOL_VERSION,
 };
 use super::reducer::{ReducerAction, RemoteMirror};
 use super::serve::{read_frame, write_frame};
@@ -224,6 +225,10 @@ impl FederationClient {
 pub(crate) enum DriveOutcome {
     /// The peer closed the link.
     LinkClosed,
+    /// The peer sent a control-channel fault frame naming why it is tearing the
+    /// mount down. Fail-fast (v1): the caller ends the session, it does not
+    /// remount. The reason is best-effort context for the exit.
+    Faulted(FaultReason),
     /// A `Gap`/`Reset` was observed; the caller must remount (a fresh
     /// `connect_and_mount` call over a *new* connection — the wire has no
     /// "request a fresh snapshot on this connection" message, so a full
@@ -419,6 +424,11 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                 // never stall this router's single read loop, which also
                 // services the event/terminal channels for the whole mount.
                 let _ = clipboard_tx.try_send(clip_msg);
+            }
+            FederationMessage::Fault(fault) => {
+                // The server is tearing the mount down and named the cause;
+                // fail-fast — end the drive, do not remount.
+                return Ok(DriveOutcome::Faulted(fault.reason));
             }
             // Handshake/HandshakeResponse/MountSnapshot are already
             // consumed during `connect_and_mount`; AgentStatus relay is P6
