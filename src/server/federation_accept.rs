@@ -34,7 +34,7 @@ use crate::remote::federation::protocol::codec;
 use crate::remote::federation::protocol::negotiate::{negotiate, AgreedCaps};
 use crate::remote::federation::protocol::{
     Capability, Channel, EventCursor, FederationMessage, Handshake, HandshakeResponse,
-    MountSnapshot, FEDERATION_PROTOCOL_VERSION,
+    MountSnapshot, TerminalChannelMessage, FEDERATION_PROTOCOL_VERSION,
 };
 use crate::server::client_transport::ServerEvent;
 use crate::server::federation_actor::FederationCommand;
@@ -204,6 +204,15 @@ fn handle_federation_connection(
         return Ok(());
     }
 
+    // Clear the handshake read timeout: a mounted federated session idles
+    // between the controller's inputs, so the command loop must not time out.
+    if let Err(err) = stream.set_recv_timeout(None) {
+        if err.kind() != io::ErrorKind::Unsupported {
+            return Err(err);
+        }
+        debug!(connid, err = %err, "clearing federation recv timeout unsupported");
+    }
+
     drive_mount(
         &mut stream,
         epoch,
@@ -253,10 +262,87 @@ fn drive_mount<S: Read + Write>(
         }),
     )?;
 
-    // Sub-brick 2c-2 enters the command loop here (reader → SendInput/Resize,
-    // writer draining events/output). 2c-1 closes after the snapshot; the guard
-    // releases the lease on return.
-    Ok(())
+    // Service the controller's inbound commands until EOF; the guard (above)
+    // releases the lease when this returns. Sub-brick 2c-3 adds the outbound
+    // side (event/output frames) on a writer thread over the try_clone'd half.
+    run_command_loop(stream, epoch, connid, server_event_tx)
+}
+
+/// Read inbound frames from the mounted controller and route terminal input and
+/// resize to the live App via the actor (fire-and-forget; the actor drops them
+/// unless `(epoch, connid)` is the mounted controller). Returns on a clean EOF
+/// or a read error. Sub-brick 2c-2 handles the inbound-input direction only —
+/// terminal Open/Close and the outbound event/output frames are 2c-3.
+fn run_command_loop<R: Read>(
+    reader: &mut R,
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) -> io::Result<()> {
+    loop {
+        match read_frame_blocking(reader)? {
+            None => return Ok(()),
+            Some(FederationMessage::Terminal(message)) => {
+                route_terminal_message(message, epoch, connid, server_event_tx)?;
+            }
+            Some(_other) => {
+                // Non-terminal inbound frames drive the outbound side, wired in
+                // 2c-3; ignore them here rather than tear down the connection.
+            }
+        }
+    }
+}
+
+/// Route one inbound `TerminalChannelMessage` from the controller. Only input
+/// and resize flow to the App in 2c-2; Open/Close/Output belong to the outbound
+/// pump added in 2c-3.
+fn route_terminal_message(
+    message: TerminalChannelMessage,
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) -> io::Result<()> {
+    match message {
+        TerminalChannelMessage::Input {
+            terminal_id, bytes, ..
+        } => send_command(
+            server_event_tx,
+            FederationCommand::SendInput {
+                epoch,
+                connid,
+                terminal_id,
+                bytes,
+            },
+        ),
+        TerminalChannelMessage::Resize {
+            terminal_id,
+            cols,
+            rows,
+            ..
+        } => send_command(
+            server_event_tx,
+            FederationCommand::Resize {
+                epoch,
+                connid,
+                terminal_id,
+                cols,
+                rows,
+            },
+        ),
+        TerminalChannelMessage::Open { .. }
+        | TerminalChannelMessage::Close { .. }
+        | TerminalChannelMessage::Output { .. } => Ok(()),
+    }
+}
+
+/// Fire-and-forget send of a federation command to the server event loop.
+fn send_command(
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+    command: FederationCommand,
+) -> io::Result<()> {
+    server_event_tx
+        .blocking_send(ServerEvent::Federation(command))
+        .map_err(|_| io::Error::other("server event loop is gone"))
 }
 
 /// Reserve the single-controller slot via the actor: a blocking round-trip to
@@ -499,5 +585,72 @@ mod tests {
         drop(server);
         drop(tx);
         loop_handle.join().expect("mock loop joins");
+    }
+
+    #[test]
+    fn command_loop_routes_controller_input_and_resize_to_the_actor() {
+        use std::sync::{Arc, Mutex};
+
+        // A recording mock loop captures the routed commands (bypassing the App
+        // + lease authz, which federation_actor already tests) so we assert the
+        // reader's frame→command routing directly.
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let recorded: Arc<Mutex<Vec<(&'static str, String, Vec<u8>)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(cmd) = ev {
+                    match cmd {
+                        FederationCommand::SendInput {
+                            terminal_id, bytes, ..
+                        } => sink.lock().unwrap().push(("input", terminal_id, bytes)),
+                        FederationCommand::Resize {
+                            terminal_id,
+                            cols,
+                            rows,
+                            ..
+                        } => sink.lock().unwrap().push((
+                            "resize",
+                            terminal_id,
+                            vec![cols as u8, rows as u8],
+                        )),
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::Terminal(TerminalChannelMessage::Input {
+                terminal_id: "t1".to_string(),
+                mount_generation: 1,
+                bytes: b"hi".to_vec(),
+            }),
+        )
+        .expect("client writes input");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::Terminal(TerminalChannelMessage::Resize {
+                terminal_id: "t1".to_string(),
+                mount_generation: 1,
+                cols: 80,
+                rows: 24,
+            }),
+        )
+        .expect("client writes resize");
+        drop(client); // EOF ends the loop
+
+        run_command_loop(&mut server, 0, 1, &tx).expect("command loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let rec = recorded.lock().unwrap();
+        assert_eq!(rec.len(), 2, "both frames routed");
+        assert_eq!(rec[0], ("input", "t1".to_string(), b"hi".to_vec()));
+        assert_eq!(rec[1].0, "resize");
+        assert_eq!(rec[1].2, vec![80u8, 24u8]);
     }
 }
