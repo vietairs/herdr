@@ -149,8 +149,19 @@
           commit→push). Design record committed 0ddea08. b0.1 FIRST BRICK GREEN+SHIPPED dd7335c:
           ServerInstanceId::fresh() + HeadlessServer per-boot identity + replacement rotation (v5 C4
           foundation); 8 id tests pass, 2640 unaffected, clean compile. Dormant (no listener until b0.4).
-          NEXT b0.1 brick: ServerEvent::Federation actor variant + FederationCommand/Reply +
-          handle_server_event forwarding-aware arms + connection-supervisor skeleton.
+          b0 PURE-PRIMITIVE FOUNDATION SHIPPED (4 green bricks on PR-1, all dormant #[allow(dead_code)],
+          production unchanged): dd7335c per-boot federation identity + replacement rotation / ee3804a
+          actor seam (ServerEvent::Federation + FederationCommand + dispatch on live App via forwarding-
+          aware handle_api_request_after_internal_events_drained) / abc6a35 single-controller lease FSM
+          (accept_epoch linearization, compare-and-clear release, resurrection-hole test) / b27ff1d typed
+          TunnelExit + FirstCauseCell (first-fault-wins). Remote loop humming (rsync→nix cargo test→push).
+          REMAINING = live I/O WIRING (bigger multi-file bricks, natural boundary for fresh effort):
+          b0.3-tail versioned wire-fault frame+version bump+bounded-egress; b0.4 server-owned unix socket
+          + accept loop wiring lease+actor+first-cause + perform_live_handoff integration + delete
+          AppFederationHost; b0-proxy transparent stdio; b1 tunnel keep-alive (remote/unix.rs); b2
+          App::new_federated + SessionPersistencePolicy::Disabled + closed-allowlist (many app/ files) +
+          eager-open + teardown; b3 flip. Then R7 tail (impl-notes review → code-review‖codex diff →
+          ship-gate --hard) before un-drafting PR #1.
         - [ ] P9.3 lifecycle FSM (reconnect/re-fence/cold-resume/warm-handoff exclusion/shutdown-never-kills) — pending; depends on P9.2b real-session wiring
 - [ ] 9. /hvn:impl-notes review — pending
 - [ ] 10. /ck:code-review ‖ 11. /codex:adversarial-review <diff> — pending
