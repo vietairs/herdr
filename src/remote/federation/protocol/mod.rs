@@ -154,7 +154,11 @@ impl TerminalChannelMessage {
         }
     }
 
-    /// The `terminal_id` tag carried by every variant.
+    /// The `terminal_id` tag carried by every variant. Symmetric with
+    /// `mount_generation`; the co-located accept loop's wire router (b0.3-tail /
+    /// b0.4 sub-brick 2) reads it to route an inbound terminal message to the
+    /// matching `FederationCommand`. Dormant until then.
+    #[allow(dead_code)]
     pub fn terminal_id(&self) -> &str {
         match self {
             Self::Open { terminal_id, .. }

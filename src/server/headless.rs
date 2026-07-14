@@ -251,6 +251,13 @@ pub struct HeadlessServer {
     /// prior process. Replaces `AppFederationHost` as the owner (v5 finding
     /// C4). Dormant until the federation listener is exposed (b0.4).
     federation_server_instance_id: crate::remote::federation::id::ServerInstanceId,
+    /// Single-controller admission + linearized revocation for the co-located
+    /// federation listener (P9.2b b0.2). One per live server; a replacement
+    /// after live-handoff starts fresh (`Free`, epoch 0). Serviced only on this
+    /// event loop, alongside the `App`, so admission/mount/authorization stay
+    /// linearized with handoff revocation. Dormant until the accept loop mints
+    /// connections against it (b0.4 sub-brick 2).
+    federation_lease: crate::server::federation_lease::FederationLease,
 }
 
 fn apply_terminal_attach_scroll(
@@ -456,6 +463,7 @@ impl HeadlessServer {
             server_event_tx,
             federation_server_instance_id:
                 crate::remote::federation::id::ServerInstanceId::fresh(),
+            federation_lease: crate::server::federation_lease::FederationLease::new(),
         })
     }
 
@@ -2825,7 +2833,11 @@ impl HeadlessServer {
                 // local events here — the loop's own event_rx arm owns the
                 // forwarding-aware drain — so no local render is needed (MIN10:
                 // these commands are render-causally inert).
-                crate::server::federation_actor::dispatch(&mut self.app, command);
+                crate::server::federation_actor::dispatch(
+                    &mut self.app,
+                    &mut self.federation_lease,
+                    command,
+                );
                 false
             }
         }
@@ -4347,6 +4359,9 @@ mod tests {
             // (P9.2b b0.1 rotation; v5 finding C4).
             federation_server_instance_id:
                 crate::remote::federation::id::ServerInstanceId::fresh(),
+            // Replacement server starts with a fresh, uncontrolled lease: no
+            // connection carries over a live-handoff, so none holds authority.
+            federation_lease: crate::server::federation_lease::FederationLease::new(),
         }
     }
 
