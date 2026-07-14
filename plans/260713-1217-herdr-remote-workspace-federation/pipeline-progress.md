@@ -144,8 +144,13 @@
           monotonic epoch never-restored-on-rollback; partial-header-EOF precision; eager-open split.
           Build order (codex-endorsed): b0.1 (buildable+DORMANT, no listener until b0.4) → b0.2 → b0.3 →
           b0.4 → b0-proxy → b1 → b2 → b3; land protocol-version bump with first wire-shape change.
-          DESIGN CONVERGED after 5 rounds. NEXT = start building b0.1 on nix host gpu-ml (pending user go
-          + branch/commit approach on their own herdr checkout).
+          DESIGN CONVERGED after 5 rounds. 260714 user greenlit BUILD b0.1 (commit on PR-1 branch).
+          BUILDING STARTED — remote loop PROVEN (edit→rsync→ssh appn-ltu-vm-100 nix develop cargo test→
+          commit→push). Design record committed 0ddea08. b0.1 FIRST BRICK GREEN+SHIPPED dd7335c:
+          ServerInstanceId::fresh() + HeadlessServer per-boot identity + replacement rotation (v5 C4
+          foundation); 8 id tests pass, 2640 unaffected, clean compile. Dormant (no listener until b0.4).
+          NEXT b0.1 brick: ServerEvent::Federation actor variant + FederationCommand/Reply +
+          handle_server_event forwarding-aware arms + connection-supervisor skeleton.
         - [ ] P9.3 lifecycle FSM (reconnect/re-fence/cold-resume/warm-handoff exclusion/shutdown-never-kills) — pending; depends on P9.2b real-session wiring
 - [ ] 9. /hvn:impl-notes review — pending
 - [ ] 10. /ck:code-review ‖ 11. /codex:adversarial-review <diff> — pending
