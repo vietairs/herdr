@@ -104,6 +104,12 @@ pub struct App {
     /// Immutable persistence contract (see `SessionPersistencePolicy`). `Enabled`
     /// for every classic construction; a federated in-proc session sets `Disabled`.
     pub(crate) persistence: SessionPersistencePolicy,
+    /// True only for an in-proc federated session (constructed via
+    /// `App::new_federated`). Suppresses the default-workspace auto-create
+    /// (`ensure_default_workspace`) — a federated App displays only the remote
+    /// mirror — and marks the App for the mutation allowlist gate at the API
+    /// dispatch entrances. Never mutated after construction.
+    pub(crate) federated_mode: bool,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
@@ -769,6 +775,7 @@ impl App {
             last_focus,
             no_session,
             persistence: SessionPersistencePolicy::Enabled,
+            federated_mode: false,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
             render_notify,
@@ -780,6 +787,30 @@ impl App {
             config_reloaded_from_disk: false,
             prefix_input_source: Box::new(crate::platform::RealPrefixInputSource::default()),
         }
+    }
+
+    /// Constructs an App for an in-proc federated session: a view onto a remote
+    /// `RemoteMirror` that must never touch the local classic session. Wraps
+    /// `App::new(no_session = true)` — so the restore branch is already the
+    /// empty one (mod.rs restore gate) — then pins the immutable
+    /// `Disabled` persistence contract (forces save-schedule / exit-save /
+    /// history / clear all off regardless of `no_session`) and the
+    /// federated-mode marker (no default workspace, mutation allowlist).
+    /// Dormant until b3 wires the live call site in `run_remote`.
+    #[cfg(unix)]
+    #[allow(dead_code)] // dormant until b3
+    pub(crate) fn new_federated(
+        config: &Config,
+        config_diagnostic: Option<String>,
+        api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
+        event_hub: crate::api::EventHub,
+    ) -> Self {
+        let mut app = Self::new(config, true, config_diagnostic, api_rx, event_hub);
+        // Immutable off: restore is already empty (no_session), and this gates
+        // every write path (save-schedule/background/now, exit-save, clear).
+        app.persistence = SessionPersistencePolicy::Disabled;
+        app.federated_mode = true;
+        app
     }
 
     #[cfg(unix)]
@@ -1165,6 +1196,12 @@ impl App {
     }
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
+        // A federated session shows only the remote mirror; never auto-create a
+        // local default workspace (covers every call site: runtime.rs api drain,
+        // headless startup, config reload).
+        if self.federated_mode {
+            return false;
+        }
         if !self.state.workspaces.is_empty() || self.state.mode == Mode::Onboarding {
             return false;
         }

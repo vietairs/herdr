@@ -67,3 +67,39 @@ b2.2/b2.3/b3 remain — checkpointed, pipeline resumable.
 ### RESULT — b2.2 shipped green
 dd3cf57. gpu-ml: build OK (exhaustive match compiles), full suite EXIT_0 all-zero-failed (2684),
 clippy 0-new, 2 tests pass. b2 bricks remaining: b2.3 (keystone) → b3 → R7 tail.
+
+---
+
+## RESUME — cortex `--auto` continue: b2.3 keystone → b3 → R7 tail
+
+### D5 — b2.3 authored by a local-only Opus implementer; controller owns the remote build/verify loop
+- **What:** The entire keystone (4 pieces: `App::new_federated`+`federated_mode`+`ensure_default_workspace`
+  no-op / two-funnel mutation allowlist guard + `federated_forbidden_response` / process-global
+  `FEDERATED_SESSION_ACTIVE` PTY backstop / `run_federated_session` in new `session.rs`) was drafted by a
+  background Opus general-purpose agent doing LOCAL Write/Edit only — no build. The controller (main loop)
+  owns rsync→gpu-ml→build/test and would relay errors back via SendMessage.
+- **Why:** Subagents cannot call `AskUserQuestion`, so the auto-mode classifier's DENY on a shared-host
+  remote write (seen earlier this run) would silently STALL a subagent that shells ssh. Keeping all remote
+  writes in the controller (which the user already authorized) avoids that deadlock; the implementer stays
+  stall-free on pure local edits.
+- **Risk:** Low — same verification rigor applies at the controller (build+test+clippy green before commit).
+- **Reversibility:** N/A (process choice).
+
+### D6 — Defer runner/guard INTEGRATION tests to post-b3 (when the live path can be exercised)
+- **What:** b2.3's plan line named "then headless TESTS" as a follow-up piece. Shipping b2.3 with NO new
+  tests this brick; the security-relevant allowlist (`federated_session_allows`) already has its exhaustive
+  81-variant test from b2.2, and `federated_forbidden_response` is a trivial serializer.
+- **Why:** The whole `session` module is DORMANT — nothing constructs a federated `App` or drives the
+  mount channel until b3 flips `run_remote`. A meaningful integration test needs a live tunnel + remote
+  server, which only exists once the path is activated. Writing an isolated App-construction unit test now
+  would fight the construction helpers for marginal coverage the b3 live attach will supersede. Matches the
+  "additive, wired at the flip point" precedent (b0/b1/P9).
+- **Risk:** Low-Medium — the guard's WIRING is compiler-enforced (both funnels call it; exhaustive match has
+  no wildcard); only the runtime rejection is unverified until b3. Conservative bias: revisit at the R7
+  code-review/ship-gate — if either flags the coverage gap on a HIGH-risk surface, add the test before merge.
+- **Reversibility:** HIGH — tests are additive; nothing shipped depends on their absence.
+
+### RESULT — b2.3 keystone shipped green
+gpu-ml: `cargo build` EXIT_0 (only the fixed `mut mirror` + 2 pre-existing dead-code warnings), full suite
+EXIT_0 all-zero-failed (live_handoff/multi_client/server_headless + all bins), clippy 0-new. Dormant additive
+code; classic path byte-for-byte unchanged. NEXT = b3 (run_remote Federated arm live flip) → R7 tail.

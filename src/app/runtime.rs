@@ -64,6 +64,17 @@ impl App {
         let previous_mode = self.state.mode;
         let mut changed = self.expire_due_metadata(Instant::now());
         changed |= crate::api::request_changes_ui(&msg.request);
+        // Federated view-only gate. The Worktree branch below bypasses the sync
+        // funnel's guard (`handle_api_request_after_internal_events_drained`),
+        // so reject non-allowlisted methods here, before either path runs.
+        // Inert (federated_mode == false) on every classic construction.
+        if self.federated_mode && !crate::api::federated_session_allows(&msg.request.method) {
+            let _ = msg
+                .respond_to
+                .send(crate::api::federated_forbidden_response(msg.request.id.clone()));
+            self.sync_prefix_input_source(previous_mode);
+            return changed;
+        }
         let skip_default_workspace = matches!(
             &msg.request.method,
             crate::api::schema::Method::ServerStop(_)

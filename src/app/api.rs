@@ -840,6 +840,14 @@ impl App {
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
 
+        // Federated sessions are view-only: reject any method outside the
+        // allowlist before it reaches a mutating handler (default-forbidden).
+        // `federated_mode` is false on every classic construction, so this is
+        // inert until a federated App is live.
+        if self.federated_mode && !crate::api::federated_session_allows(&request.method) {
+            return crate::api::federated_forbidden_response(request.id);
+        }
+
         let response = match request.method {
             Method::ServerStop(_) => {
                 self.state.should_quit = true;

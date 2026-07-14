@@ -65,3 +65,11 @@ pub(crate) mod pane_source;
 // at the reducer's ingest choke point (S11.1). `pub(crate)` to match the
 // visibility pattern of every other module in this file.
 pub(crate) mod sanitize;
+
+// P9.2b b2: the in-proc federated session runner (`run_federated_session`) plus
+// the process-global local-spawn backstop it arms. Unix-only (mirrors the
+// `#[cfg(unix)]` gate on `remote::unix`, which owns `dial_federation`/
+// `LiveTunnel` and `App::new_federated`). Dormant until b3 flips
+// `run_remote`'s federated arm onto it.
+#[cfg(unix)]
+pub(crate) mod session;
