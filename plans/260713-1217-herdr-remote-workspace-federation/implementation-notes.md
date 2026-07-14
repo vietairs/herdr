@@ -1056,3 +1056,17 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   local dormant-federation-scaffolding convention (id::map_out etc.) rather than deleting churn.
   Reversibility: additive+dormant (field read only in the never-reached Federation arm); revert = drop commit.
   NEXT = 2b accept loop + handshake-only connection thread (socket finally accepts).
+
+- 260714 b0.4 CRUX RESOLVED — I/O topology = decision B (SYNC thread topology), reversing the keystone's
+  earlier decision-A lean. Evidence: codec::encode/decode are PURE (byte-slice, no Read/Write coupling —
+  codec.rs:6-8); LocalStream is sync Read+Write with try_clone() into independent halves; the classic
+  client transport ALREADY drives a connection this exact way (handle_client_handshake → try_clone →
+  client_writer_loop thread + client_read_loop, bridging via server_event_tx.blocking_send —
+  client_transport.rs:429-579). So a federation connection = reader thread (blocking sync-framed reads →
+  FederationCommand via blocking_send + oneshot::blocking_recv) + writer thread (drains mpsc<Federation
+  Message>, blocking sync-framed writes) + output-pump threads (broadcast::Receiver::blocking_recv →
+  writer mpsc) + ticker. NO per-connection tokio runtime, NO async-over-interprocess bridge (decision A
+  would need fragile raw-fd→tokio::net::UnixStream). Codebase-idiomatic; sidesteps A's fragility.
+  Why it matters: this was THE flagged crux risk of the whole feature ("get the sync-vs-async boundary
+  right or the render loop stalls"). Recorded in the keystone spec's crux section.
+  Reversibility: design decision, not code yet; revert = re-open the A-vs-B choice.
