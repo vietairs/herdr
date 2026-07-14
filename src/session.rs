@@ -236,9 +236,13 @@ pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
 pub(crate) fn stop_active_server() -> Result<(), String> {
     let socket_path = active_api_socket_path();
     let client_socket_path = crate::server::socket_paths::client_socket_path();
+    // The co-located federation socket (P9.2b b0.4 sub-brick 1) is unlinked on
+    // the same shutdown path as the client socket, so wait for it too.
+    let federation_socket_path =
+        crate::server::socket_paths::federation_socket_path(&client_socket_path);
     stop_socket_with_timeout(
         socket_path.clone(),
-        vec![socket_path, client_socket_path],
+        vec![socket_path, client_socket_path, federation_socket_path],
         STOP_WAIT_TIMEOUT,
         "server",
     )

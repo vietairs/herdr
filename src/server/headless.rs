@@ -42,6 +42,8 @@ use crate::ipc::{
     bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalListener,
     SocketFileIdentity,
 };
+#[cfg(unix)]
+use crate::ipc::remove_socket_file_if_owned_typed;
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
     MAX_GRAPHICS_FRAME_SIZE,
@@ -62,6 +64,8 @@ use crate::server::notifications::{
 use crate::server::socket_paths::{
     client_socket_path, prepare_socket_path, restrict_socket_permissions,
 };
+#[cfg(unix)]
+use crate::server::socket_paths::federation_socket_path;
 use crate::server::terminal_attach::paste_payload_for_runtime;
 
 #[cfg(test)]
@@ -200,6 +204,16 @@ pub struct HeadlessServer {
     client_listener: LocalListener,
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
+    /// Co-located federation listener (P9.2b b0.4 sub-brick 1). Bound and
+    /// fully lifecycle-managed here, but nothing accepts connections on it
+    /// yet — that is sub-brick 2.
+    #[cfg(unix)]
+    #[allow(dead_code)] // dormant until the accept loop reads it (b0.4 sub-brick 2)
+    federation_listener: LocalListener,
+    #[cfg(unix)]
+    federation_socket_path: PathBuf,
+    #[cfg(unix)]
+    federation_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
     #[cfg(unix)]
     next_client_id: u64,
@@ -382,6 +396,20 @@ impl HeadlessServer {
         #[cfg(unix)]
         listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
+        // Co-located federation listener (P9.2b b0.4 sub-brick 1): bind + full
+        // lifecycle wiring now, but nothing accepts on it yet (sub-brick 2).
+        #[cfg(unix)]
+        let (federation_listener, federation_path, federation_socket_identity) = {
+            let federation_path = federation_socket_path(&client_path);
+            prepare_socket_path(&federation_path)?;
+            let federation_listener = bind_local_listener(&federation_path)?;
+            restrict_socket_permissions(&federation_path)?;
+            let federation_socket_identity = socket_file_identity(&federation_path)?;
+            info!(path = %federation_path.display(), "federation socket listening");
+            federation_listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+            (federation_listener, federation_path, federation_socket_identity)
+        };
+
         let should_quit = Arc::new(AtomicBool::new(false));
 
         // Channel for server events from client threads.
@@ -403,6 +431,12 @@ impl HeadlessServer {
             client_listener: listener,
             client_socket_path: client_path,
             client_socket_identity,
+            #[cfg(unix)]
+            federation_listener,
+            #[cfg(unix)]
+            federation_socket_path: federation_path,
+            #[cfg(unix)]
+            federation_socket_identity,
             clients: HashMap::new(),
             #[cfg(unix)]
             next_client_id: 1,
@@ -1078,6 +1112,13 @@ impl HeadlessServer {
             let _ = std::fs::remove_file(crate::api::socket_path());
         }
         let _ = remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity);
+        // Unlink the federation socket alongside the client socket (P9.2b b0.4
+        // sub-brick 1). Typed so a future revocation sub-brick can build an
+        // accurate unlink record; the result is not yet consumed.
+        let _ = remove_socket_file_if_owned_typed(
+            &self.federation_socket_path,
+            &self.federation_socket_identity,
+        );
         if let Err(err) = crate::server::handoff::wait_ready(&mut stream) {
             crate::server::handoff::cleanup_failed_import_child(&mut import_child);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
@@ -1163,10 +1204,23 @@ impl HeadlessServer {
         let client_socket_identity = socket_file_identity(&client_path)?;
         listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
+        // The federation socket was unlinked alongside the client socket
+        // (perform_live_handoff, between send_fds and wait_ready); a failed
+        // handoff rolls back to the old server, so restore it the same way.
+        let federation_path = federation_socket_path(&client_path);
+        prepare_socket_path(&federation_path)?;
+        let federation_listener = bind_local_listener(&federation_path)?;
+        restrict_socket_permissions(&federation_path)?;
+        let federation_socket_identity = socket_file_identity(&federation_path)?;
+        federation_listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+
         self.api_server = Some(api_server);
         self.client_listener = listener;
         self.client_socket_path = client_path;
         self.client_socket_identity = client_socket_identity;
+        self.federation_listener = federation_listener;
+        self.federation_socket_path = federation_path;
+        self.federation_socket_identity = federation_socket_identity;
         Ok(())
     }
 
@@ -3844,6 +3898,19 @@ impl HeadlessServer {
                 );
             }
         }
+        #[cfg(unix)]
+        if let Err(err) = remove_socket_file_if_owned(
+            &self.federation_socket_path,
+            &self.federation_socket_identity,
+        ) {
+            if err.kind() != io::ErrorKind::NotFound {
+                warn!(
+                    path = %self.federation_socket_path.display(),
+                    err = %err,
+                    "failed to remove federation socket on shutdown"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -4220,6 +4287,19 @@ mod tests {
         listener
             .set_nonblocking(ListenerNonblockingMode::Accept)
             .expect("set listener nonblocking");
+        #[cfg(unix)]
+        let (federation_listener, federation_path, federation_socket_identity) = {
+            let federation_path = federation_socket_path(&socket_path);
+            let _ = fs::remove_file(&federation_path);
+            let federation_listener =
+                bind_local_listener(&federation_path).expect("bind test federation listener");
+            let federation_socket_identity = socket_file_identity(&federation_path)
+                .expect("test federation listener socket identity");
+            federation_listener
+                .set_nonblocking(ListenerNonblockingMode::Accept)
+                .expect("set federation listener nonblocking");
+            (federation_listener, federation_path, federation_socket_identity)
+        };
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
         #[cfg(windows)]
         let should_quit = Arc::new(AtomicBool::new(false));
@@ -4236,6 +4316,12 @@ mod tests {
             client_listener: listener,
             client_socket_path: socket_path,
             client_socket_identity,
+            #[cfg(unix)]
+            federation_listener,
+            #[cfg(unix)]
+            federation_socket_path: federation_path,
+            #[cfg(unix)]
+            federation_socket_identity,
             clients: HashMap::new(),
             #[cfg(unix)]
             next_client_id: 1,
@@ -4262,6 +4348,26 @@ mod tests {
             federation_server_instance_id:
                 crate::remote::federation::id::ServerInstanceId::fresh(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn federation_socket_is_bound_as_a_sibling_of_the_client_socket() {
+        let server = test_headless_server();
+        assert_eq!(
+            server.federation_socket_path.parent(),
+            server.client_socket_path.parent()
+        );
+        assert!(
+            server
+                .federation_socket_path
+                .to_str()
+                .unwrap()
+                .ends_with(".sock"),
+            "federation socket path = {:?}",
+            server.federation_socket_path
+        );
+        assert_ne!(server.federation_socket_path, server.client_socket_path);
     }
 
     fn shutdown_test_runtimes(server: &mut HeadlessServer) {
