@@ -160,11 +160,14 @@
           unlink 1f733f9. ~28 new unit tests, all green; every brick compiled the full binary; remote loop
           humming.
           REMAINING = live-I/O INTEGRATION (the keystone + tails, need fresh focused context):
-          (1) b0.4 KEYSTONE: server-owned federation listener + accept loop mirroring client_accept.rs —
-              mint connids, negotiate handshake w/ ServerInstanceId, lease.try_acquire@epoch, read-loop →
-              FederationCommand via server_event_tx + oneshot, output pump; add federation_listener/socket
-              fields to HeadlessServer; poll in main select!; integrate perform_live_handoff (begin_revocation
-              +close streams+typed-unlink+rollback+replacement-readiness); DELETE AppFederationHost.
+          (1) b0.4 KEYSTONE — IN PROGRESS (spec: phase-09b-b04-accept-loop-keystone.md, from 3 parallel
+              scouts). SUB-BRICK 1 DONE+SHIPPED d0f166f (WITH AGENTS: hvn-implementer): federation socket
+              BOUND + full lifecycle (both constructors, handoff unlink+rollback, cleanup/Drop, stop-wait);
+              first LIVE change; FULL SUITE 2669/0. NEXT sub-brick 2 (CRUX): accept loop + async connection
+              driver (decision A) — mint connid, handshake w/ federation_server_instance_id, lease acquire/
+              mount via actor, read-loop → FederationCommand, exclusive serializer, first-cause supervisor;
+              needs federation_lease field + lease ops on FederationCommand. Sub-brick 3: live handoff
+              revocation. Sub-brick 4: DELETE AppFederationHost.
           (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
               + bounded egress + inbound-Fault→TunnelExit (ripples into serve/client/loopback/pane_source/codec).
           (3) b0-proxy transparent stdio; b1 tunnel keep-alive (remote/unix.rs); b2 App::new_federated +
