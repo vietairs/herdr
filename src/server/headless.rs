@@ -1011,6 +1011,17 @@ impl HeadlessServer {
         self.handoff_in_progress = true;
         self.disconnect_all_clients_for_handoff();
         let _ = reject_pending_client_connections(&self.client_listener);
+        // Revoke the federation controller for the handoff: close admission, bump
+        // the accept-epoch, and free the single-controller slot. Any command still
+        // queued from the current controller now carries a stale epoch and is
+        // rejected, so it cannot mutate the App or reacquire authority if the
+        // handoff rolls back (federation_lease v5 finding #1). The revoked
+        // connection's own threads are reaped when this process is replaced on a
+        // successful handoff; on rollback, `rollback_handoff_before_commit`
+        // reopens admission. Active stream-close is deferred (no registry) — the
+        // client path likewise relies on shutdown + connection drop, not a forced
+        // socket close.
+        let _revoked = self.federation_lease.begin_revocation();
 
         let mut paused_terminal_ids = Vec::new();
         for terminal_id in pane_by_terminal.keys() {
@@ -1258,6 +1269,10 @@ impl HeadlessServer {
                 runtime.set_handoff_reader_paused(false);
             }
         }
+        // Reopen federation admission (the epoch stays at its already-bumped
+        // value — never restored, so pre-revocation connections remain stale) so
+        // a rolled-back handoff does not permanently wedge federation.
+        self.federation_lease.reopen_admission();
         self.handoff_in_progress = false;
         let _ = std::fs::remove_file(socket_path);
     }
