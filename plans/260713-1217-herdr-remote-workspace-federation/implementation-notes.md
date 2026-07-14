@@ -1179,3 +1179,25 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   NEXT = sub-brick 3: live handoff revocation (lease.begin_revocation wired into perform_live_handoff; test
   revoke-without-deadlock + no-resurrection). Then sub-brick 4: DELETE AppFederationHost. Then b0.3-tail
   (wire-fault variant + protocol version bump + bounded egress) + b0-proxy + b1 + b2 + b3, then the R7 tail.
+
+- 260714 b0.4 sub-brick 3 GREEN+SHIPPED 7183c24 — live handoff revocation wired.
+  What: perform_live_handoff (headless.rs) calls self.federation_lease.begin_revocation() right after the
+  client-disconnect/reject step (closes admission, bumps accept-epoch, frees the single-controller slot);
+  rollback_handoff_before_commit — the SINGLE shared pre-commit rollback (8 call sites) — calls
+  reopen_admission() so a rolled-back handoff doesn't permanently wedge federation (epoch stays bumped,
+  never restored). The lease FSM (reopen_admission etc.) was already fully built+tested in abc6a35; SB3 is
+  pure wiring.
+  Why minimal (no active stream-close): scout confirmed federation accept threads are FULLY DETACHED (no
+  registry). But (1) begin_revocation's epoch bump fences the revoked controller — its queued commands carry
+  the stale epoch and are rejected (no authority resurrection, lease-tested); (2) a SUCCESSFUL handoff replaces
+  this process → detached threads die with it; (3) the CLIENT path also doesn't force-close sockets (sends
+  ServerShutdown + drops writer). So adding a connection registry to force-close revoked sockets is v1 hygiene,
+  not correctness — DEFERRED (a typed wire-fault "you're revoked" frame is b0.3-tail; hard registry/kill is
+  P9.3). "Revoke-without-deadlock" is trivially satisfied: SB3 adds NO joins/blocking.
+  Evidence: FULL suite 2680/0 (unchanged — pure wiring); clippy clean (headless.rs + federation_lease.rs no
+  warnings). No new test (lease no-resurrection tested; a perform_live_handoff integration test needs full
+  fd/socket machinery — disproportionate for a 2-line call of tested methods).
+  Reversibility: additive; revert = drop 7183c24. federation_lease #![allow(dead_code)] left in place —
+  batched removal scheduled for b3 ("Remove dead_code allows", v5 plan).
+  NEXT = b0.3-tail: bump FEDERATION_PROTOCOL_VERSION 1→2 + versioned wire-fault variant + Channel::Control +
+  bounded egress + inbound-Fault→TunnelExit (ripples serve/client/loopback/pane_source/codec).
