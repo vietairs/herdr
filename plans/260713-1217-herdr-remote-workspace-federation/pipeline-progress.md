@@ -241,11 +241,17 @@
               45 forbidden), NO wildcard so future variants force a compile-time bucketing decision.
               Dormant (uncalled). Verified gpu-ml: build OK, full suite EXIT_0 (2684), clippy 0-new, 2
               tests green. Seam map reports/from-root-causer-b22-mutation-guard-seam-map.md.
-              CHECKPOINT (cortex --auto stopped before the keystone). NEXT = b2.3 (run_federated_session
-              + App::new_federated + eager-open + C1-safe router move + supervision select! + clipboard
-              sinks + teardown RAII; WIRES b2.1 policy + b2.2 allowlist + b1 dial_federation LIVE +
-              spawn_command_builder backstop). Highest blast radius, multi-file — needs fresh context +
-              sub-scouting. Then b3 (run_remote flip) → R7 tail (impl-notes review → code-review ‖ codex
+              b2.3 SHIPPED (keystone): run_federated_session (new src/remote/federation/session.rs) +
+              App::new_federated (persistence Disabled + federated_mode) + ensure_default_workspace no-op +
+              two-funnel mutation allowlist guard (app/api.rs sync + app/runtime.rs deferred-Worktree
+              bypass) + federated_forbidden_response helper (api/mod.rs) + process-global
+              FEDERATED_SESSION_ACTIVE PTY-spawn backstop (pty/backend/unix.rs). Materialize-then-move-router
+              (C1-safe, no shared mutex) + eager-open + two clipboard sinks (inbound BOUNDED / outbound
+              UNBOUNDED) + supervision select! (app.run vs drive task) + RAII teardown (TerminalRestoreGuard
+              drops LAST) + FederatedSessionActiveGuard. Whole module DORMANT (#[allow(dead_code)]) until b3.
+              Verified gpu-ml: build EXIT_0, full suite EXIT_0 all-zero-failed (live_handoff/multi_client/
+              server_headless + bins), clippy 0-new. Tests deferred to post-b3 live path (D6 auto-decisions).
+              NEXT = b3 (run_remote Federated arm live flip) → R7 tail (impl-notes review → code-review ‖ codex
               diff → ship-gate --hard) before un-drafting PR #1.
           (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
               + bounded egress + inbound-Fault→TunnelExit (ripples into serve/client/loopback/pane_source/codec).

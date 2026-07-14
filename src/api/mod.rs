@@ -174,6 +174,23 @@ pub(crate) fn federated_session_allows(method: &Method) -> bool {
     }
 }
 
+/// Serialized error response for an API method rejected because it is not in
+/// the federated-session allowlist (`federated_session_allows`). Shared by both
+/// dispatch entrances (`app::api` sync funnel + `app::runtime` deferred funnel)
+/// so the forbidden shape stays identical. `federated_mode` is only ever set on
+/// unix (`App::new_federated`), so on other platforms this simply never fires.
+pub(crate) fn federated_forbidden_response(id: String) -> String {
+    use crate::api::schema::{ErrorBody, ErrorResponse};
+    let response = ErrorResponse {
+        id,
+        error: ErrorBody {
+            code: "forbidden_in_federated_session".into(),
+            message: "this operation is not permitted on a federated remote workspace".into(),
+        },
+    };
+    serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string())
+}
+
 #[cfg(test)]
 mod federated_allowlist_tests {
     use super::federated_session_allows;

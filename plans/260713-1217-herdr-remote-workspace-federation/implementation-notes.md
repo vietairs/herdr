@@ -1299,3 +1299,34 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   eager-open + C1-safe router move + supervision select! + clipboard sinks + teardown RAII, WIRING
   b2.1 policy + b2.2 allowlist + b1 dial_federation LIVE) is the integration keystone — highest blast
   radius, multi-file, needs fresh focused context + its own sub-scouting, not a late-session one-shot.
+
+- What: b2.3 keystone STARTED under cortex --auto. Design LOCKED after full seam-map read
+  (reports/from-root-causer-b23-keystone-seam-map.md). Architecture = materialize-then-move-router
+  (C1 dodge): materialize_federation_mount populates App model + router.output_senders + queues Opens
+  via out_tx; THEN router+reader+mirror MOVE into ONE drive_mount_channel task; App panes already hold
+  the open_terminal rx receivers → no shared Arc<Mutex>, clean ownership handoff. Eager-open (MAJ6):
+  spawn drive(reader) + writer tasks BEFORE the server can reply to queued Opens (out_rx unbounded so
+  queuing Opens pre-writer never blocks). Supervision: select! app.run() vs drive-task DriveOutcome
+  (LinkClosed/Faulted) → tunnel wins → drop App → restore TTY (main.rs:804-822 seq) → exit (D2).
+  Two clipboard channels: outbound UNBOUNDED (materialize→spawn_remote) + inbound BOUNDED
+  (drive_mount_channel try_send), both dropped on teardown.
+- Why: matches phase-09b-option-b plan §b2 + escapes option-a C1 deadlock (codex-verified).
+- Evidence: client.rs materialize/drive/router/spawn_mount_writer signatures read; main.rs:768-831
+  classic template; mod.rs new_from_handoff wrap-pattern; api.rs:834 + runtime.rs:60 dispatch funnels.
+- Reversibility: fully DORMANT/additive — nothing calls run_federated_session until b3; classic path
+  byte-for-byte unchanged. Reversible by deleting the new module + new_federated + guards.
+
+- What: DECISION (conservative, reversible) — mutation guard = TWO layers. (1) Primary: closed
+  allowlist federated_session_allows(&method) at BOTH API funnels (handle_api_request_after_internal_
+  events_drained api.rs:834 + handle_api_request_message runtime.rs:60 incl. its Worktree deferred
+  branch) → clean ErrorResponse to client. (2) Backstop: process-global AtomicBool
+  FEDERATED_SESSION_ACTIVE (precedent: kitty_graphics global flag mod.rs:394) set by
+  run_federated_session, checked at the ONE local-spawn choke spawn_with_portable_pty
+  (pty/backend/unix.rs:12) → Err if set. Catches any non-API local-pane path (keybindings) the API
+  allowlist can't see.
+- Why: plan wants default-FORBIDDEN + "authoritative local-runtime-creation seam"; the spawn choke is
+  the single point every local pane passes through (seam map L96). Global atomic avoids high-churn
+  threading of federated-mode through the whole spawn call graph; safe because exactly one App/process
+  and v1 = no local coexistence.
+- Evidence: seam map §4; spawn_with_portable_pty at pty/backend/unix.rs:12; kitty_graphics precedent.
+- Reversibility: additive; global flag default false = classic unaffected. Remove flag+check to revert.
