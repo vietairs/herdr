@@ -1232,3 +1232,33 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   (tail-1, protocol change — would need client/codec reverts too).
   NEXT = b0-proxy (transparent federation-serve) → SB4 (delete AppFederationHost) → b1 → b2 (multi-week) →
   b3 → R7 tail.
+
+- What: RESUMED b1 (tunnel keep-alive + single dial + timeouts) after prior agent stalled 600s
+  mid-slice (watchdog + API ConnectionRefused). Adopted the crashed agent's uncommitted WIP verbatim
+  (Cargo.toml tokio-util dep + src/remote/unix.rs: dial_federation/LiveTunnel/ChildGuard/timeout
+  consts + --session dial fix + --session ordering test). Kept tokio-util despite being currently
+  unused; deferred the dial-live/timeout tests to b2/b3.
+  Why: WIP matched b1 spec (phase-09b-option-b b1 slice) ~90%. tokio-util is spec-directed b2 prep
+  (CancellationToken) and unused crate deps do not fail cargo/clippy default, so the green-suite gate
+  is unaffected. dial-live + timeout-fallback tests need a real ssh + the b2 mount driver, so they are
+  hermetically untestable at b1 level — the plan already schedules them as the b3 acceptance smoke
+  (plan L171 "mount live App, stream a PTY, disconnect, prove PTY alive"). Unit tests here are all
+  pure (no ssh); the --session ordering test is the one genuine b1-level behavioral test.
+  Evidence: b1 spec plan L119-125; unix.rs tests all #[test] pure (no ssh spawn); WIP code comments
+  already mark timeouts "applied by b2". Remote sandbox gpu-ml (appn-ltu-vm-100) reachable, 125 cores.
+  Reversibility: HIGH — all b1 additions are #[allow(dead_code)] dormant (nothing dials until b3);
+  the only live change is remote_federation_serve_command gaining --session, guarded by its test.
+
+- What: b1 SHIPPED 3e1a2ad on feat/remote-workspace-federation. dial_federation + LiveTunnel +
+  ChildGuard + FEDERATION_CONNECT/MOUNT_TIMEOUT + --session dial fix (test) live; all dormant
+  (#[allow(dead_code)]) except the --session change. Widened ChildGuard/RemoteHerdr/ManagedSshOptions
+  to pub(crate) to clear 3 private-interface clippy warnings the pub(crate) tunnel API introduced.
+  Why: LiveTunnel{reader,writer} halves are driven by federation::client (a different module), so the
+  tunnel API is pub(crate) and its referenced types must match; prior bricks shipped clippy-clean in
+  touched files, so no new warnings in unix.rs.
+  Evidence: gpu-ml (appn-ltu-vm-100) nix develop: cargo build OK, cargo test exit 0 (0 failed across
+  all suites), cargo clippy = 2 warnings total, both pre-existing baseline (id.rs/protocol/pane_source),
+  0 in unix.rs. Cargo.lock pins tokio-util 0.7.18 (regenerated on remote, pulled back).
+  Reversibility: HIGH — dormant; nothing dials the live tunnel until b3.
+  NEXT: b2 (in-proc federated session runner; App::new_federated + SessionPersistencePolicy::Disabled
+  + closed-allowlist + supervision + teardown) — the multi-week slice.
