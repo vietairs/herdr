@@ -205,8 +205,18 @@
               process-replacement reaps detached threads, epoch-fencing makes revoked conn inert — matches client
               path). No new tests (lease FSM no-resurrection already tested; wiring adds no blocking→no deadlock).
               Full suite 2680/0, clippy clean.
-              NEXT sub-brick 4: DELETE AppFederationHost (after b0-proxy). Remaining order: b0.3-tail (protocol
-              bump 1→2 + wire-fault variant + bounded egress) → b0-proxy → SB4 → b1 → b2 → b3 → R7 tail.
+              b0.3-tail DONE+SHIPPED (2 commits): tail-1 fa8700e = protocol v1→2 + Channel::Control + Fault
+              frame (FaultReason mirrors TunnelExit 1:1); co-located server best-effort emits Fault on non-clean
+              teardown + adopts inbound Fault as first-cause; local client surfaces DriveOutcome::Faulted; codec
+              round-trips Fault. tail-2 acaf78e = bounded server egress (std sync_channel cap 1024) via a single
+              enqueue_outbound helper threaded through reader-Open/output-pumps/ticker; full queue → EgressOverflow
+              first-cause + teardown (fail-fast, no block). Full suite 2681/0, clippy clean. DEFERRED (noted): byte
+              budget (only message-count bound v1); client-input egress bounding (low-volume; → b2). serve.rs async
+              egress NOT bounded (dying path, superseded by b0-proxy/SB4).
+              NEXT = b0-proxy: federation-serve = TRANSPARENT transport only (retry unix-socket connect to
+              *-federation.sock + pipe stdin<->socket; lazy-start via ensure_remote_server_running; NO handshake/
+              mount — local client owns those). Then SB4 (delete AppFederationHost + serve.rs dup-App boot) → b1
+              (tunnel keep-alive) → b2 (in-proc federated session runner, MULTI-WEEK) → b3 (live flip) → R7 tail.
           (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
               + bounded egress + inbound-Fault→TunnelExit (ripples into serve/client/loopback/pane_source/codec).
           (3) b0-proxy transparent stdio; b1 tunnel keep-alive (remote/unix.rs); b2 App::new_federated +
