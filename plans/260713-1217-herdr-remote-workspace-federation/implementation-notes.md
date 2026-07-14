@@ -1262,3 +1262,21 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   Reversibility: HIGH — dormant; nothing dials the live tunnel until b3.
   NEXT: b2 (in-proc federated session runner; App::new_federated + SessionPersistencePolicy::Disabled
   + closed-allowlist + supervision + teardown) — the multi-week slice.
+
+- What: b2 STARTED under cortex --auto. Decomposed b2 into bricks b2.1 (persistence policy) /
+  b2.2 (closed-allowlist mutation guard) / b2.3 (run_federated_session orchestration + App::new_
+  federated) → b3 flip. b2.1 SHIPPED 7dc71ec: immutable SessionPersistencePolicy{Enabled,Disabled}
+  on App, additive OR-guard (`!no_session && !persistence.is_disabled()`) at all 5 write/clear sites
+  (schedule/background/now save app/session.rs:15/61/91, exit-save mod.rs:1108, config-reload
+  clear_history mod.rs:1440). Default Enabled everywhere → classic byte-for-byte unchanged.
+  Why: chose ADDITIVE policy over the scout-recommended REPLACE-no_session (Option A). no_session
+  also gates update-check + plugin-registry + detach_exits AND is live-mutated (headless.rs:1193);
+  replacing it = scope creep + breaks "immutable". Additive policy is an independent persistence axis,
+  leaves no_session's other roles + live flip untouched, forces persistence off immutably for a future
+  federated App. Scoped b2.1 to the WRITE/CLEAR sites (the clobber risk the spec C3 headlines);
+  restore is a READ (can't clobber the saved snapshot) → deferred to b2.3's App::new_federated.
+  Evidence: gpu-ml nix: cargo build OK, full suite EXIT_0 all-zero-failed, clippy 2 warnings (both
+  pre-existing baseline, 0 new), 2 new tests green (session_persistence_policy_is_disabled_reports_
+  variant + disabled_persistence_policy_blocks_session_save_even_when_no_session_false). No dep added.
+  Reversibility: HIGH — Disabled #[allow(dead_code)], only tests construct it; classic path unchanged.
+  NEXT (b2.2): closed-allowlist mutation guard at the local-runtime-creation seam (D4/MAJ7).
