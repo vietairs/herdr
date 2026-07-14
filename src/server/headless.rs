@@ -2764,6 +2764,16 @@ impl HeadlessServer {
                 // No render needed — the next iteration will initiate shutdown.
                 false
             }
+            ServerEvent::Federation(command) => {
+                // Service the request against the live App on this single
+                // &mut self dispatch point (P9.2b b0.1). Read-only queries and
+                // the remote-input forwards drive no local UI and drain no
+                // local events here — the loop's own event_rx arm owns the
+                // forwarding-aware drain — so no local render is needed (MIN10:
+                // these commands are render-causally inert).
+                crate::server::federation_actor::dispatch(&mut self.app, command);
+                false
+            }
         }
     }
 
