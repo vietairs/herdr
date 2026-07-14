@@ -231,6 +231,12 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    /// Identity of this live server process for federation (P9.2b b0.1).
+    /// One fresh id per boot; a replacement server after live-handoff mints
+    /// its own, so a federation handshake/mount fences stale traffic from a
+    /// prior process. Replaces `AppFederationHost` as the owner (v5 finding
+    /// C4). Dormant until the federation listener is exposed (b0.4).
+    federation_server_instance_id: crate::remote::federation::id::ServerInstanceId,
 }
 
 fn apply_terminal_attach_scroll(
@@ -414,7 +420,21 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
+            federation_server_instance_id:
+                crate::remote::federation::id::ServerInstanceId::fresh(),
         })
+    }
+
+    /// This live server's federation identity (P9.2b b0.1). Dormant until the
+    /// federation listener is exposed (b0.4); the handshake/mount path will
+    /// hand this to a connecting federation client so stale traffic from a
+    /// prior server process is fenced.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub(crate) fn federation_server_instance_id(
+        &self,
+    ) -> &crate::remote::federation::id::ServerInstanceId {
+        &self.federation_server_instance_id
     }
 
     /// Runs the headless server event loop until shutdown.
@@ -4226,6 +4246,11 @@ mod tests {
             should_quit,
             server_event_rx,
             server_event_tx,
+            // Replacement server after live-handoff mints a fresh identity so a
+            // federation client fences stale traffic from the prior process
+            // (P9.2b b0.1 rotation; v5 finding C4).
+            federation_server_instance_id:
+                crate::remote::federation::id::ServerInstanceId::fresh(),
         }
     }
 

@@ -45,6 +45,29 @@ impl std::fmt::Display for HostKey {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ServerInstanceId(pub String);
 
+impl ServerInstanceId {
+    /// Mints a fresh, process-unique server instance id: `<pid>-<nanos>-<seq>`.
+    /// The monotonic sequence disambiguates two mints within the same
+    /// nanosecond, so distinct boots (or a post-handoff replacement rotating
+    /// its id) never collide. This is the single owner-side generator used by
+    /// the live server (P9.2b b0.1); federation handshake/mount fence stale
+    /// traffic against it (see [`Mount::server_instance_id`]).
+    pub(crate) fn fresh() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        Self(format!(
+            "{}-{}-{}",
+            std::process::id(),
+            nanos,
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+}
+
 impl std::fmt::Display for ServerInstanceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -251,6 +274,18 @@ mod tests {
 
         assert_eq!(classify("w1"), IdClass::Local);
         assert_eq!(classify(&fed_ref.to_public_id()), IdClass::Remote(mount.host_key.clone()));
+    }
+
+    #[test]
+    fn fresh_server_instance_ids_are_distinct_within_the_same_process() {
+        // Two mints in the same process (potentially the same nanosecond) must
+        // still differ, so a replacement server rotating its id can never be
+        // confused with the boot it replaced.
+        let a = ServerInstanceId::fresh();
+        let b = ServerInstanceId::fresh();
+        assert_ne!(a, b);
+        // Shape: `<pid>-<nanos>-<seq>` — three dash-separated non-empty parts.
+        assert_eq!(a.0.split('-').filter(|s| !s.is_empty()).count(), 3, "id={}", a.0);
     }
 
     #[test]
