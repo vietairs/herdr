@@ -140,6 +140,10 @@ Red-team F1-F8 (`reports/redteam-federation-plan-review.md`) + codex Critical 1-
    and vice-versa; stale traffic after a remote restart is rejected by `mount_generation` — all proven by test.
 4. A network blip does NOT require a full remount; remote crash shows an explicit **disconnected** sidebar
    state, never a silently-frozen "fine-looking" pane.
+   **P9.2b PHASE EXCEPTION (260714):** the initial P9.2b live-wiring milestone (option-b own-in-proc
+   federated session, D2) intentionally EXITs to shell on post-start transport failure instead of showing
+   a disconnected state / avoiding remount. Reconnect + disconnected-state is deferred to and becomes FINAL
+   acceptance in P9.3. AC4 is thus satisfied at P9.3, not at P9.2b.
 5. Local restart re-establishes federated workspaces (cold-resume) or shows disconnected; warm handoff never
    panics on a federated pane.
 6. Untrusted remote strings cannot inject ANSI/OSC locally; every ingestion channel enforces bounded framing

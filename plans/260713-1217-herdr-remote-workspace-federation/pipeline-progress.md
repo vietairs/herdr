@@ -21,7 +21,131 @@
     - [~] P9 lifecycle — EXPANDED per user decision, split into 3 priorities:
         - [x] P9.1 GAP #1 event drain (serve.rs drains real App AppEvent→federation stream) — VALIDATED 2830/0; commits 8d43034/3f60b92/31458b3
         - [x] P9.2a materialization MECHANISM (App::materialize_federation_mount + build_remote_pane via spawn_remote, reuses existing creation/event primitives) — VALIDATED 2835/0; commits dfafd76/6110d05/a593d59/70555f2/41f07ef. Tested against loopback.
-        - [ ] P9.2b materialization CALL-SITE wiring — BLOCKED ON ARCHITECTURE DECISION: App/AppState live in a SEPARATE server process from the run_remote CLI process that owns the SSH dial; bridging a live mount into the running session needs a new async JSON API method OR a 2nd SshStdioBridge socket forward (each multi-day, 2 designs in impl-notes). remote/unix.rs FederationRoute::Federated arm still falls back to classic attach.
+        - [~] P9.2b materialization CALL-SITE wiring — DECISION MADE 260714: option (a) JSON-API-in-server.
+          Rejected (b) own-in-proc-session (partial-goal, attach-like). DESIGN VERIFIED + LOCKED (2 deep
+          seam scouts): plan = phase-09b-materialization-call-site-option-a.md, 3 additive/dormant slices:
+            P9.2b-1 server-owned FederationTunnel registry (dedicated tokio-runtime thread; owns un-killed
+                    ssh child + spawn_mount_writer pump + newly-spawned drive_mount_channel read-loop +
+                    Arc<Mutex> shared router/mirror; Drop teardown per SshStdioBridge; clipboard type fix)
+                    + extract perform_federation_mount from unix.rs::attempt_federation_mount — NOT STARTED
+            P9.2b-2 FederationMaterialize Method + ResponseResult + deferred handler (worktree-deferred
+                    precedent app/api.rs:41) — NOT STARTED
+            P9.2b-3 live flip: remote/unix.rs FederationRoute::Federated → ApiClient::local() subscribe+call
+                    (replaces classic-attach fallback; error path keeps fallback) — NOT STARTED
+          Key findings logged to implementation-notes.md (connect_and_mount one-shot; App has no tokio
+          handle; RemoteMirror not serde → re-mount in server). Build/test remote-only (nix host
+          appn-ltu-vm-100/gpu-ml).
+          REVIEW-FIRST (codex gpt-5.6-sol xhigh, "review first"): VERDICT = UNSOUND (viable direction,
+          not buildable as written) — 5 CRITICAL + 6 MAJOR. Full report:
+          reports/codex-gpt56sol-adversarial-review-p9b-option-a-materialization.md. Core Arc<Mutex>
+          router/mirror design DEADLOCKS (C1); + generation fencing (C2), durable server-side SSH
+          recipe (C3, needs product decision), generic deferred dispatcher for both prod paths (C4),
+          supervisor teardown + P9.3 FSM as PREREQUISITE for live (C5). phase-09b plan = UNSOUND-
+          NEEDS-REVISION (superseded).
+          PIVOT 260714: user chose OPTION (b) own-in-proc-session (avoids cross-process CRITICALs
+          C3/C4/M11; renders federated workspace alone, no local coexistence = narrower v1). (a) file
+          marked SUPERSEDED. (b) plan written: phase-09b-option-b-own-in-proc-session.md (precedent
+          main.rs:766-843; crux = restructure attempt_federation_mount to keep tunnel alive onto the
+          app.run() runtime; C1 dodged via materialize-then-move-router; C2/M7/M9/M10 scoped as v1
+          non-goals; 3 slices b1/b2/b3). Feasibility scouted DONE.
+          codex gpt-5.6-sol RE-REVIEW of (b) = UNSOUND-but-TRACTABLE (4 CRIT + 5 MAJ + 1 MIN; report
+          reports/codex-gpt56sol-adversarial-review-p9b-option-b-inproc-session.md). (b) ARCHITECTURE
+          CONFIRMED (escapes (a) C1-deadlock/C4/M11); remaining = bounded correctness checklist. CRUX
+          finding CRIT1 = federation-serve boots a DUPLICATE App not the live remote session (pre-
+          existing GAP #1; a REMOTE-SIDE decision proxy-vs-durable). DECISIONS 260714: D1 remote=PROXY-live
+          (co-locate in HeadlessServer — proxy-live has NO existing wire seam; raw PTY bytes reachable
+          only in-process, scout-backed), D2 post-start-fail=EXIT to shell. (b) plan REVISED to v2
+          (phase-09b-option-b-own-in-proc-session.md) folding both + all 10 findings + remote scout:
+          4 slices b0 REMOTE co-location (biggest, needs sub-scout) / b1 tunnel keep-alive+single-dial
+          / b2 session runner (federated mode, supervision, close/gap/overflow, clipboard sinks,
+          teardown) / b3 live flip + --session fix. Scope now TWO-SIDED (remote+local), multi-week.
+          codex gpt-5.6-sol RE-REVIEW of v2 = UNSOUND (direction VINDICATED, design not yet
+          executable; 2 CRIT + 6 MAJ; report reports/codex-gpt56sol-adversarial-review-p9b-option-b
+          -v2-colocation.md). TWO KILLERS CLEARED: CRIT2 supervision (outer select! around app.run())
+          IS feasible (app !Send irrelevant when block_on-driven inline); co-location DOES satisfy
+          disconnects-never-kills (HeadlessServer owns PTYs, federation = broadcast subscriber not
+          ownership). REMAINING v2 BLOCKERS: (C1) no legal live-App sharing — need a bounded async
+          FederationCommand ACTOR SEAM driven from the headless loop, NOT direct event_rx drain (App
+          !Send, &mut self across whole loop, steals events + bypasses forwarding handler); (C2)
+          federation socket needs first-class server-owned lifecycle (handoff/rollback/readiness) +
+          DELETE the duplicate-App legacy-boot fallback (reverses D1). 6 MAJ: proxy uses wrong fn
+          (ensure_remote_server_RUNNING not _ready) + needs timeouts; close/lag/overflow = FAIL-FAST
+          typed fatal outcome (no reopen protocol exists); federated mode misses 6 creation bypasses
+          → need SessionKind::Federated central policy; single-controller lease undefined; teardown
+          RAII; D2 vs acceptance-criterion-4 conflict (defer AC4 to P9.3). Slices: b0 BLOCKED (actor
+          seam+socket lifecycle) / b1 conditionally buildable / b2 blocked / b3 not ready. Start b0.
+          260714 user chose v3-design-pass-then-re-review. v3 WRITTEN
+          (phase-09b-option-b-own-in-proc-session.md): 3 decisions adopted from codex defaults (D2
+          intermediate + AC4→P9.3; lazy-start via ensure_remote_server_RUNNING, legacy boot deleted;
+          single-controller v1). CRIT1 UNBLOCKED by seam scout — the actor seam ALREADY EXISTS: extend
+          ServerEvent with Federation(cmd,oneshot), arms in handle_server_event (headless.rs:2473, the
+          sole &mut self dispatch) call live-App accessors, no lock/no theft. b0 restructured: b0.1
+          actor variants / b0.2 server-owned federation socket + handoff integration / b0.3 fail-fast
+          TunnelFault signal / b0.4 delete duplicate-App; b0-proxy thin stdio proxy; b1 single-dial+
+          timeouts+RAII; b2 SessionKind::Federated central policy (all 6 bypasses)+supervision+fail-fast
+          consume+teardown; b3 flip. v3 codex gpt-5.6-sol re-review: 1st launch BLOCKED by
+          workspace spend cap; RETRY SUCCEEDED. VERDICT = UNSOUND but CRIT1 RESOLVED — codex explicitly:
+          "the existing actor seam truly resolves the original live-App borrow/lock problem"; co-location
+          architecture VALIDATED. Report reports/codex-gpt56sol-adversarial-review-p9b-option-b-v3-actor
+          -seam.md (2 CRIT + 5 MAJ + 1 MIN, all concrete correctness checklist, NOT dead-ends). New CRITs:
+          (C1) handoff can't safely revoke actor-blocked controllers → need connid-tagged commands +
+          Free/Reserved/Mounted FSM + cancellation/completion + bounded non-actor-joining wait; (C2)
+          typed fail-fast can't route through the SAME bounded data queue → need SEPARATE control/
+          cancellation lane + versioned wire fault + retained TunnelTasks→TunnelExit + bounded queues
+          both dirs. 5 MAJ: adapter needs async-RPC/explicit-thread topology (one thread can't block-read
+          AND pump output); federation socket needs FULL public-socket lifecycle not just handoff (don't
+          SCM_RIGHTS-transfer it, fresh listener + no controller on replacement); admission needs actor
+          AcquireController-before-Accept + per-controller opened-terminals; central policy misses MORE
+          bypasses (custom cmds/overlays/respawn/agent-resume/pane.move) + must be construction-time
+          (App::new_federated, restoration disabled, NOT post-construction SessionKind); socket naming
+          must inherit override precedence. Buildability (codex): b0.1 actor prototype BUILDABLE after
+          connid/admission + forwarding-aware sequence; b0.2/b0.3/b2 blocked; b1 plausible. 4th UNSOUND
+          but findings converging to bounded engineering. 260714 user chose v4-fold+one-more-review.
+          v4 WRITTEN: folds all 7 v3 findings + resolves v3's 4 open Qs with conservative defaults (D4:
+          forbidden-mutation BROAD; fault=local-typed-TunnelExit + remote-reason-best-effort; terminal
+          Close=whole-mount-fatal v1; unix-only v1). b0 restructured b0.1 actor seam+forwarding-aware+
+          thread-topology / b0.2 lease FSM (connid Free/Reserved/Mounted)+handoff revocation-without-
+          actor-join / b0.3 fault-control-lane+versioned-wire-fault+TunnelExit / b0.4 full socket
+          lifecycle+delete-dup-App; b2 App::new_federated construction-time + exhaustive mutation guard.
+          v4 codex gpt-5.6-sol review DONE = UNSOUND (5th consecutive). Report
+          reports/codex-gpt56sol-adversarial-review-p9b-option-b-v4-lease-fault-persistence.md (4 CRIT +
+          5 MAJ + 2 MIN). Architecture STILL validated ("D1 co-location does not need reversal") but v4
+          introduced 2 NEW CRITs by specifying more: (C3) App::new_federated can CLOBBER the classic
+          local session (no_session controls persistence too, not just restore) → need
+          SessionPersistencePolicy::Disabled; (C4) deleting AppFederationHost removes the only
+          ServerInstanceId owner → handshake/mount identity + AC3 restart-fencing lost → HeadlessServer
+          must own+rotate it. C1 lease revocation still NOT linearizable (stale queued Acquire/Mount
+          resurrect authority post-rollback → need accept_epoch on every command + close-admission-
+          before-revoke); C2 fault still can't guarantee EOF when the sole writer blocks mid-frame →
+          need per-conn supervisor with independent shutdown(Both). 5 MAJ: contradictory task graph
+          (need 1 supervisor+1 serializer+poller); eager-open vs bounded-queue startup overflow; D4
+          mutation policy needs CLOSED ALLOWLIST not creator-list; socket unlink outcomes untyped +
+          path-length/collision unsafe; proxy can't be transparent AND handshake (client owns handshake).
+          Codex: "NOT small implementation-time folds ... a focused v5 design round is warranted."
+          META: 5 UNSOUND, architecture validated since v2, but each round specifying more reveals more
+          correctness surface — CRIT count went 2→2→4. This is a genuine multi-week live-daemon systems
+          change. NEXT = (user decision) v5 targeted fold+review (codex-recommended, but grind continues)
+          OR pause/checkpoint (design record preserved, PR #1 stands) OR build b0.1-minus-gaps blind
+          (codex says not buildable as written — higher risk). NOT building until user chooses.
+          260714 user chose v5-fold+one-more-review. v5 WRITTEN (folds all 11 v4 findings; adopts D5:
+          ServerInstanceId fresh-per-boot+rotated, federation-serve transparent-only; MIN11 closed — AC4
+          P9.2b exception recorded plan.md:143-146; D4 now CLOSED ALLOWLIST). b0.1 identity+supervisor /
+          b0.2 linearized lease (accept_epoch on every cmd) / b0.3 EOF-safe fault supervisor / b0.4 typed
+          unlink+hash-safe socket / b2 SessionPersistencePolicy::Disabled+eager-open-ordering+allowlist.
+          v5 codex review DONE = SOUND-WITH-CHANGES, **BUILD NOW** (codex verbatim: "No CRITICAL
+          architecture blocker remains ... small enough to fold into b0.2/b0.3/b2 without a sixth design
+          round ... Unresolved questions: none requiring a product or architecture decision"). Report
+          reports/codex-gpt56sol-adversarial-review-p9b-option-b-v5-build-now.md. All 5 load-bearing
+          claims YES (linearization/EOF/persistence/allowlist/no-races). 0 CRIT; 5 MAJ + 3 MIN =
+          fold-into-slice-tests constraints: per-iteration actor drain BUDGET (else handoff starves);
+          byte permits BEFORE frame encode (chunk replay/output); ONE exhaustive Method classifier at
+          BOTH sync+deferred dispatch entrances; local-spawn PERMIT before spawn_with_portable_pty +
+          reject detached custom cmds; gate clear_history() (app/mod.rs:1432) on persistence policy;
+          monotonic epoch never-restored-on-rollback; partial-header-EOF precision; eager-open split.
+          Build order (codex-endorsed): b0.1 (buildable+DORMANT, no listener until b0.4) → b0.2 → b0.3 →
+          b0.4 → b0-proxy → b1 → b2 → b3; land protocol-version bump with first wire-shape change.
+          DESIGN CONVERGED after 5 rounds. NEXT = start building b0.1 on nix host gpu-ml (pending user go
+          + branch/commit approach on their own herdr checkout).
         - [ ] P9.3 lifecycle FSM (reconnect/re-fence/cold-resume/warm-handoff exclusion/shutdown-never-kills) — pending; depends on P9.2b real-session wiring
 - [ ] 9. /hvn:impl-notes review — pending
 - [ ] 10. /ck:code-review ‖ 11. /codex:adversarial-review <diff> — pending
