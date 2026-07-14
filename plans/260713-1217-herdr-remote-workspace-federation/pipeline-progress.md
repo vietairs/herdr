@@ -174,12 +174,19 @@
               (accept loop + sync framing + drive_handshake); HeadlessServer mints next_federation_id +
               accept_federation_connections() each tick (handoff drains). Closes after handshake (mount is
               2c). 3 handshake tests; FULL suite 2676/0, 0 warnings.
-              NEXT sub-brick 2c (THE BIG ONE): after Accept → AcquireController→Mount via server_event_tx +
-              oneshot::blocking_recv → MountSnapshot; then command loop (reader thread → SendInput/Resize;
-              writer thread draining mpsc<FederationMessage>; output-pump threads on broadcast::Receiver::
-              blocking_recv w/ mount-gen fencing; event/agent ticker) + first-cause supervisor + guaranteed
-              lease Release on every EOF/fault exit. Suggest splitting 2c-1 (mount-on-accept + Release) /
-              2c-2 (reader command loop + writer) / 2c-3 (output pumps + tickers + supervisor).
+              2c scouted WITH 2 PARALLEL AGENTS (hvn-root-causer lease-lifecycle + hvn-scout output/mount-gen).
+              SUB-BRICK 2c-1 DONE+SHIPPED 2368791 — ACTOR BRIDGE LIVE E2E: drive_mount acquires lease + mounts
+              via server_event_tx.blocking_send+oneshot::blocking_recv → MountSnapshot; accept reads
+              current_epoch() synchronously + stamps it; LeaseReleaseGuard (Drop→Release) covers every thread
+              exit incl panic (closes dead-Reserved hole). Mock-loop e2e test; FULL 2677/0.
+              SUB-BRICK 2c-2 DONE+SHIPPED 8c3cbeb — INBOUND COMPLETE: run_command_loop reads until EOF, routes
+              Input→SendInput / Resize→Resize (authz'd); cleared 4s handshake timeout before loop (idle-drop
+              fix). FULL 2678/0, 0 warnings.
+              NEXT sub-brick 2c-3 (OUTBOUND — big multi-thread brick): try_clone → writer thread draining
+              mpsc<FederationMessage>; inbound Open → SubscribeOutput+ScrollbackReplay → Open{replay}+Output
+              (pump = try_recv() POLLING per tee.rs drain_available — broadcast::Receiver has NO blocking_recv
+              in this tokio) + event ticker (EventsAfter→Frame/Gap) + agent ticker + first-cause supervisor
+              (TunnelExit) + teardown; then drop FederationCommand/dispatch #[allow(dead_code)]. mount_gen=const 1.
               Sub-brick 3: live handoff revocation (lease.begin_revocation wired into perform_live_handoff).
               Sub-brick 4: DELETE AppFederationHost.
           (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
