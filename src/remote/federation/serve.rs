@@ -35,12 +35,19 @@ use super::tee;
 /// to shutdown, so there is only ever one live generation to fence against
 /// (a fresh remote boot — and therefore a fresh `server_instance_id` — is
 /// what a remount after a crash produces; see `id::Mount`/`id::fence`).
+///
+/// `#[allow(dead_code)]`: only `loopback.rs`'s tests drive `run()` (and
+/// therefore this constant) now that the co-located `federation_accept.rs`
+/// host owns production traffic — kept for those tests, not a real bin-build
+/// dead end.
+#[allow(dead_code)]
 const MOUNT_GENERATION: u64 = 1;
 
 /// How often the event-stream and agent-status pollers check their sources.
 /// A poll (not a push/notify) keeps `FederationHost` a plain sync trait; the
 /// interval is short enough that federation consumers do not perceive it as
 /// added latency relative to human-typing/terminal-output cadences.
+#[allow(dead_code)]
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Everything the protocol handler needs from the process hosting the actual
@@ -56,6 +63,12 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// future as the read loop — so this bound is never required. Only
 /// `LoopbackFederationServer::spawn` (test-only, always instantiated with
 /// `FixtureHost`) needs `Send + Sync`, and adds it locally.
+///
+/// `#[allow(dead_code)]`: only `loopback::FixtureHost` (test-only) implements
+/// this trait now that `federation_accept.rs` hosts production traffic
+/// without going through it — kept for those tests, not dead in the sense of
+/// unreachable production code.
+#[allow(dead_code)]
 pub(crate) trait FederationHost: 'static {
     fn server_instance_id(&self) -> ServerInstanceId;
     fn capabilities(&self) -> BTreeSet<Capability>;
@@ -175,10 +188,15 @@ pub(crate) async fn write_frame<W: AsyncWrite + Unpin>(
 }
 
 /// Runs the federation protocol handler for one connection to completion
-/// (until the peer disconnects or a fatal protocol error occurs). Reused
-/// verbatim by the real `federation-serve` subcommand (over stdio, riding
-/// `SshStdioBridge`) and by `LoopbackFederationServer` (over an in-memory
-/// duplex).
+/// (until the peer disconnects or a fatal protocol error occurs). Historically
+/// reused verbatim by the real `federation-serve` subcommand and by
+/// `LoopbackFederationServer` (over an in-memory duplex); `federation-serve`
+/// is now a transparent proxy to the co-located `federation_accept.rs` host
+/// instead, so `loopback.rs`'s tests are the sole caller.
+///
+/// `#[allow(dead_code)]`: unreachable from production `main.rs` after that
+/// change, kept for `loopback.rs`'s tests.
+#[allow(dead_code)]
 pub(crate) async fn run<R, W, H>(host: Arc<H>, mut reader: R, mut writer: W) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -290,6 +308,10 @@ where
 /// Polls `host.events_after` once, emitting `Gap`/`Frame` messages and
 /// advancing `cursor`. Returns `false` if the outbound channel closed (the
 /// writer task exited) and the caller should stop the connection.
+///
+/// `#[allow(dead_code)]`: only reachable through `run()`, kept for
+/// `loopback.rs`'s tests (see `run`'s doc comment).
+#[allow(dead_code)]
 fn poll_events<H: FederationHost>(
     host: &H,
     cursor: &mut u64,
@@ -329,6 +351,10 @@ fn poll_events<H: FederationHost>(
 
 /// Polls `host.agent_statuses` once, emitting only the entries that changed
 /// since the last poll. Returns `false` if the outbound channel closed.
+///
+/// `#[allow(dead_code)]`: only reachable through `run()`, kept for
+/// `loopback.rs`'s tests (see `run`'s doc comment).
+#[allow(dead_code)]
 fn poll_agent_statuses<H: FederationHost>(
     host: &H,
     last: &mut HashMap<String, AgentStatus>,
@@ -355,6 +381,9 @@ fn poll_agent_statuses<H: FederationHost>(
     true
 }
 
+/// `#[allow(dead_code)]`: only reachable through `run()`, kept for
+/// `loopback.rs`'s tests (see `run`'s doc comment).
+#[allow(dead_code)]
 fn handle_inbound<H: FederationHost>(
     host: &Arc<H>,
     msg: FederationMessage,
@@ -414,6 +443,10 @@ fn handle_inbound<H: FederationHost>(
 /// poll tick rather than one per PTY read syscall (bounded-framing
 /// backpressure: the tick interval, not an unbounded outbound queue, is what
 /// paces a flooding pane).
+///
+/// `#[allow(dead_code)]`: only reachable through `run()`, kept for
+/// `loopback.rs`'s tests (see `run`'s doc comment).
+#[allow(dead_code)]
 fn spawn_terminal_forward_task(
     terminal_id: String,
     mut rx: broadcast::Receiver<Bytes>,
@@ -452,345 +485,4 @@ fn spawn_terminal_forward_task(
             }
         }
     })
-}
-
-// ---------------------------------------------------------------------------
-// Production host: `herdr federation-serve` wired to a real, in-process
-// `App`/`AppState`/`EventHub` (the counterpart to `loopback::FixtureHost`).
-// ---------------------------------------------------------------------------
-
-/// Deviation from the phase file's stated file list (logged in
-/// `implementation-notes.md`): `App::session_snapshot`/`handle_event`
-/// internals live in `app/*`, which this phase does not own. This host
-/// deliberately stays on `App`'s already-`pub`/`pub(crate)` surface —
-/// `handle_api_request` (JSON API, reused for `SessionSnapshot`/`AgentList`)
-/// and the two small `pub(crate)` accessors added to `app/creation.rs` and
-/// `pane.rs`/`terminal/runtime.rs` for the raw-byte tap — rather than adding
-/// new private-module reach-ins.
-pub(crate) struct AppFederationHost {
-    server_instance_id: ServerInstanceId,
-    event_hub: crate::api::EventHub,
-    app: std::sync::Mutex<crate::app::App>,
-}
-
-impl AppFederationHost {
-    /// Builds a fresh `App` the same way `server::headless::run_server`
-    /// does (session persistence enabled, so a remote's existing
-    /// workspaces/panes are what gets mounted), but does not bind the
-    /// classic client/API unix sockets — this host speaks the federation
-    /// protocol over the caller-supplied stdio instead, so it never
-    /// conflicts with (and never touches) a classic `herdr server` process.
-    pub(crate) fn boot() -> Self {
-        let loaded_config = crate::config::Config::load();
-        let event_hub = crate::api::EventHub::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let no_session = false;
-        let app = crate::app::App::new(
-            &loaded_config.config,
-            no_session,
-            crate::config::config_diagnostic_summary(&loaded_config.diagnostics),
-            api_rx,
-            event_hub.clone(),
-        );
-
-        Self {
-            server_instance_id: ServerInstanceId(fresh_server_instance_id()),
-            event_hub,
-            app: std::sync::Mutex::new(app),
-        }
-    }
-
-    fn json_request(
-        &self,
-        method: crate::api::schema::Method,
-    ) -> crate::api::schema::ResponseResult {
-        let mut app = self.app.lock().expect("federation host app mutex poisoned");
-        let response = app.handle_api_request(crate::api::schema::Request {
-            id: "federation-serve".to_string(),
-            method,
-        });
-        drop(app);
-        serde_json::from_str::<crate::api::schema::SuccessResponse>(&response)
-            .map(|success| success.result)
-            .unwrap_or(crate::api::schema::ResponseResult::Ok {})
-    }
-}
-
-fn fresh_server_instance_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    format!(
-        "{}-{}-{}",
-        std::process::id(),
-        nanos,
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
-impl FederationHost for AppFederationHost {
-    fn server_instance_id(&self) -> ServerInstanceId {
-        self.server_instance_id.clone()
-    }
-
-    fn capabilities(&self) -> BTreeSet<Capability> {
-        [
-            Capability::new(Capability::SCROLLBACK_REPLAY),
-            Capability::new(Capability::AGENT_STATUS),
-        ]
-        .into_iter()
-        .collect()
-    }
-
-    fn mount(&self) -> (SessionSnapshot, EventCursor) {
-        // Hold the app lock across both the snapshot call and the cursor
-        // read so no event can slip between them (RT-F2/CX-2 atomic pair).
-        let mut app = self.app.lock().expect("federation host app mutex poisoned");
-        let response = app.handle_api_request(crate::api::schema::Request {
-            id: "federation-mount".to_string(),
-            method: crate::api::schema::Method::SessionSnapshot(
-                crate::api::schema::EmptyParams::default(),
-            ),
-        });
-        let cursor = EventCursor(self.event_hub.current_sequence());
-        drop(app);
-
-        let snapshot = serde_json::from_str::<crate::api::schema::SuccessResponse>(&response)
-            .ok()
-            .and_then(|success| match success.result {
-                crate::api::schema::ResponseResult::SessionSnapshot { snapshot } => {
-                    Some(*snapshot)
-                }
-                _ => None,
-            })
-            .unwrap_or_else(empty_snapshot);
-
-        (snapshot, cursor)
-    }
-
-    fn events_after(&self, since: u64) -> Vec<(u64, EventKind)> {
-        self.event_hub
-            .events_after(since)
-            .into_iter()
-            .map(|(seq, envelope)| (seq, envelope.event))
-            .collect()
-    }
-
-    fn subscribe_output(&self, terminal_id: &str) -> Option<broadcast::Receiver<Bytes>> {
-        let app = self.app.lock().expect("federation host app mutex poisoned");
-        app.terminal_runtime_for_terminal_id(terminal_id)
-            .map(|runtime| runtime.subscribe_output_bytes())
-    }
-
-    fn scrollback_replay(&self, terminal_id: &str) -> Vec<u8> {
-        let app = self.app.lock().expect("federation host app mutex poisoned");
-        let Some(_runtime) = app.terminal_runtime_for_terminal_id(terminal_id) else {
-            return Vec::new();
-        };
-        #[cfg(unix)]
-        {
-            _runtime
-                .handoff_history_ansi()
-                .map(String::into_bytes)
-                .unwrap_or_default()
-        }
-        #[cfg(not(unix))]
-        {
-            Vec::new()
-        }
-    }
-
-    fn send_input(&self, terminal_id: &str, bytes: &[u8]) {
-        let app = self.app.lock().expect("federation host app mutex poisoned");
-        if let Some(runtime) = app.terminal_runtime_for_terminal_id(terminal_id) {
-            let _ = runtime.try_send_bytes(Bytes::copy_from_slice(bytes));
-        }
-    }
-
-    fn resize(&self, terminal_id: &str, cols: u16, rows: u16) {
-        let app = self.app.lock().expect("federation host app mutex poisoned");
-        if let Some(runtime) = app.terminal_runtime_for_terminal_id(terminal_id) {
-            runtime.resize(rows, cols, 0, 0);
-        }
-    }
-
-    fn agent_statuses(&self) -> Vec<(String, AgentStatus)> {
-        let result = self.json_request(crate::api::schema::Method::AgentList(
-            crate::api::schema::EmptyParams::default(),
-        ));
-        match result {
-            crate::api::schema::ResponseResult::AgentList { agents } => agents
-                .into_iter()
-                .map(|agent| (agent.terminal_id, agent.agent_status))
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Closes GAP #1 (`implementation-notes.md`, P8 entry): drains `App`'s
-    /// `event_rx` and applies each pending `AppEvent` via
-    /// `App::handle_internal_event` — the same call `HeadlessServer::
-    /// handle_internal_event_with_forwarding` (`server/headless.rs:1845`)
-    /// makes, minus the client-forwarding side effects (sound/clipboard/
-    /// prefix-input relayed to an attached terminal client), which do not
-    /// apply here: `federation-serve` has no attached interactive client of
-    /// its own, only federation-protocol subscribers reading `EventHub`/
-    /// `agent_statuses`/the raw-byte tee, none of which this drain bypasses.
-    /// Bounded per tick (not drained to exhaustion) so a burst of internal
-    /// events cannot starve the read loop that shares this task via
-    /// `tokio::select!`.
-    fn drain_internal_events(&self) {
-        const MAX_EVENTS_PER_DRAIN: usize = 256;
-        let mut app = self.app.lock().expect("federation host app mutex poisoned");
-        for _ in 0..MAX_EVENTS_PER_DRAIN {
-            match app.event_rx.try_recv() {
-                Ok(ev) => app.handle_internal_event(ev),
-                Err(_) => break,
-            }
-        }
-    }
-}
-
-/// Entry point for the `herdr federation-serve` subcommand (`main.rs`).
-/// Boots a dedicated, session-persistence-enabled `App` (mirrors
-/// `server::headless::run_server`'s construction) and speaks the federation
-/// protocol over stdin/stdout — the same transport `remote-client-bridge`
-/// rides over `SshStdioBridge`, so this subcommand needs no bespoke SSH
-/// plumbing on the local side (P4 dials it exactly like the bridge).
-pub(crate) fn run_federation_serve_over_stdio() -> std::io::Result<()> {
-    crate::platform::raise_server_nofile_limit();
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(std::io::Error::other)?;
-
-    rt.block_on(async {
-        // `AppFederationHost` is intentionally `!Send`/`!Sync` (see the
-        // `FederationHost` trait doc comment) — this `Arc` is never handed
-        // to `tokio::spawn`/another thread, only driven via `block_on` on
-        // this one, which has no `Send` requirement.
-        #[allow(clippy::arc_with_non_send_sync)]
-        let host = Arc::new(AppFederationHost::boot());
-        let stdin = tokio::io::stdin();
-        let stdout = tokio::io::stdout();
-        run(host, stdin, stdout).await
-    })
-}
-
-#[cfg(test)]
-mod gap1_app_event_drain_tests {
-    //! Proves GAP #1 is closed: an `AppEvent` emitted by a real, in-process
-    //! `App` (not a fixture stand-in) reaches the federation event stream
-    //! over the actual `serve::run` protocol handler. `AppFederationHost` is
-    //! `!Send`/`!Sync`, so — like production's `run_federation_serve_over_stdio`
-    //! — this drives `run()` via `tokio::join!` on one `#[tokio::test]` task
-    //! rather than `tokio::spawn`ing the host across threads.
-
-    use super::*;
-    use crate::api::EventHub;
-    use crate::app::App;
-    use crate::events::AppEvent;
-
-    #[tokio::test]
-    async fn a_real_app_event_reaches_the_federation_event_stream() {
-        let event_hub = EventHub::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            true,
-            None,
-            api_rx,
-            event_hub.clone(),
-        );
-        let event_tx = app.event_tx.clone();
-
-        let mut workspace = crate::workspace::Workspace::test_new("gap1-drain");
-        let dead_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
-        app.state.workspaces = vec![workspace];
-        app.state.ensure_test_terminals();
-
-        // Same non-Send/Sync situation as `run_federation_serve_over_stdio`'s
-        // own `Arc::new(AppFederationHost::boot())` — never handed to
-        // `tokio::spawn`, only driven via `tokio::join!` on this one task.
-        #[allow(clippy::arc_with_non_send_sync)]
-        let host = Arc::new(AppFederationHost {
-            server_instance_id: ServerInstanceId("gap1-test".to_string()),
-            event_hub: event_hub.clone(),
-            app: std::sync::Mutex::new(app),
-        });
-
-        let (client, server) = tokio::io::duplex(1 << 20);
-        let (server_reader, server_writer) = tokio::io::split(server);
-        let (mut client_reader, mut client_writer) = tokio::io::split(client);
-
-        let run_fut = run(host, server_reader, server_writer);
-        let drive_fut = async move {
-            write_frame(
-                &mut client_writer,
-                &FederationMessage::Handshake(Handshake {
-                    federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
-                    capabilities: BTreeSet::new(),
-                    server_instance_id: ServerInstanceId("gap1-test-client".to_string()),
-                }),
-            )
-            .await
-            .unwrap();
-
-            // Handshake accept, then the atomic mount — both server->client
-            // only, unconditional on a successful negotiation.
-            assert!(matches!(
-                read_frame(&mut client_reader).await.unwrap(),
-                Some(FederationMessage::HandshakeResponse(
-                    HandshakeResponse::Accept { .. }
-                ))
-            ));
-            assert!(matches!(
-                read_frame(&mut client_reader).await.unwrap(),
-                Some(FederationMessage::MountSnapshot(_))
-            ));
-
-            // Now that the mount is established, emit a real `AppEvent` the
-            // same way local pane activity would — through `event_tx`, the
-            // exact channel `App::handle_internal_event` normally only gets
-            // drained from by `HeadlessServer::run`'s select loop
-            // (`server/headless.rs:570`). Before GAP #1's fix, nothing drove
-            // this channel inside `federation-serve`, so this event would
-            // never reach `event_hub` and this test would time out below.
-            event_tx
-                .send(AppEvent::PaneDied {
-                    pane_id: dead_pane,
-                })
-                .await
-                .unwrap();
-
-            // Poll the federation event stream (server-driven, `POLL_INTERVAL`
-            // = 25ms) until the `pane.exited` frame produced by that event
-            // arrives, or fail on timeout — proving the drain path is live.
-            let saw_pane_exited = tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    match read_frame(&mut client_reader).await.unwrap() {
-                        Some(FederationMessage::Event(EventChannelMessage::Frame(frame))) => {
-                            if frame.kind == EventKind::PaneExited {
-                                return;
-                            }
-                        }
-                        Some(_) => continue,
-                        None => panic!("federation link closed before pane.exited arrived"),
-                    }
-                }
-            })
-            .await;
-            assert!(
-                saw_pane_exited.is_ok(),
-                "pane.exited never reached the federation event stream (GAP #1 regressed)"
-            );
-        };
-
-        let (run_result, ()) = tokio::join!(run_fut, drive_fut);
-        assert!(run_result.is_ok());
-    }
 }
