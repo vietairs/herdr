@@ -24,16 +24,21 @@ use std::io::{self, Read, Write};
 use std::time::Duration;
 
 use interprocess::local_socket::traits::{Listener as _, Stream as _};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
 
+use crate::api::schema::session::SessionSnapshot;
 use crate::ipc::{LocalListener, LocalStream};
 use crate::remote::federation::id::ServerInstanceId;
 use crate::remote::federation::protocol::codec;
 use crate::remote::federation::protocol::negotiate::{negotiate, AgreedCaps};
 use crate::remote::federation::protocol::{
-    Capability, Channel, FederationMessage, Handshake, HandshakeResponse,
-    FEDERATION_PROTOCOL_VERSION,
+    Capability, Channel, EventCursor, FederationMessage, Handshake, HandshakeResponse,
+    MountSnapshot, FEDERATION_PROTOCOL_VERSION,
 };
+use crate::server::client_transport::ServerEvent;
+use crate::server::federation_actor::FederationCommand;
+use crate::server::federation_lease::{AcceptEpoch, Admission, ConnId};
 
 /// How long a federation connection has to complete its handshake before the
 /// server drops it, mirroring the thin-client path's `HANDSHAKE_TIMEOUT`. Keeps
@@ -104,13 +109,19 @@ fn write_frame_blocking(writer: &mut impl Write, msg: &FederationMessage) -> io:
     writer.flush()
 }
 
-/// Accept pending co-located federation connections and start each one's
-/// handshake on its own `std::thread`. Mirrors
-/// `accept_pending_client_connections`; called each server tick.
+/// Accept pending co-located federation connections and drive each one on its
+/// own `std::thread`. Mirrors `accept_pending_client_connections`; called each
+/// server tick. `epoch` is the lease's current accept-epoch, read
+/// synchronously by the caller on the event loop and stamped onto every command
+/// this connection later enqueues — a connection accepted before a handoff
+/// revocation carries the pre-revocation epoch, so its queued commands fail
+/// validation and cannot resurrect authority (federation_lease v5 finding #1).
 pub(crate) fn accept_pending_federation_connections(
     listener: &LocalListener,
     next_id: &mut u64,
+    epoch: AcceptEpoch,
     server_instance_id: &ServerInstanceId,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
 ) -> io::Result<()> {
     loop {
         match listener.accept() {
@@ -124,11 +135,16 @@ pub(crate) fn accept_pending_federation_connections(
                 }
 
                 let server_instance_id = server_instance_id.clone();
+                let server_event_tx = server_event_tx.clone();
                 std::thread::spawn(move || {
-                    if let Err(err) =
-                        handle_federation_handshake(stream, connid, &server_instance_id)
-                    {
-                        debug!(connid, err = %err, "federation handshake failed");
+                    if let Err(err) = handle_federation_connection(
+                        stream,
+                        epoch,
+                        connid,
+                        &server_instance_id,
+                        server_event_tx,
+                    ) {
+                        debug!(connid, err = %err, "federation connection failed");
                     }
                 });
             }
@@ -161,13 +177,17 @@ pub(crate) fn reject_pending_federation_connections(listener: &LocalListener) ->
     Ok(())
 }
 
-/// Drive one federation connection through the protocol handshake, then close
-/// it (sub-brick 2). Sets blocking I/O with a bounded receive timeout, then
-/// delegates the wire exchange to [`drive_handshake`].
-fn handle_federation_handshake(
+/// Drive one federation connection: handshake, then (on acceptance) acquire the
+/// single-controller lease and mount, streaming the initial snapshot. Sets
+/// blocking I/O with a bounded receive timeout for the handshake, then delegates
+/// the wire exchange. Sub-brick 2c-1 closes the connection after the mount
+/// snapshot; sub-brick 2c-2 layers the command loop on top.
+fn handle_federation_connection(
     mut stream: LocalStream,
-    connid: u64,
+    epoch: AcceptEpoch,
+    connid: ConnId,
     server_instance_id: &ServerInstanceId,
+    server_event_tx: mpsc::Sender<ServerEvent>,
 ) -> io::Result<()> {
     // The accept loop set the stream nonblocking; the handshake needs blocking
     // I/O, bounded by a timeout so a silent peer cannot pin this thread.
@@ -179,19 +199,137 @@ fn handle_federation_handshake(
         debug!(connid, err = %err, "federation socket receive timeout unavailable");
     }
 
-    match drive_handshake(&mut stream, connid, server_instance_id)? {
-        Some(_agreed) => {
-            // Sub-brick 2c continues into mount + the command loop here; 2b
-            // closes the connection to validate the accept/negotiate/identity
-            // wire in isolation.
-            debug!(connid, "federation handshake accepted (2b closes; mount loop is 2c)");
-        }
-        None => {
-            debug!(connid, "federation handshake rejected or absent");
+    if drive_handshake(&mut stream, connid, server_instance_id)?.is_none() {
+        debug!(connid, "federation handshake rejected or absent");
+        return Ok(());
+    }
+
+    drive_mount(
+        &mut stream,
+        epoch,
+        connid,
+        server_instance_id,
+        &server_event_tx,
+    )
+}
+
+/// Acquire the single-controller lease, mount, and stream the initial
+/// `MountSnapshot` to the peer. A connection that loses the admission race (or
+/// whose reservation is superseded before it mounts) simply closes. Once the
+/// slot is reserved, a [`LeaseReleaseGuard`] guarantees the lease is released on
+/// every return or panic. Sub-brick 2c-1 stops after the snapshot; 2c-2
+/// continues into the command loop where the `_` binding below lives.
+fn drive_mount<S: Read + Write>(
+    stream: &mut S,
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    server_instance_id: &ServerInstanceId,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) -> io::Result<()> {
+    match acquire_controller(epoch, connid, server_event_tx)? {
+        Admission::Accepted => {}
+        other => {
+            debug!(connid, ?other, "federation admission refused");
+            return Ok(());
         }
     }
 
+    // The slot is now reserved for (epoch, connid); guarantee its release on
+    // every exit from here — including a panic — so a connection that dies
+    // before (or without) a handoff cannot pin the single-controller slot.
+    let _release = LeaseReleaseGuard::new(epoch, connid, server_event_tx.clone());
+
+    let Some((snapshot, cursor)) = mount(epoch, connid, server_event_tx)? else {
+        debug!(connid, "federation mount refused (reservation superseded)");
+        return Ok(());
+    };
+
+    write_frame_blocking(
+        stream,
+        &FederationMessage::MountSnapshot(MountSnapshot {
+            server_instance_id: server_instance_id.clone(),
+            snapshot,
+            cursor,
+        }),
+    )?;
+
+    // Sub-brick 2c-2 enters the command loop here (reader → SendInput/Resize,
+    // writer draining events/output). 2c-1 closes after the snapshot; the guard
+    // releases the lease on return.
     Ok(())
+}
+
+/// Reserve the single-controller slot via the actor: a blocking round-trip to
+/// the server event loop (legal here — a plain `std::thread`, no tokio runtime).
+fn acquire_controller(
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) -> io::Result<Admission> {
+    let (reply, rx) = oneshot::channel();
+    server_event_tx
+        .blocking_send(ServerEvent::Federation(FederationCommand::AcquireController {
+            epoch,
+            connid,
+            reply,
+        }))
+        .map_err(|_| io::Error::other("server event loop is gone"))?;
+    rx.blocking_recv()
+        .map_err(|_| io::Error::other("federation acquire reply dropped"))
+}
+
+/// Promote the reservation to `Mounted` and fetch the atomic (snapshot, cursor)
+/// via the actor. `None` if the reservation was superseded before the mount.
+fn mount(
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) -> io::Result<Option<(SessionSnapshot, EventCursor)>> {
+    let (reply, rx) = oneshot::channel();
+    server_event_tx
+        .blocking_send(ServerEvent::Federation(FederationCommand::Mount {
+            epoch,
+            connid,
+            reply,
+        }))
+        .map_err(|_| io::Error::other("server event loop is gone"))?;
+    rx.blocking_recv()
+        .map_err(|_| io::Error::other("federation mount reply dropped"))
+}
+
+/// Releases the single-controller lease for `(epoch, connid)` when the
+/// connection thread returns or unwinds — the RAII backstop that keeps a
+/// connection which dies after acquiring (but before a handoff bumps the epoch)
+/// from pinning the slot forever. The lease's `release` is compare-and-clear, so
+/// a release that races a newer lease is inert.
+struct LeaseReleaseGuard {
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    server_event_tx: mpsc::Sender<ServerEvent>,
+}
+
+impl LeaseReleaseGuard {
+    fn new(epoch: AcceptEpoch, connid: ConnId, server_event_tx: mpsc::Sender<ServerEvent>) -> Self {
+        Self {
+            epoch,
+            connid,
+            server_event_tx,
+        }
+    }
+}
+
+impl Drop for LeaseReleaseGuard {
+    fn drop(&mut self) {
+        // `blocking_send` is legal here (a plain std::thread, never a tokio
+        // runtime thread) and returns immediately if the loop is gone (the
+        // server is shutting down — the lease dies with it), so Drop never hangs.
+        let _ = self
+            .server_event_tx
+            .blocking_send(ServerEvent::Federation(FederationCommand::Release {
+                epoch: self.epoch,
+                connid: self.connid,
+            }));
+    }
 }
 
 /// The stream-generic handshake exchange: read the peer's `Handshake`, negotiate
@@ -304,5 +442,62 @@ mod tests {
 
         let outcome = drive_handshake(&mut server, 1, &sid).expect("handshake runs");
         assert!(outcome.is_none(), "a non-handshake opener is dropped");
+    }
+
+    /// A minimal live `App` with session persistence disabled, mirroring the
+    /// federation_actor test harness — enough to service Acquire/Mount.
+    fn test_app() -> crate::app::App {
+        let config = crate::config::Config::default();
+        let (_api_tx, api_rx) = mpsc::unbounded_channel();
+        crate::app::App::new(&config, true, None, api_rx, crate::api::EventHub::default())
+    }
+
+    #[test]
+    fn drive_mount_acquires_the_lease_and_streams_a_snapshot_through_the_actor() {
+        use crate::server::federation_lease::FederationLease;
+
+        // A mock server event loop: service Federation commands against a test
+        // App + lease, exactly as HeadlessServer's handle_server_event arm does.
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let loop_handle = std::thread::spawn(move || {
+            let mut app = test_app();
+            let mut lease = FederationLease::new();
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(cmd) = ev {
+                    crate::server::federation_actor::dispatch(&mut app, &mut lease, cmd);
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        let sid = ServerInstanceId::fresh();
+
+        // The peer reads the mount snapshot the server streams after mounting.
+        let peer_sid = sid.clone();
+        let client_thread = std::thread::spawn(move || {
+            let snapshot = read_frame_blocking(&mut client)
+                .expect("client reads snapshot")
+                .expect("snapshot present");
+            match snapshot {
+                FederationMessage::MountSnapshot(mount) => {
+                    assert_eq!(
+                        mount.server_instance_id, peer_sid,
+                        "snapshot carries this server's identity"
+                    );
+                }
+                other => panic!("expected MountSnapshot, got {other:?}"),
+            }
+        });
+
+        // Acquire → Mount → stream the snapshot, all bridged through the actor.
+        drive_mount(&mut server, 0, 1, &sid, &tx).expect("mount runs end to end");
+
+        client_thread.join().expect("client thread");
+
+        // drive_mount's guard already released the lease on return; dropping the
+        // last sender ends the mock loop.
+        drop(server);
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
     }
 }
