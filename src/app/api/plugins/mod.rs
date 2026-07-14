@@ -1164,6 +1164,11 @@ command = ["echo", "b"]
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = crate::app::Mode::Terminal;
+        app.state.kitty_graphics_enabled = true;
+        app.state.host_cell_size = crate::kitty_graphics::HostCellSize {
+            width_px: 11,
+            height_px: 22,
+        };
         app.state.terminals.get_mut(&root_terminal).unwrap().cwd = "/tmp".into();
         let target_public_pane_id = app.public_pane_id(0, root_pane).unwrap();
 
@@ -1182,7 +1187,7 @@ platforms = ["linux", "macos"]
 [[panes]]
 id = "board"
 title = "Plugin Board"
-command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_ENTRYPOINT_ID\" \"$HERDR_WORKSPACE_ID\" \"$HERDR_PANE_ID\" \"$HERDR_BIN_PATH\" \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
+command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_ENTRYPOINT_ID\" \"$HERDR_WORKSPACE_ID\" \"$HERDR_PANE_ID\" \"$HERDR_BIN_PATH\" \"$HERDR_PLUGIN_CONTEXT_JSON\" \"${{HERDR_CELL_WIDTH_PX-unset}}\" \"${{HERDR_CELL_HEIGHT_PX-unset}}\" > {}"]
 "#,
                 capture.display()
             ),
@@ -1254,6 +1259,8 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$HERDR_
             context.focused_pane_id.as_deref(),
             Some(target_public_pane_id.as_str())
         );
+        assert_eq!(lines.next(), Some("unset"));
+        assert_eq!(lines.next(), Some("unset"));
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();

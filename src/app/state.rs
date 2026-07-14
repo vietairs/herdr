@@ -2,6 +2,7 @@ use crate::config::{Keybinds, NewTerminalCwdConfig, SoundConfig, ToastConfig, To
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
+use std::hash::{Hash, Hasher};
 
 use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
@@ -14,6 +15,42 @@ pub(crate) type InstalledPluginRegistry =
 pub(crate) struct PluginPaneRecord {
     pub plugin_id: String,
     pub entrypoint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaneGraphicsLayer {
+    pub format: crate::api::schema::PaneGraphicsFormat,
+    pub image_width: u32,
+    pub image_height: u32,
+    pub data: Vec<u8>,
+    pub data_fingerprint: u64,
+    pub render: crate::api::schema::PaneGraphicsPlacementParams,
+}
+
+impl PaneGraphicsLayer {
+    pub(crate) fn new(
+        format: crate::api::schema::PaneGraphicsFormat,
+        image_width: u32,
+        image_height: u32,
+        data: Vec<u8>,
+        render: crate::api::schema::PaneGraphicsPlacementParams,
+    ) -> Self {
+        let data_fingerprint = pane_graphics_data_fingerprint(&data);
+        Self {
+            format,
+            image_width,
+            image_height,
+            data,
+            data_fingerprint,
+            render,
+        }
+    }
+}
+
+fn pane_graphics_data_fingerprint(data: &[u8]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -1472,6 +1509,12 @@ pub struct AppState {
     pub(crate) installed_plugins: InstalledPluginRegistry,
     /// Pane ids opened through the plugin pane API.
     pub(crate) plugin_panes: std::collections::HashMap<PaneId, PluginPaneRecord>,
+    /// Runtime image layers owned by API clients and composited over panes.
+    pub(crate) pane_graphics_layers: std::collections::HashMap<PaneId, PaneGraphicsLayer>,
+    /// Active streaming graphics owner token by pane id.
+    pub(crate) pane_graphics_streams: std::collections::HashMap<PaneId, String>,
+    /// Monotonic marker for accepted pane graphics mutations.
+    pub(crate) pane_graphics_revision: u64,
     /// Recent plugin action/event command executions.
     pub(crate) plugin_command_logs: Vec<crate::api::schema::PluginCommandLogInfo>,
     pub(crate) next_plugin_command_log_id: u64,
@@ -1480,6 +1523,8 @@ pub struct AppState {
     pub global_menu: MenuListState,
     /// Resolved host terminal default colors for theming embedded panes.
     pub host_terminal_theme: TerminalTheme,
+    /// Last known foreground host terminal cell size in pixels.
+    pub(crate) host_cell_size: crate::kitty_graphics::HostCellSize,
     /// Set when a persisted session snapshot would change.
     pub session_dirty: bool,
     /// Terminal runtimes that should be shut down by the app/runtime layer
@@ -1826,11 +1871,15 @@ impl AppState {
             integration_install_messages: Vec::new(),
             installed_plugins: std::collections::HashMap::new(),
             plugin_panes: std::collections::HashMap::new(),
+            pane_graphics_layers: std::collections::HashMap::new(),
+            pane_graphics_streams: std::collections::HashMap::new(),
+            pane_graphics_revision: 0,
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
             plugin_commands_in_flight: 0,
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
+            host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         }

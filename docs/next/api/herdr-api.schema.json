@@ -2075,6 +2075,92 @@
           ],
           "type": "object"
         },
+        "PaneGraphicsClearParams": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "PaneGraphicsFormat": {
+          "enum": [
+            "png",
+            "rgb",
+            "rgba"
+          ],
+          "type": "string"
+        },
+        "PaneGraphicsPlacementParams": {
+          "properties": {
+            "grid_cols": {
+              "default": 0,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "grid_rows": {
+              "default": 0,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "viewport_col": {
+              "default": 0,
+              "format": "int32",
+              "type": "integer"
+            },
+            "viewport_row": {
+              "default": 0,
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "PaneGraphicsSetParams": {
+          "properties": {
+            "data_base64": {
+              "default": "",
+              "type": "string"
+            },
+            "format": {
+              "$ref": "#/schemas/request/$defs/PaneGraphicsFormat"
+            },
+            "image_height": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "image_width": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "placement": {
+              "$ref": "#/schemas/request/$defs/PaneGraphicsPlacementParams",
+              "default": {
+                "grid_cols": 0,
+                "grid_rows": 0,
+                "viewport_col": 0,
+                "viewport_row": 0
+              }
+            }
+          },
+          "required": [
+            "pane_id",
+            "format",
+            "image_width",
+            "image_height"
+          ],
+          "type": "object"
+        },
         "PaneLayoutParams": {
           "properties": {
             "pane_id": {
@@ -4789,6 +4875,54 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.graphics.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneGraphicsSetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.graphics.clear",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneGraphicsClearParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.graphics.info",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTarget"
             }
           },
           "required": [
@@ -8347,6 +8481,30 @@
               "required": [
                 "type",
                 "read"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "cell_height_px": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "cell_width_px": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_graphics_info",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "cell_width_px",
+                "cell_height_px"
               ],
               "type": "object"
             },
