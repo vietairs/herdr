@@ -243,25 +243,50 @@ pub(crate) fn socket_file_identity(path: &Path) -> io::Result<SocketFileIdentity
     }
 }
 
-pub(crate) fn remove_socket_file_if_owned(
+/// What [`remove_socket_file_if_owned_typed`] actually did. The plain
+/// `remove_socket_file_if_owned` collapses all three into `Ok(())`, which is
+/// fine for best-effort cleanup but loses the information a transactional caller
+/// needs: handoff rollback must restore only the sockets it *actually* unlinked,
+/// never one that was absent or owned by someone else (P9.2b b0.4, codex MAJ8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SocketUnlink {
+    /// The file existed, matched `identity`, and was removed.
+    Removed,
+    /// Nothing was there (already gone).
+    Absent,
+    /// A file exists but is owned by a different inode/marker; left untouched.
+    NotOwner,
+}
+
+/// Like [`remove_socket_file_if_owned`] but reports which of the three cases
+/// occurred, so a caller can build an accurate unlink record.
+#[allow(dead_code)] // dormant until the federation socket lifecycle wires it (b0.4)
+pub(crate) fn remove_socket_file_if_owned_typed(
     path: &Path,
     identity: &SocketFileIdentity,
-) -> io::Result<()> {
+) -> io::Result<SocketUnlink> {
     let current = match socket_file_identity(path) {
         Ok(current) => current,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(SocketUnlink::Absent),
         Err(err) => return Err(err),
     };
 
     if current != *identity {
-        return Ok(());
+        return Ok(SocketUnlink::NotOwner);
     }
 
     match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => Ok(SocketUnlink::Removed),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(SocketUnlink::Absent),
         Err(err) => Err(err),
     }
+}
+
+pub(crate) fn remove_socket_file_if_owned(
+    path: &Path,
+    identity: &SocketFileIdentity,
+) -> io::Result<()> {
+    remove_socket_file_if_owned_typed(path, identity).map(|_| ())
 }
 
 #[cfg(windows)]
@@ -302,6 +327,52 @@ mod tests {
             stale_socket_connect_error(io::ErrorKind::WouldBlock),
             cfg!(windows)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn typed_unlink_distinguishes_removed_absent_and_not_owner() {
+        let dir = std::env::temp_dir().join(format!(
+            "ipc-unlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("s.sock");
+
+        // Absent: nothing there yet.
+        let mismatching = SocketFileIdentity {
+            dev: u64::MAX,
+            ino: u64::MAX,
+        };
+        assert_eq!(
+            remove_socket_file_if_owned_typed(&path, &mismatching).unwrap(),
+            SocketUnlink::Absent
+        );
+
+        // Create the file and capture its real identity.
+        fs::write(&path, b"x").expect("write socket file");
+        let identity = socket_file_identity(&path).expect("identity");
+
+        // NotOwner: a stale/foreign identity must leave the file untouched.
+        // (Fabricated rather than relying on inode non-reuse, which is flaky.)
+        assert_eq!(
+            remove_socket_file_if_owned_typed(&path, &mismatching).unwrap(),
+            SocketUnlink::NotOwner
+        );
+        assert!(path.exists(), "a non-owned file must survive");
+
+        // Removed: the true owner unlinks it.
+        assert_eq!(
+            remove_socket_file_if_owned_typed(&path, &identity).unwrap(),
+            SocketUnlink::Removed
+        );
+        assert!(!path.exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[cfg(windows)]
