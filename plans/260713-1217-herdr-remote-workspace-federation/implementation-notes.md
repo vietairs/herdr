@@ -1115,3 +1115,25 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   generation is a fixed const=1 (serve.rs:38). subscribe_output_bytes()->broadcast::Receiver<Bytes>
   (runtime.rs:497). ServerEvent channel is bounded mpsc::channel(64).
   Reversibility: decisions, not code; revert = re-open. Guard is additive.
+
+- 260714 b0.4 sub-brick 2c-1 GREEN+SHIPPED 2368791 — ACTOR BRIDGE LIVE END-TO-END.
+  What: after handshake Accept, drive_mount acquires the lease (AcquireController) + mounts (Mount) via
+  server_event_tx.blocking_send + oneshot::blocking_recv, streams MountSnapshot{this server's sid}.
+  accept_federation_connections reads self.federation_lease.current_epoch() synchronously + stamps it.
+  LeaseReleaseGuard (Drop→blocking_send Release) covers every connection-thread exit incl panic.
+  Test: mock event loop dispatches Federation cmds against test App+lease; drive_mount over UnixStream::pair
+  delivers MountSnapshot carrying the server identity. FULL suite 2677/0.
+- 260714 b0.4 sub-brick 2c-2 GREEN+SHIPPED — inbound command loop.
+  What: after the snapshot, run_command_loop reads inbound frames until EOF; route_terminal_message sends
+  Input→SendInput / Resize→Resize to the actor (fire-and-forget; actor drops unless mounted controller).
+  Open/Close/Output ignored (they drive the OUTBOUND side = 2c-3). FIX: clear the 4s handshake recv-timeout
+  before the loop (else a mounted federated session idles→drops after 4s; mirrors client_transport.rs:543).
+  Test: recording mock loop asserts Input+Resize frames route to the right commands w/ terminal_id/bytes.
+  FULL suite 2678/0, 0 warnings.
+  Reversibility: additive; the loop runs only on a real federation connection (nothing dials until b3).
+  NEXT = 2c-3 (outbound): try_clone the stream → writer thread draining mpsc<FederationMessage>; on inbound
+  Open → SubscribeOutput + ScrollbackReplay → emit Open{replay}+Output frames (output pump uses try_recv()
+  polling per tee.rs drain_available — this tokio's broadcast::Receiver has NO blocking_recv); event ticker
+  (EventsAfter→Frame/Gap) + agent ticker (AgentStatuses); first-cause supervisor (TunnelExit) over the
+  reader/writer/pump threads. Then remove FederationCommand/dispatch #[allow(dead_code)] once all variants
+  constructed. mount_generation = const 1 (serve.rs:38).
