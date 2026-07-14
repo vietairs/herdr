@@ -1070,3 +1070,27 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   Why it matters: this was THE flagged crux risk of the whole feature ("get the sync-vs-async boundary
   right or the render loop stalls"). Recorded in the keystone spec's crux section.
   Reversibility: design decision, not code yet; revert = re-open the A-vs-B choice.
+
+- 260714 b0.4 sub-brick 2b GREEN + FIRST FEDERATION ACCEPT — the socket now accepts.
+  What: new src/server/federation_accept.rs (unix-only): accept loop (mirrors accept_pending_client_
+  connections) spawns one std::thread per accepted connection; sync framing helpers read_frame_blocking/
+  write_frame_blocking (sync twins of serve::read_frame/write_frame, over codec's pure encode/decode);
+  drive_handshake<S: Read+Write> reads the peer Handshake, negotiates against this server's identity
+  (federation_server_instance_id) + capabilities {SCROLLBACK_REPLAY, AGENT_STATUS}, replies Accept/Reject.
+  handle_federation_handshake sets blocking + a 4s recv timeout then delegates; 2b CLOSES after handshake
+  (mount loop is 2c). HeadlessServer gains next_federation_id counter (both constructors) +
+  accept_federation_connections() (unix real / windows no-op) called each tick next to accept_client_
+  connections(); handoff drains pending federation peers (reject_pending_federation_connections). Removed
+  federation_listener's now-inaccurate #[allow(dead_code)].
+  Why sync/thread topology (not the keystone's old decision-A async): see the crux-resolution note above.
+  drive_handshake is stream-generic so it unit-tests over UnixStream::pair() — 3 tests: accept-compatible,
+  reject-version-mismatch (payload version field, independent of the frame header's codec version),
+  drop-non-handshake-opener.
+  Evidence: cargo test --bin herdr federation 102/0; FULL suite 2676/0, 0 warnings (live tick change).
+  Reversibility: additive; the accept loop runs in production now but nothing DIALS the federation socket
+  until b3's run_remote flip, and a connection is closed right after handshake (no mount) — so no live
+  federated session yet. Revert = drop the commit.
+  NEXT = 2c: after Accept, drive mount (FederationCommand::AcquireController→Mount via server_event_tx +
+  oneshot::blocking_recv) + the command loop (reader thread → SendInput/Resize; writer thread draining an
+  mpsc<FederationMessage>; output-pump threads on broadcast::Receiver::blocking_recv; event/agent ticker)
+  + first-cause supervisor + lease Release on EOF. This is the big one — wires the dormant actor commands.
