@@ -1201,3 +1201,34 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   batched removal scheduled for b3 ("Remove dead_code allows", v5 plan).
   NEXT = b0.3-tail: bump FEDERATION_PROTOCOL_VERSION 1→2 + versioned wire-fault variant + Channel::Control +
   bounded egress + inbound-Fault→TunnelExit (ripples serve/client/loopback/pane_source/codec).
+
+- 260714 b0.3-tail GREEN+SHIPPED (split into 2 green commits).
+  tail-1 fa8700e — control-channel wire fault + protocol v2. What: FEDERATION_PROTOCOL_VERSION 1→2 (codec
+  version == protocol version, so this gates old peers); new Channel::Control (4KiB cap) + FederationMessage::
+  Fault(FaultMessage{reason: FaultReason}); FaultReason mirrors TunnelExit 1:1 with to_wire/from_wire in
+  federation_fault.rs (kept the wire type in protocol, the conversion in the server module to avoid a
+  protocol→server dep). Co-located server (federation_accept run_connection) best-effort try_send's a Fault
+  on a non-clean first-cause before dropping out_tx; reader_loop maps an inbound Fault → TunnelExit::from_wire
+  + teardown; local client (client.rs drive loop) returns new DriveOutcome::Faulted(FaultReason) (fail-fast,
+  no remount — b2's supervisor consumes it). Exhaustiveness ripple was SMALL: only client.rs:403 matched
+  FederationMessage exhaustively (added arm); serve.rs/pane_source use let-else, loopback has catch-alls,
+  federation_accept has _other. Codec every_message_variant round-trips Fault.
+  tail-2 acaf78e — bounded server egress. What: the co-located writer queue std_mpsc::channel (unbounded) →
+  sync_channel(EGRESS_QUEUE_CAP=1024); one enqueue_outbound(out_tx, msg, first_cause, shutdown) helper
+  (try_send; Full → first_cause.set(EgressOverflow)+shutdown+return false; Disconnected → false) threaded
+  through every producer (open_terminal Open, output_pump Output, poll_events Gap/Frame, poll_agent_statuses).
+  first_cause now flows as &Arc through reader_loop→handle_terminal_inbound→open_terminal (pumps clone it),
+  &FirstCauseCell into ticker/polls. New test enqueue_outbound_fails_fast_on_a_full_queue (sync_channel(1)).
+  Why fail-fast not backpressure: a bounded queue with BLOCKING send would stall a pump/ticker on a stuck
+  peer and could deadlock teardown; try_send + overflow-as-fault matches the v1 no-reopen contract.
+  Evidence: FULL suite 2681/0 (+1 test); federation_accept.rs + all touched files clippy-clean.
+  DECISIONS/DEFERRALS: (1) byte-budget egress bound = DEFERRED (v1 = message-count cap only; the codec MAJ
+  "byte permits before encode" is a later refinement — 1024 msgs bounds queue growth, the actual DoS). (2)
+  client-input egress bounding DEFERRED to b2 (client→server input is low-volume; server→client output is the
+  overflow risk, now bounded). (3) serve.rs async egress NOT bounded — it's the dying duplicate-App path that
+  b0-proxy+SB4 supersede; only kept compiling (no exhaustive-match break). (4) federation_lease/federation_
+  actor/federation_fault #![allow(dead_code)] still in place — batched removal at b3 per plan.
+  Reversibility: additive; nothing dials federation until b3. Revert = drop acaf78e (tail-2) then fa8700e
+  (tail-1, protocol change — would need client/codec reverts too).
+  NEXT = b0-proxy (transparent federation-serve) → SB4 (delete AppFederationHost) → b1 → b2 (multi-week) →
+  b3 → R7 tail.
