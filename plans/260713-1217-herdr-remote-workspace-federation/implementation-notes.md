@@ -1035,3 +1035,24 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   field on HeadlessServer + lease ops (AcquireController/ReleaseController) added to FederationCommand
   serviced against self.federation_lease + connid/accept_epoch threading + exclusive serializer +
   first-cause supervisor. Large careful async brick — fresh-context boundary. Full spec in the keystone md.
+
+- 260714 b0.4 sub-brick 2 SPLIT into 2a/2b/2c to keep each remote round-trip cheap + each commit green:
+  2a lease/actor integration (dormant) / 2b accept loop + handshake-only conn thread / 2c the async
+  connection driver (mount → select! loop, exclusive serializer, first-cause supervisor).
+- 260714 b0.4 sub-brick 2a GREEN — lease↔actor integration (dormant).
+  What: `dispatch` now takes `&mut FederationLease` alongside `&mut App` (one servicing home, DRY), so
+  admission (AcquireController), lease-gated Mount{epoch,connid}→Option<(snapshot,cursor)>, Release, and
+  mounted-controller authorization on SendInput/Resize are ALL linearized at the single event-loop
+  dispatch point. HeadlessServer owns a `federation_lease` field (both constructors + fresh-on-handoff-
+  replacement). 6 new actor tests: full acquire→mount→authz→release + busy + stale-mount-inert.
+  Why: the lease can't be serviced inside dispatch(&mut App,..) — it lives on HeadlessServer; threading
+  it through dispatch (vs splitting lease logic into the headless arm) keeps all federation-command
+  servicing in one unit, unit-testable against a fresh lease without building a whole HeadlessServer.
+  Evidence: `cargo test --bin herdr federation` 99/0; FULL suite 2673/0.
+  GOTCHA: full suite surfaced a pre-existing latent warning `TerminalChannelMessage::terminal_id() never
+  used` (protocol/mod.rs:158) — NOT caused by 2a (my diff never touches that file/callers; incremental
+  compile hadn't re-surfaced it at sub-brick 1). It's a dormant tag accessor symmetric with the *used*
+  mount_generation(); the b0.3-tail/2c wire router will consume it. Annotated #[allow(dead_code)] per the
+  local dormant-federation-scaffolding convention (id::map_out etc.) rather than deleting churn.
+  Reversibility: additive+dormant (field read only in the never-reached Federation arm); revert = drop commit.
+  NEXT = 2b accept loop + handshake-only connection thread (socket finally accepts).
