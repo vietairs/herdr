@@ -995,3 +995,22 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   NEXT (b0.4, the wiring keystone): server-owned federation unix socket + accept loop that mints connids,
   registers each connection at the lease's current epoch, drives FederationCommands through
   server_event_tx, and integrates handoff revocation. This is where the dormant primitives light up.
+
+- 260714 b0.4 sub-primitives GREEN + SHIPPED: socket-path (6dbea3d) + typed-unlink (1f733f9).
+  TYPED-UNLINK BUILD SURPRISE: first NotOwner test relied on remove+recreate giving a new inode, but the
+  fs REUSED the inode (dev+ino identical) → identity matched → Removed. Fixed by fabricating a mismatching
+  SocketFileIdentity{dev:MAX,ino:MAX} instead of trusting inode non-reuse.
+  What: (a) socket_paths::federation_socket_path(classic) — sibling of the classic client socket (inherits
+  session/env override precedence for free), name embeds a DefaultHasher(fixed-seed, deterministic per
+  binary) hash of the full classic path → INJECTIVE (kills x vs x.sock collision) + readable stem truncated
+  to a SUN_PATH_BUDGET=100 budget. 4 tests. (b) ipc::remove_socket_file_if_owned_typed → SocketUnlink
+  {Removed|Absent|NotOwner}; existing remove_socket_file_if_owned refactored to delegate (DRY, behavior
+  unchanged for its 5 callers). Lets handoff rollback restore ONLY actually-removed sockets (MAJ8). 1 unix
+  test (removed/absent/not-owner).
+  Why: these are the last clean isolable b0.4 primitives; the accept-loop/handoff INTEGRATION is the next
+  (big) brick.
+  Reversibility: additive+dormant; revert = drop commits.
+  NOW 6 code bricks shipped this session (identity, actor seam, lease FSM, fault, socket-path, typed-unlink)
+  + design/progress docs. Remaining b0.4 = the actual listener/accept-loop + wire lease+actor+first-cause+
+  socket-path+typed-unlink together + perform_live_handoff integration + delete AppFederationHost. Then
+  b0-proxy, b1, b2, b3, R7 tail.

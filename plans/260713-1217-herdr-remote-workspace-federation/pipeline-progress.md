@@ -155,13 +155,22 @@
           aware handle_api_request_after_internal_events_drained) / abc6a35 single-controller lease FSM
           (accept_epoch linearization, compare-and-clear release, resurrection-hole test) / b27ff1d typed
           TunnelExit + FirstCauseCell (first-fault-wins). Remote loop humming (rsync→nix cargo test→push).
-          REMAINING = live I/O WIRING (bigger multi-file bricks, natural boundary for fresh effort):
-          b0.3-tail versioned wire-fault frame+version bump+bounded-egress; b0.4 server-owned unix socket
-          + accept loop wiring lease+actor+first-cause + perform_live_handoff integration + delete
-          AppFederationHost; b0-proxy transparent stdio; b1 tunnel keep-alive (remote/unix.rs); b2
-          App::new_federated + SessionPersistencePolicy::Disabled + closed-allowlist (many app/ files) +
-          eager-open + teardown; b3 flip. Then R7 tail (impl-notes review → code-review‖codex diff →
-          ship-gate --hard) before un-drafting PR #1.
+          b0–b0.4 PRIMITIVES ALL SHIPPED (6 green bricks on PR-1, dormant, production unchanged): identity
+          dd7335c / actor seam ee3804a / lease FSM abc6a35 / fault b27ff1d / socket-path 6dbea3d / typed-
+          unlink 1f733f9. ~28 new unit tests, all green; every brick compiled the full binary; remote loop
+          humming.
+          REMAINING = live-I/O INTEGRATION (the keystone + tails, need fresh focused context):
+          (1) b0.4 KEYSTONE: server-owned federation listener + accept loop mirroring client_accept.rs —
+              mint connids, negotiate handshake w/ ServerInstanceId, lease.try_acquire@epoch, read-loop →
+              FederationCommand via server_event_tx + oneshot, output pump; add federation_listener/socket
+              fields to HeadlessServer; poll in main select!; integrate perform_live_handoff (begin_revocation
+              +close streams+typed-unlink+rollback+replacement-readiness); DELETE AppFederationHost.
+          (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
+              + bounded egress + inbound-Fault→TunnelExit (ripples into serve/client/loopback/pane_source/codec).
+          (3) b0-proxy transparent stdio; b1 tunnel keep-alive (remote/unix.rs); b2 App::new_federated +
+              SessionPersistencePolicy::Disabled + closed-allowlist (many app/ files) + eager-open + teardown;
+              b3 run_remote flip.
+          Then R7 tail (impl-notes review → code-review‖codex diff → ship-gate --hard) before un-drafting PR #1.
         - [ ] P9.3 lifecycle FSM (reconnect/re-fence/cold-resume/warm-handoff exclusion/shutdown-never-kills) — pending; depends on P9.2b real-session wiring
 - [ ] 9. /hvn:impl-notes review — pending
 - [ ] 10. /ck:code-review ‖ 11. /codex:adversarial-review <diff> — pending
