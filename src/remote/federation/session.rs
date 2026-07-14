@@ -159,7 +159,6 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
 /// back to the classic attach. Once terminal mode is entered, every exit
 /// (user quit, tunnel fault, link close) returns `Ok(())`: D2 fail-fast exits
 /// to the shell.
-#[allow(dead_code)] // dormant until b3
 pub(crate) fn run_federated_session(
     target: &str,
     remote_herdr: &RemoteHerdr,
