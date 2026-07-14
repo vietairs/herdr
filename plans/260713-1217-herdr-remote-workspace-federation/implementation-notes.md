@@ -1014,3 +1014,24 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   + design/progress docs. Remaining b0.4 = the actual listener/accept-loop + wire lease+actor+first-cause+
   socket-path+typed-unlink together + perform_live_handoff integration + delete AppFederationHost. Then
   b0-proxy, b1, b2, b3, R7 tail.
+
+- 260714 b0.4 KEYSTONE started — WITH AGENTS. 3 parallel hvn-scout maps (client-accept pattern / federation
+  wire handshake / socket-lifecycle sites) → synthesized into phase-09b-b04-accept-loop-keystone.md
+  (execution spec + the sync-trait-vs-async-oneshot crux + decision A recommendation). Then delegated
+  sub-brick 1 to hvn-implementer (owned headless.rs+session.rs; additive-only; couldn't build).
+- 260714 b0.4 sub-brick 1 GREEN + SHIPPED (d0f166f) — FIRST LIVE (non-dormant) change.
+  What: HeadlessServer now BINDS a server-owned federation unix socket (sibling of client socket via
+  federation_socket_path) + full lifecycle: both constructors, handoff unlink (typed) between send_fds
+  and wait_ready, rollback rebind in restore_public_sockets_after_failed_handoff, cleanup_sockets/Drop,
+  session.rs stop-wait. Nothing accepts yet. Unix-only (D4). FULL SUITE 2669/0, 0 warnings.
+  Process note: implementer's edits mirrored the client recipe faithfully at every mapped site; I
+  reviewed the handoff/rollback diff + ran the FULL suite (not scoped) since it touches live handoff.
+  GOTCHA: chained rsync of 2 files to a single-file dest silently errored → remote headless.rs was STALE
+  → first build tested old code. Fixed by per-file rsync + md5 checksum verify. LESSON: verify remote
+  checksum after rsync when it matters.
+  Reversibility: additive; revert = drop d0f166f (but it changes live startup — every server binds the
+  socket now). NEXT = b0.4 sub-brick 2 (THE CRUX): accept loop + async connection driver (decision A:
+  purpose-built async driver awaiting oneshot, NOT the sync FederationHost trait). Needs: federation_lease
+  field on HeadlessServer + lease ops (AcquireController/ReleaseController) added to FederationCommand
+  serviced against self.federation_lease + connid/accept_epoch threading + exclusive serializer +
+  first-cause supervisor. Large careful async brick — fresh-context boundary. Full spec in the keystone md.
