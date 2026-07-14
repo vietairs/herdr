@@ -185,9 +185,10 @@ fn validate_remote_target(target: &str) -> Result<&str, String> {
 
 /// Remote invocation for `herdr federation-serve` (P8's dial target),
 /// mirroring `remote_bridge_command`'s shape. No `--session` passthrough yet
-/// — `federation-serve` (P3's `AppFederationHost::boot`) always boots the
-/// remote's default-config session; a named-session dial target is left to a
-/// future pass (not required by this phase's routing/negotiation tests).
+/// — `federation-serve` bridges to the remote's already-running default
+/// session's co-located federation socket; a named-session dial target is
+/// left to a future pass (not required by this phase's routing/negotiation
+/// tests).
 fn remote_federation_serve_command(remote_herdr: &RemoteHerdr) -> String {
     format!("exec {} federation-serve", remote_herdr.shell_path)
 }
@@ -448,6 +449,32 @@ pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
         )
     })?;
 
+    pipe_stdio_over_socket(stream)
+}
+
+/// Transparently bridges SSH stdin/stdout to the co-located federation
+/// socket accepted alongside the live `HeadlessServer`. The remote peer's
+/// local federation client owns the handshake/mount; this side is a byte
+/// pipe only.
+pub(crate) fn run_federation_serve_bridge() -> io::Result<()> {
+    ensure_remote_server_running()?;
+
+    let client_path = crate::server::socket_paths::client_socket_path();
+    let federation_path = crate::server::socket_paths::federation_socket_path(&client_path);
+    let stream = UnixStream::connect(&federation_path).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!(
+                "failed to connect to remote Herdr federation socket {}: {err}",
+                federation_path.display()
+            ),
+        )
+    })?;
+
+    pipe_stdio_over_socket(stream)
+}
+
+fn pipe_stdio_over_socket(stream: UnixStream) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     let mut socket_to_stdout = stream.try_clone()?;
     let mut stdin_to_socket = stream;

@@ -474,12 +474,13 @@ fn main() -> io::Result<()> {
     }
 
     // Headless remote-side federation server (P3 of the remote-workspace-
-    // federation plan): speaks the federation protocol over stdin/stdout so
-    // it rides `SshStdioBridge` exactly like `remote-client-bridge` does.
-    // A distinct subcommand — the classic `server`/`remote-client-bridge`
-    // paths above are untouched.
+    // federation plan): transparently bridges SSH stdin/stdout to the
+    // co-located federation socket the live `HeadlessServer` already accepts
+    // on (`server::federation_accept`), so it rides `SshStdioBridge` exactly
+    // like `remote-client-bridge` does. A distinct subcommand — the classic
+    // `server`/`remote-client-bridge` paths above are untouched.
     if args.get(1).map(|s| s.as_str()) == Some("federation-serve") {
-        return remote::federation::serve::run_federation_serve_over_stdio();
+        return remote::run_federation_serve_bridge();
     }
 
     if args.get(1).map(|s| s.as_str()) == Some("server") {
