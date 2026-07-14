@@ -101,6 +101,9 @@ pub struct App {
     pub(crate) event_hub: crate::api::EventHub,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
     pub(crate) no_session: bool,
+    /// Immutable persistence contract (see `SessionPersistencePolicy`). `Enabled`
+    /// for every classic construction; a federated in-proc session sets `Disabled`.
+    pub(crate) persistence: SessionPersistencePolicy,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
@@ -198,6 +201,36 @@ fn repeat_key_identity(
     key: &crate::input::TerminalKey,
 ) -> (crossterm::event::KeyCode, crossterm::event::KeyModifiers) {
     (key.code, key.modifiers)
+}
+
+/// Immutable per-session contract for whether this `App` may touch the classic
+/// on-disk session state (`session.json` / `session-history.json`). Set once at
+/// construction, never mutated at runtime. This is an INDEPENDENT axis from
+/// `no_session` (which also gates unrelated concerns — update checks, the plugin
+/// registry, `detach_exits` — and can be flipped on a live server). The effective
+/// "does this session persist" test at every write site is
+/// `!no_session && !persistence.is_disabled()`, so `Disabled` forces every
+/// persistence write off regardless of `no_session`, while `Enabled` preserves
+/// classic behavior byte-for-byte. A federated in-proc session, which displays a
+/// remote workspace and must never clobber the user's local session, uses
+/// `Disabled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionPersistencePolicy {
+    /// Classic session: on-disk persistence follows the usual `no_session` gate.
+    Enabled,
+    /// Persistence is fully and immutably off (restore/save/exit-save/history/
+    /// clear), independent of `no_session`.
+    // Constructed by the federated constructor (b2.3) and the b2.1 tests; the
+    // classic path only ever builds `Enabled`, so keep the variant until wired.
+    #[allow(dead_code)]
+    Disabled,
+}
+
+impl SessionPersistencePolicy {
+    /// True when this session must never read or write classic on-disk state.
+    pub(crate) fn is_disabled(self) -> bool {
+        matches!(self, SessionPersistencePolicy::Disabled)
+    }
 }
 
 fn auto_updates_enabled(no_session: bool) -> bool {
@@ -735,6 +768,7 @@ impl App {
             event_hub,
             last_focus,
             no_session,
+            persistence: SessionPersistencePolicy::Enabled,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
             render_notify,
@@ -1104,8 +1138,9 @@ impl App {
             }
         }
 
-        // Save session on exit (skip in --no-session mode)
-        if !self.no_session {
+        // Save session on exit (skip in --no-session mode, or when this session's
+        // persistence policy forbids touching the classic on-disk state).
+        if !self.no_session && !self.persistence.is_disabled() {
             self.save_session_now();
         }
 
@@ -1437,7 +1472,7 @@ impl App {
             // snapshot — this was the one persistence write path not already
             // gated by `no_session` (codex C3), so a config reload here could
             // clear the local session history out from under a real session.
-            if !self.persist_pane_history && !self.no_session {
+            if !self.persist_pane_history && !self.no_session && !self.persistence.is_disabled() {
                 crate::persist::clear_history();
             }
         }
@@ -4135,6 +4170,39 @@ mod tests {
 
         assert!(!app.state.session_dirty);
         assert!(app.session_save_deadline.is_some());
+    }
+
+    #[test]
+    fn session_persistence_policy_is_disabled_reports_variant() {
+        assert!(SessionPersistencePolicy::Disabled.is_disabled());
+        assert!(!SessionPersistencePolicy::Enabled.is_disabled());
+    }
+
+    #[test]
+    fn disabled_persistence_policy_blocks_session_save_even_when_no_session_false() {
+        let mut app = test_app();
+        // Classic no_session gate is OFF (a real, persisting session), but the
+        // immutable persistence policy is Disabled (as a federated in-proc
+        // session would be) — no on-disk write may be scheduled or performed.
+        app.no_session = false;
+        app.persistence = SessionPersistencePolicy::Disabled;
+        app.state.session_dirty = true;
+
+        app.sync_session_save_schedule();
+        assert!(
+            app.session_save_deadline.is_none(),
+            "a Disabled persistence policy must not schedule a session save",
+        );
+
+        // The direct save entry points must early-return without spawning a save
+        // thread or reaching the disk-write choke point.
+        app.save_session_now();
+        assert!(app.session_save_thread.is_none());
+        assert!(app.session_save_deadline.is_none());
+
+        app.start_background_session_save();
+        assert!(app.session_save_thread.is_none());
+        assert!(app.session_save_deadline.is_none());
     }
 
     #[test]
