@@ -64,6 +64,144 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
     )
 }
 
+/// Closed allowlist of API methods a federated (view-only) in-proc session may
+/// execute. A federated session displays a REMOTE workspace mounted into the
+/// local device's herdr and must never mutate local workspace/tab/pane/plugin/
+/// server state, so it may run ONLY read-only queries, presentation/navigation,
+/// and remote input forwarded to the remote panes. Every other method is
+/// forbidden.
+///
+/// This is an EXHAUSTIVE match with no wildcard arm: a newly added `Method`
+/// forces a compile error here, so a capability can never be silently granted
+/// to — or silently withheld from — a federated session without an explicit,
+/// reviewed decision. `PaneZoom` and `PaneResize` are FORBIDDEN despite their
+/// "zoom/resize" naming (both mutate persisted local layout); the host-driven
+/// remote-terminal resize is not an API method and bypasses this gate entirely.
+///
+/// Dormant until b2.3 wires it at the dispatch entrances behind the federated
+/// construction marker.
+#[allow(dead_code)]
+pub(crate) fn federated_session_allows(method: &Method) -> bool {
+    match method {
+        // Read-only queries (snapshot / list / get / status / stream).
+        Method::Ping(_)
+        | Method::SessionSnapshot(_)
+        | Method::ServerAgentManifests(_)
+        | Method::WorkspaceList(_)
+        | Method::WorkspaceGet(_)
+        | Method::WorktreeList(_)
+        | Method::TabList(_)
+        | Method::TabGet(_)
+        | Method::AgentList(_)
+        | Method::AgentGet(_)
+        | Method::AgentRead(_)
+        | Method::AgentExplain(_)
+        | Method::PaneProcessInfo(_)
+        | Method::LayoutExport(_)
+        | Method::PaneNeighbor(_)
+        | Method::PaneEdges(_)
+        | Method::PaneList(_)
+        | Method::PaneCurrent(_)
+        | Method::PaneGet(_)
+        | Method::PaneRead(_)
+        | Method::EventsSubscribe(_)
+        | Method::EventsWait(_)
+        | Method::PaneWaitForOutput(_)
+        | Method::PluginList(_)
+        | Method::PluginActionList(_)
+        | Method::PluginLogList(_)
+        // Presentation / navigation — view-state focus only, no structural change.
+        | Method::WorkspaceFocus(_)
+        | Method::TabFocus(_)
+        | Method::AgentFocus(_)
+        | Method::PaneFocus(_)
+        | Method::PaneFocusDirection(_)
+        | Method::PluginPaneFocus(_)
+        // Remote input forwarded to the remote-backed panes.
+        | Method::PaneSendText(_)
+        | Method::PaneSendKeys(_)
+        | Method::PaneSendInput(_)
+        | Method::AgentSend(_) => true,
+
+        // Everything below mutates local workspace/tab/pane/plugin/server state
+        // (or is a client-display command) and is forbidden for a view-only
+        // federated session.
+        Method::ServerStop(_)
+        | Method::ServerLiveHandoff(_)
+        | Method::ServerReloadConfig(_)
+        | Method::ServerReloadAgentManifests(_)
+        | Method::NotificationShow(_)
+        | Method::ClientWindowTitleSet(_)
+        | Method::ClientWindowTitleClear(_)
+        | Method::WorkspaceCreate(_)
+        | Method::WorkspaceRename(_)
+        | Method::WorkspaceMove(_)
+        | Method::WorkspaceReportMetadata(_)
+        | Method::WorkspaceClose(_)
+        | Method::WorktreeCreate(_)
+        | Method::WorktreeOpen(_)
+        | Method::WorktreeRemove(_)
+        | Method::TabCreate(_)
+        | Method::TabRename(_)
+        | Method::TabMove(_)
+        | Method::TabClose(_)
+        | Method::AgentRename(_)
+        | Method::AgentStart(_)
+        | Method::PaneSplit(_)
+        | Method::PaneSwap(_)
+        | Method::PaneMove(_)
+        | Method::PaneZoom(_)
+        | Method::PaneLayout(_)
+        | Method::LayoutApply(_)
+        | Method::LayoutSetSplitRatio(_)
+        | Method::PaneResize(_)
+        | Method::PaneRename(_)
+        | Method::PaneReportAgent(_)
+        | Method::PaneReportAgentSession(_)
+        | Method::PaneReportMetadata(_)
+        | Method::PaneClearAgentAuthority(_)
+        | Method::PaneReleaseAgent(_)
+        | Method::PaneClose(_)
+        | Method::IntegrationInstall(_)
+        | Method::IntegrationUninstall(_)
+        | Method::PluginLink(_)
+        | Method::PluginUnlink(_)
+        | Method::PluginEnable(_)
+        | Method::PluginDisable(_)
+        | Method::PluginActionInvoke(_)
+        | Method::PluginPaneOpen(_)
+        | Method::PluginPaneClose(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod federated_allowlist_tests {
+    use super::federated_session_allows;
+    use crate::api::schema::{EmptyParams, Method};
+
+    #[test]
+    fn allows_read_only_navigation_and_remote_input() {
+        assert!(federated_session_allows(&Method::SessionSnapshot(EmptyParams {})));
+        assert!(federated_session_allows(&Method::WorkspaceList(EmptyParams {})));
+        assert!(federated_session_allows(&Method::AgentList(EmptyParams {})));
+        // Read-only server query stays allowed...
+        assert!(federated_session_allows(&Method::ServerAgentManifests(EmptyParams {})));
+    }
+
+    #[test]
+    fn forbids_server_control_and_client_display_methods() {
+        assert!(!federated_session_allows(&Method::ServerStop(EmptyParams {})));
+        assert!(!federated_session_allows(&Method::ServerReloadConfig(EmptyParams {})));
+        // ...but the reload counterpart of the allowed query is forbidden.
+        assert!(!federated_session_allows(&Method::ServerReloadAgentManifests(
+            EmptyParams {}
+        )));
+        assert!(!federated_session_allows(&Method::ClientWindowTitleClear(
+            EmptyParams {}
+        )));
+    }
+}
+
 pub struct ApiRequestMessage {
     pub request: Request,
     pub respond_to: std::sync::mpsc::Sender<String>,
