@@ -267,6 +267,14 @@
               b3 run_remote flip.
           Then R7 tail (impl-notes review → code-review‖codex diff → ship-gate --hard) before un-drafting PR #1.
         - [ ] P9.3 lifecycle FSM (reconnect/re-fence/cold-resume/warm-handoff exclusion/shutdown-never-kills) — pending; depends on P9.2b real-session wiring
-- [ ] 9. /hvn:impl-notes review — pending
-- [ ] 10. /ck:code-review ‖ 11. /codex:adversarial-review <diff> — pending
-- [ ] 12. /hvn:ship-gate --hard — pending
+- [x] 9. /hvn:impl-notes review — DONE. Top finding: live-attach path has no automated coverage (D6, by design,
+      manual smoke). D7 double-dial + eager-materialize-once flagged for the reviewers.
+- [x] 10. code-review (b23review, inherited Opus) ‖ 11. codex adversarial <diff> — DONE. BOTH returned a BLOCK:
+      codex BLOCK (5 findings: 1 CRIT teardown-deadlock, 4 HIGH), code-reviewer DONE_WITH_CONCERNS (1 CRIT =
+      federated worktree-guard hole via keyboard path, corroborating codex F4). All 5 verified vs source.
+      FIXED 4 + added regression test; documented 1 (F3 stale-structural-state) as v1 scope. See auto-decisions D8.
+      Fixes: F1 bounded writer-drain-then-kill (session.rs); F4 deep-choke federated guard at
+      handle_deferred_worktree_api_request + test (api/worktrees); F5 probe mount timeout + F2 child.wait()
+      lease-release (unix.rs). Also fixed a b2.2-introduced clippy warning (test module → end of api/mod.rs).
+      Verified gpu-ml: build EXIT_0, full suite 2685/0 (+1 guard test), clippy only 3 pre-existing baseline.
+- [ ] 12. /hvn:ship-gate --hard — pending (reconcile predict-vs-actual + plan-vs-shipped; --auto attestation)

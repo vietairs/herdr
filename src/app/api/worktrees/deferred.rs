@@ -17,6 +17,23 @@ impl App {
         request: Request,
         respond_to: std::sync::mpsc::Sender<String>,
     ) -> bool {
+        // Deepest single choke for the deferred worktree mutations: covers BOTH
+        // the interactive keyboard path (via `dispatch_deferred_api_request`)
+        // and the `api_rx` message path (via `handle_api_request_message`),
+        // plus any future caller. A federated session is view-only — reject the
+        // mutating worktree methods here, before any `git worktree add/remove`
+        // or `create_dir_all` runs against the LOCAL filesystem using metadata
+        // that originated from the remote host. This is the guard the two API
+        // dispatch entrances cannot provide for the keyboard-driven path, which
+        // reaches this handler without passing through either of them. Inert
+        // (federated_mode == false) on every classic construction.
+        if self.federated_mode && !crate::api::federated_session_allows(&request.method) {
+            Self::send_api_response(
+                respond_to,
+                crate::api::federated_forbidden_response(request.id),
+            );
+            return true;
+        }
         match request.method {
             crate::api::schema::Method::WorktreeCreate(params) => {
                 self.start_api_worktree_create(request.id, params, respond_to);

@@ -339,8 +339,31 @@ fn attempt_federation_mount(
             std::collections::BTreeSet::new(),
         );
 
-        let mount_result = client.connect_and_mount(stdout, stdin).await;
+        // Bound the snapshot handshake+mount. A peer that accepts the SSH
+        // connection but never answers the herdr federation protocol would
+        // otherwise hang `run_remote` here indefinitely — before the federated
+        // route (and the live session's own mount timeout) is ever reached.
+        // Same budget the live session uses.
+        let mount_budget = FEDERATION_CONNECT_TIMEOUT + FEDERATION_MOUNT_TIMEOUT;
+        let mount_result =
+            tokio::time::timeout(mount_budget, client.connect_and_mount(stdout, stdin)).await;
+        // Fully tear the snapshot tunnel down before returning: `start_kill`
+        // only SIGNALS the ssh child. Without also awaiting its exit, the
+        // process (and the server-side single-controller lease it holds) can
+        // outlive this call, so the LIVE federated dial that immediately
+        // follows a `Federated` decision could be rejected `Busy` and
+        // spuriously fall back to classic. `wait()` reaps the child so the
+        // remote observes the tunnel close and releases the lease first.
         let _ = child.start_kill();
+        let _ = child.wait().await;
+        let mount_result = match mount_result {
+            Ok(inner) => inner,
+            Err(_elapsed) => {
+                return Err(FederationMountFailure::Failed(
+                    "federation snapshot mount timed out".to_string(),
+                ));
+            }
+        };
         match mount_result {
             Ok(mounted) => Ok(mounted.mirror),
             Err(crate::remote::federation::client::MountError::Rejected(reason)) => Err(
