@@ -76,6 +76,14 @@ const OUTBOUND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// coarser than terminal output, so they need no per-tick poll.
 const AGENT_STATUS_POLL_DIVISOR: u32 = 4;
 
+/// Depth of the bounded outbound queue. A peer that stops reading cannot make
+/// the server buffer without limit: once this many frames are undrained, the
+/// next enqueue fails fast as an [`TunnelExit::EgressOverflow`] and tears the
+/// connection down (v1 fail-fast — no reopen protocol). Sized for a healthy
+/// burst (scrollback replay + a few ticks of coalesced output) without letting
+/// a stuck peer pin unbounded memory.
+const EGRESS_QUEUE_CAP: usize = 1024;
+
 /// The capabilities the co-located federation host advertises. Mirrors
 /// `AppFederationHost::capabilities` (`remote::federation::serve`); becomes the
 /// sole definition once sub-brick 4 deletes that duplicate host.
@@ -341,7 +349,7 @@ fn run_connection<S: FederationStream>(
     // frame is funnelled through `out_tx` so two producers never interleave a
     // write on the shared socket. It drains until all senders drop (clean
     // teardown) or a write fails (writer-initiated teardown).
-    let (out_tx, out_rx) = std_mpsc::channel::<FederationMessage>();
+    let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
     let write_half = stream.try_clone_stream()?;
     let writer = {
         let first_cause = Arc::clone(&first_cause);
@@ -356,7 +364,16 @@ fn run_connection<S: FederationStream>(
         let out_tx = out_tx.clone();
         let server_event_tx = server_event_tx.clone();
         let shutdown = Arc::clone(&shutdown);
-        std::thread::spawn(move || ticker_loop(&out_tx, &server_event_tx, initial_cursor, &shutdown))
+        let first_cause = Arc::clone(&first_cause);
+        std::thread::spawn(move || {
+            ticker_loop(
+                &out_tx,
+                &server_event_tx,
+                initial_cursor,
+                &shutdown,
+                &first_cause,
+            )
+        })
     };
 
     // Inbound loop on THIS thread; it spawns an output pump per opened terminal.
@@ -392,7 +409,7 @@ fn run_connection<S: FederationStream>(
     // after the ticker/pumps are joined so nothing races it, before out_tx drops.
     if let Some(cause) = first_cause.get() {
         if !cause.is_clean() {
-            let _ = out_tx.send(FederationMessage::Fault(FaultMessage {
+            let _ = out_tx.try_send(FederationMessage::Fault(FaultMessage {
                 reason: cause.to_wire(),
             }));
         }
@@ -415,9 +432,9 @@ fn reader_loop<S: Read>(
     reader: &mut S,
     epoch: AcceptEpoch,
     connid: ConnId,
-    out_tx: &std_mpsc::Sender<FederationMessage>,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
     shutdown: &Arc<AtomicBool>,
-    first_cause: &FirstCauseCell,
+    first_cause: &Arc<FirstCauseCell>,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     pumps: &mut HashMap<String, OutputPump>,
 ) -> io::Result<()> {
@@ -434,6 +451,7 @@ fn reader_loop<S: Read>(
                     connid,
                     out_tx,
                     shutdown,
+                    first_cause,
                     server_event_tx,
                     pumps,
                 )?;
@@ -465,8 +483,9 @@ fn handle_terminal_inbound(
     message: TerminalChannelMessage,
     epoch: AcceptEpoch,
     connid: ConnId,
-    out_tx: &std_mpsc::Sender<FederationMessage>,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
     shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     pumps: &mut HashMap<String, OutputPump>,
 ) -> io::Result<()> {
@@ -498,7 +517,14 @@ fn handle_terminal_inbound(
             },
         ),
         TerminalChannelMessage::Open { terminal_id, .. } => {
-            open_terminal(terminal_id, out_tx, shutdown, server_event_tx, pumps);
+            open_terminal(
+                terminal_id,
+                out_tx,
+                shutdown,
+                first_cause,
+                server_event_tx,
+                pumps,
+            );
             Ok(())
         }
         TerminalChannelMessage::Close { terminal_id, .. } => {
@@ -519,8 +545,9 @@ fn handle_terminal_inbound(
 /// matching `serve::handle_inbound`; a duplicate Open is a no-op.
 fn open_terminal(
     terminal_id: String,
-    out_tx: &std_mpsc::Sender<FederationMessage>,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
     shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     pumps: &mut HashMap<String, OutputPump>,
 ) {
@@ -535,15 +562,18 @@ fn open_terminal(
     let replay = request_scrollback_replay(server_event_tx, &terminal_id);
 
     // The Open frame (with scrollback) must precede any live Output, so it is
-    // enqueued before the pump starts producing.
-    if out_tx
-        .send(FederationMessage::Terminal(TerminalChannelMessage::Open {
+    // enqueued before the pump starts producing. A full queue here is already an
+    // egress overflow — skip spawning the pump; teardown is under way.
+    if !enqueue_outbound(
+        out_tx,
+        FederationMessage::Terminal(TerminalChannelMessage::Open {
             terminal_id: terminal_id.clone(),
             mount_generation: MOUNT_GENERATION,
             replay: ScrollbackReplay { bytes: replay },
-        }))
-        .is_err()
-    {
+        }),
+        first_cause,
+        shutdown,
+    ) {
         return;
     }
 
@@ -553,8 +583,16 @@ fn open_terminal(
         let pump_out_tx = out_tx.clone();
         let pump_stop = Arc::clone(&stop);
         let pump_shutdown = Arc::clone(shutdown);
+        let pump_first_cause = Arc::clone(first_cause);
         std::thread::spawn(move || {
-            output_pump(pump_terminal_id, rx, pump_out_tx, pump_stop, pump_shutdown)
+            output_pump(
+                pump_terminal_id,
+                rx,
+                pump_out_tx,
+                pump_stop,
+                pump_shutdown,
+                pump_first_cause,
+            )
         })
     };
     pumps.insert(terminal_id, OutputPump { stop, handle });
@@ -578,9 +616,10 @@ struct OutputPump {
 fn output_pump(
     terminal_id: String,
     mut rx: broadcast::Receiver<Bytes>,
-    out_tx: std_mpsc::Sender<FederationMessage>,
+    out_tx: std_mpsc::SyncSender<FederationMessage>,
     stop: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    first_cause: Arc<FirstCauseCell>,
 ) {
     loop {
         if stop.load(Ordering::SeqCst) || shutdown.load(Ordering::SeqCst) {
@@ -588,17 +627,42 @@ fn output_pump(
         }
         let (bytes, _lagged) = tee::drain_available(&mut rx);
         if !bytes.is_empty()
-            && out_tx
-                .send(FederationMessage::Terminal(TerminalChannelMessage::Output {
+            && !enqueue_outbound(
+                &out_tx,
+                FederationMessage::Terminal(TerminalChannelMessage::Output {
                     terminal_id: terminal_id.clone(),
                     mount_generation: MOUNT_GENERATION,
                     bytes,
-                }))
-                .is_err()
+                }),
+                &first_cause,
+                &shutdown,
+            )
         {
-            return; // the writer is gone; nothing more to stream.
+            return; // egress overflow or the writer is gone; stop streaming.
         }
         std::thread::sleep(OUTBOUND_POLL_INTERVAL);
+    }
+}
+
+/// Enqueue one outbound frame on the bounded writer queue. A full queue means
+/// the peer is draining slower than we produce: fail fast — record
+/// `EgressOverflow` (first-cause) and signal teardown rather than block a
+/// producer thread or buffer without bound. `false` tells the caller to stop
+/// (overflow or the writer already gone).
+fn enqueue_outbound(
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    msg: FederationMessage,
+    first_cause: &FirstCauseCell,
+    shutdown: &AtomicBool,
+) -> bool {
+    match out_tx.try_send(msg) {
+        Ok(()) => true,
+        Err(std_mpsc::TrySendError::Full(_)) => {
+            first_cause.set(TunnelExit::EgressOverflow);
+            shutdown.store(true, Ordering::SeqCst);
+            false
+        }
+        Err(std_mpsc::TrySendError::Disconnected(_)) => false,
     }
 }
 
@@ -626,10 +690,11 @@ fn writer_loop<S: Write>(
 /// status changes, pushing frames to the writer. Ends when a shutdown is
 /// signalled or the server event loop is gone.
 fn ticker_loop(
-    out_tx: &std_mpsc::Sender<FederationMessage>,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     initial_cursor: EventCursor,
     shutdown: &AtomicBool,
+    first_cause: &FirstCauseCell,
 ) {
     let mut cursor = initial_cursor.0;
     let mut last_agent: HashMap<String, AgentStatus> = HashMap::new();
@@ -639,12 +704,12 @@ fn ticker_loop(
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        if !poll_events(server_event_tx, &mut cursor, out_tx) {
+        if !poll_events(server_event_tx, &mut cursor, out_tx, first_cause, shutdown) {
             break;
         }
         tick = tick.wrapping_add(1);
         if tick.is_multiple_of(AGENT_STATUS_POLL_DIVISOR)
-            && !poll_agent_statuses(server_event_tx, &mut last_agent, out_tx)
+            && !poll_agent_statuses(server_event_tx, &mut last_agent, out_tx, first_cause, shutdown)
         {
             break;
         }
@@ -658,7 +723,9 @@ fn ticker_loop(
 fn poll_events(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     cursor: &mut u64,
-    out_tx: &std_mpsc::Sender<FederationMessage>,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    first_cause: &FirstCauseCell,
+    shutdown: &AtomicBool,
 ) -> bool {
     let Some(frames) = request_events_after(server_event_tx, *cursor) else {
         return false;
@@ -668,25 +735,28 @@ fn poll_events(
     }
     let first_seq = frames[0].0;
     if first_seq != *cursor + 1
-        && out_tx
-            .send(FederationMessage::Event(EventChannelMessage::Gap {
+        && !enqueue_outbound(
+            out_tx,
+            FederationMessage::Event(EventChannelMessage::Gap {
                 from: *cursor,
                 to: first_seq - 1,
-            }))
-            .is_err()
+            }),
+            first_cause,
+            shutdown,
+        )
     {
         return false;
     }
     for (seq, kind) in &frames {
-        if out_tx
-            .send(FederationMessage::Event(EventChannelMessage::Frame(
-                EventFrame {
-                    source_seq: *seq,
-                    kind: *kind,
-                },
-            )))
-            .is_err()
-        {
+        if !enqueue_outbound(
+            out_tx,
+            FederationMessage::Event(EventChannelMessage::Frame(EventFrame {
+                source_seq: *seq,
+                kind: *kind,
+            })),
+            first_cause,
+            shutdown,
+        ) {
             return false;
         }
     }
@@ -700,7 +770,9 @@ fn poll_events(
 fn poll_agent_statuses(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     last: &mut HashMap<String, AgentStatus>,
-    out_tx: &std_mpsc::Sender<FederationMessage>,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    first_cause: &FirstCauseCell,
+    shutdown: &AtomicBool,
 ) -> bool {
     let Some(statuses) = request_agent_statuses(server_event_tx) else {
         return false;
@@ -712,14 +784,16 @@ fn poll_agent_statuses(
         // `AgentStatus` is `Copy`, so the insert takes a copy and `status`
         // remains usable for the outbound frame below.
         last.insert(terminal_id.clone(), status);
-        if out_tx
-            .send(FederationMessage::AgentStatus(AgentStatusMessage {
+        if !enqueue_outbound(
+            out_tx,
+            FederationMessage::AgentStatus(AgentStatusMessage {
                 terminal_id,
                 mount_generation: MOUNT_GENERATION,
                 status,
-            }))
-            .is_err()
-        {
+            }),
+            first_cause,
+            shutdown,
+        ) {
             return false;
         }
     }
@@ -1108,8 +1182,8 @@ mod tests {
         drop(client); // EOF ends the loop
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let first_cause = FirstCauseCell::new();
-        let (out_tx, _out_rx) = std_mpsc::channel::<FederationMessage>();
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, _out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
         let mut pumps = HashMap::new();
         reader_loop(
             &mut server,
@@ -1204,11 +1278,19 @@ mod tests {
             }
         });
 
-        let (out_tx, out_rx) = std_mpsc::channel::<FederationMessage>();
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
         let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
         let mut pumps: HashMap<String, OutputPump> = HashMap::new();
 
-        open_terminal("t1".to_string(), &out_tx, &shutdown, &tx, &mut pumps);
+        open_terminal(
+            "t1".to_string(),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+        );
 
         let frame = out_rx.recv().expect("open frame emitted");
         match frame {
@@ -1234,5 +1316,35 @@ mod tests {
         drop(out_tx);
         drop(tx);
         loop_handle.join().expect("mock loop joins");
+    }
+
+    #[test]
+    fn enqueue_outbound_fails_fast_on_a_full_queue() {
+        // A peer that stops reading fills the bounded queue; the next enqueue
+        // must fail fast as EgressOverflow and signal teardown, never block.
+        let (tx, _rx) = std_mpsc::sync_channel::<FederationMessage>(1);
+        let first_cause = FirstCauseCell::new();
+        let shutdown = AtomicBool::new(false);
+
+        assert!(
+            enqueue_outbound(
+                &tx,
+                FederationMessage::Event(EventChannelMessage::Reset),
+                &first_cause,
+                &shutdown,
+            ),
+            "the first frame fits the one slot"
+        );
+        assert!(
+            !enqueue_outbound(
+                &tx,
+                FederationMessage::Event(EventChannelMessage::Reset),
+                &first_cause,
+                &shutdown,
+            ),
+            "the second frame overflows and fails fast"
+        );
+        assert_eq!(first_cause.get(), Some(TunnelExit::EgressOverflow));
+        assert!(shutdown.load(Ordering::SeqCst), "teardown is signalled");
     }
 }
