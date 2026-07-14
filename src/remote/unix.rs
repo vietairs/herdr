@@ -184,13 +184,16 @@ fn validate_remote_target(target: &str) -> Result<&str, String> {
 }
 
 /// Remote invocation for `herdr federation-serve` (P8's dial target),
-/// mirroring `remote_bridge_command`'s shape. No `--session` passthrough yet
-/// — `federation-serve` bridges to the remote's already-running default
-/// session's co-located federation socket; a named-session dial target is
-/// left to a future pass (not required by this phase's routing/negotiation
-/// tests).
-fn remote_federation_serve_command(remote_herdr: &RemoteHerdr) -> String {
-    format!("exec {} federation-serve", remote_herdr.shell_path)
+/// mirroring `remote_bridge_command`'s shape. Carries a shell-quoted
+/// `--session <name>` ahead of the subcommand so the remote resolves the
+/// correct session's federation socket (previously always resolved the
+/// default session's socket regardless of the dial target).
+fn remote_federation_serve_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
+    format!(
+        "exec {} --session {} federation-serve",
+        remote_herdr.shell_path,
+        shell_quote(session_name)
+    )
 }
 
 /// `tokio::process::Command` counterpart to `apply_managed_ssh_options`
@@ -304,7 +307,7 @@ fn attempt_federation_mount(
         command
             .arg("-T")
             .arg(target)
-            .arg(remote_federation_serve_command(remote_herdr))
+            .arg(remote_federation_serve_command(remote_herdr, session_name))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
@@ -350,6 +353,74 @@ fn attempt_federation_mount(
         }
     })
 }
+
+/// Kills the wrapped ssh child on drop (keeps a dialed federation tunnel
+/// alive only as long as this guard lives).
+#[allow(dead_code)] // b1 scaffolding: not yet wired up, see `dial_federation`.
+pub(crate) struct ChildGuard(tokio::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.start_kill();
+    }
+}
+
+/// A live, un-killed federation SSH tunnel: the child is retained (guarded)
+/// while the reader/writer halves drive the mount + session (b2).
+#[allow(dead_code)] // b1 scaffolding: not yet wired up until b3.
+pub(crate) struct LiveTunnel {
+    pub(crate) guard: ChildGuard,
+    pub(crate) reader: tokio::process::ChildStdout,
+    pub(crate) writer: tokio::process::ChildStdin,
+}
+
+/// b1 scaffolding: dials `herdr federation-serve` over SSH exactly like
+/// [`attempt_federation_mount`], but keeps the child alive (no `start_kill`)
+/// so a later pass (b2/b3) can drive a live mount + session over the
+/// returned reader/writer instead of a one-shot snapshot. Dormant — nothing
+/// calls this yet.
+#[allow(dead_code)] // b1 scaffolding: not yet wired up until b3.
+pub(crate) async fn dial_federation(
+    target: &str,
+    remote_herdr: &RemoteHerdr,
+    session_name: &str,
+    ssh_options: Option<&ManagedSshOptions>,
+) -> Result<LiveTunnel, FederationMountFailure> {
+    let mut command = tokio::process::Command::new("ssh");
+    apply_managed_ssh_options_tokio(&mut command, ssh_options);
+    command
+        .arg("-T")
+        .arg(target)
+        .arg(remote_federation_serve_command(remote_herdr, session_name))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+
+    let mut child = command.spawn().map_err(|err| {
+        FederationMountFailure::Failed(format!("failed to start ssh federation dial: {err}"))
+    })?;
+    let writer = child.stdin.take().ok_or_else(|| {
+        FederationMountFailure::Failed("ssh federation dial stdin missing".to_string())
+    })?;
+    let reader = child.stdout.take().ok_or_else(|| {
+        FederationMountFailure::Failed("ssh federation dial stdout missing".to_string())
+    })?;
+
+    Ok(LiveTunnel {
+        guard: ChildGuard(child),
+        reader,
+        writer,
+    })
+}
+
+/// b1 scaffolding: b2 wraps `client.connect_and_mount` in
+/// `tokio::time::timeout` using these — the client's reads are otherwise
+/// unbounded and a live tunnel (unlike the one-shot snapshot dial) can hang
+/// forever on a stalled/partitioned link.
+#[allow(dead_code)] // b1 scaffolding: applied by b2.
+pub(crate) const FEDERATION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+#[allow(dead_code)] // b1 scaffolding: applied by b2.
+pub(crate) const FEDERATION_MOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     let session_name = crate::session::active_name()
@@ -555,7 +626,7 @@ impl RemotePlatform {
 }
 
 #[derive(Debug, Clone)]
-struct RemoteHerdr {
+pub(crate) struct RemoteHerdr {
     install_suffix: String,
     shell_path: String,
     platform: RemotePlatform,
@@ -703,7 +774,7 @@ struct PreparedRemoteHerdr {
 }
 
 #[derive(Clone)]
-struct ManagedSshOptions {
+pub(crate) struct ManagedSshOptions {
     config_path: PathBuf,
     control_path: PathBuf,
 }
@@ -2622,9 +2693,18 @@ mod tests {
             os: "linux",
             arch: "x86_64",
         });
+        let command = remote_federation_serve_command(&remote_herdr, "work");
         assert_eq!(
-            remote_federation_serve_command(&remote_herdr),
-            "exec \"$HOME/.local/bin/herdr\" federation-serve"
+            command,
+            "exec \"$HOME/.local/bin/herdr\" --session work federation-serve"
+        );
+        let session_index = command.find("--session").expect("--session present");
+        let subcommand_index = command
+            .find("federation-serve")
+            .expect("federation-serve present");
+        assert!(
+            session_index < subcommand_index,
+            "--session must appear before the federation-serve subcommand"
         );
     }
 
