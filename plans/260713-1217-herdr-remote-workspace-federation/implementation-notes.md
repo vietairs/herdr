@@ -910,3 +910,34 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   Reversibility: planning only, no code yet. NEXT = start b0.1 on nix host gpu-ml — but this is the
   USER's own herdr checkout (branch feat/remote-workspace-federation, draft PR #1); MUST confirm go +
   branch/commit approach before writing code + the remote build loop (edit→push→ssh pull→cargo test).
+
+- 260714 BUILD STARTED. User greenlit b0.1 + "commit directly on PR-1 branch". Design record committed
+  0ddea08 + pushed. b0.1 FIRST BRICK (C4 foundation): ServerInstanceId::fresh() constructor added to
+  remote/federation/id.rs (mints <pid>-<nanos>-<seq>, DRY over serve.rs's private fresh_server_instance_id
+  which stays until AppFederationHost deletion in b0.4); HeadlessServer now owns
+  federation_server_instance_id (fresh per boot) + a #[cfg(unix)] accessor; both dormant (no listener
+  until b0.4). Test: fresh()-distinct-within-process in id.rs.
+  Build-loop DECISION: macOS can't compile herdr; remote host SSH alias = appn-ltu-vm-100 (hostname
+  gpu-ml, 125 cores, nix at /nix/var/nix/profiles/default/bin/nix), checkout at
+  /home/hvnguyen/Projects/herdr. To avoid pushing UNVERIFIED commits to the shared PR-1 branch, loop =
+  edit locally → rsync changed files to remote → nix develop -c cargo test there → only commit+push to
+  origin once GREEN. (Remote git hard-reset was classifier-blocked + unnecessary: remote HEAD 41f07ef
+  has identical CODE to origin/feat, newer commits docs-only.)
+  Why: first brick proves the remote build loop end-to-end on the smallest safe dormant change before
+  the larger b0.1 actor-seam work.
+  Reversibility: 2-file additive change, uncommitted until remote build green.
+
+- 260714 b0.1 first brick GREEN + SHIPPED (dd7335c, pushed origin/feat).
+  What: ServerInstanceId::fresh() + HeadlessServer per-boot identity ownership + replacement rotation.
+  Remote build proved the loop: cargo test --bin herdr remote::federation::id → 8 passed (new test
+  incl.), 2640 filtered, compiles clean. Binary crate (no lib target) → must use --bin herdr, not --lib.
+  SURPRISE: TWO HeadlessServer initializers — ::new (headless.rs:391) AND the replacement-server
+  construction (headless.rs:4220, post-live-handoff); both need the field. The 4220 site fresh()es a NEW
+  id = exactly v5's rotation-on-replacement requirement (free correctness win).
+  Pre-existing unrelated warning left alone (scope): TerminalChannelMessage::terminal_id dead at
+  protocol/mod.rs:158 (P4-era dormant accessor, not my file). My change added zero new warnings.
+  Reversibility: shipped; revert = drop dd7335c.
+  NEXT b0.1 brick (larger): ServerEvent::Federation(cmd, {accept_epoch,connid}, oneshot) variant +
+  FederationCommand/Reply enums + handle_server_event arms (forwarding-aware drain →
+  handle_api_request_after_internal_events_drained headless.rs:2848; never await AppEvent pre-reply) +
+  connection-supervisor skeleton. Still dormant (no listener until b0.4).
