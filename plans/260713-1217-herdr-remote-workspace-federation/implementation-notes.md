@@ -1280,3 +1280,22 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   variant + disabled_persistence_policy_blocks_session_save_even_when_no_session_false). No dep added.
   Reversibility: HIGH — Disabled #[allow(dead_code)], only tests construct it; classic path unchanged.
   NEXT (b2.2): closed-allowlist mutation guard at the local-runtime-creation seam (D4/MAJ7).
+
+- What: b2.2 SHIPPED dd3cf57: federated_session_allows closed mutation allowlist in src/api/mod.rs —
+  exhaustive match over all 81 Method variants, 36 allowed (26 read-only + 6 presentation/nav + 4
+  remote input), 45 forbidden, NO wildcard arm (future Method → compile error). Dormant
+  (#[allow(dead_code)], only tests call it); wiring at the two dispatch entrances + spawn backstop
+  deferred to b2.3. 2 tests green; full suite 2684, clippy 0-new.
+  Why: exhaustive-match (not the matches! idiom of the sibling request_changes_ui) because every
+  variant carries (_) so it costs nothing and the compiler now forces every present/future method to
+  be explicitly bucketed — auditable both ways for a security allowlist. Forbid the 3 ambiguous
+  client-display/server methods (NotificationShow/ClientWindowTitle*/ServerReload*) per D4 default-
+  closed. PaneZoom/PaneResize forbidden (scout proved both mutate persisted layout, not view-state).
+  Evidence: gpu-ml build OK, clippy 2 warnings (pre-existing baseline), full suite EXIT_0 all-zero-
+  failed, 2 b2.2 tests pass (api::federated_allowlist_tests). Seam map:
+  reports/from-root-causer-b22-mutation-guard-seam-map.md.
+  Reversibility: HIGH — pure fn, uncalled, dormant.
+  CHECKPOINT: stopping the --auto run before b2.3. b2.3 (run_federated_session + App::new_federated +
+  eager-open + C1-safe router move + supervision select! + clipboard sinks + teardown RAII, WIRING
+  b2.1 policy + b2.2 allowlist + b1 dial_federation LIVE) is the integration keystone — highest blast
+  radius, multi-file, needs fresh focused context + its own sub-scouting, not a late-session one-shot.

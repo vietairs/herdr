@@ -52,3 +52,18 @@ Branch: `feat/remote-workspace-federation` (draft PR #1). Build/test remote-only
 ### RESULT — b2.1 shipped green
 7dc71ec. gpu-ml: build OK, full suite EXIT_0 (all-zero-failed), clippy 0-new, 2 new tests pass.
 b2.2/b2.3/b3 remain — checkpointed, pipeline resumable.
+
+### D4 — Continued to b2.2 (bonus), then CHECKPOINT before b2.3 keystone
+- **What:** After b2.1, continued autonomously and shipped b2.2 (mutation allowlist) green. Then
+  STOPPED the --auto run before b2.3 rather than attempting the integration keystone unattended.
+- **Why:** b2.3 wires everything LIVE (b2.1 policy + b2.2 allowlist + b1 tunnel + supervision +
+  teardown across many app/ files) — the highest-blast-radius brick. --auto skips ASK gates but does
+  not obligate rushing the keystone late in a long session; a deliberate checkpoint before the
+  riskiest integration is the conservative call ("insurance proportional to risk"). All prior bricks
+  are dormant + verified, so the branch is safe to leave here.
+- **Risk:** None added — nothing new wired; checkpoint only.
+- **Reversibility:** N/A.
+
+### RESULT — b2.2 shipped green
+dd3cf57. gpu-ml: build OK (exhaustive match compiles), full suite EXIT_0 all-zero-failed (2684),
+clippy 0-new, 2 tests pass. b2 bricks remaining: b2.3 (keystone) → b3 → R7 tail.
