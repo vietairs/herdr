@@ -161,13 +161,27 @@
           humming.
           REMAINING = live-I/O INTEGRATION (the keystone + tails, need fresh focused context):
           (1) b0.4 KEYSTONE — IN PROGRESS (spec: phase-09b-b04-accept-loop-keystone.md, from 3 parallel
-              scouts). SUB-BRICK 1 DONE+SHIPPED d0f166f (WITH AGENTS: hvn-implementer): federation socket
-              BOUND + full lifecycle (both constructors, handoff unlink+rollback, cleanup/Drop, stop-wait);
-              first LIVE change; FULL SUITE 2669/0. NEXT sub-brick 2 (CRUX): accept loop + async connection
-              driver (decision A) — mint connid, handshake w/ federation_server_instance_id, lease acquire/
-              mount via actor, read-loop → FederationCommand, exclusive serializer, first-cause supervisor;
-              needs federation_lease field + lease ops on FederationCommand. Sub-brick 3: live handoff
-              revocation. Sub-brick 4: DELETE AppFederationHost.
+              scouts). CRUX RESOLVED 260714 = decision B (SYNC thread topology, NOT the old decision-A
+              async lean) — codex is pure + LocalStream try_clones into halves + the client transport
+              already drives connections this exact way; recorded b049b15.
+              SUB-BRICK 1 DONE+SHIPPED d0f166f (hvn-implementer): federation socket BOUND + full lifecycle;
+              first LIVE change; FULL SUITE 2669/0.
+              SUB-BRICK 2a DONE+SHIPPED d58064d: lease↔actor integration — dispatch(&mut App, &mut
+              FederationLease, cmd); FederationCommand gains AcquireController/Mount{epoch,connid}/Release +
+              mounted-controller authz on SendInput/Resize; HeadlessServer owns federation_lease. Dormant.
+              6 actor tests; FULL suite 2673/0.
+              SUB-BRICK 2b DONE+SHIPPED a1eb97f — FIRST FEDERATION ACCEPT: new server::federation_accept
+              (accept loop + sync framing + drive_handshake); HeadlessServer mints next_federation_id +
+              accept_federation_connections() each tick (handoff drains). Closes after handshake (mount is
+              2c). 3 handshake tests; FULL suite 2676/0, 0 warnings.
+              NEXT sub-brick 2c (THE BIG ONE): after Accept → AcquireController→Mount via server_event_tx +
+              oneshot::blocking_recv → MountSnapshot; then command loop (reader thread → SendInput/Resize;
+              writer thread draining mpsc<FederationMessage>; output-pump threads on broadcast::Receiver::
+              blocking_recv w/ mount-gen fencing; event/agent ticker) + first-cause supervisor + guaranteed
+              lease Release on every EOF/fault exit. Suggest splitting 2c-1 (mount-on-accept + Release) /
+              2c-2 (reader command loop + writer) / 2c-3 (output pumps + tickers + supervisor).
+              Sub-brick 3: live handoff revocation (lease.begin_revocation wired into perform_live_handoff).
+              Sub-brick 4: DELETE AppFederationHost.
           (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
               + bounded egress + inbound-Fault→TunnelExit (ripples into serve/client/loopback/pane_source/codec).
           (3) b0-proxy transparent stdio; b1 tunnel keep-alive (remote/unix.rs); b2 App::new_federated +
