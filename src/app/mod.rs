@@ -2714,7 +2714,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"$summary\"]]\n\n[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"terminal_title_stripped\"]]\n\n[ui.sidebar.spaces]\nrows = [[\"workspace\", \"$jj_status\"]]\n",
+            "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"$summary\"]]\nrow_gap = 1\n\n[ui.sidebar.agents.rows_by_agent]\nclaude = [[\"terminal_title_stripped\"]]\n\n[ui.sidebar.spaces]\nrows = [[\"workspace\", \"$jj_status\"]]\nrow_gap = 3\n",
         )
         .unwrap();
         app.state.agent_panel_scroll = 5;
@@ -2735,6 +2735,7 @@ mod tests {
                 crate::config::AgentSidebarToken::TerminalTitleStripped,
             ]]
         );
+        assert_eq!(app.state.sidebar_agents.row_gap, 1);
         assert_eq!(
             app.state.sidebar_spaces.rows,
             vec![vec![
@@ -2742,6 +2743,7 @@ mod tests {
                 crate::config::SpaceSidebarToken::Custom("jj_status".into()),
             ]]
         );
+        assert_eq!(app.state.sidebar_spaces.row_gap, 3);
 
         let previous_agents = app.state.sidebar_agents.clone();
         std::fs::write(
