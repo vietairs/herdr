@@ -182,12 +182,23 @@
               SUB-BRICK 2c-2 DONE+SHIPPED 8c3cbeb — INBOUND COMPLETE: run_command_loop reads until EOF, routes
               Input→SendInput / Resize→Resize (authz'd); cleared 4s handshake timeout before loop (idle-drop
               fix). FULL 2678/0, 0 warnings.
-              NEXT sub-brick 2c-3 (OUTBOUND — big multi-thread brick): try_clone → writer thread draining
-              mpsc<FederationMessage>; inbound Open → SubscribeOutput+ScrollbackReplay → Open{replay}+Output
-              (pump = try_recv() POLLING per tee.rs drain_available — broadcast::Receiver has NO blocking_recv
-              in this tokio) + event ticker (EventsAfter→Frame/Gap) + agent ticker + first-cause supervisor
-              (TunnelExit) + teardown; then drop FederationCommand/dispatch #[allow(dead_code)]. mount_gen=const 1.
-              Sub-brick 3: live handoff revocation (lease.begin_revocation wired into perform_live_handoff).
+              SUB-BRICK 2c-3 DONE+SHIPPED 393c07f — OUTBOUND COMPLETE (mounted connection now bidirectional).
+              try_clone → single writer thread draining std_mpsc<FederationMessage> (the sole serializer);
+              inbound Open → SubscribeOutput+ScrollbackReplay → Open{replay} then one output-pump thread per
+              terminal (pump = tee::drain_available try_recv POLLING @25ms — this tokio's broadcast::Receiver
+              has NO blocking_recv) → Output; event ticker @25ms (EventsAfter→Gap/Frame, resumes at snapshot
+              cursor) + agent ticker @100ms (AgentStatuses, diff-on-change); first-cause teardown via
+              FirstCauseCell (PeerClosed vs WriterFailed) + join order that drops the writer's last sender LAST
+              so recv() disconnects (no hung join). mount_gen=const 1. All 9 FederationCommand variants now
+              constructed. 3 tests (writer-drain/teardown, open→scrollback-replay, reader-input reused);
+              FULL suite 2680/0; federation_accept clippy-clean (3 remaining warnings all in untouched files
+              id.rs/protocol/pane_source — pre-existing baseline). DEFERRED: drop FederationCommand/dispatch
+              #[allow(dead_code)] (per-item in federation_actor.rs:52/141 — now redundant since all variants
+              live, but a redundant allow is a no-op not a warning; out-of-file cosmetic cleanup, fold into a
+              later brick). BOUNDED BACKSTOP (logged): a wedged peer (half-closed + not reading/closing) can
+              delay reader/writer teardown — same rare class as the deferred reservation-expiry; well-behaved
+              herdr peer closes both directions. Nothing dials the federation socket until b3.
+              NEXT sub-brick 3: live handoff revocation (lease.begin_revocation wired into perform_live_handoff).
               Sub-brick 4: DELETE AppFederationHost.
           (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
               + bounded egress + inbound-Fault→TunnelExit (ripples into serve/client/loopback/pane_source/codec).
