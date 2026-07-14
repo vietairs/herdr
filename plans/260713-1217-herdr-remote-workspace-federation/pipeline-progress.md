@@ -213,10 +213,30 @@
               first-cause + teardown (fail-fast, no block). Full suite 2681/0, clippy clean. DEFERRED (noted): byte
               budget (only message-count bound v1); client-input egress bounding (low-volume; → b2). serve.rs async
               egress NOT bounded (dying path, superseded by b0-proxy/SB4).
-              NEXT = b0-proxy: federation-serve = TRANSPARENT transport only (retry unix-socket connect to
-              *-federation.sock + pipe stdin<->socket; lazy-start via ensure_remote_server_running; NO handshake/
-              mount — local client owns those). Then SB4 (delete AppFederationHost + serve.rs dup-App boot) → b1
-              (tunnel keep-alive) → b2 (in-proc federated session runner, MULTI-WEEK) → b3 (live flip) → R7 tail.
+              b0-proxy SHIPPED 08ecab9 (federation-serve = transparent socket proxy) + a4417fa
+              (no-session app keeps on-disk history). SB4 SHIPPED (delete AppFederationHost + serve.rs
+              dup-App boot). b1 SHIPPED 3e1a2ad/930a3a5 (dial_federation keep-alive + LiveTunnel +
+              ChildGuard + connect/mount timeouts + --session dial fix; dormant until b3; verified green
+              on gpu-ml — build OK, test exit 0, clippy-clean in touched files, tokio-util 0.7.18 locked).
+              NEXT = b2 (in-proc federated session runner, MULTI-WEEK): App::new_federated +
+              SessionPersistencePolicy::Disabled + closed-allowlist (many app/ files) + eager-open +
+              supervision + teardown, folding the v5-review constraints (per-iter actor drain budget,
+              byte permits before frame encode, exhaustive Method classifier at both dispatch entrances,
+              local-spawn permit before spawn_with_portable_pty, gate clear_history on persistence policy,
+              monotonic epoch never-restored-on-rollback, partial-header-EOF, eager-open split). Then b3
+              (run_remote live flip) → R7 tail.
+              b2 STARTED 260714 under cortex --auto (auto-decisions report:
+              reports/auto-decisions-260714-herdr-b2-federated-session-runner.md). Bricks: b2.1
+              persistence policy / b2.2 closed-allowlist mutation guard / b2.3 run_federated_session
+              + App::new_federated → b3 flip.
+              b2.1 SHIPPED 7dc71ec: immutable SessionPersistencePolicy{Enabled,Disabled}, additive
+              OR-guard at all 5 write/clear sites (save schedule/background/now, exit-save, config-reload
+              clear_history); classic defaults Enabled = byte-for-byte unchanged; Disabled dormant
+              (#[allow(dead_code)], only tests build it). Verified gpu-ml: build OK, full suite EXIT_0
+              all-zero-failed, clippy 0-new, 2 tests green. Chose additive over replace-no_session
+              (scout Option A) — no_session also gates update-check/plugin-registry + is live-mutated.
+              Restore gating deferred to b2.3 (read, not clobber).
+              NEXT = b2.2 (closed-allowlist mutation guard at the local-runtime-creation seam, D4/MAJ7).
           (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
               + bounded egress + inbound-Fault→TunnelExit (ripples into serve/client/loopback/pane_source/codec).
           (3) b0-proxy transparent stdio; b1 tunnel keep-alive (remote/unix.rs); b2 App::new_federated +
