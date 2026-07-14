@@ -1431,7 +1431,13 @@ impl App {
                 config.experimental.switch_ascii_input_source_in_prefix;
             self.persist_pane_history = config.experimental.pane_history;
             self.state.pane_history_persistence = config.experimental.pane_history;
-            if !self.persist_pane_history {
+            // Only touch the shared on-disk history for a session that actually
+            // persists. A no-session App (monolithic mode, or a federated mount
+            // displaying a remote workspace) must never mutate the classic saved
+            // snapshot — this was the one persistence write path not already
+            // gated by `no_session` (codex C3), so a config reload here could
+            // clear the local session history out from under a real session.
+            if !self.persist_pane_history && !self.no_session {
                 crate::persist::clear_history();
             }
         }
