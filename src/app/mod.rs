@@ -796,9 +796,8 @@ impl App {
     /// `Disabled` persistence contract (forces save-schedule / exit-save /
     /// history / clear all off regardless of `no_session`) and the
     /// federated-mode marker (no default workspace, mutation allowlist).
-    /// Dormant until b3 wires the live call site in `run_remote`.
+    /// Wired live from `run_remote`'s federated route (b3).
     #[cfg(unix)]
-    #[allow(dead_code)] // dormant until b3
     pub(crate) fn new_federated(
         config: &Config,
         config_diagnostic: Option<String>,

@@ -469,24 +469,33 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     );
     match &route {
         FederationRoute::Federated => {
-            // GAP (logged in implementation-notes.md, deferred to P9): the
-            // mount itself (handshake + capability negotiation + atomic
-            // snapshot, all real) succeeds here, but materializing it into a
-            // live rendered workspace requires wiring a *already-running*
-            // local session's `AppState`/API — outside this phase's declared
-            // file ownership (`app/creation.rs`/API surface, not
-            // `main.rs`/`remote/unix.rs`/`ui/sidebar.rs`/`app/state.rs`).
-            // Never silently pretend the federated UI is live: tell the user
-            // plainly, then still attach so the command does something
-            // useful rather than exiting with nothing rendered.
-            if let Some(Ok(mirror)) = &mount_outcome {
-                eprintln!(
-                    "herdr: federated workspace mount to {} succeeded ({} remote workspace(s)); \
-                     interactive federated rendering is not yet wired (tracked for a follow-up) — \
-                     attaching via the classic full-screen view instead.",
-                    remote.target,
-                    mirror.workspaces().len()
-                );
+            // The snapshot mount above proved the server supports federation;
+            // now run the interactive in-proc federated session, which dials a
+            // fresh LIVE tunnel and renders the remote mirror locally. It
+            // returns `Err` only on a pre-render failure (dial / mount timeout
+            // / empty workspace) BEFORE terminal mode is entered, so we can
+            // still fall through to the classic full-screen attach; once it
+            // has entered terminal mode every exit returns `Ok` (D2 fail-fast:
+            // quit or tunnel fault exits to the shell, no classic fallback).
+            let loaded_config = crate::config::Config::load();
+            let config_diagnostic =
+                crate::config::config_diagnostic_summary(&loaded_config.diagnostics);
+            match crate::remote::federation::session::run_federated_session(
+                &remote.target,
+                &prepared_remote.remote_herdr,
+                &session_name,
+                remote_ssh.options(),
+                &loaded_config.config,
+                config_diagnostic,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    eprintln!(
+                        "herdr: federated session to {} could not start ({err}); \
+                         attaching via the classic full-screen view instead.",
+                        remote.target
+                    );
+                }
             }
         }
         FederationRoute::ClassicFallback { notice } => {

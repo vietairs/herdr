@@ -102,4 +102,25 @@ clippy 0-new, 2 tests pass. b2 bricks remaining: b2.3 (keystone) → b3 → R7 t
 ### RESULT — b2.3 keystone shipped green
 gpu-ml: `cargo build` EXIT_0 (only the fixed `mut mirror` + 2 pre-existing dead-code warnings), full suite
 EXIT_0 all-zero-failed (live_handoff/multi_client/server_headless + all bins), clippy 0-new. Dormant additive
-code; classic path byte-for-byte unchanged. NEXT = b3 (run_remote Federated arm live flip) → R7 tail.
+code; classic path byte-for-byte unchanged. Committed 65d4388. NEXT = b3 (run_remote Federated arm live flip).
+
+### D7 — b3 live flip: re-dial live in the Federated arm; keep the snapshot mount as the route probe
+- **What:** Flipped `run_remote`'s `FederationRoute::Federated` arm from an eprintln+classic-fallthrough onto
+  `run_federated_session`. On `Ok` it returns early (session ran + exited to shell, D2); on `Err` (pre-render
+  dial/mount/empty failure) it eprintln's and falls through to the classic SshStdioBridge attach. `Config` +
+  `config_diagnostic` loaded inside the arm (matches main.rs's `Config::load()`/`config_diagnostic_summary`),
+  so the classic route stays byte-for-byte. Removed the now-stale `dormant until b3` allows on
+  `run_federated_session` + `App::new_federated`.
+- **Why the double dial:** the existing `attempt_federation_mount` snapshot still runs to DECIDE the route;
+  `run_federated_session` then dials a FRESH live tunnel. Reusing the one-shot snapshot as a live tunnel would
+  fight its consume-and-drop contract and widen `decide_federation_route`'s surface. v1 accepts one extra cheap
+  snapshot dial as the viability probe; an optimization (skip snapshot when Federated) is a later cleanup.
+- **Risk:** Medium — this ACTIVATES the path. Mitigated: `Err`-before-TTY always falls back to the working
+  classic attach; full remote suite green (2684 + all bins, 0 failed); classic route untouched. Residual: the
+  live attach itself has no automated coverage (D6) — flagged for R7 code-review/ship-gate.
+- **Reversibility:** HIGH — revert one arm to restore the eprintln behavior.
+
+### RESULT — b3 live flip shipped green
+gpu-ml: build EXIT_0 (run_federated_session/new_federated no longer warn dead — confirming live wiring), full
+suite EXIT_0 all-zero-failed (2684 + 22+14+76+12+9+11+18+11+15). NEXT = R7 tail (impl-notes review →
+code-review ‖ codex diff → ship-gate --hard) → un-draft PR #1.

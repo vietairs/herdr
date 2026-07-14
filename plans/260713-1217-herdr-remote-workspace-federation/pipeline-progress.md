@@ -251,8 +251,15 @@
               drops LAST) + FederatedSessionActiveGuard. Whole module DORMANT (#[allow(dead_code)]) until b3.
               Verified gpu-ml: build EXIT_0, full suite EXIT_0 all-zero-failed (live_handoff/multi_client/
               server_headless + bins), clippy 0-new. Tests deferred to post-b3 live path (D6 auto-decisions).
-              NEXT = b3 (run_remote Federated arm live flip) → R7 tail (impl-notes review → code-review ‖ codex
-              diff → ship-gate --hard) before un-drafting PR #1.
+              b3 SHIPPED (LIVE FLIP): run_remote's FederationRoute::Federated arm now calls
+              run_federated_session (was eprintln+classic-fallthrough). Ok→return early (D2 exit-to-shell);
+              Err-before-TTY→eprintln+classic SshStdioBridge fallback. Config/config_diagnostic loaded in-arm
+              (classic route byte-for-byte). Removed stale dormant-until-b3 allows. Snapshot mount kept as the
+              route-viability probe; run_federated_session re-dials a fresh LIVE tunnel (v1 double-dial, D7).
+              Verified gpu-ml: build EXIT_0 (now-live fns no longer warn dead), full suite EXIT_0
+              all-zero-failed (2684 + all bins). CAVEAT: live attach (dial→mount→render) has no automated
+              coverage — needs real server + TTY (D6 gap for R7 to weigh).
+              NEXT = R7 tail (impl-notes review → code-review ‖ codex diff → ship-gate --hard) → un-draft PR #1.
           (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
               + bounded egress + inbound-Fault→TunnelExit (ripples into serve/client/loopback/pane_source/codec).
           (3) b0-proxy transparent stdio; b1 tunnel keep-alive (remote/unix.rs); b2 App::new_federated +
