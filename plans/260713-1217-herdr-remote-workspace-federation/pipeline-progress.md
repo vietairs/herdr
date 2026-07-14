@@ -277,4 +277,12 @@
       handle_deferred_worktree_api_request + test (api/worktrees); F5 probe mount timeout + F2 child.wait()
       lease-release (unix.rs). Also fixed a b2.2-introduced clippy warning (test module → end of api/mod.rs).
       Verified gpu-ml: build EXIT_0, full suite 2685/0 (+1 guard test), clippy only 3 pre-existing baseline.
-- [ ] 12. /hvn:ship-gate --hard — pending (reconcile predict-vs-actual + plan-vs-shipped; --auto attestation)
+- [x] 12. /hvn:ship-gate --hard — DONE. Attestation = CONDITIONAL PASS (merge-ready PENDING human smoke).
+      Plan-vs-shipped: b2.1/b2.2/b2.3/b3 all SHIPPED green; b3's FIRST ACCEPTANCE TEST (two-machine live smoke:
+      mount→stream PTY→disconnect→prove PTY alive) is UNMET — the plan itself marks it "out of env per P1"
+      (phase-09b:162), a HUMAN-ONLY gate (macOS-27 can't build; remote host is a headless build sandbox).
+      In-env gates all green (build EXIT_0, 2685/0, clippy baseline, 2 adversarial reviews' blockers fixed).
+      See auto-decisions D9 for the attestation + the exact manual smoke steps.
+- [ ] 13. un-draft PR #1 — NOT DONE (deliberate). Do NOT un-draft: un-drafting would assert merge-readiness the
+      unmet human-only live smoke does not support; cortex never weakens a gate to ship, never merges. PR stays
+      DRAFT; the human runs the two-machine smoke (D9), then un-drafts + merges. STOP here (--auto: record + stop).
