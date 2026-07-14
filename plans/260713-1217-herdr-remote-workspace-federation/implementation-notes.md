@@ -941,3 +941,57 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   FederationCommand/Reply enums + handle_server_event arms (forwarding-aware drain →
   handle_api_request_after_internal_events_drained headless.rs:2848; never await AppEvent pre-reply) +
   connection-supervisor skeleton. Still dormant (no listener until b0.4).
+
+- 260714 b0.1 actor seam GREEN + SHIPPED (ee3804a).
+  What: new src/server/federation_actor.rs — FederationCommand enum (Mount/EventsAfter/SubscribeOutput/
+  ScrollbackReplay/SendInput/Resize/AgentStatuses, each value-producer carries a oneshot reply) +
+  dispatch(&mut App, cmd) mirroring AppFederationHost onto the LIVE App via
+  handle_api_request_after_internal_events_drained (NOT handle_api_request — that one drain_all_internal_
+  events NON-forwarding, api.rs:830; the _after_ variant assumes the loop already drained WITH forwarding
+  via its event_rx arm). ServerEvent::Federation variant + handle_server_event arm (returns false = MIN10
+  render-inert). 4 unit tests green (2648 unaffected).
+  SURPRISES: (1) ServerEvent derives Debug → the variant forced a manual Debug impl for FederationCommand
+  (channels aren't Debug) — prints variant+plain fields only. (2) oneshot::Receiver::try_recv needs &mut.
+  (3) EventCursor has no PartialEq/Debug → mount test asserts delivery not equality. Dormant via
+  #[allow(dead_code)] on enum+variant (matches id::map_out precedent).
+  Reversibility: shipped; revert = drop ee3804a. b0.1 = DONE (identity + actor seam); the connection
+  supervisor topology folds into b0.3 fault-lane / b0.4 socket where the stream exists.
+  NEXT: b0.2 controller-lease FSM as a PURE testable primitive (Free/Reserved(epoch,connid)/Mounted;
+  monotonic epoch never-restored-on-rollback; close-admission→increment-epoch→revoke; compare-and-clear
+  release) — standalone module + unit tests, dormant; wired into HeadlessServer/handoff in a later brick.
+
+- 260714 b0.2 lease FSM GREEN + SHIPPED (abc6a35).
+  What: src/server/federation_lease.rs — pure FederationLease state machine (Free/Reserved/Mounted keyed
+  by (accept_epoch, connid)). try_acquire (single-controller→Busy; StaleEpoch/Closed before Busy check),
+  try_mount (holder-only promotion), is_mounted_controller (authz), release (compare-and-clear so late EOF
+  can't drop a newer lease), begin_revocation (close admission→++epoch→free, returns revoked connid),
+  reopen_admission (epoch never restored). 8 tests incl. the exact codex resurrection-hole case
+  (post-rollback stale acquire/mount inert). 2652 unaffected. Pure, no I/O, #![allow(dead_code)] dormant.
+  Reversibility: shipped; revert = drop abc6a35. Wiring into HeadlessServer + perform_live_handoff is a
+  later brick (needs the socket/accept context, b0.4).
+  NEXT: b0.3 fault primitives — TunnelExit typed outcome enum + a first-cause cell (record FIRST cause,
+  ignore subsequent — codex "secondary EOF must not overwrite the initiating cause"), pure+tested+dormant;
+  the versioned wire fault message + bounded-egress rewire come with the socket/stream (b0.3 tail / b0.4).
+
+- 260714 b0.3 fault primitives GREEN + SHIPPED (b27ff1d). CHECKPOINT: b0 pure-primitive foundation done.
+  What: src/server/federation_fault.rs — TunnelExit typed outcome enum (PeerClosed/WriterFailed/
+  ChildExited/TaskPanicked/ServerTerminalClosed/Lagged/EgressOverflow/LocalQueueOverflow/
+  GenerationMismatch/EventGap; is_clean()) + FirstCauseCell (Mutex<Option>, set-if-empty first-wins,
+  Send+Sync for Arc-sharing across reader/writer/child tasks). 4 tests incl. concurrent single-winner.
+  4 CODE BRICKS SHIPPED this session, all green+pushed to PR-1: dd7335c identity / ee3804a actor seam /
+  abc6a35 lease FSM / b27ff1d fault primitives. = ALL of b0's clean, dormant, PURE primitives.
+  Why checkpoint here: remaining work is NO LONGER dormant primitives — it's live I/O WIRING:
+  (b0.3-tail) versioned wire-fault frame + protocol version bump + bounded-egress rewire (touches
+  protocol/mod.rs+codec+serve.rs); (b0.4) server-owned unix socket + actor-polled accept + WIRE the
+  lease+actor+first-cause into a real listener + integrate perform_live_handoff (headless.rs:900-1108)
+  revoke/close/unlink/rollback/readiness + delete AppFederationHost; (b0-proxy) transparent stdio proxy;
+  (b1) tunnel keep-alive+single-dial+timeouts in remote/unix.rs; (b2) App::new_federated +
+  SessionPersistencePolicy::Disabled + closed-allowlist mutation guard (touches many app/ files) +
+  eager-open ordering + supervision/teardown; (b3) run_remote flip. These are bigger multi-file bricks
+  needing careful reads of unfamiliar seams (handoff FSM, App::new, API dispatch chokes) — a natural
+  boundary for a fresh focused effort rather than the tail of a long session.
+  Reversibility: all 4 bricks additive+dormant behind #[allow(dead_code)]; production behavior unchanged
+  (no federation listener exposed). Revert any = drop its commit.
+  NEXT (b0.4, the wiring keystone): server-owned federation unix socket + accept loop that mints connids,
+  registers each connection at the lease's current epoch, drives FederationCommands through
+  server_event_tx, and integrates handoff revocation. This is where the dormant primitives light up.
