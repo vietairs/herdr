@@ -1137,3 +1137,45 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   (EventsAfter→Frame/Gap) + agent ticker (AgentStatuses); first-cause supervisor (TunnelExit) over the
   reader/writer/pump threads. Then remove FederationCommand/dispatch #[allow(dead_code)] once all variants
   constructed. mount_generation = const 1 (serve.rs:38).
+
+- 260714 b0.4 sub-brick 2c-3 GREEN+SHIPPED 393c07f — OUTBOUND COMPLETE; a mounted federation connection is
+  now fully bidirectional.
+  What: after the mount snapshot, drive_mount calls run_connection (the sync analogue of serve::run's async
+  select!). try_clone's the stream; ONE writer thread drains a std::sync::mpsc<FederationMessage> as the sole
+  serializer (every outbound producer funnels through it so no two writes race the socket). Producers: the
+  reader thread (Open{replay}), one output-pump thread per opened terminal, and one event/agent ticker.
+  Reader routes inbound Input/Resize (unchanged) + Open (→ SubscribeOutput + ScrollbackReplay via the actor →
+  emit Open{replay}, spawn pump) + Close (stop+join that pump). Output pump polls tee::drain_available(&mut
+  rx) @25ms (NOT blocking_recv — absent on this tokio's broadcast::Receiver) → Output frames. Ticker @25ms:
+  EventsAfter(cursor)→Gap/Frame (resumes at the snapshot cursor so no dup/skip); every 4th tick @~100ms
+  AgentStatuses diff-on-change→AgentStatus frame. All bridged to the live App via server_event_tx.blocking_send
+  + oneshot::blocking_recv (legal on plain std::threads). All 9 FederationCommand variants now constructed.
+  Why the topology: decision B (sync threads) locked earlier — serve.rs's shape is async, but the accept path
+  yields a sync interprocess stream and this tokio's broadcast has no blocking recv, so I mirror serve.rs's
+  LOGIC (poll_events gap/frame, agent diff, MOUNT_GENERATION=1) over threads, not its async mechanics. Added a
+  FederationStream trait (try_clone_stream) impl'd for LocalStream (prod) + UnixStream (cfg-test) so the whole
+  bidirectional driver unit-tests over a socket pair.
+  TEARDOWN (the flagged deadlock risk): reader is the owning thread; writer/ticker/pumps are subordinate. On
+  the reader's EOF/read-error it records FirstCauseCell(PeerClosed); a writer failure records WriterFailed +
+  sets the shared shutdown flag. Teardown order is load-bearing: set shutdown → stop+join pumps → join ticker
+  → DROP our out_tx → join writer. Dropping the last sender BEFORE joining the writer is what makes the
+  writer's recv() disconnect; hold it and the join hangs. Verified by test writer_loop_drains_the_queue_and_
+  stops_when_senders_drop.
+  Evidence: cargo test --bin herdr federation 106/0 (incl 3 new: writer-drain/teardown, open→scrollback-replay,
+  reused reader-input); FULL suite 2680/0 (was 2678 → +2); federation_accept.rs clippy-clean. 3 clippy warnings
+  remain but ALL in untouched files (id.rs map_out, protocol CLIPBOARD, pane_source complex-type) — pre-existing
+  dormant-scaffolding baseline, not caused by this file's change (surfaced under --all-targets). Fixed 3 of my
+  own clippy nits inline (is_multiple_of, drop clone-on-Copy AgentStatus, test type alias).
+  DECISIONS logged: (1) DEFERRED removing FederationCommand/dispatch #[allow(dead_code)] (federation_actor.rs:
+  52/141) — now redundant (all variants live) but a redundant allow is a no-op not a warning, and it is out of
+  this brick's file; fold into a later brick to avoid touching unaudited code. (2) BOUNDED BACKSTOP: a wedged
+  peer (write-half closed but not reading/not sending EOF) can delay reader- or writer-initiated teardown
+  because a blocking read/write only unblocks on peer close; I did NOT add socket shutdown(Both) (interprocess
+  Stream shutdown availability unconfirmed; the well-behaved herdr peer closes both directions). Same rare
+  class as the already-deferred reservation-expiry; a hard supervisor kill is P9.3 scope.
+  Reversibility: additive; the bidirectional loop runs only on a real mounted federation connection and nothing
+  dials the federation socket until b3's run_remote flip. Revert = drop 393c07f (restores the 2c-2 inbound-only
+  run_command_loop).
+  NEXT = sub-brick 3: live handoff revocation (lease.begin_revocation wired into perform_live_handoff; test
+  revoke-without-deadlock + no-resurrection). Then sub-brick 4: DELETE AppFederationHost. Then b0.3-tail
+  (wire-fault variant + protocol version bump + bounded egress) + b0-proxy + b1 + b2 + b3, then the R7 tail.
