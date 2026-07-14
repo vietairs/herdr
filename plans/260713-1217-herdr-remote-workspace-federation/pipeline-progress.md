@@ -236,7 +236,17 @@
               all-zero-failed, clippy 0-new, 2 tests green. Chose additive over replace-no_session
               (scout Option A) — no_session also gates update-check/plugin-registry + is live-mutated.
               Restore gating deferred to b2.3 (read, not clobber).
-              NEXT = b2.2 (closed-allowlist mutation guard at the local-runtime-creation seam, D4/MAJ7).
+              b2.2 SHIPPED dd3cf57: federated_session_allows closed mutation allowlist (src/api/mod.rs)
+              — exhaustive match over all 81 Method variants (36 allowed: read-only+nav+remote-input;
+              45 forbidden), NO wildcard so future variants force a compile-time bucketing decision.
+              Dormant (uncalled). Verified gpu-ml: build OK, full suite EXIT_0 (2684), clippy 0-new, 2
+              tests green. Seam map reports/from-root-causer-b22-mutation-guard-seam-map.md.
+              CHECKPOINT (cortex --auto stopped before the keystone). NEXT = b2.3 (run_federated_session
+              + App::new_federated + eager-open + C1-safe router move + supervision select! + clipboard
+              sinks + teardown RAII; WIRES b2.1 policy + b2.2 allowlist + b1 dial_federation LIVE +
+              spawn_command_builder backstop). Highest blast radius, multi-file — needs fresh context +
+              sub-scouting. Then b3 (run_remote flip) → R7 tail (impl-notes review → code-review ‖ codex
+              diff → ship-gate --hard) before un-drafting PR #1.
           (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
               + bounded egress + inbound-Fault→TunnelExit (ripples into serve/client/loopback/pane_source/codec).
           (3) b0-proxy transparent stdio; b1 tunnel keep-alive (remote/unix.rs); b2 App::new_federated +
