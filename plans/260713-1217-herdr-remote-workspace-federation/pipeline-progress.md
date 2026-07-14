@@ -198,8 +198,15 @@
               later brick). BOUNDED BACKSTOP (logged): a wedged peer (half-closed + not reading/closing) can
               delay reader/writer teardown — same rare class as the deferred reservation-expiry; well-behaved
               herdr peer closes both directions. Nothing dials the federation socket until b3.
-              NEXT sub-brick 3: live handoff revocation (lease.begin_revocation wired into perform_live_handoff).
-              Sub-brick 4: DELETE AppFederationHost.
+              SUB-BRICK 3 DONE+SHIPPED 7183c24 — live handoff revocation. perform_live_handoff now calls
+              federation_lease.begin_revocation() at handoff start (close admission + bump epoch + free slot →
+              fences stale controller commands, no authority resurrection on rollback); rollback_handoff_before_
+              commit calls reopen_admission() (epoch stays monotonic). Active stream-close DEFERRED (no registry;
+              process-replacement reaps detached threads, epoch-fencing makes revoked conn inert — matches client
+              path). No new tests (lease FSM no-resurrection already tested; wiring adds no blocking→no deadlock).
+              Full suite 2680/0, clippy clean.
+              NEXT sub-brick 4: DELETE AppFederationHost (after b0-proxy). Remaining order: b0.3-tail (protocol
+              bump 1→2 + wire-fault variant + bounded egress) → b0-proxy → SB4 → b1 → b2 → b3 → R7 tail.
           (2) b0.3-tail: wire-fault FederationMessage variant + Channel::Control + PROTOCOL VERSION bump 1→2
               + bounded egress + inbound-Fault→TunnelExit (ripples into serve/client/loopback/pane_source/codec).
           (3) b0-proxy transparent stdio; b1 tunnel keep-alive (remote/unix.rs); b2 App::new_federated +
