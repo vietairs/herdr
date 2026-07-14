@@ -14,13 +14,25 @@ inside the async loop stalls the runtime (codex v5 MAJ3).
 
 **Two viable resolutions (decide before coding the accept handler):**
 - (A) A NEW async serve path for the co-located case that `await`s the oneshot directly (does NOT go
-  through the sync `FederationHost` trait). Cleanest; duplicates some of serve::run's loop shape.
-- (B) A `ServerBackedFederationHost` whose sync trait methods `blocking_recv()` the oneshot — only
-  legal if each such call runs on a dedicated blocking thread (not the async reader), i.e. the explicit
-  reader/serializer/poller thread topology (codex MAJ5), never inside an async task.
-Recommendation: (A) — a purpose-built async connection driver that owns the reader + an exclusive
-serializer + the tickers, and bridges each request to the server loop via `server_event_tx` + oneshot.
-This also naturally hosts the connection supervisor (first-cause + shutdown(Both), b0.3).
+  through the sync `FederationHost` trait). Cleanest in the abstract; but needs async I/O over the
+  accepted stream, and the accept path yields a SYNC `interprocess::local_socket::Stream` — bridging it
+  to tokio async (raw-fd → `tokio::net::UnixStream`) is platform-specific and fragile.
+- (B) Sync thread topology (codex MAJ5), never blocking inside an async task. Each such blocking call
+  runs on a dedicated std::thread.
+
+**DECISION 260714 = (B), REVISED from the earlier (A) lean.** Evidence gathered building 2a/2b:
+`codec::encode`/`decode` are PURE (byte-slice in/out, no `Read`/`Write` coupling — codec.rs:6-8), and
+`LocalStream` is a sync `Read`+`Write` that `try_clone()`s into independent read/write halves — the
+classic client transport ALREADY drives a connection exactly this way (`handle_client_handshake` →
+`try_clone` → `client_writer_loop` thread + `client_read_loop`, client_transport.rs:429-579), bridging
+to the async server loop via `server_event_tx.blocking_send`. So a co-located federation connection is:
+a per-connection READER thread (blocking sync-framed reads → `FederationCommand` via
+`server_event_tx.blocking_send` + `oneshot::blocking_recv`), a WRITER thread draining an mpsc of
+`FederationMessage` (blocking sync-framed writes over the `try_clone`d half), output-pump thread(s)
+(`broadcast::Receiver<Bytes>::blocking_recv` → writer mpsc), and a ticker (events/agent polls → writer
+mpsc). NO per-connection tokio runtime, NO async I/O over the interprocess stream. This is the
+codebase-idiomatic fit and sidesteps (A)'s fragile async bridge entirely. The connection supervisor
+(first-cause + shutdown(Both), b0.3) sits over these threads.
 
 ## Accept pattern to MIRROR (client path)
 - `accept_pending_client_connections(&LocalListener, &mut next_id, &Arc<AtomicBool>, &mpsc::Sender<ServerEvent>)`
