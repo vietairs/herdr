@@ -5,6 +5,7 @@ pub(crate) mod client_transport;
 pub(crate) mod clients;
 pub(crate) mod clipboard_image;
 pub(crate) mod federation_actor;
+pub(crate) mod federation_lease;
 #[cfg(unix)]
 pub(crate) mod handoff;
 pub mod headless;
