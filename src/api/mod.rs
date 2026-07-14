@@ -191,6 +191,17 @@ pub(crate) fn federated_forbidden_response(id: String) -> String {
     serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string())
 }
 
+pub struct ApiRequestMessage {
+    pub request: Request,
+    pub respond_to: std::sync::mpsc::Sender<String>,
+}
+
+pub type ApiRequestSender = mpsc::UnboundedSender<ApiRequestMessage>;
+
+pub fn socket_path() -> PathBuf {
+    crate::session::active_api_socket_path()
+}
+
 #[cfg(test)]
 mod federated_allowlist_tests {
     use super::federated_session_allows;
@@ -217,15 +228,4 @@ mod federated_allowlist_tests {
             EmptyParams {}
         )));
     }
-}
-
-pub struct ApiRequestMessage {
-    pub request: Request,
-    pub respond_to: std::sync::mpsc::Sender<String>,
-}
-
-pub type ApiRequestSender = mpsc::UnboundedSender<ApiRequestMessage>;
-
-pub fn socket_path() -> PathBuf {
-    crate::session::active_api_socket_path()
 }

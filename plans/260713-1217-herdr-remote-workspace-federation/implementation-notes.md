@@ -1330,3 +1330,30 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   and v1 = no local coexistence.
 - Evidence: seam map §4; spawn_with_portable_pty at pty/backend/unix.rs:12; kitty_graphics precedent.
 - Reversibility: additive; global flag default false = classic unaffected. Remove flag+check to revert.
+
+- What: b2.3 SHIPPED 65d4388 + b3 live flip SHIPPED 67c82eb (both gpu-ml green). Then R7 tail reviews
+  (codex adversarial ‖ code-reviewer agent) returned BLOCK — 5 findings, all verified vs source; fixed 4,
+  documented 1 as v1 scope. (F1 CRIT) teardown deadlock: writer_handle.await ran BEFORE the ssh kill →
+  a half-open peer (stopped reading) hangs write_all forever → user stranded in alt-screen. Fixed: bound
+  the writer drain (FEDERATION_TEARDOWN_DRAIN_TIMEOUT=2s) then drop tunnel_guard (kill) regardless.
+  (F4 CRIT/HIGH, both reviewers) federated view-only guard hole: interactive New Worktree (keyboard) reaches
+  handle_deferred_worktree_api_request → git worktree add + create_dir_all WITHOUT a federated_mode check,
+  bypassing both API-dispatch guards (the runtime.rs api_rx guard is on a DEAD path in v1 — no live API
+  socket). Fixed: guard at the DEEPEST single choke (handle_deferred_worktree_api_request) covering keyboard
+  + api_rx + future callers; reverted the shallower dispatch_deferred_api_request guard as redundant; added
+  regression test federated_session_rejects_deferred_worktree_mutations. (F5 HIGH) unbounded snapshot-probe
+  mount → wrapped attempt_federation_mount's connect_and_mount in timeout(CONNECT+MOUNT). (F2 HIGH) lease
+  race: probe start_kill()'d without waiting → live re-dial could be rejected Busy → spurious classic
+  fallback; mitigated with child.wait() so the tunnel is reaped (server releases the lease) before the live
+  dial. (F3 → v1 SCOPE, not fixed) remote STRUCTURAL changes (tab/pane/rename post-mount) don't reach the
+  displayed App — pane byte-output flows live, only mount-time structure is frozen; propagation is P9.3
+  lifecycle scope. Also fixed a b2.2-introduced clippy warning (moved federated_allowlist_tests to end of
+  api/mod.rs — items-after-test-module).
+- Why: HIGH-risk R7 surface + b3 ACTIVATES the path; adversarial reviews are the gate. F1 is a hard hang
+  (user must kill -9); F4 is a trust-boundary breach (local git/fs mutation from a view-only remote session).
+  Deepest-choke guard = self-protecting handler, robust to future callers (both reviewers' recommendation).
+- Evidence: gpu-ml build EXIT_0, full suite 2685/0 (+1 guard test, was 2684), clippy 3 pre-existing baseline
+  only (map_out/CLIPBOARD/pane_source complex-type). Reviews: codex 5-finding BLOCK; code-reviewer
+  DONE_WITH_CONCERNS. auto-decisions D8.
+- Reversibility: all fixes additive/isolated; F3 documented for P9.3. Live-attach still has no automated
+  coverage (manual two-machine smoke, D6) — the ONE gate before a human un-drafts + merges PR #1.

@@ -43,6 +43,10 @@ impl App {
         id: &'static str,
         method: crate::api::schema::Method,
     ) -> Option<String> {
+        // The federated view-only guard for this deferred-worktree path lives at
+        // the deepest choke (`handle_deferred_worktree_api_request`), so it
+        // covers this interactive keyboard caller AND the `api_rx` message path
+        // with one check rather than being duplicated per dispatch entrance.
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         if !self.handle_deferred_worktree_api_request(
             crate::api::schema::Request {

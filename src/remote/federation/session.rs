@@ -52,6 +52,13 @@ use crate::remote::{
 /// bounded budget so a flooding remote can't grow memory without bound.
 const INBOUND_CLIPBOARD_CAPACITY: usize = 64;
 
+/// Upper bound on how long teardown waits for the mount writer task to drain
+/// after `out_tx` is dropped, before killing the ssh child regardless. Bounds
+/// the fault case (a half-open peer that stopped reading) so teardown can never
+/// hang and strand the user in the alt-screen; the clean case exits far sooner.
+const FEDERATION_TEARDOWN_DRAIN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
 /// Process-global: true only while an in-proc federated session is running.
 /// Read by the low-level local-PTY spawn choke (`pty::backend::unix::
 /// spawn_with_portable_pty`) as a last-resort backstop against any local-pane
@@ -341,12 +348,20 @@ pub(crate) fn run_federated_session(
 
         // Teardown RAII order: App scope has ended (its `run` future is done or
         // cancelled) → drop App (remote-backed panes/workspaces) → drop out_tx
-        // (ends the writer loop) → await the writer → drop the ChildGuard
-        // (kills the ssh child) → the terminal-restore guard runs LAST at
-        // block end. `_inbound_clip_rx`/`_outbound_clip_rx` drop here too.
+        // (ends the writer loop) → drain the writer under a bounded timeout →
+        // drop the ChildGuard (kills the ssh child) → the terminal-restore
+        // guard runs LAST at block end. `_inbound_clip_rx`/`_outbound_clip_rx`
+        // drop here too.
         drop(app);
         drop(out_tx);
-        let _ = writer_handle.await;
+        // On a clean exit the peer is still reading, so once `out_tx` is dropped
+        // the writer flushes and exits well within this cap. On a HALF-OPEN peer
+        // (stopped reading), the writer's `write_all`/`flush` would block
+        // forever — so bound the drain and then kill the ssh child regardless
+        // (dropping `tunnel_guard`), which also breaks any still-pending write.
+        // Teardown must NEVER hang on an unreadable peer: that would strand the
+        // user in the alt-screen (the `TerminalRestoreGuard` never drops).
+        let _ = tokio::time::timeout(FEDERATION_TEARDOWN_DRAIN_TIMEOUT, writer_handle).await;
         drop(tunnel_guard);
 
         app_result

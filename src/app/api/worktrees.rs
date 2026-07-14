@@ -865,6 +865,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn federated_session_rejects_deferred_worktree_mutations() {
+        // Trust boundary (view-only federation): the deferred worktree handler
+        // is the deepest choke the keyboard-driven New Worktree path reaches
+        // without passing an API dispatch guard. A federated App must reject
+        // WorktreeCreate/Remove here — SYNCHRONOUSLY, before any local git or
+        // filesystem mutation — using the shared federated-forbidden response.
+        for method in [
+            crate::api::schema::Method::WorktreeCreate(WorktreeCreateParams {
+                branch: Some("worktree/should-not-run".into()),
+                ..WorktreeCreateParams::default()
+            }),
+            crate::api::schema::Method::WorktreeRemove(WorktreeRemoveParams {
+                workspace_id: "should-not-run".into(),
+                force: false,
+            }),
+        ] {
+            let event_hub = crate::api::EventHub::default();
+            let mut app = test_app_with_event_hub(event_hub);
+            app.federated_mode = true;
+
+            let (respond_to, response_rx) = response_channel();
+            let handled = app.handle_deferred_worktree_api_request(
+                Request {
+                    id: "req".into(),
+                    method,
+                },
+                respond_to,
+            );
+
+            // A response was produced (handled == true), but it is the forbidden
+            // error delivered synchronously — no completion event is emitted
+            // because no git worktree operation was ever started.
+            assert!(handled);
+            let response = response_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .expect("federated rejection must respond synchronously");
+            assert!(
+                response.contains("forbidden_in_federated_session"),
+                "expected federated-forbidden error, got: {response}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn api_worktree_create_opens_workspace_and_marks_membership() {
         let repo = create_committed_repo("api-worktree-create-repo");
         let worktree_root = unique_temp_path("api-worktree-create-root");

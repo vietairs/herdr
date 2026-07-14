@@ -124,3 +124,47 @@ code; classic path byte-for-byte unchanged. Committed 65d4388. NEXT = b3 (run_re
 gpu-ml: build EXIT_0 (run_federated_session/new_federated no longer warn dead — confirming live wiring), full
 suite EXIT_0 all-zero-failed (2684 + 22+14+76+12+9+11+18+11+15). NEXT = R7 tail (impl-notes review →
 code-review ‖ codex diff → ship-gate --hard) → un-draft PR #1.
+
+---
+
+## R7 TAIL — reviews + blocker fixes (do NOT un-draft yet)
+
+### D8 — codex adversarial review returned BLOCK (5 findings); fixed 4, documented 1 as v1 scope
+Ran `/hvn:impl-notes review` (main loop) + `code-reviewer` agent (inherited Opus) ‖ `codex exec` adversarial
+pass on the b2.3+b3 diff (fb1e00f..67c82eb). Codex verdict: **BLOCK — unsafe to land**. All 5 findings verified
+against source before acting (review-audit rule: concrete file:line, not abstract). Decision: this is a genuine
+BLOCK → do NOT un-draft PR #1; fix the confirmed blockers, re-verify green, re-assess (cortex never merges).
+
+- **F1 CRITICAL — teardown deadlock** (session.rs): `writer_handle.await` ran BEFORE the ssh kill; a half-open
+  peer (stopped reading) leaves the writer's `write_all`/`flush` pending forever → await never returns → ssh +
+  `TerminalRestoreGuard` never drop → user stranded in alt-screen. FIXED: bound the writer drain with
+  `FEDERATION_TEARDOWN_DRAIN_TIMEOUT` (2s) then drop `tunnel_guard` (kill) regardless — clean exit still drains
+  promptly, fault case caps at 2s then kills (which also breaks the pending write).
+- **F4 HIGH (security) — mutation-guard hole** (app/api.rs): a THIRD funnel `dispatch_deferred_api_request`
+  (interactive New Worktree submit) reached `handle_deferred_worktree_api_request` → `create_dir_all` WITHOUT
+  a `federated_mode` check, bypassing both guarded entrances; federated workspaces are non-linked so the UI
+  admits the action. FIXED: added the same allowlist guard at `dispatch_deferred_api_request` (returns
+  `federated_forbidden_response`), closing the default-forbidden hole.
+- **F5 HIGH — unbounded probe timeout** (remote/unix.rs `attempt_federation_mount`): the pre-existing snapshot
+  probe's `connect_and_mount().await` had no timeout → a peer that accepts SSH but never answers hangs
+  `run_remote` before the federated route is reached. FIXED: wrapped in `timeout(CONNECT+MOUNT)`.
+- **F2 HIGH — lease race / double-dial** (remote/unix.rs): the probe only `start_kill()`'d (no wait) so the ssh
+  child + its server-side single-controller lease could outlive the call; b3's immediate live dial could be
+  rejected `Busy` → spurious classic fallback. MITIGATED: added `child.wait().await` after `start_kill` so the
+  snapshot tunnel is fully reaped (remote observes the close + releases the lease) before the live dial. Not
+  provably eliminated (remote lease-release is async), but the failure mode is a SAFE degrade-to-classic and the
+  fresh-dial handshake RTT gives ample release time; a retry-on-Busy is a possible follow-up. This also removes
+  the D7 double-dial's practical harm.
+- **F3 HIGH (codex) → assessed MEDIUM / v1 SCOPE — stale structural state** (session.rs/client.rs): the App is
+  materialized once at mount; the mirror then moves into the drive task, whose EventFrames advance only that
+  private mirror (and P4 EventFrames carry no payload, so only a remount reconciles) → remote STRUCTURAL changes
+  (new tab/pane, rename) never reach the displayed App. NOT fixed this run: pane terminal OUTPUT does flow live
+  (router → pane receivers); only mount-time structure is frozen. Propagating structural deltas mirror→App is
+  P9.3 lifecycle scope, not the b3 flip. DOCUMENTED as a known v1 limitation (below) for the human's merge
+  decision — neither silently shipped as "full live sync" nor silently expanded into a new phase under --auto.
+
+No defect in the router receiver handoff (receivers exist before Opens are queued / drive starts), the AtomicBool
+ordering, or new_federated's Disabled-persistence isolation — codex explicitly cleared these.
+
+FIX VERIFY (partial — full suite pending code-reviewer fold): gpu-ml build EXIT_0, no new warnings, 4 fixes
+compile clean. NEXT: fold code-reviewer agent findings → full suite → commit → re-assess merge-readiness.
