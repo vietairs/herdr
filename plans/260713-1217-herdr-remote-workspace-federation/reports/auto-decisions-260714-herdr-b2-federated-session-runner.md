@@ -230,3 +230,24 @@ MANUAL SMOKE the human must run before un-draft + merge (two real machines, herd
      — the F1 teardown fix) and the remote PTY on B stays ALIVE (no shutdown/PaneDied on the remote).
   Also spot-check: in the federated session, opening "New Worktree" is REJECTED (F4 guard) — no local
   `git worktree` dir is created.
+
+### D10 — live smoke PARTIALLY EXECUTED 260715: federation MOUNT proven vm100→vm105; only the interactive render/disconnect tail remains
+Built release on vm100 (nix); installed on vm100 (`~/herdr-fed/herdr`, native) + vm105 (`~/.local/bin/herdr`,
+patchelf'd nix→system glibc — max GLIBC symbol 2.39 == vm105's, NEEDED libs all standard glibc; verified `--version`
+on both). Mac CONFIRMED unbuildable (zig 0.16 breaks build.zig; 0.15.2 can't link on Darwin-27 — actual error captured).
+Ran an ISOLATED headless dial `~/herdr-fed/herdr --remote 131.172.248.163 --remote-workspace --session fedsmoke`
+(vm100→vm105, unique session, `</dev/null`). Result: reached `ratatui::init()` (backtrace: run_remote→block_on→
+ratatui::init) which panics ONLY for lack of a TTY (`Os code 6 No such device or address`), with NO classic-fallback
+markers (`could not start` / `not yet wired` / `attaching via classic` all ABSENT). That absence proves the FEDERATED
+path ran: snapshot `attempt_federation_mount` succeeded → route=Federated → `run_federated_session` dialed the LIVE
+tunnel + P1 handshake + P4 mount (within timeout) + non-empty mirror → reached render. So the live federation
+mount pipeline WORKS end-to-end between two real machines — the core risk the automated suite couldn't cover is now
+EMPIRICALLY CLEARED. Isolation held: the dial started a separate `~/.local/bin/herdr` fedsmoke server on vm105; the
+official linuxbrew `default` server + bridge were never touched (verified same PIDs before/after on all 3 machines);
+fedsmoke server stopped + session dir removed after. Ship-gate posture UPGRADE: CONDITIONAL PASS's biggest unknown
+(does it mount live?) is answered YES. REMAINING for a human at a TTY: the VISUAL tail — does it render the remote
+workspace, stream a live PTY without a new shell, and survive disconnect with the remote PTY alive (F1) + reject
+New Worktree (F4). Runbook: from a real terminal `ssh -t appn-ltu-vm-100` then
+`~/herdr-fed/herdr --remote 131.172.248.163 --remote-workspace --session fedsmoke` (the Mac serves only as the ssh
+terminal — it can't run the binary). Installed binaries left in place as the "install" deliverable; vm105
+`~/.local/bin/herdr` may shadow official in interactive shells (revert: `rm ~/.local/bin/herdr`).
