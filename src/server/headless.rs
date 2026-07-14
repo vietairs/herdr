@@ -204,11 +204,10 @@ pub struct HeadlessServer {
     client_listener: LocalListener,
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
-    /// Co-located federation listener (P9.2b b0.4 sub-brick 1). Bound and
-    /// fully lifecycle-managed here, but nothing accepts connections on it
-    /// yet — that is sub-brick 2.
+    /// Co-located federation listener (P9.2b b0.4). Bound and fully
+    /// lifecycle-managed here; the accept loop (sub-brick 2) drives each
+    /// connection through the handshake on its own thread.
     #[cfg(unix)]
-    #[allow(dead_code)] // dormant until the accept loop reads it (b0.4 sub-brick 2)
     federation_listener: LocalListener,
     #[cfg(unix)]
     federation_socket_path: PathBuf,
@@ -217,6 +216,12 @@ pub struct HeadlessServer {
     clients: HashMap<u64, ClientConnection>,
     #[cfg(unix)]
     next_client_id: u64,
+    /// Monotonically-minted id for each accepted federation connection (P9.2b
+    /// b0.4 sub-brick 2). Together with the lease's accept-epoch it names an
+    /// exact connection; never reused within a process. Dormant until the accept
+    /// loop mints against it.
+    #[cfg(unix)]
+    next_federation_id: u64,
     /// The client currently driving the shared pane runtime size, theme, and input keybindings.
     foreground_client_id: Option<u64>,
     /// Server-owned keybindings, restored when foreground clients use server mode.
@@ -463,6 +468,8 @@ impl HeadlessServer {
             server_event_tx,
             federation_server_instance_id:
                 crate::remote::federation::id::ServerInstanceId::fresh(),
+            #[cfg(unix)]
+            next_federation_id: 1,
             federation_lease: crate::server::federation_lease::FederationLease::new(),
         })
     }
@@ -557,6 +564,7 @@ impl HeadlessServer {
 
             // 4. Accept new client connections.
             self.accept_client_connections()?;
+            self.accept_federation_connections()?;
 
             // 5. Drain server events from client threads.
             if self.drain_server_events() {
@@ -1460,6 +1468,30 @@ impl HeadlessServer {
     /// pending blocking accept. The dedicated accept thread handles that path.
     #[cfg(windows)]
     fn accept_client_connections(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Accepts pending co-located federation connections (P9.2b b0.4 sub-brick
+    /// 2). During live handoff pending peers are drained without a handshake,
+    /// mirroring the client path, so none waits on a mount the draining server
+    /// will never send.
+    #[cfg(unix)]
+    fn accept_federation_connections(&mut self) -> io::Result<()> {
+        if self.handoff_in_progress {
+            return crate::server::federation_accept::reject_pending_federation_connections(
+                &self.federation_listener,
+            );
+        }
+        crate::server::federation_accept::accept_pending_federation_connections(
+            &self.federation_listener,
+            &mut self.next_federation_id,
+            &self.federation_server_instance_id,
+        )
+    }
+
+    /// Federation is unix-only; no federation listener exists on Windows.
+    #[cfg(windows)]
+    fn accept_federation_connections(&mut self) -> io::Result<()> {
         Ok(())
     }
 
@@ -4359,6 +4391,8 @@ mod tests {
             // (P9.2b b0.1 rotation; v5 finding C4).
             federation_server_instance_id:
                 crate::remote::federation::id::ServerInstanceId::fresh(),
+            #[cfg(unix)]
+            next_federation_id: 1,
             // Replacement server starts with a fresh, uncontrolled lease: no
             // connection carries over a live-handoff, so none holds authority.
             federation_lease: crate::server::federation_lease::FederationLease::new(),

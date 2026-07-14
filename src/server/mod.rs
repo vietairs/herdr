@@ -4,6 +4,8 @@ pub(crate) mod client_accept;
 pub(crate) mod client_transport;
 pub(crate) mod clients;
 pub(crate) mod clipboard_image;
+#[cfg(unix)]
+pub(crate) mod federation_accept;
 pub(crate) mod federation_actor;
 pub(crate) mod federation_fault;
 pub(crate) mod federation_lease;
