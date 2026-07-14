@@ -1482,10 +1482,18 @@ impl HeadlessServer {
                 &self.federation_listener,
             );
         }
+        // Read the lease's accept-epoch synchronously here, on the event loop
+        // that owns the lease, and stamp it onto every connection accepted this
+        // tick. A handoff revocation between ticks bumps the epoch, so a
+        // connection accepted before it carries a now-stale epoch and cannot
+        // acquire or mutate (federation_lease v5 finding #1).
+        let epoch = self.federation_lease.current_epoch();
         crate::server::federation_accept::accept_pending_federation_connections(
             &self.federation_listener,
             &mut self.next_federation_id,
+            epoch,
             &self.federation_server_instance_id,
+            &self.server_event_tx,
         )
     }
 
