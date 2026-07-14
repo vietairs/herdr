@@ -102,6 +102,35 @@ Use `--session` with `--remote` to attach to a named session on the remote host:
 herdr --remote workbox --session agents
 ```
 
+## Federated workspaces
+
+Classic `herdr --remote` makes your local Herdr a thin client of one remote server, full-screen. **Federation** instead mounts that remote server as a *new workspace inside your local Herdr sidebar*, so local and remote workspaces — with their agents and native status — coexist in one view, with cold-resume across reconnects.
+
+Enable it by adding `--remote-workspace` to a `--remote` attach, or by setting `HERDR_REMOTE_FEDERATION=1`:
+
+```bash
+herdr --remote ssh://you@server --remote-workspace
+# equivalently
+HERDR_REMOTE_FEDERATION=1 herdr --remote workbox
+```
+
+Under the hood Herdr runs a dedicated headless federation server on the remote (`herdr federation-serve`) over the existing SSH bridge — a purpose-built, versioned federation protocol, not the rendered attach stream. There are no extra open ports.
+
+Mount several machines into one sidebar by repeating the command per host; each mounts under its own per-host group:
+
+```bash
+herdr --remote appn-ltu-vm-100 --remote-workspace
+herdr --remote appn-ltu-vm-105 --remote-workspace
+```
+
+Notes:
+
+- **Herdr must be installed on both ends** with federation support. Remote binary resolution is the same as classic remote attach (remote `PATH`, then common install paths, then `~/.local/bin`); push a local build with `HERDR_REMOTE_BINARY`.
+- Mount a named remote session by combining `--session <name>` with `--remote-workspace`.
+- `--remote-workspace` requires `--remote`; using it alone errors.
+- **Capability fallback:** if the remote's Herdr does not support federation (older binary or version skew), Herdr falls back to the classic full-screen `--remote` attach with a notice rather than failing. Attaching classically to a host already federated locally is guarded against double-attach.
+- Federated workspaces are labeled by remote host and never run local git shellouts, so a remote workspace cannot masquerade as a trusted local one.
+
 ## Direct terminal attach
 
 Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.
