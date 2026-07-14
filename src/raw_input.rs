@@ -766,6 +766,15 @@ fn complete_escape_sequence_len(buffer: &[u8]) -> Option<usize> {
         return None;
     }
 
+    if buffer.starts_with(b"\x1b\x1b[<") {
+        if let Some(mouse_len) = find_csi_final(&buffer[1..], b"Mm") {
+            let mouse_sequence = std::str::from_utf8(&buffer[1..1 + mouse_len]).ok()?;
+            if parse_sgr_mouse(mouse_sequence).is_some() {
+                return Some(1);
+            }
+        }
+    }
+
     if buffer.starts_with(b"\x1b\x1b") {
         return complete_escape_sequence_len(&buffer[1..]).map(|len| len + 1);
     }
@@ -1570,6 +1579,45 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn lone_escape_then_complete_sgr_mouse_report_emits_both_events() {
+        for report in [b"\x1b[<35;10;20M".as_slice(), b"\x1b[<35;10;20m".as_slice()] {
+            let mut framer = RawInputFramer::default();
+
+            assert!(framer.push(b"\x1b").is_empty());
+            let events = framer.push(report);
+
+            assert_eq!(events.len(), 2);
+            let mut events = events.into_iter();
+            assert_raw_key(events.next().unwrap(), KeyCode::Esc, KeyModifiers::empty());
+            assert!(matches!(
+                events.next().unwrap(),
+                RawInputEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: 9,
+                    row: 19,
+                    ..
+                })
+            ));
+            assert!(framer.flush_timeout().is_empty());
+        }
+    }
+
+    #[test]
+    fn legacy_doubled_escape_alt_arrow_remains_one_event() {
+        let mut framer = RawInputFramer::default();
+
+        let events = framer.push(b"\x1b\x1b[A");
+
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Up,
+            KeyModifiers::ALT,
+        );
+        assert!(framer.flush_timeout().is_empty());
     }
 
     #[test]
