@@ -168,3 +168,65 @@ ordering, or new_federated's Disabled-persistence isolation — codex explicitly
 
 FIX VERIFY (partial — full suite pending code-reviewer fold): gpu-ml build EXIT_0, no new warnings, 4 fixes
 compile clean. NEXT: fold code-reviewer agent findings → full suite → commit → re-assess merge-readiness.
+
+### D8b — code-reviewer agent corroborated codex; fixes finalized + regression-tested
+`b23review` (inherited Opus) returned DONE_WITH_CONCERNS: its sole CRITICAL = codex F4 (federated worktree
+guard hole), with the key added detail that the pre-existing `runtime.rs` api_rx guard is on a DEAD path in v1
+(the federated session stands up NO live API socket), so `handle_deferred_worktree_api_request` reached via the
+keyboard path is the only live hole — confirming the fix location. Its LOW/MED notes = F2 (double-dial) and
+writer-teardown scheduling (my bounded-timeout fix covers it). It agreed F3 is a known documented gap, not to
+fix in this diff. Final fixes: moved the F4 guard to the DEEPEST single choke
+(`handle_deferred_worktree_api_request`) covering keyboard + api_rx + future callers; reverted the shallower
+`dispatch_deferred_api_request` guard as redundant; added regression test
+`federated_session_rejects_deferred_worktree_mutations` (both forbidden methods, synchronous rejection, no
+git/fs mutation). Also cleared a b2.2-introduced clippy warning (moved `federated_allowlist_tests` to end of
+`api/mod.rs`). Committed a28d9b1. VERIFY gpu-ml: build EXIT_0, full suite 2685/0 (+1), clippy 3 pre-existing
+baseline only (map_out/CLIPBOARD/pane_source complex-type).
+
+---
+
+## SHIP-GATE --hard (stage 12) — attestation: CONDITIONAL PASS (merge-ready PENDING human smoke)
+
+### D9 — ship-gate --hard verdict + the un-draft decision (do NOT un-draft; --auto records + stops)
+Machine reconciliation, plan phase-09b-option-b §b2/§b3 + plan.md global AC + scenario-federation-edge-cases.md.
+
+PLAN-vs-SHIPPED:
+- b2.1 persistence policy (Disabled) — SHIPPED 7dc71ec, tested. ✓
+- b2.2 closed mutation allowlist (exhaustive, no wildcard) — SHIPPED dd3cf57 + the deferred-worktree keyboard
+  hole (found by R7 reviews) CLOSED + regression-tested. ✓
+- b2.3 run_federated_session + App::new_federated + eager-open + C1-safe move-router + supervision select! +
+  clipboard sinks + RAII teardown (deadlock fixed) — SHIPPED 65d4388 / a28d9b1. ✓ (compiles, dormant→live)
+- b3 run_remote federated-arm live flip (Ok→exit, Err-pre-TTY→classic fallback; classic byte-for-byte) —
+  SHIPPED 67c82eb. ✓
+- b3 FIRST ACCEPTANCE TEST — "mount live App, stream a PTY, disconnect, prove PTY alive" (phase-09b:171):
+  **UNMET**. The plan ITSELF marks it "two-machine smoke (out of env per P1)" (:162) — a HUMAN-ONLY gate;
+  macOS-27 can't build and the remote host is a headless build sandbox (no second machine + interactive TTY).
+- P9.3 lifecycle (reconnect/disconnected-state/cold-resume) — OUT OF SCOPE this run (plan.md:146 defers AC4/5
+  to P9.3); F3 stale-structural-state belongs here.
+
+IN-ENV GATES: build EXIT_0; full suite 2685/0 all bins; clippy 3 pre-existing baseline; 2 independent
+adversarial reviews (codex + code-reviewer) — all 5 findings verified, 4 fixed + 1 documented v1 scope.
+
+PREDICTED-vs-ACTUAL: no /hvn-predict report (R7 used /hvn-scenario → scenario-federation-edge-cases.md); the
+review found no un-scoped surprise beyond F3 (already an acknowledged v1 limitation) — consistent with the
+scenario edge-case set.
+
+ATTESTATION = **CONDITIONAL PASS — merge-ready PENDING the human two-machine live smoke.** Every gate I CAN
+run is green and both adversarial reviews' blockers are cleared; the single remaining acceptance criterion is
+the plan's own explicitly out-of-env smoke.
+
+UN-DRAFT DECISION (--auto, conservative): **do NOT un-draft PR #1.** Un-drafting asserts merge-readiness that
+an UNMET (human-only) acceptance test does not support; cortex must not weaken a gate to force a ship, and
+cortex never merges. This is the "external/human blocker → record and stop" path: logged here, PR left DRAFT,
+the exact smoke handed to the user. --auto skips the approval QUESTION but does not license overriding an
+unmet plan acceptance gate. No GitHub write (free-text run, not issue-sourced).
+
+MANUAL SMOKE the human must run before un-draft + merge (two real machines, herdr built on both):
+  1. On host B (remote): a herdr session running (it will be federation-served over ssh).
+  2. On host A (local): `herdr --remote <B> --remote-workspace` (or `HERDR_REMOTE_FEDERATION=1` + `--remote`).
+  3. Confirm the remote workspace renders in-process (not the classic full-screen attach) and a remote pane
+     streams live output WITHOUT spawning a new local shell.
+  4. Disconnect the link (kill the ssh path); confirm herdr exits to the shell cleanly (no hang in alt-screen
+     — the F1 teardown fix) and the remote PTY on B stays ALIVE (no shutdown/PaneDied on the remote).
+  Also spot-check: in the federated session, opening "New Worktree" is REJECTED (F4 guard) — no local
+  `git worktree` dir is created.
