@@ -37,17 +37,39 @@ use crate::api::schema::{EmptyParams, Method, Request, ResponseResult, SuccessRe
 use crate::app::App;
 use crate::remote::federation::protocol::EventCursor;
 use crate::remote::federation::serve::empty_snapshot;
+use crate::server::federation_lease::{AcceptEpoch, Admission, ConnId, FederationLease};
 
 /// A request from a co-located federation connection to be serviced against the
-/// live `App` on the server event loop. Read-only requests and the two
-/// remote-input forwards (`SendInput`/`Resize`) mirror the federation protocol
-/// host surface; each value-producing variant carries its reply channel.
+/// live `App` (and the single-controller [`FederationLease`]) on the server
+/// event loop. Read-only queries and the two remote-input forwards
+/// (`SendInput`/`Resize`) mirror the federation protocol host surface; each
+/// value-producing variant carries its reply channel.
+///
+/// Lease-bearing variants carry the connection's `(epoch, connid)` so admission,
+/// mount promotion, and per-command authorization are all linearized against the
+/// live lease at the one dispatch point — a stale connection's command can
+/// neither acquire, mount, nor mutate (v5 finding #1).
 #[allow(dead_code)] // dormant until b0.4 wires the federation listener
 pub(crate) enum FederationCommand {
-    /// Atomic (snapshot, cursor) pair for a fresh mount. Atomic for free here:
-    /// the actor holds `&mut App` exclusively, so no event can slip between the
-    /// snapshot and the cursor read.
-    Mount(oneshot::Sender<(SessionSnapshot, EventCursor)>),
+    /// Reserve the single-controller slot for a freshly-accepted connection
+    /// registered at `epoch`. The reply carries the [`Admission`] outcome.
+    AcquireController {
+        epoch: AcceptEpoch,
+        connid: ConnId,
+        reply: oneshot::Sender<Admission>,
+    },
+    /// Promote this connection's reservation to `Mounted` and, on success,
+    /// return the atomic (snapshot, cursor). Atomic for free here: the actor
+    /// holds `&mut App` exclusively, so no event can slip between the snapshot
+    /// and the cursor read. `None` if the reservation is stale or absent.
+    Mount {
+        epoch: AcceptEpoch,
+        connid: ConnId,
+        reply: oneshot::Sender<Option<(SessionSnapshot, EventCursor)>>,
+    },
+    /// Release the lease on connection EOF (compare-and-clear; a late EOF from a
+    /// superseded connection is inert).
+    Release { epoch: AcceptEpoch, connid: ConnId },
     /// Events strictly after the given sequence number.
     EventsAfter(u64, oneshot::Sender<Vec<(u64, EventKind)>>),
     /// A subscription to one live terminal's raw output bytes, or `None` if the
@@ -55,10 +77,19 @@ pub(crate) enum FederationCommand {
     SubscribeOutput(String, oneshot::Sender<Option<broadcast::Receiver<Bytes>>>),
     /// The scrollback history (ANSI) to seed a newly opened remote pane.
     ScrollbackReplay(String, oneshot::Sender<Vec<u8>>),
-    /// Forward input bytes to a live terminal (fire-and-forget).
-    SendInput(String, Vec<u8>),
-    /// Resize a live terminal (fire-and-forget).
+    /// Forward input bytes to a live terminal — dropped unless `(epoch, connid)`
+    /// is the mounted controller. Fire-and-forget.
+    SendInput {
+        epoch: AcceptEpoch,
+        connid: ConnId,
+        terminal_id: String,
+        bytes: Vec<u8>,
+    },
+    /// Resize a live terminal — dropped unless `(epoch, connid)` is the mounted
+    /// controller. Fire-and-forget.
     Resize {
+        epoch: AcceptEpoch,
+        connid: ConnId,
         terminal_id: String,
         cols: u16,
         rows: u16,
@@ -73,30 +104,61 @@ pub(crate) enum FederationCommand {
 impl std::fmt::Debug for FederationCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FederationCommand::Mount(_) => f.write_str("Mount"),
+            FederationCommand::AcquireController { epoch, connid, .. } => {
+                write!(f, "AcquireController(e{epoch}, c{connid})")
+            }
+            FederationCommand::Mount { epoch, connid, .. } => {
+                write!(f, "Mount(e{epoch}, c{connid})")
+            }
+            FederationCommand::Release { epoch, connid } => {
+                write!(f, "Release(e{epoch}, c{connid})")
+            }
             FederationCommand::EventsAfter(since, _) => write!(f, "EventsAfter({since})"),
             FederationCommand::SubscribeOutput(id, _) => write!(f, "SubscribeOutput({id})"),
             FederationCommand::ScrollbackReplay(id, _) => write!(f, "ScrollbackReplay({id})"),
-            FederationCommand::SendInput(id, bytes) => {
-                write!(f, "SendInput({id}, {} bytes)", bytes.len())
+            FederationCommand::SendInput {
+                terminal_id, bytes, ..
+            } => {
+                write!(f, "SendInput({terminal_id}, {} bytes)", bytes.len())
             }
             FederationCommand::Resize {
                 terminal_id,
                 cols,
                 rows,
+                ..
             } => write!(f, "Resize({terminal_id}, {cols}x{rows})"),
             FederationCommand::AgentStatuses(_) => f.write_str("AgentStatuses"),
         }
     }
 }
 
-/// Services one [`FederationCommand`] against the live `App`. Called only from
-/// the server event loop's single `&mut self` dispatch point. A dropped reply
-/// receiver (worker gone) is ignored — the `send` result is discarded.
+/// Services one [`FederationCommand`] against the live `App` and the
+/// single-controller `lease`. Called only from the server event loop's single
+/// `&mut self` dispatch point, so lease admission/mount/authorization and the
+/// `App` reads it gates are linearized with live-handoff revocation (which runs
+/// on the same loop). A dropped reply receiver (worker gone) is ignored — the
+/// `send` result is discarded.
 #[allow(dead_code)] // dormant until b0.4 wires the federation listener
-pub(crate) fn dispatch(app: &mut App, command: FederationCommand) {
+pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: FederationCommand) {
     match command {
-        FederationCommand::Mount(reply) => {
+        FederationCommand::AcquireController {
+            epoch,
+            connid,
+            reply,
+        } => {
+            let _ = reply.send(lease.try_acquire(epoch, connid));
+        }
+        FederationCommand::Mount {
+            epoch,
+            connid,
+            reply,
+        } => {
+            // Promote the reservation first; only the current-epoch holder mounts.
+            // A stale or non-holding Mount replies `None` and touches no `App`.
+            if !lease.try_mount(epoch, connid) {
+                let _ = reply.send(None);
+                return;
+            }
             let response =
                 app.handle_api_request_after_internal_events_drained(Request {
                     id: "federation-mount".to_string(),
@@ -110,7 +172,10 @@ pub(crate) fn dispatch(app: &mut App, command: FederationCommand) {
                     _ => None,
                 })
                 .unwrap_or_else(empty_snapshot);
-            let _ = reply.send((snapshot, cursor));
+            let _ = reply.send(Some((snapshot, cursor)));
+        }
+        FederationCommand::Release { epoch, connid } => {
+            lease.release(epoch, connid);
         }
         FederationCommand::EventsAfter(since, reply) => {
             let events = app
@@ -131,16 +196,31 @@ pub(crate) fn dispatch(app: &mut App, command: FederationCommand) {
             let replay = scrollback_replay(app, &terminal_id);
             let _ = reply.send(replay);
         }
-        FederationCommand::SendInput(terminal_id, bytes) => {
+        FederationCommand::SendInput {
+            epoch,
+            connid,
+            terminal_id,
+            bytes,
+        } => {
+            // Only the mounted controller may drive input. A stale or
+            // non-controller forward is dropped before it reaches the PTY.
+            if !lease.is_mounted_controller(epoch, connid) {
+                return;
+            }
             if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
                 let _ = runtime.try_send_bytes(Bytes::copy_from_slice(&bytes));
             }
         }
         FederationCommand::Resize {
+            epoch,
+            connid,
             terminal_id,
             cols,
             rows,
         } => {
+            if !lease.is_mounted_controller(epoch, connid) {
+                return;
+            }
             if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
                 runtime.resize(rows, cols, 0, 0);
             }
@@ -201,38 +281,133 @@ mod tests {
         crate::app::App::new(&config, true, None, api_rx, crate::api::EventHub::default())
     }
 
-    #[test]
-    fn mount_returns_a_snapshot_and_the_live_cursor() {
-        let mut app = test_app();
-        let (tx, mut rx) = oneshot::channel();
-        dispatch(&mut app, FederationCommand::Mount(tx));
-        // dispatch is synchronous and replies before returning; a delivered
-        // (snapshot, cursor) pair is the assertion.
-        let (_snapshot, _cursor) = rx.try_recv().expect("mount reply delivered");
+    /// Drive a connection through admission + mount, returning its `(epoch,
+    /// connid)`. The lease is left `Mounted` for that connection.
+    fn acquire_and_mount(app: &mut App, lease: &mut FederationLease, connid: ConnId) -> AcceptEpoch {
+        let epoch = lease.current_epoch();
+        let (atx, mut arx) = oneshot::channel();
+        dispatch(
+            app,
+            lease,
+            FederationCommand::AcquireController {
+                epoch,
+                connid,
+                reply: atx,
+            },
+        );
+        assert_eq!(arx.try_recv().expect("admission reply"), Admission::Accepted);
+        let (mtx, mut mrx) = oneshot::channel();
+        dispatch(
+            app,
+            lease,
+            FederationCommand::Mount {
+                epoch,
+                connid,
+                reply: mtx,
+            },
+        );
+        assert!(
+            mrx.try_recv().expect("mount reply").is_some(),
+            "the holder mounts and receives a snapshot"
+        );
+        epoch
     }
 
     #[test]
-    fn subscribe_output_for_an_unknown_terminal_is_none() {
+    fn mount_after_acquire_returns_a_snapshot_and_the_live_cursor() {
         let mut app = test_app();
-        let (tx, mut rx) = oneshot::channel();
-        dispatch(
-            &mut app,
-            FederationCommand::SubscribeOutput("no-such-terminal".to_string(), tx),
-        );
-        assert!(rx.try_recv().expect("reply delivered").is_none());
+        let mut lease = FederationLease::new();
+        // acquire_and_mount asserts a delivered `Some((snapshot, cursor))`.
+        acquire_and_mount(&mut app, &mut lease, 1);
+        assert!(lease.is_mounted_controller(0, 1));
     }
 
     #[test]
-    fn send_input_and_resize_for_an_unknown_terminal_are_silent_noops() {
+    fn acquire_is_busy_for_a_second_connection() {
         let mut app = test_app();
-        // Neither should panic nor require the terminal to exist.
+        let mut lease = FederationLease::new();
+        let epoch = lease.current_epoch();
+        let (t1, mut r1) = oneshot::channel();
         dispatch(
             &mut app,
-            FederationCommand::SendInput("no-such-terminal".to_string(), b"hi".to_vec()),
+            &mut lease,
+            FederationCommand::AcquireController {
+                epoch,
+                connid: 1,
+                reply: t1,
+            },
         );
+        assert_eq!(r1.try_recv().unwrap(), Admission::Accepted);
+        let (t2, mut r2) = oneshot::channel();
         dispatch(
             &mut app,
+            &mut lease,
+            FederationCommand::AcquireController {
+                epoch,
+                connid: 2,
+                reply: t2,
+            },
+        );
+        assert_eq!(r2.try_recv().unwrap(), Admission::Busy);
+    }
+
+    #[test]
+    fn a_stale_mount_replies_none_without_mounting() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let epoch = lease.current_epoch();
+        let (atx, mut arx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::AcquireController {
+                epoch,
+                connid: 1,
+                reply: atx,
+            },
+        );
+        assert_eq!(arx.try_recv().unwrap(), Admission::Accepted);
+        // A handoff revocation supersedes conn 1's epoch before it mounts.
+        lease.begin_revocation();
+        lease.reopen_admission();
+        let (mtx, mut mrx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::Mount {
+                epoch,
+                connid: 1,
+                reply: mtx,
+            },
+        );
+        assert!(mrx.try_recv().unwrap().is_none(), "stale mount is inert");
+        assert!(!lease.is_mounted_controller(epoch, 1));
+    }
+
+    #[test]
+    fn input_and_resize_are_dropped_unless_the_caller_is_the_mounted_controller() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        // The mounted controller's forwards run (no terminal → silent no-op, but
+        // no panic and the authorization gate passes).
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::SendInput {
+                epoch,
+                connid: 1,
+                terminal_id: "no-such-terminal".to_string(),
+                bytes: b"hi".to_vec(),
+            },
+        );
+        // A non-controller connection's forwards are dropped before the PTY.
+        dispatch(
+            &mut app,
+            &mut lease,
             FederationCommand::Resize {
+                epoch,
+                connid: 999,
                 terminal_id: "no-such-terminal".to_string(),
                 cols: 80,
                 rows: 24,
@@ -241,10 +416,48 @@ mod tests {
     }
 
     #[test]
+    fn release_frees_the_lease_for_the_next_connection() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::Release { epoch, connid: 1 },
+        );
+        // The slot is free again; a fresh connection can acquire.
+        let (atx, mut arx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::AcquireController {
+                epoch,
+                connid: 2,
+                reply: atx,
+            },
+        );
+        assert_eq!(arx.try_recv().unwrap(), Admission::Accepted);
+    }
+
+    #[test]
+    fn subscribe_output_for_an_unknown_terminal_is_none() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::SubscribeOutput("no-such-terminal".to_string(), tx),
+        );
+        assert!(rx.try_recv().expect("reply delivered").is_none());
+    }
+
+    #[test]
     fn events_after_on_a_fresh_app_is_empty() {
         let mut app = test_app();
+        let mut lease = FederationLease::new();
         let (tx, mut rx) = oneshot::channel();
-        dispatch(&mut app, FederationCommand::EventsAfter(0, tx));
+        dispatch(&mut app, &mut lease, FederationCommand::EventsAfter(0, tx));
         assert!(rx.try_recv().expect("reply delivered").is_empty());
     }
 }
