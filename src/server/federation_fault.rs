@@ -22,6 +22,8 @@
 
 use std::sync::Mutex;
 
+use crate::remote::federation::protocol::FaultReason;
+
 /// The single typed reason a federation tunnel terminated. Fail-fast for v1:
 /// any of these ends the mount. `PeerClosed` is the ordinary clean shutdown;
 /// the rest are faults. The remote-origin reason for an overflow may be
@@ -57,6 +59,39 @@ impl TunnelExit {
     /// Whether this outcome is a clean shutdown rather than a fault.
     pub(crate) fn is_clean(&self) -> bool {
         matches!(self, TunnelExit::PeerClosed)
+    }
+
+    /// The wire mirror of this outcome, for a best-effort control-channel fault
+    /// frame. 1:1 with [`FaultReason`] so the mapping stays total and obvious.
+    pub(crate) fn to_wire(&self) -> FaultReason {
+        match self {
+            TunnelExit::PeerClosed => FaultReason::PeerClosed,
+            TunnelExit::WriterFailed => FaultReason::WriterFailed,
+            TunnelExit::ChildExited => FaultReason::ChildExited,
+            TunnelExit::TaskPanicked => FaultReason::TaskPanicked,
+            TunnelExit::ServerTerminalClosed => FaultReason::ServerTerminalClosed,
+            TunnelExit::Lagged => FaultReason::Lagged,
+            TunnelExit::EgressOverflow => FaultReason::EgressOverflow,
+            TunnelExit::LocalQueueOverflow => FaultReason::LocalQueueOverflow,
+            TunnelExit::GenerationMismatch => FaultReason::GenerationMismatch,
+            TunnelExit::EventGap => FaultReason::EventGap,
+        }
+    }
+
+    /// The local outcome for a fault frame a peer sent us.
+    pub(crate) fn from_wire(reason: FaultReason) -> Self {
+        match reason {
+            FaultReason::PeerClosed => TunnelExit::PeerClosed,
+            FaultReason::WriterFailed => TunnelExit::WriterFailed,
+            FaultReason::ChildExited => TunnelExit::ChildExited,
+            FaultReason::TaskPanicked => TunnelExit::TaskPanicked,
+            FaultReason::ServerTerminalClosed => TunnelExit::ServerTerminalClosed,
+            FaultReason::Lagged => TunnelExit::Lagged,
+            FaultReason::EgressOverflow => TunnelExit::EgressOverflow,
+            FaultReason::LocalQueueOverflow => TunnelExit::LocalQueueOverflow,
+            FaultReason::GenerationMismatch => TunnelExit::GenerationMismatch,
+            FaultReason::EventGap => TunnelExit::EventGap,
+        }
     }
 }
 

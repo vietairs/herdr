@@ -46,7 +46,7 @@ use crate::remote::federation::protocol::codec;
 use crate::remote::federation::protocol::negotiate::{negotiate, AgreedCaps};
 use crate::remote::federation::protocol::{
     AgentStatusMessage, Capability, Channel, EventChannelMessage, EventCursor, EventFrame,
-    FederationMessage, Handshake, HandshakeResponse, MountSnapshot, ScrollbackReplay,
+    FaultMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot, ScrollbackReplay,
     TerminalChannelMessage, FEDERATION_PROTOCOL_VERSION,
 };
 use crate::remote::federation::tee;
@@ -386,6 +386,17 @@ fn run_connection<S: FederationStream>(
         let _ = pump.handle.join();
     }
     let _ = ticker.join();
+    // If a fault (not a clean peer close) ended the connection, best-effort tell
+    // the peer why before the socket closes. It may not arrive if the link is
+    // already broken (e.g. a WriterFailed cause), hence best-effort; enqueued
+    // after the ticker/pumps are joined so nothing races it, before out_tx drops.
+    if let Some(cause) = first_cause.get() {
+        if !cause.is_clean() {
+            let _ = out_tx.send(FederationMessage::Fault(FaultMessage {
+                reason: cause.to_wire(),
+            }));
+        }
+    }
     drop(out_tx);
     let _ = writer.join();
 
@@ -426,6 +437,12 @@ fn reader_loop<S: Read>(
                     server_event_tx,
                     pumps,
                 )?;
+            }
+            Ok(Some(FederationMessage::Fault(fault))) => {
+                // The peer is tearing down and told us why; adopt it as the
+                // first cause (if none is set yet) and end the connection.
+                first_cause.set(TunnelExit::from_wire(fault.reason));
+                return Ok(());
             }
             Ok(Some(_other)) => {
                 // The controller drives only the terminal channel inbound;
