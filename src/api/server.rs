@@ -1007,7 +1007,7 @@ mod tests {
     #[test]
     fn dispatched_request_reports_response_write_completion() {
         let (api_tx, mut api_rx) = mpsc::unbounded_channel();
-        let (mut client, server, _path) = local_stream_pair("api-response-write-complete");
+        let (mut client, server, _path) = local_stream_pair("write-ack");
         client
             .write_all(br#"{"id":"req_write","method":"workspace.list","params":{}}"#)
             .unwrap();
