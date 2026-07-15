@@ -992,7 +992,7 @@
           "key": "ui.sound.agents.maki",
           "type": "enum",
           "default": "\"default\"",
-          "description": "Sound override for detected MastraCode agents.",
+          "description": "Sound override for detected Maki agents.",
           "values": [
             "default",
             "on",
