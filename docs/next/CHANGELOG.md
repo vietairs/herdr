@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Live handoff now preserves installed plugins and no longer lets the next plugin installation overwrite the existing registry. (#893)
+
 ## [0.7.4] - 2026-07-15
 
 ### Added
