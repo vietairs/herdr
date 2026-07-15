@@ -53,6 +53,14 @@ fn pane_graphics_data_fingerprint(data: &[u8]) -> u64 {
     hasher.finish()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PopupPaneState {
+    pub pane_id: PaneId,
+    pub terminal_id: crate::terminal::TerminalId,
+    pub width: Option<crate::popup_size::PopupSize>,
+    pub height: Option<crate::popup_size::PopupSize>,
+}
+
 // ---------------------------------------------------------------------------
 // Selection autoscroll types
 // ---------------------------------------------------------------------------
@@ -1515,6 +1523,8 @@ pub struct AppState {
     pub(crate) pane_graphics_streams: std::collections::HashMap<PaneId, String>,
     /// Monotonic marker for accepted pane graphics mutations.
     pub(crate) pane_graphics_revision: u64,
+    /// Session-modal terminal popup. This is intentionally outside workspace layouts.
+    pub(crate) popup_pane: Option<PopupPaneState>,
     /// Recent plugin action/event command executions.
     pub(crate) plugin_command_logs: Vec<crate::api::schema::PluginCommandLogInfo>,
     pub(crate) next_plugin_command_log_id: u64,
@@ -1608,7 +1618,9 @@ impl AppState {
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> bool {
-        self.mouse_capture || self.focused_pane_requests_mouse_capture_from(terminal_runtimes)
+        self.mouse_capture
+            || self.popup_pane.is_some()
+            || self.focused_pane_requests_mouse_capture_from(terminal_runtimes)
     }
 
     pub fn is_prefix_key(&self, key: crate::input::TerminalKey) -> bool {
@@ -1874,6 +1886,7 @@ impl AppState {
             pane_graphics_layers: std::collections::HashMap::new(),
             pane_graphics_streams: std::collections::HashMap::new(),
             pane_graphics_revision: 0,
+            popup_pane: None,
             plugin_command_logs: Vec::new(),
             next_plugin_command_log_id: 1,
             plugin_commands_in_flight: 0,
@@ -2102,6 +2115,19 @@ impl AppState {
                 &notification.workspace_id,
                 notification.pane_id,
                 "pending agent notification",
+            );
+        }
+        if let Some(popup) = &self.popup_pane {
+            assert!(
+                self.terminals.contains_key(&popup.terminal_id),
+                "popup {:?} references missing terminal {}",
+                popup.pane_id,
+                popup.terminal_id
+            );
+            assert!(
+                !attached_terminal_ids.contains(&popup.terminal_id),
+                "popup terminal {} must not be attached to a tiled pane",
+                popup.terminal_id
             );
         }
         for &pane_id in self.plugin_panes.keys() {

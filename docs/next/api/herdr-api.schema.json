@@ -3052,6 +3052,16 @@
               "default": false,
               "type": "boolean"
             },
+            "height": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PopupSize"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "placement": {
               "anyOf": [
                 {
@@ -3071,6 +3081,16 @@
                 "null"
               ]
             },
+            "width": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/PopupSize"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "workspace_id": {
               "type": [
                 "string",
@@ -3087,6 +3107,7 @@
         "PluginPanePlacement": {
           "enum": [
             "overlay",
+            "popup",
             "split",
             "tab",
             "zoomed"
@@ -3174,6 +3195,21 @@
             "plugin_id"
           ],
           "type": "object"
+        },
+        "PopupSize": {
+          "oneOf": [
+            {
+              "description": "Outer popup size in terminal cells, including the border.",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Outer popup size as a percentage of the terminal area, for example 80%.",
+              "pattern": "^(100|[1-9][0-9]?)%$",
+              "type": "string"
+            }
+          ]
         },
         "ReadFormat": {
           "enum": [
@@ -5019,6 +5055,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "popup.close",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
             }
           },
           "required": [
@@ -7756,6 +7808,16 @@
                 "null"
               ]
             },
+            "height": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PopupSize"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "id": {
               "type": "string"
             },
@@ -7774,6 +7836,16 @@
             },
             "title": {
               "type": "string"
+            },
+            "width": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PopupSize"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -7805,6 +7877,7 @@
         "PluginPanePlacement": {
           "enum": [
             "overlay",
+            "popup",
             "split",
             "tab",
             "zoomed"
@@ -7878,6 +7951,21 @@
             "github"
           ],
           "type": "string"
+        },
+        "PopupSize": {
+          "oneOf": [
+            {
+              "description": "Outer popup size in terminal cells, including the border.",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Outer popup size as a percentage of the terminal area, for example 80%.",
+              "pattern": "^(100|[1-9][0-9]?)%$",
+              "type": "string"
+            }
+          ]
         },
         "ReadFormat": {
           "enum": [
