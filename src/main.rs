@@ -269,8 +269,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Pane apps like lazygit and btop can still receive mouse when they request it.
 # mouse_capture = true
 
-# Copy text selected by mouse drag or double-click.
-# Set false to disable mouse text selection and copying.
+# Automatically copy text selected by mouse drag.
+# Set false to keep drag selection visible without copying; double-click still copies a word.
 # copy_on_select = true
 
 # Host cursor policy: "auto", "native", or "drawn".
