@@ -470,7 +470,9 @@ fn catalog_url() -> String {
 
 fn fetch_text(url: &str) -> Result<String, String> {
     let max_fetch_bytes = MAX_FETCH_BYTES.to_string();
-    let mut child = Command::new("curl")
+    let mut command = Command::new("curl");
+    crate::platform::configure_background_command(&mut command);
+    let mut child = command
         .args([
             "-sfL",
             "--retry",
