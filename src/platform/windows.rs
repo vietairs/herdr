@@ -666,28 +666,58 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use windows_sys::Win32::System::Console::{AllocConsole, FreeConsole, GetConsoleWindow};
+    use windows_sys::Win32::System::Console::{
+        AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
+    };
 
     const CONSOLE_TEST_CHILD_ENV: &str = "HERDR_TEST_CONSOLE_CHILD_MODE";
+    const CONSOLE_TEST_PARENT_PID_ENV: &str = "HERDR_TEST_CONSOLE_PARENT_PID";
+
+    fn console_process_ids() -> Vec<u32> {
+        let mut process_ids = vec![0; 8];
+        loop {
+            let count = unsafe {
+                GetConsoleProcessList(process_ids.as_mut_ptr(), process_ids.len() as u32)
+            } as usize;
+            if count == 0 {
+                return Vec::new();
+            }
+            if count <= process_ids.len() {
+                process_ids.truncate(count);
+                return process_ids;
+            }
+            process_ids.resize(count, 0);
+        }
+    }
 
     #[test]
     fn windows_background_and_server_daemon_commands_do_not_have_consoles() {
         if let Some(mode) = std::env::var_os(CONSOLE_TEST_CHILD_ENV) {
             assert!(
                 unsafe { GetConsoleWindow() }.is_null(),
-                "{} child opened or inherited a console",
+                "{} child opened or inherited a console window",
+                mode.to_string_lossy()
+            );
+            let parent_pid = std::env::var(CONSOLE_TEST_PARENT_PID_ENV)
+                .expect("console test parent pid")
+                .parse::<u32>()
+                .expect("numeric console test parent pid");
+            assert!(
+                !console_process_ids().contains(&parent_pid),
+                "{} child inherited the parent console",
                 mode.to_string_lossy()
             );
             return;
         }
 
-        let allocated_console = if unsafe { GetConsoleWindow() }.is_null() {
+        let allocated_console = if console_process_ids().is_empty() {
             assert_ne!(unsafe { AllocConsole() }, 0, "allocate test console");
             true
         } else {
             false
         };
 
+        let parent_pid = std::process::id().to_string();
         let test_exe = std::env::current_exe().expect("resolve test executable");
         let configurations: [(&str, fn(&mut Command)); 2] = [
             ("background", super::configure_background_command_platform),
@@ -698,6 +728,7 @@ mod tests {
             child
                 .arg("windows_background_and_server_daemon_commands_do_not_have_consoles")
                 .env(CONSOLE_TEST_CHILD_ENV, mode)
+                .env(CONSOLE_TEST_PARENT_PID_ENV, &parent_pid)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -716,6 +747,7 @@ mod tests {
         );
         let status = crate::platform::detached_custom_command_process(&command)
             .env(CONSOLE_TEST_CHILD_ENV, "detached custom command descendant")
+            .env(CONSOLE_TEST_PARENT_PID_ENV, &parent_pid)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
