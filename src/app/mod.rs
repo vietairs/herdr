@@ -4146,42 +4146,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn focused_agent_start_records_previous_pane() {
+    async fn unavailable_agent_start_does_not_mutate_topology() {
         let mut app = test_app();
-        let workspace = Workspace::test_new("agent-start-focus");
+        let workspace = Workspace::test_new("agent-start-target");
         let root = workspace.tabs[0].root_pane;
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
+        let pane_id = app.pane_info(0, root).unwrap().pane_id;
 
         let response = app.handle_api_request(crate::api::schema::Request {
-            id: "req_agent_start_focus".into(),
+            id: "req_agent_start_target".into(),
             method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
                 name: "worker".into(),
-                cwd: None,
-                workspace_id: None,
-                tab_id: None,
-                split: Some(crate::api::schema::SplitDirection::Right),
-                focus: true,
-                argv: vec![exiting_test_command().into()],
-                env: Default::default(),
+                kind: "pi".into(),
+                pane_id,
+                args: Vec::new(),
+                timeout_ms: Some(1_000),
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
-        assert_eq!(response["result"]["type"], "agent_started");
-        assert_ne!(app.state.workspaces[0].focused_pane_id(), Some(root));
-
-        app.state.last_pane();
-
-        assert_eq!(app.state.active, Some(0));
+        assert_eq!(response["error"]["code"], "agent_pane_unavailable");
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+    }
 
-        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
-        for (_terminal_id, runtime) in runtimes {
-            runtime.shutdown();
-        }
+    #[tokio::test]
+    async fn failed_agent_start_input_rolls_back_and_can_retry() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("agent-start-input-failure");
+        let root = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane_id = app.pane_info(0, root).unwrap().pane_id;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_manual_label("shell".into());
+        let (runtime, mut receiver) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+        runtime
+            .try_send_bytes(bytes::Bytes::from_static(b"occupied"))
+            .unwrap();
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        let request = || crate::api::schema::Request {
+            id: "req_agent_start_input".into(),
+            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                name: "worker".into(),
+                kind: "pi".into(),
+                pane_id: pane_id.clone(),
+                args: Vec::new(),
+                timeout_ms: Some(4_000),
+            }),
+        };
+        let response = app.handle_api_request(request());
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], "agent_start_input_failed");
+        assert_eq!(app.state.terminals[&terminal_id].agent_name, None);
+        assert_eq!(
+            app.state.terminals[&terminal_id].manual_label.as_deref(),
+            Some("shell")
+        );
+
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"occupied")
+        );
+        let retry = app.handle_api_request(request());
+        let retry: serde_json::Value = serde_json::from_str(&retry).unwrap();
+        assert_eq!(retry["result"]["type"], "agent_started");
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_name.as_deref(),
+            Some("worker")
+        );
+        let rename = app.handle_api_request(crate::api::schema::Request {
+            id: "req_agent_rename_pending".into(),
+            method: crate::api::schema::Method::AgentRename(
+                crate::api::schema::AgentRenameParams {
+                    target: pane_id,
+                    name: Some("replacement".into()),
+                },
+            ),
+        });
+        let rename: serde_json::Value = serde_json::from_str(&rename).unwrap();
+        assert_eq!(rename["error"]["code"], "agent_launch_pending");
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_name.as_deref(),
+            Some("worker")
+        );
     }
 
     #[test]
