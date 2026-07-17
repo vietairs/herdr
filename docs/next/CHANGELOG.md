@@ -8,7 +8,7 @@
 
 ### Fixed
 - New panes, tabs, layouts, and workspaces using `new_cwd = "follow"` now inherit the foreground process-group leader's working directory instead of an unrelated helper process directory. (#1472)
-- Background update checks, captured plugin commands, and workspace Git probes no longer flash console windows on Windows. (#1468)
+- Noninteractive update, plugin, integration, sound, custom-command, and Git subprocesses no longer flash console windows on Windows. (#1468)
 - Live handoff now preserves installed plugins and no longer lets the next plugin installation overwrite the existing registry. (#893)
 - `herdr wait agent-status` now returns `pane_not_found` promptly when its target pane closes instead of waiting for the full timeout. (#1439)
 

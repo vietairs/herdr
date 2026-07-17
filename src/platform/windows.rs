@@ -671,7 +671,7 @@ mod tests {
     const CONSOLE_TEST_CHILD_ENV: &str = "HERDR_TEST_CONSOLE_CHILD_MODE";
 
     #[test]
-    fn background_and_server_daemon_commands_do_not_have_consoles() {
+    fn windows_background_and_server_daemon_commands_do_not_have_consoles() {
         if let Some(mode) = std::env::var_os(CONSOLE_TEST_CHILD_ENV) {
             assert!(
                 unsafe { GetConsoleWindow() }.is_null(),
@@ -696,7 +696,7 @@ mod tests {
         for (mode, configure) in configurations {
             let mut child = Command::new(&test_exe);
             child
-                .arg("background_and_server_daemon_commands_do_not_have_consoles")
+                .arg("windows_background_and_server_daemon_commands_do_not_have_consoles")
                 .env(CONSOLE_TEST_CHILD_ENV, mode)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -709,6 +709,22 @@ mod tests {
                 "{mode} child opened or inherited a console"
             );
         }
+
+        let command = format!(
+            r#""{}" windows_background_and_server_daemon_commands_do_not_have_consoles"#,
+            test_exe.display()
+        );
+        let status = crate::platform::detached_custom_command_process(&command)
+            .env(CONSOLE_TEST_CHILD_ENV, "detached custom command descendant")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("spawn detached custom command test child");
+        assert!(
+            status.success(),
+            "detached custom command descendant opened or inherited a console"
+        );
 
         if allocated_console {
             unsafe {
