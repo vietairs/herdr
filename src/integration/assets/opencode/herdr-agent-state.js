@@ -62,6 +62,9 @@ function requestOnce(method, params) {
     return Promise.resolve();
   }
 
+  const socketEndpoint =
+    process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
+
   const requestId = `${SOURCE}:${Date.now()}:${Math.floor(Math.random() * 1_000_000)
     .toString()
     .padStart(6, "0")}`;
@@ -78,7 +81,7 @@ function requestOnce(method, params) {
   };
 
   return new Promise((resolve) => {
-    const client = net.createConnection(socketPath, () => {
+    const client = net.createConnection(socketEndpoint, () => {
       client.write(`${JSON.stringify(request)}\n`);
     });
 
