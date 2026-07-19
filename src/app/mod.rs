@@ -6,6 +6,7 @@
 
 pub(crate) mod actions;
 mod agent_resume;
+pub(crate) mod agent_view;
 mod agents;
 mod api;
 mod api_helpers;
@@ -607,6 +608,7 @@ impl App {
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
             agent_panel_sort,
+            agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
             next_agent_state_change_seq: 0,
@@ -3609,6 +3611,12 @@ mod tests {
                 amount: Some(0.05),
             }),
         };
+        let agent_view = crate::api::schema::Request {
+            id: "req_9".into(),
+            method: crate::api::schema::Method::AgentViewClear(
+                crate::api::schema::AgentViewClearParams::default(),
+            ),
+        };
 
         assert!(!crate::api::request_changes_ui(&read_only));
         assert!(!crate::api::request_changes_ui(&worktree_list));
@@ -3618,6 +3626,7 @@ mod tests {
         assert!(crate::api::request_changes_ui(&pane_swap));
         assert!(crate::api::request_changes_ui(&pane_focus_direction));
         assert!(crate::api::request_changes_ui(&pane_resize));
+        assert!(crate::api::request_changes_ui(&agent_view));
     }
 
     #[test]

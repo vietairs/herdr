@@ -1354,6 +1354,283 @@
           ],
           "type": "object"
         },
+        "AgentViewBuiltinField": {
+          "enum": [
+            "status",
+            "workspace_id",
+            "tab_id",
+            "pane_id",
+            "agent",
+            "seen",
+            "state_change_seq"
+          ],
+          "type": "string"
+        },
+        "AgentViewBuiltinSortField": {
+          "enum": [
+            "workspace_order",
+            "tab_order",
+            "pane_order",
+            "attention",
+            "status",
+            "agent",
+            "seen",
+            "state_change_seq"
+          ],
+          "type": "string"
+        },
+        "AgentViewClearParams": {
+          "properties": {
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "AgentViewContext": {
+          "enum": [
+            "current_workspace_id",
+            "current_tab_id"
+          ],
+          "type": "string"
+        },
+        "AgentViewField": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/request/$defs/AgentViewBuiltinField"
+            },
+            {
+              "properties": {
+                "token": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "token"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentViewFilter": {
+          "oneOf": [
+            {
+              "properties": {
+                "filters": {
+                  "items": {
+                    "$ref": "#/schemas/request/$defs/AgentViewFilter"
+                  },
+                  "type": "array"
+                },
+                "op": {
+                  "const": "all",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "filters"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "filters": {
+                  "items": {
+                    "$ref": "#/schemas/request/$defs/AgentViewFilter"
+                  },
+                  "type": "array"
+                },
+                "op": {
+                  "const": "any",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "filters"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "filter": {
+                  "$ref": "#/schemas/request/$defs/AgentViewFilter"
+                },
+                "op": {
+                  "const": "not",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "filter"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "field": {
+                  "$ref": "#/schemas/request/$defs/AgentViewField"
+                },
+                "op": {
+                  "const": "eq",
+                  "type": "string"
+                },
+                "value": {
+                  "$ref": "#/schemas/request/$defs/AgentViewValue"
+                }
+              },
+              "required": [
+                "op",
+                "field",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "field": {
+                  "$ref": "#/schemas/request/$defs/AgentViewField"
+                },
+                "op": {
+                  "const": "in",
+                  "type": "string"
+                },
+                "values": {
+                  "items": {
+                    "$ref": "#/schemas/request/$defs/AgentViewValue"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "op",
+                "field",
+                "values"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "field": {
+                  "$ref": "#/schemas/request/$defs/AgentViewField"
+                },
+                "op": {
+                  "const": "exists",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "field"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentViewSetParams": {
+          "properties": {
+            "filter": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentViewFilter"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sort": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentViewSort"
+              },
+              "type": "array"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        },
+        "AgentViewSort": {
+          "properties": {
+            "field": {
+              "$ref": "#/schemas/request/$defs/AgentViewSortField"
+            },
+            "order": {
+              "$ref": "#/schemas/request/$defs/AgentViewSortOrder",
+              "default": "asc"
+            }
+          },
+          "required": [
+            "field"
+          ],
+          "type": "object"
+        },
+        "AgentViewSortField": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/request/$defs/AgentViewBuiltinSortField"
+            },
+            {
+              "properties": {
+                "token": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "token"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentViewSortOrder": {
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "type": "string"
+        },
+        "AgentViewValue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "properties": {
+                "context": {
+                  "$ref": "#/schemas/request/$defs/AgentViewContext"
+                }
+              },
+              "required": [
+                "context"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "AgentWaitParams": {
           "properties": {
             "target": {
@@ -4601,6 +4878,38 @@
         {
           "properties": {
             "method": {
+              "const": "agent.view.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentViewSetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.view.clear",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentViewClearParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.focus",
               "type": "string"
             },
@@ -6632,6 +6941,12 @@
                 "kind": "local"
               }
             },
+            "startup": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginManifestStartup"
+              },
+              "type": "array"
+            },
             "version": {
               "type": "string"
             },
@@ -7975,6 +8290,29 @@
           ],
           "type": "object"
         },
+        "PluginManifestStartup": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
         "PluginPaneInfo": {
           "properties": {
             "entrypoint": {
@@ -8446,6 +8784,34 @@
               "required": [
                 "type",
                 "agents"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "active": {
+                  "type": "boolean"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "agent_view",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "active"
               ],
               "type": "object"
             },

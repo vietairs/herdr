@@ -296,6 +296,49 @@ fn client_window_title_requests_round_trip() {
 }
 
 #[test]
+fn agent_view_requests_round_trip() {
+    let set_json = serde_json::json!({
+        "id": "view-set",
+        "method": "agent.view.set",
+        "params": {
+            "source": "example.views",
+            "label": "current + attention",
+            "filter": {
+                "op": "any",
+                "filters": [
+                    {
+                        "op": "eq",
+                        "field": "workspace_id",
+                        "value": {"context": "current_workspace_id"}
+                    },
+                    {
+                        "op": "in",
+                        "field": "status",
+                        "values": ["blocked", "done"]
+                    }
+                ]
+            },
+            "sort": [
+                {"field": "attention", "order": "desc"},
+                {"field": "state_change_seq", "order": "desc"}
+            ]
+        }
+    });
+    let request: Request = serde_json::from_value(set_json.clone()).unwrap();
+    assert!(matches!(request.method, Method::AgentViewSet(_)));
+    assert_eq!(serde_json::to_value(request).unwrap(), set_json);
+
+    let clear_json = serde_json::json!({
+        "id": "view-clear",
+        "method": "agent.view.clear",
+        "params": {"source": "example.views"}
+    });
+    let request: Request = serde_json::from_value(clear_json.clone()).unwrap();
+    assert!(matches!(request.method, Method::AgentViewClear(_)));
+    assert_eq!(serde_json::to_value(request).unwrap(), clear_json);
+}
+
+#[test]
 fn unknown_method_is_rejected() {
     let json = r#"{"id":"req_1","method":"nope","params":{}}"#;
     let err = serde_json::from_str::<Request>(json)
@@ -856,6 +899,7 @@ fn plugin_link_list_unlink_round_trip() {
             platforms: None,
             command: vec!["bun".into(), "install".into()],
         }],
+        startup: vec![],
         actions: vec![PluginManifestAction {
             id: "bootstrap".into(),
             title: "Bootstrap worktree".into(),
