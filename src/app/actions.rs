@@ -14,6 +14,7 @@ use crate::selection::Selection;
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
 use crate::workspace::WorkspaceGitStatus;
 
+use super::api_helpers::pane_agent_status;
 use super::state::{
     navigator_display_index_of_row, navigator_display_lines, navigator_first_row_at_or_after,
     text_matches_query, AgentNotificationDelivery, AppState, Mode, NavigatorRow,
@@ -245,6 +246,9 @@ pub struct PaneStateUpdate {
     pub state: AgentState,
     pub seen: bool,
     pub presentation: crate::terminal::EffectivePresentation,
+    pub agent_name_changed: bool,
+    pub agent_released: bool,
+    pub agent_release_status: Option<crate::api::schema::AgentStatus>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,6 +1045,9 @@ impl AppState {
                     state: change.state,
                     seen,
                     presentation: change.presentation.clone(),
+                    agent_name_changed: false,
+                    agent_released: false,
+                    agent_release_status: None,
                 };
                 Some(update)
             })
@@ -2677,7 +2684,7 @@ impl AppState {
                 observed_at,
             } => self
                 .update_terminal_state(pane_id, |terminal| {
-                    let mutation = terminal.set_detected_state_with_screen_signals_at(
+                    Some(terminal.set_detected_state_with_screen_signals_at(
                         agent,
                         state,
                         visible_blocker,
@@ -2685,11 +2692,7 @@ impl AppState {
                         visible_working,
                         process_exited,
                         observed_at,
-                    );
-                    if process_exited {
-                        terminal.reconcile_managed_agent_at(observed_at, true);
-                    }
-                    Some(mutation)
+                    ))
                 })
                 .into_iter()
                 .collect(),
@@ -2851,16 +2854,27 @@ impl AppState {
             .attached_terminal_id
             .clone();
         let previous_seen = self.workspaces[ws_idx].pane_state(pane_id)?.seen;
-        let (mutation, managed_changed) = {
+        let now = Instant::now();
+        let (mutation, managed_changed, agent_name_changed, unchanged_change) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
+            let previous_agent_name = terminal.agent_name.clone();
             let mutation = update(terminal)?;
-            let managed_changed = terminal.reconcile_managed_agent_at(Instant::now(), false);
-            (mutation, managed_changed)
+            let managed_changed = terminal.reconcile_managed_agent_at(now, false);
+            let agent_name_changed = terminal.agent_name != previous_agent_name;
+            let unchanged_change = (mutation.agent_released || agent_name_changed)
+                .then(|| terminal.unchanged_effective_state_change_at(now));
+            (
+                mutation,
+                managed_changed,
+                agent_name_changed,
+                unchanged_change,
+            )
         };
-        if mutation.session_ref_changed || managed_changed {
+        if mutation.session_ref_changed || managed_changed || agent_name_changed {
             self.mark_session_dirty();
         }
-        let change = mutation.effective_state_change?;
+        let agent_released = mutation.agent_released;
+        let change = mutation.effective_state_change.or(unchanged_change)?;
         if change.previous_state != change.state {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
@@ -2881,6 +2895,9 @@ impl AppState {
             state: change.state,
             seen,
             presentation: change.presentation.clone(),
+            agent_name_changed,
+            agent_released,
+            agent_release_status: agent_released.then(|| pane_agent_status(change.state, seen)),
         };
         Some(update)
     }
@@ -2924,7 +2941,7 @@ impl AppState {
         pane_id: PaneId,
     ) -> Option<PaneStateUpdate> {
         let observed_at = std::time::Instant::now();
-        self.update_terminal_state(pane_id, |terminal| {
+        let update = self.update_terminal_state(pane_id, |terminal| {
             let agent = terminal.effective_known_agent().or(terminal.detected_agent);
             if agent.is_none() && !terminal.full_lifecycle_hook_authority_active() {
                 return None;
@@ -2938,7 +2955,8 @@ impl AppState {
                 true,
                 observed_at,
             ))
-        })
+        })?;
+        update.agent_released.then_some(update)
     }
 
     fn apply_pane_state_change(
@@ -5063,6 +5081,32 @@ mod tests {
     }
 
     #[test]
+    fn releasing_an_agent_alias_marks_the_session_dirty() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0]
+            .pane_state(pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        terminal.set_agent_name("reviewer".into());
+        state.session_dirty = false;
+
+        state.handle_app_event(AppEvent::HookAgentReleased {
+            pane_id,
+            source: "herdr:pi".into(),
+            agent_label: "pi".into(),
+            known_agent: Some(Agent::Pi),
+            seq: Some(1),
+        });
+
+        assert!(state.terminals[&terminal_id].agent_name.is_none());
+        assert!(state.session_dirty);
+    }
+
+    #[test]
     fn terminal_cwd_report_updates_terminal_cwd_and_marks_session_dirty() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
@@ -5470,6 +5514,11 @@ mod tests {
         assert_eq!(update.state, AgentState::Idle);
         assert_eq!(update.agent_label.as_deref(), Some("pi"));
         assert_eq!(update.known_agent, Some(Agent::Pi));
+        assert!(update.agent_released);
+        assert_eq!(
+            update.agent_release_status,
+            Some(crate::api::schema::AgentStatus::Done)
+        );
         assert!(matches!(
             state.toast.as_ref().map(|toast| toast.kind),
             Some(ToastKind::Finished)

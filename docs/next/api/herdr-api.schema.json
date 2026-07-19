@@ -597,8 +597,21 @@
                     "null"
                   ]
                 },
+                "final_status": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/event/$defs/AgentStatus"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "pane_id": {
                   "type": "string"
+                },
+                "released": {
+                  "type": "boolean"
                 },
                 "type": {
                   "const": "pane_agent_detected",
@@ -1183,12 +1196,41 @@
             },
             "text": {
               "type": "string"
+            },
+            "wait": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentPromptWaitOptions"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "target",
             "text"
           ],
+          "type": "object"
+        },
+        "AgentPromptWaitOptions": {
+          "properties": {
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "until": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentStatus"
+              },
+              "type": "array"
+            }
+          },
           "type": "object"
         },
         "AgentReadParams": {
@@ -1239,18 +1281,21 @@
           ],
           "type": "object"
         },
-        "AgentSendParams": {
+        "AgentSendKeysParams": {
           "properties": {
-            "target": {
-              "type": "string"
+            "keys": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
-            "text": {
+            "target": {
               "type": "string"
             }
           },
           "required": [
             "target",
-            "text"
+            "keys"
           ],
           "type": "object"
         },
@@ -1302,6 +1347,31 @@
           "properties": {
             "target": {
               "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
+        "AgentWaitParams": {
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "until": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentStatus"
+              },
+              "type": "array"
             }
           },
           "required": [
@@ -4499,11 +4569,11 @@
         {
           "properties": {
             "method": {
-              "const": "agent.send",
+              "const": "agent.send_keys",
               "type": "string"
             },
             "params": {
-              "$ref": "#/schemas/request/$defs/AgentSendParams"
+              "$ref": "#/schemas/request/$defs/AgentSendKeysParams"
             }
           },
           "required": [
@@ -4568,6 +4638,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentPromptParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.wait",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentWaitParams"
             }
           },
           "required": [
@@ -6332,8 +6418,21 @@
                     "null"
                   ]
                 },
+                "final_status": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AgentStatus"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "pane_id": {
                   "type": "string"
+                },
+                "released": {
+                  "type": "boolean"
                 },
                 "type": {
                   "const": "pane_agent_detected",
@@ -8320,11 +8419,6 @@
                 "agent": {
                   "$ref": "#/schemas/success_response/$defs/AgentInfo"
                 },
-                "baseline_state_change_seq": {
-                  "format": "uint64",
-                  "minimum": 0,
-                  "type": "integer"
-                },
                 "type": {
                   "const": "agent_prompted",
                   "type": "string"
@@ -8332,8 +8426,7 @@
               },
               "required": [
                 "type",
-                "agent",
-                "baseline_state_change_seq"
+                "agent"
               ],
               "type": "object"
             },

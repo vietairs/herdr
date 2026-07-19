@@ -103,7 +103,6 @@ pub enum ResponseResult {
     },
     AgentPrompted {
         agent: AgentInfo,
-        baseline_state_change_seq: u64,
     },
     AgentList {
         agents: Vec<AgentInfo>,

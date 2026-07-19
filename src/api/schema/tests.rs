@@ -86,6 +86,7 @@ fn agent_start_and_prompt_requests_round_trip() {
         method: Method::AgentPrompt(AgentPromptParams {
             target: "reviewer".into(),
             text: "review this".into(),
+            wait: None,
         }),
     };
     let prompt_json = serde_json::to_value(&prompt).unwrap();
@@ -93,6 +94,31 @@ fn agent_start_and_prompt_requests_round_trip() {
     assert_eq!(
         serde_json::from_value::<Request>(prompt_json).unwrap(),
         prompt
+    );
+
+    let prompt_and_wait = Request {
+        id: "prompt-and-wait".into(),
+        method: Method::AgentPrompt(AgentPromptParams {
+            target: "reviewer".into(),
+            text: "review this".into(),
+            wait: Some(AgentPromptWaitOptions {
+                until: vec![AgentStatus::Idle, AgentStatus::Done],
+                timeout_ms: Some(120_000),
+            }),
+        }),
+    };
+    let prompt_and_wait_json = serde_json::to_value(&prompt_and_wait).unwrap();
+    assert_eq!(
+        prompt_and_wait_json["params"]["wait"]["until"],
+        serde_json::json!(["idle", "done"])
+    );
+    assert_eq!(
+        prompt_and_wait_json["params"]["wait"]["timeout_ms"],
+        120_000
+    );
+    assert_eq!(
+        serde_json::from_value::<Request>(prompt_and_wait_json).unwrap(),
+        prompt_and_wait
     );
 }
 

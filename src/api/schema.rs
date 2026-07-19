@@ -109,8 +109,8 @@ pub enum Method {
     AgentRead(AgentReadParams),
     #[serde(rename = "agent.explain")]
     AgentExplain(AgentTarget),
-    #[serde(rename = "agent.send")]
-    AgentSend(AgentSendParams),
+    #[serde(rename = "agent.send_keys")]
+    AgentSendKeys(AgentSendKeysParams),
     #[serde(rename = "agent.rename")]
     AgentRename(AgentRenameParams),
     #[serde(rename = "agent.focus")]
@@ -119,6 +119,8 @@ pub enum Method {
     AgentStart(AgentStartParams),
     #[serde(rename = "agent.prompt")]
     AgentPrompt(AgentPromptParams),
+    #[serde(rename = "agent.wait")]
+    AgentWait(AgentWaitParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]
