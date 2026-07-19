@@ -435,7 +435,9 @@ pub fn render_with_runtime_registry(
         Mode::Prefix => render_prefix_overlay(app, frame, terminal_area),
         Mode::Copy => render_copy_mode_overlay(app, frame, terminal_area),
         Mode::Resize => render_resize_overlay(app, frame, terminal_area),
-        Mode::ConfirmClose => render_confirm_close_overlay(app, frame, terminal_area),
+        Mode::ConfirmClose => {
+            render_confirm_close_overlay(app, terminal_runtimes, frame, terminal_area)
+        }
         Mode::ContextMenu => {
             render_context_menu(app, frame);
         }
