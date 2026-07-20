@@ -1357,3 +1357,25 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
   DONE_WITH_CONCERNS. auto-decisions D8.
 - Reversibility: all fixes additive/isolated; F3 documented for P9.3. Live-attach still has no automated
   coverage (manual two-machine smoke, D6) — the ONE gate before a human un-drafts + merges PR #1.
+
+## 2026-07-16 16:50 — VM100 orca update + serve enable (ops task)
+
+**What:** Updated VM100 Orca AppImage 1.4.141 -> 1.4.143; killed an orphaned `orca serve` tree holding the Electron single-instance profile lock; enabled `orca-xvfb`; restarted `orca-serve`. Proven reachable end-to-end from Mac via saved env `APPN-LTU-VM-100`.
+**Why:** Plan report assumed serve merely needed enabling. False: it was already `enabled` but exited on every start with "Another Orca instance is already running for this userData profile". The orphan (PPID=1, from an interactive debug one-liner) squatted the lock while NOT serving (`runtimeState: stale_bootstrap`).
+**Evidence:** `runtimeId` seen locally on VM100 == `runtimeId` returned remotely via pairing env -> remote traffic lands on the new 1.4.143 process. `nc 131.172.248.161:45511` succeeds from Mac.
+**Reversibility:** Full rollback = `/opt/orca/orca-linux.AppImage.bak-1.4.141` (kept on VM); `sudo systemctl disable orca-xvfb` reverts the enable.
+
+**Plan corrections (report was wrong on 4 points):**
+1. Download URL `github.com/orca-sh/orca` is fabricated -> 404. Real feed: `stablyai/orca` (from local `Orca.app/Contents/Resources/app-update.yml`). Asset `orca-linux.AppImage`, verified via sha512 in `latest-linux.yml`.
+2. `orca-serve` was already enabled; blocker was the profile lock, not the unit.
+3. `orca-xvfb` was `active` but `disabled` -> would NOT survive reboot despite `orca-serve` depending on it. Now enabled.
+4. `--port 6768` in the unit is a no-op: ws-transport binds `0.0.0.0:45511`. Saved env already points at 45511, which is why the existing pairing code keeps working.
+
+## 2026-07-16 17:00 — VM105 orca update (ops task, continuation)
+
+**What:** Updated VM105 Orca 1.4.141 -> 1.4.143. Unlike VM100, `orca-serve` was already healthy (active/enabled, genuinely serving on :33155, no lock-squat). Downloaded+verified on Mac (gh authed), scp'd to VM105 (no gh there), re-verified sha512 post-transfer, clean stop/swap/start.
+**Why:** VM105 has no `gh` CLI and the release repo (stablyai/orca) is private -> can't curl it directly on VM105. Reused the already-verified binary from the Mac instead of installing new tooling on the VM (YAGNI).
+**Evidence:** sha512 matched pre- and post-scp. `runtimeId` returned via `orca status --environment APPN-LTU-VM-105` == local VM105 runtimeId. `orca repo list --environment APPN-LTU-VM-105` returned real repos (herdr, APPNltu_smartForm) — stronger proof than VM100's empty list. Pairing banner (unlike VM100) DID appear directly in journalctl -- runbook's "banner never reaches journal" claim doesn't hold universally, softened in report.
+**Reversibility:** `/opt/orca/orca-linux.AppImage.bak-1.4.141` kept on VM105 for rollback.
+
+**Note:** VM105 has no `orca-xvfb` unit at all (unlike VM100) — its `orca-serve` unit has no DISPLAY env var and doesn't need one; left untouched, don't invent a unit that isn't broken.
