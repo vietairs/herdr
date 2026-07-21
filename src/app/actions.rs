@@ -2729,6 +2729,10 @@ impl AppState {
             AppEvent::FederationMountFailed { .. } => Vec::new(),
             #[cfg(unix)]
             AppEvent::FederationMountEnded { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationSplitPaneReady(_) => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationSplitPaneFailed { .. } => Vec::new(),
         }
     }
 

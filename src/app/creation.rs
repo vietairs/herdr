@@ -720,7 +720,7 @@ impl App {
             scrollback_limit_bytes,
             host_terminal_theme,
             None,
-            raw_terminal_id,
+            raw_terminal_id.clone(),
             mount.mount_generation,
             out_tx.clone(),
             output_rx,
@@ -729,6 +729,14 @@ impl App {
             self.render_notify.clone(),
             self.render_dirty.clone(),
         )?;
+        // P6/P8/P9 wiring: register this pane's relayed-agent-status sink
+        // under the same raw terminal id `router` uses for output routing,
+        // so `drive_mount_channel`'s `AgentStatus` handling can forward the
+        // remote's real detection status into this pane's own detection
+        // loop (`PaneRuntime::relayed_agent_status_sender`).
+        if let Some(sender) = runtime.relayed_agent_status_sender() {
+            router.register_agent_status_sender(raw_terminal_id, sender);
+        }
         let mut terminal = TerminalState::new(
             terminal_id.clone(),
             pane_info
@@ -741,6 +749,182 @@ impl App {
         let pane_state = PaneState::new(terminal_id);
         Ok((pane_id, terminal, runtime, pane_state))
     }
+
+    /// Remembers the local layout context a `SplitPaneRequest` was minted
+    /// for, keyed by its `request_id`
+    /// (`app/api/panes.rs::dispatch_remote_pane_split`), so
+    /// `handle_federation_split_pane_ready`/`_failed` can splice the eventual
+    /// response into the right tab once it arrives (fire-and-forget: the
+    /// mint site cannot await it inline, see that function's own doc
+    /// comment).
+    pub(crate) fn register_pending_remote_split(
+        &mut self,
+        request_id: u64,
+        pending: PendingRemoteSplit,
+    ) {
+        self.pending_remote_splits.insert(request_id, pending);
+    }
+
+    fn take_pending_remote_split(&mut self, request_id: u64) -> Option<PendingRemoteSplit> {
+        self.pending_remote_splits.remove(&request_id)
+    }
+
+    /// Drops every pending remote-split registration targeting one of the
+    /// given (closing) workspace ids. Call this from
+    /// `handle_federation_mount_ended` before those workspaces are removed,
+    /// so a late/never-arriving `SplitPaneResponse` for a torn-down mount
+    /// can no longer splice its pane into whatever workspace later reuses
+    /// the same index, and the entry doesn't leak in the map forever.
+    pub(crate) fn purge_pending_remote_splits_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        self.pending_remote_splits
+            .retain(|_, pending| !workspace_ids.contains(&pending.workspace_id));
+    }
+
+    /// `AppEvent::FederationSplitPaneReady` handler: the drive task already
+    /// built the new pane's real `TerminalRuntime` (it owns the mount's
+    /// `TerminalChannelRouter`/out-tx, which this handler does not); this
+    /// splices it into the requesting pane's own tab layout, the same
+    /// `insert_existing_pane` primitive `materialize_federation_mount` uses
+    /// for mount-time split panes.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_split_pane_ready(
+        &mut self,
+        ready: crate::events::FederationSplitPaneReady,
+    ) {
+        let crate::events::FederationSplitPaneReady {
+            request_id,
+            pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        } = ready;
+
+        let Some(pending) = self.take_pending_remote_split(request_id) else {
+            tracing::warn!(
+                request_id,
+                "remote split materialized a pane for an unknown/stale request; dropping it"
+            );
+            return;
+        };
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == pending.workspace_id)
+        else {
+            tracing::warn!(
+                request_id,
+                workspace_id = %pending.workspace_id,
+                "remote split materialized a pane but its workspace no longer exists"
+            );
+            return;
+        };
+        let ws = &mut self.state.workspaces[ws_idx];
+        let Some(tab_idx) = ws.find_tab_index_for_pane(pending.target_pane_id) else {
+            tracing::warn!(
+                request_id,
+                "remote split materialized a pane but its target pane no longer exists"
+            );
+            return;
+        };
+
+        let moved = crate::workspace::MovedPane { pane_id, pane_state };
+        if ws.tabs[tab_idx]
+            .insert_existing_pane(pending.target_pane_id, moved, pending.direction, pending.ratio)
+            .is_err()
+        {
+            tracing::warn!(
+                request_id,
+                "remote split materialized a pane but it could not be inserted into its \
+                 target tab's layout"
+            );
+            return;
+        }
+
+        self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        self.state.terminals.insert(terminal_id, terminal);
+        self.state
+            .remove_alias_shadowed_by_new_pane(pane_id);
+        self.schedule_session_save();
+
+        if pending.focus {
+            let previous_focus = self.state.current_pane_focus_target();
+            self.state.switch_workspace_tab(ws_idx, tab_idx);
+            self.state
+                .record_pane_focus_change(previous_focus, ws_idx, pane_id);
+            self.state.settle_terminal_mode_after_focus();
+        }
+
+        if let Some(pane) = self.pane_info(ws_idx, pane_id) {
+            self.emit_event(EventEnvelope {
+                event: EventKind::PaneCreated,
+                data: EventData::PaneCreated { pane },
+            });
+        }
+        self.emit_layout_updated_event(ws_idx, tab_idx);
+
+        self.render_dirty.store(true, std::sync::atomic::Ordering::Release);
+        self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationSplitPaneFailed` handler: the remote host
+    /// rejected (or the mount could not carry) an earlier split request —
+    /// drop the pending context and surface it exactly like a failed local
+    /// split, via the same toast mechanism `handle_federation_mount_failed`
+    /// uses.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_split_pane_failed(&mut self, request_id: u64, reason: String) {
+        self.take_pending_remote_split(request_id);
+        tracing::warn!(request_id, %reason, "remote split failed");
+        match self.state.toast_config.delivery {
+            crate::config::ToastDelivery::Herdr => {
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: super::ToastKind::NeedsAttention,
+                    title: "remote split failed".to_string(),
+                    context: reason,
+                    position: None,
+                    target: None,
+                });
+            }
+            crate::config::ToastDelivery::Terminal | crate::config::ToastDelivery::System
+                if self.local_terminal_notifications =>
+            {
+                let notify = match self.state.toast_config.delivery {
+                    crate::config::ToastDelivery::Terminal => {
+                        crate::terminal_notify::show_notification
+                    }
+                    crate::config::ToastDelivery::System => {
+                        crate::platform::show_desktop_notification
+                    }
+                    _ => unreachable!("toast delivery was matched above"),
+                };
+                let _ = notify("remote split failed", Some(&reason));
+            }
+            _ => {}
+        }
+        self.render_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_notify.notify_one();
+    }
+}
+
+/// Local layout context a `SplitPaneRequest` was minted from, remembered
+/// until its `SplitPaneResponse` arrives (or the process ends). See
+/// `App::register_pending_remote_split`/`handle_federation_split_pane_ready`.
+pub(crate) struct PendingRemoteSplit {
+    /// Stable workspace id (`Workspace::id`), not a `Vec` index — indices
+    /// shift when workspaces close, so a raw `usize` here could splice a
+    /// late/stale response into an unrelated workspace that later occupies
+    /// the same slot (see `App::purge_pending_remote_splits_for_workspaces`).
+    pub(crate) workspace_id: String,
+    pub(crate) target_pane_id: PaneId,
+    pub(crate) direction: ratatui::layout::Direction,
+    pub(crate) ratio: f32,
+    pub(crate) focus: bool,
 }
 
 fn terminal_agent_session_info(

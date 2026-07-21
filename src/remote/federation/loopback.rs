@@ -194,6 +194,34 @@ impl FederationHost for FixtureHost {
             .map(|(id, status)| (id.clone(), *status))
             .collect()
     }
+
+    /// Fixture-only split: proves the request/response roundtrip (protocol
+    /// scaffolding, tested by `serve.rs`'s tests) without a real
+    /// `AppState`-backed workspace to split against. Fails for an unknown
+    /// `target_pane_id`; otherwise mints a fresh sibling terminal id and
+    /// registers it exactly like `with_terminal` would.
+    fn split_pane(
+        &self,
+        target_pane_id: &str,
+        _direction: super::protocol::SplitDirection,
+        _ratio: Option<f32>,
+        _focus: bool,
+    ) -> Result<(String, String), String> {
+        let mut terminals = self.terminals.lock().unwrap();
+        if !terminals.contains_key(target_pane_id) {
+            return Err(format!("unknown target pane {target_pane_id}"));
+        }
+        let new_id = format!("{target_pane_id}-split-{}", uuid_like());
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        terminals.insert(
+            new_id.clone(),
+            FixtureTerminal {
+                runtime,
+                scrollback: Vec::new(),
+            },
+        );
+        Ok((new_id.clone(), new_id))
+    }
 }
 
 /// Runs `serve::run` against `host` over an in-memory duplex; returns the
@@ -563,6 +591,95 @@ mod tests {
         .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(host.last_resize_for("term_1"), Some((100, 40)));
+
+        drop(writer);
+        drop(reader);
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+    }
+
+    // Remote-split protocol scaffolding (plans/260721-2353-federation-
+    // agents-sidebar-remote-detection debug report): a `SplitPaneRequest`
+    // for a known pane produces a `SplitPaneResponse::Created` naming a new
+    // pane/terminal id; an unknown pane produces `Failed` instead of a
+    // silent local fallback.
+    #[tokio::test]
+    async fn split_pane_request_for_a_known_pane_yields_a_created_response() {
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let host = Arc::new(FixtureHost::new().with_terminal("term_1", runtime, Vec::new()));
+        let (mut reader, mut writer, server_handle, _hs, _mount) =
+            connect_and_mount(host.clone()).await;
+
+        serve::write_frame(
+            &mut writer,
+            &FederationMessage::SplitPaneRequest(
+                crate::remote::federation::protocol::SplitPaneRequest {
+                    request_id: 1,
+                    target_pane_id: "term_1".to_string(),
+                    direction: crate::remote::federation::protocol::SplitDirection::Right,
+                    ratio: None,
+                    focus: true,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let response = tokio::time::timeout(Duration::from_millis(500), serve::read_frame(&mut reader))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        match response {
+            FederationMessage::SplitPaneResponse(
+                crate::remote::federation::protocol::SplitPaneResponse::Created {
+                    request_id,
+                    new_pane_id,
+                    ..
+                },
+            ) => {
+                assert_eq!(request_id, 1);
+                assert_ne!(new_pane_id, "term_1");
+            }
+            other => panic!("expected SplitPaneResponse::Created, got {other:?}"),
+        }
+
+        drop(writer);
+        drop(reader);
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+    }
+
+    #[tokio::test]
+    async fn split_pane_request_for_an_unknown_pane_yields_a_failed_response() {
+        let host = Arc::new(FixtureHost::new());
+        let (mut reader, mut writer, server_handle, _hs, _mount) =
+            connect_and_mount(host.clone()).await;
+
+        serve::write_frame(
+            &mut writer,
+            &FederationMessage::SplitPaneRequest(
+                crate::remote::federation::protocol::SplitPaneRequest {
+                    request_id: 2,
+                    target_pane_id: "does_not_exist".to_string(),
+                    direction: crate::remote::federation::protocol::SplitDirection::Down,
+                    ratio: None,
+                    focus: false,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let response = tokio::time::timeout(Duration::from_millis(500), serve::read_frame(&mut reader))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response,
+            FederationMessage::SplitPaneResponse(
+                crate::remote::federation::protocol::SplitPaneResponse::Failed { request_id: 2, .. }
+            )
+        ));
 
         drop(writer);
         drop(reader);

@@ -180,6 +180,47 @@ pub enum AppEvent {
         target: String,
         reason: String,
     },
+    /// A live mount's drive task (`remote::federation::client::
+    /// drive_mount_channel`) finished materializing a locally-spawned
+    /// `TerminalRuntime` for a remote host's `SplitPaneResponse::Created` —
+    /// everything `App::handle_federation_split_pane_ready`
+    /// (`app/creation.rs`) needs to splice the new pane into the requesting
+    /// pane's own tab layout, without the drive task itself ever touching
+    /// `&mut App`.
+    #[cfg(unix)]
+    FederationSplitPaneReady(Box<FederationSplitPaneReady>),
+    /// The remote host rejected (or the local mount could not honor) an
+    /// earlier `SplitPaneRequest`. Carries the same `request_id` so the
+    /// handler can drop the matching pending-split context.
+    #[cfg(unix)]
+    FederationSplitPaneFailed { request_id: u64, reason: String },
+}
+
+/// Payload for [`AppEvent::FederationSplitPaneReady`] — the fully-built local
+/// counterpart of a remote-created pane, assembled by the mount's own drive
+/// task (which owns the `TerminalChannelRouter`/mount out-tx a
+/// `TerminalRuntime::spawn_remote` call needs) and handed back to `App` for
+/// layout insertion.
+#[cfg(unix)]
+pub struct FederationSplitPaneReady {
+    pub request_id: u64,
+    pub pane_id: crate::layout::PaneId,
+    pub terminal_id: crate::terminal::TerminalId,
+    pub terminal: crate::terminal::TerminalState,
+    pub runtime: crate::terminal::TerminalRuntime,
+    pub pane_state: crate::pane::PaneState,
+}
+
+// `TerminalRuntime`/`TerminalState` don't derive `Debug`, matching
+// `FederationMountReady`'s existing precedent above.
+#[cfg(unix)]
+impl std::fmt::Debug for FederationSplitPaneReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FederationSplitPaneReady")
+            .field("request_id", &self.request_id)
+            .field("pane_id", &self.pane_id)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Payload for [`AppEvent::FederationMountReady`] — everything
