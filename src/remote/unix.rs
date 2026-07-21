@@ -530,7 +530,18 @@ pub(crate) async fn dial_federation(
     ssh_options: Option<&ManagedSshOptions>,
 ) -> Result<LiveTunnel, FederationMountFailure> {
     let mut command = tokio::process::Command::new("ssh");
-    apply_managed_ssh_options_tokio(&mut command, ssh_options);
+    // The tunnel must NOT join the herdr-managed control master: when
+    // provisioning ends, `RemoteSsh`'s Drop runs `ssh -O exit`, which tears
+    // down every session multiplexed through that master — including a live
+    // tunnel. Reuse the managed config for its keepalive settings, but force
+    // a direct, mux-independent connection.
+    if let Some(options) = ssh_options {
+        command
+            .arg("-F")
+            .arg(&options.config_path)
+            .arg("-S")
+            .arg("none");
+    }
     command
         .arg("-T")
         .arg(target)
@@ -688,7 +699,9 @@ pub(crate) async fn prepare_and_mount_federation_target(
         .manage_ssh_config;
 
     let prep_target = target.clone();
-    let (remote_herdr, ssh_options) = tokio::task::spawn_blocking(move || -> io::Result<_> {
+    // `remote_ssh` must stay alive across the dial: dropping it deletes the
+    // managed ssh config dir, and the dial's `ssh -F/-S` flags point into it.
+    let (remote_ssh, remote_herdr) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         let remote_ssh = RemoteSsh::new(prep_target, manage_ssh_config);
         let prepared_remote = prepare_remote_herdr(&remote_ssh, false)?;
         ensure_remote_server_ready(
@@ -698,7 +711,7 @@ pub(crate) async fn prepare_and_mount_federation_target(
             prepared_remote.stop_after_install_approved,
             false,
         )?;
-        Ok((prepared_remote.remote_herdr, remote_ssh.options().cloned()))
+        Ok((remote_ssh, prepared_remote.remote_herdr))
     })
     .await
     .map_err(|err| io::Error::other(format!("remote preparation task failed: {err}")))??;
@@ -707,7 +720,7 @@ pub(crate) async fn prepare_and_mount_federation_target(
         &target,
         &remote_herdr,
         &session_name,
-        ssh_options.as_ref(),
+        remote_ssh.options(),
     )
     .await
 }
