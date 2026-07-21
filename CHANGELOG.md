@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.7.5] - 2026-07-21
+
 ### Breaking Changes
 - Installed and linked plugins, including their enabled state, are now global to the current user instead of isolated by Herdr session. Plugins installed only in a named session on Herdr 0.7.3 must be installed or linked again. (#1174)
 
