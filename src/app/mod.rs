@@ -147,6 +147,12 @@ pub struct App {
     pub render_dirty: Arc<AtomicBool>,
     pub(crate) full_redraw_pending: bool,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
+    /// Correlates an in-flight `SplitPaneRequest::request_id`
+    /// (`app/api/panes.rs::dispatch_remote_pane_split`) to the local layout
+    /// context (target tab/pane/direction/ratio/focus) needed to splice the
+    /// eventual `SplitPaneResponse`'s materialized pane into the right spot
+    /// (`App::handle_federation_split_pane_ready`, `app/creation.rs`).
+    pub(crate) pending_remote_splits: HashMap<u64, creation::PendingRemoteSplit>,
     pub(crate) local_terminal_notifications: bool,
     /// Whether this process applies `AppEvent::PrefixInputSource` to the host input source.
     /// The headless server sets this to false: the switch belongs to the foreground client,
@@ -782,6 +788,7 @@ impl App {
             render_dirty,
             full_redraw_pending: false,
             overlay_panes: HashMap::new(),
+            pending_remote_splits: HashMap::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
             config_reloaded_from_disk: false,

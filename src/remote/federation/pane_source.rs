@@ -86,6 +86,22 @@ pub(crate) struct RemoteTerminalSourceHandle {
 }
 
 impl RemoteTerminalSourceHandle {
+    /// This pane's raw (un-namespaced) remote terminal id, as placed verbatim
+    /// on the wire — the same id a `SplitPaneRequest.target_pane_id` must
+    /// carry so the remote host can resolve which of its own panes to split.
+    pub(crate) fn raw_terminal_id(&self) -> &str {
+        &self.terminal_id
+    }
+
+    /// Clone of this pane's shared mount out-tx, so a caller (e.g.
+    /// `handle_pane_split`) can enqueue a control-channel message (like
+    /// `SplitPaneRequest`) on the SAME mount tunnel this pane's
+    /// input/resize/close frames already ride, without needing a separate
+    /// mount registry.
+    pub(crate) fn out_tx(&self) -> mpsc::UnboundedSender<FederationMessage> {
+        self.out_tx.clone()
+    }
+
     /// Spawns the byte-in task (drains `output_rx`, calls `on_read`) and the
     /// input-forwarding task (drains a per-pane bounded queue onto the
     /// shared `out_tx`). Neither task touches a local child process or PTY

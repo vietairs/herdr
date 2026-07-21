@@ -28,6 +28,15 @@ use super::super::api_helpers::{
 use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
 use super::responses::{encode_error, encode_success};
 
+/// Mints a fresh, process-wide-unique `SplitPaneRequest::request_id`. A bare
+/// counter (not a per-mount map) is enough today because the response is
+/// fire-and-forget (see `App::dispatch_remote_pane_split`'s doc comment) — no
+/// caller here awaits or correlates it yet.
+fn next_remote_split_request_id() -> u64 {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
         let target = if let Some(target_pane_id) = params.target_pane_id.as_deref() {
@@ -46,6 +55,25 @@ impl App {
         let Some((ws_idx, target_pane_id)) = target else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
+        // Federation-mount awareness: a federated workspace's pane ids are
+        // namespaced `r:<host>:...` (`crate::remote::federation::id`). The
+        // local-spawn path below (`ws.split_pane`/`split_pane_with_ratio`
+        // -> `split_focused_with_runtime`) always spawns a LOCAL PTY and
+        // stamps it with a public id derived from the target workspace,
+        // which for a mounted workspace looks exactly like a real remote
+        // pane id (`public_pane_id_for_number`) even though the backing
+        // process actually runs on this machine. Never let that local-spawn
+        // path run for a remote-federated workspace's pane — dispatch the
+        // split to the remote host over the mount's federation link instead
+        // (see plans/260721-2353-federation-agents-sidebar-remote-detection/
+        // reports/debug-260722-0002-remote-split-spawns-local-pane-report.md
+        // for the root cause this replaces).
+        if matches!(
+            crate::remote::federation::id::classify(&self.public_workspace_id(ws_idx)),
+            crate::remote::federation::id::IdClass::Remote(_)
+        ) {
+            return self.dispatch_remote_pane_split(id, ws_idx, target_pane_id, &params);
+        }
         let extra_env = match super::env::normalize_launch_env(params.env) {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
@@ -121,6 +149,107 @@ impl App {
         self.emit_layout_updated_event(ws_idx, target_tab_idx);
 
         encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
+    /// Dispatches a split targeting a remote-federated workspace's pane over
+    /// its mount's federation link instead of spawning a local PTY (see the
+    /// caller's doc comment). Fire-and-forget by necessity: this JSON-API
+    /// handler runs synchronously inline with `App`'s own tick and cannot
+    /// await the `SplitPaneResponse` a live mount's async drive task will
+    /// eventually read (`remote::federation::client::drive_mount_channel`).
+    /// The smallest correct design given that hard sync/async boundary: send
+    /// the request now (real split happens on the remote host, reusing its
+    /// own `Method::PaneSplit` handler — see `server::federation_actor`'s
+    /// `SplitPane` command), and acknowledge with `remote_split_pending`
+    /// rather than fabricating a `PaneInfo` this handler cannot yet produce.
+    /// Materializing the resulting mirrored pane into a real local
+    /// `Tab`/`PaneRuntime` when the response arrives needs a reactive hook
+    /// in the mount's own drive loop (`app/api/workspaces.rs`) and its event
+    /// wiring (`app/mod.rs`/`events.rs`) — outside this fix's owned files;
+    /// logged as a follow-up in implementation-notes.md. Falls back to the
+    /// prior `remote_split_unsupported` refusal when the target pane has no
+    /// live mount (no `remote_out_tx`), so a stale/disconnected mount still
+    /// never falls through to the local-spawn path.
+    fn dispatch_remote_pane_split(
+        &mut self,
+        id: String,
+        ws_idx: usize,
+        target_pane_id: PaneId,
+        params: &PaneSplitParams,
+    ) -> String {
+        let live_mount = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.terminal_id(target_pane_id))
+            .cloned()
+            .and_then(|terminal_id| self.terminal_runtimes.get(&terminal_id))
+            .and_then(|runtime| {
+                let raw_terminal_id = runtime.remote_terminal_id()?.to_string();
+                let out_tx = runtime.remote_out_tx()?;
+                Some((raw_terminal_id, out_tx))
+            });
+
+        let Some((raw_target_pane_id, out_tx)) = live_mount else {
+            return encode_error(
+                id,
+                "remote_split_unsupported",
+                "splitting a pane in a remote-federated workspace requires a live mount; \
+                 this pane's mount is not connected",
+            );
+        };
+
+        let direction = match params.direction {
+            crate::api::schema::SplitDirection::Right => {
+                crate::remote::federation::protocol::SplitDirection::Right
+            }
+            crate::api::schema::SplitDirection::Down => {
+                crate::remote::federation::protocol::SplitDirection::Down
+            }
+        };
+        let request_id = next_remote_split_request_id();
+        let sent = out_tx.send(crate::remote::federation::protocol::FederationMessage::SplitPaneRequest(
+            crate::remote::federation::protocol::SplitPaneRequest {
+                request_id,
+                target_pane_id: raw_target_pane_id,
+                direction,
+                ratio: params.ratio,
+                focus: params.focus,
+            },
+        ));
+        if sent.is_err() {
+            return encode_error(
+                id,
+                "remote_split_unsupported",
+                "the remote mount's link is closing; the split request could not be sent",
+            );
+        }
+
+        // Remembers the local layout context this request was minted for, so
+        // the mount's drive task can splice its eventual `SplitPaneResponse`
+        // into the right tab once it arrives (materialization follow-up: see
+        // `App::handle_federation_split_pane_ready`, `app/creation.rs`).
+        let local_direction = match params.direction {
+            crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
+            crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
+        };
+        self.register_pending_remote_split(
+            request_id,
+            crate::app::creation::PendingRemoteSplit {
+                workspace_id: self.public_workspace_id(ws_idx),
+                target_pane_id,
+                direction: local_direction,
+                ratio: params.ratio.unwrap_or(0.5),
+                focus: params.focus,
+            },
+        );
+
+        encode_error(
+            id,
+            "remote_split_pending",
+            "split request sent to the remote host; the new pane will appear once \
+             the remote host replies (materializing it locally is a follow-up)",
+        )
     }
 
     pub(super) fn handle_pane_list(&mut self, id: String, params: PaneListParams) -> String {
@@ -3780,5 +3909,43 @@ mod tests {
 
             assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
         }
+    }
+
+    // Regression for plans/260721-2353-federation-agents-sidebar-remote-
+    // detection/reports/debug-260722-0002-remote-split-spawns-local-pane-
+    // report.md: splitting a pane in a federation-mounted (`r:`-namespaced)
+    // workspace must be refused explicitly, never silently fall through to
+    // a local spawn misfiled into the remote workspace's layout.
+    #[test]
+    fn pane_split_in_a_federated_workspace_is_refused_not_misfiled_locally() {
+        let (mut app, _pane_id) = app_with_test_workspace();
+        let remote_workspace_id = "r:alice@10.0.0.1#s1:default".to_string();
+        app.state.workspaces[0].id = remote_workspace_id.clone();
+        let panes_before = app.state.workspaces[0].tabs[0].layout.panes(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        ).len();
+
+        let response = app.handle_pane_split(
+            "req".into(),
+            PaneSplitParams {
+                workspace_id: Some(remote_workspace_id),
+                target_pane_id: None,
+                direction: SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: false,
+                env: std::collections::HashMap::new(),
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "remote_split_unsupported");
+        let panes_after = app.state.workspaces[0].tabs[0].layout.panes(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        ).len();
+        assert_eq!(
+            panes_before, panes_after,
+            "a refused remote split must not create any local pane"
+        );
     }
 }

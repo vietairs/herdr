@@ -47,7 +47,7 @@ use crate::remote::federation::protocol::negotiate::{negotiate, AgreedCaps};
 use crate::remote::federation::protocol::{
     AgentStatusMessage, Capability, Channel, EventChannelMessage, EventCursor, EventFrame,
     FaultMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot, ScrollbackReplay,
-    TerminalChannelMessage, FEDERATION_PROTOCOL_VERSION,
+    SplitPaneRequest, SplitPaneResponse, TerminalChannelMessage, FEDERATION_PROTOCOL_VERSION,
 };
 use crate::remote::federation::tee;
 use crate::server::client_transport::ServerEvent;
@@ -462,6 +462,9 @@ fn reader_loop<S: Read>(
                 first_cause.set(TunnelExit::from_wire(fault.reason));
                 return Ok(());
             }
+            Ok(Some(FederationMessage::SplitPaneRequest(request))) => {
+                handle_split_pane_request(request, out_tx, shutdown, first_cause, server_event_tx);
+            }
             Ok(Some(_other)) => {
                 // The controller drives only the terminal channel inbound;
                 // other inbound frames are ignored, not treated as fatal.
@@ -474,6 +477,60 @@ fn reader_loop<S: Read>(
             }
         }
     }
+}
+
+/// Services one inbound `SplitPaneRequest` against the live `App`: a
+/// blocking round-trip through `FederationCommand::SplitPane` (legal here —
+/// this reader runs on its own `std::thread`, never a tokio worker), replying
+/// with `SplitPaneResponse::Created`/`Failed` on the shared outbound queue.
+/// A dropped/gone actor (server shutting down) replies `Failed` rather than
+/// silently dropping the peer's request.
+fn handle_split_pane_request(
+    request: SplitPaneRequest,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) {
+    let SplitPaneRequest {
+        request_id,
+        target_pane_id,
+        direction,
+        ratio,
+        focus,
+    } = request;
+
+    let (reply, rx) = oneshot::channel();
+    let sent = server_event_tx.blocking_send(ServerEvent::Federation(
+        FederationCommand::SplitPane {
+            target_pane_id,
+            direction,
+            ratio,
+            focus,
+            reply,
+        },
+    ));
+    let outcome = if sent.is_err() {
+        Err("server event loop is gone".to_string())
+    } else {
+        rx.blocking_recv()
+            .unwrap_or_else(|_| Err("federation split-pane reply dropped".to_string()))
+    };
+
+    let response = match outcome {
+        Ok((new_pane_id, new_terminal_id)) => SplitPaneResponse::Created {
+            request_id,
+            new_pane_id,
+            new_terminal_id,
+        },
+        Err(reason) => SplitPaneResponse::Failed { request_id, reason },
+    };
+    let _ = enqueue_outbound(
+        out_tx,
+        FederationMessage::SplitPaneResponse(response),
+        first_cause,
+        shutdown,
+    );
 }
 
 /// Route one inbound `TerminalChannelMessage`: input/resize to the actor;
@@ -1204,6 +1261,80 @@ mod tests {
         assert_eq!(rec[0], ("input", "t1".to_string(), b"hi".to_vec()));
         assert_eq!(rec[1].0, "resize");
         assert_eq!(rec[1].2, vec![80u8, 24u8]);
+    }
+
+    #[test]
+    fn reader_loop_routes_a_split_pane_request_and_replies_created() {
+        // A mock actor loop answers `FederationCommand::SplitPane` directly
+        // (the real dispatch is `federation_actor`'s own responsibility,
+        // already tested there) so this asserts only the reader's
+        // frame -> command -> response routing.
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::SplitPane {
+                    target_pane_id,
+                    reply,
+                    ..
+                }) = ev
+                {
+                    let _ = reply.send(Ok((
+                        format!("{target_pane_id}-split"),
+                        format!("{target_pane_id}-split-term"),
+                    )));
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::SplitPaneRequest(
+                crate::remote::federation::protocol::SplitPaneRequest {
+                    request_id: 7,
+                    target_pane_id: "p1".to_string(),
+                    direction: crate::remote::federation::protocol::SplitDirection::Right,
+                    ratio: None,
+                    focus: false,
+                },
+            ),
+        )
+        .expect("client writes split request");
+        drop(client); // EOF ends the reader after servicing the one frame
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let response = out_rx.try_recv().expect("a response was enqueued");
+        match response {
+            FederationMessage::SplitPaneResponse(
+                crate::remote::federation::protocol::SplitPaneResponse::Created {
+                    request_id,
+                    new_pane_id,
+                    new_terminal_id,
+                },
+            ) => {
+                assert_eq!(request_id, 7);
+                assert_eq!(new_pane_id, "p1-split");
+                assert_eq!(new_terminal_id, "p1-split-term");
+            }
+            other => panic!("expected SplitPaneResponse::Created, got {other:?}"),
+        }
     }
 
     #[test]

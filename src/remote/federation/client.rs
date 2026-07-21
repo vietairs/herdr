@@ -30,6 +30,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::api::schema::common::AgentStatus;
 use crate::api::EventHub;
 
 use super::id::{HostKey, Mount, ServerInstanceId};
@@ -310,6 +311,24 @@ const TERMINAL_OUTPUT_CHANNEL_CAPACITY: usize = 4096;
 /// `TerminalChannelRouter::route_inbound`).
 const CLIPBOARD_CHANNEL_CAPACITY: usize = 64;
 
+/// Everything [`drive_mount_channel`] needs to spawn a real local
+/// `TerminalRuntime` for a remote-created pane (`SplitPaneResponse::Created`)
+/// and hand it back to `App`. Mirrors the constants `App::
+/// materialize_federation_mount`/`build_remote_pane` (`app/creation.rs`) use
+/// at mount time — `rows`/`cols`/`scrollback_limit_bytes`/
+/// `host_terminal_theme` are captured once when the mount's drive task is
+/// spawned rather than re-queried per split (same "v1: splits materialize as
+/// a simple chain" simplification already accepted for mount-time panes).
+pub(crate) struct SplitMaterializationContext {
+    pub(crate) rows: u16,
+    pub(crate) cols: u16,
+    pub(crate) scrollback_limit_bytes: usize,
+    pub(crate) host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    pub(crate) events: mpsc::Sender<crate::events::AppEvent>,
+    pub(crate) render_notify: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) render_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Demultiplexes ONE mount's single `Terminal`-channel wire stream by
 /// `terminal_id` (requirement 9: every open remote pane's byte channel rides
 /// the ONE mount tunnel, never a per-pane connection). Built once per mount;
@@ -318,11 +337,39 @@ const CLIPBOARD_CHANNEL_CAPACITY: usize = 64;
 #[derive(Default)]
 pub(crate) struct TerminalChannelRouter {
     output_senders: HashMap<String, mpsc::Sender<Bytes>>,
+    /// Per-pane sink for relayed `AgentStatus` (P6), keyed by the same raw
+    /// (un-namespaced) `terminal_id` `output_senders` uses — the wire's
+    /// `AgentStatusMessage::terminal_id` is the remote's raw id too, so no
+    /// extra namespace mapping is needed to route it back to the pane that
+    /// `build_remote_pane` registered it for.
+    agent_status_senders: HashMap<String, mpsc::Sender<AgentStatus>>,
 }
 
 impl TerminalChannelRouter {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Registers `terminal_id`'s relayed-agent-status sink
+    /// (`PaneRuntime::relayed_agent_status_sender`) so `route_agent_status`
+    /// can forward this mount's inbound `AgentStatus` frames into the
+    /// matching pane's detection loop.
+    pub(crate) fn register_agent_status_sender(
+        &mut self,
+        terminal_id: String,
+        sender: mpsc::Sender<AgentStatus>,
+    ) {
+        self.agent_status_senders.insert(terminal_id, sender);
+    }
+
+    /// Routes one inbound `AgentStatus` value to the registered pane, if
+    /// any. `try_send` (never `.await`) so a slow/unfocused pane can never
+    /// stall this router's single read loop (same isolation shape as
+    /// `route_inbound`).
+    pub(crate) fn route_agent_status(&mut self, terminal_id: &str, status: AgentStatus) {
+        if let Some(tx) = self.agent_status_senders.get(terminal_id) {
+            let _ = tx.try_send(status);
+        }
     }
 
     /// Registers `terminal_id` as open and sends the `Open` request
@@ -351,6 +398,7 @@ impl TerminalChannelRouter {
     /// server-side `Close` echo.
     pub(crate) fn forget(&mut self, terminal_id: &str) {
         self.output_senders.remove(terminal_id);
+        self.agent_status_senders.remove(terminal_id);
     }
 
     /// Routes one inbound `Terminal` message to the registered pane, if
@@ -414,6 +462,9 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
     hub: &EventHub,
     router: &mut TerminalChannelRouter,
     clipboard_tx: &mpsc::Sender<ClipboardMessage>,
+    out_tx: &mpsc::UnboundedSender<FederationMessage>,
+    outbound_clipboard_tx: &mpsc::UnboundedSender<ClipboardMessage>,
+    split_materialization: Option<&SplitMaterializationContext>,
 ) -> Result<DriveOutcome, std::io::Error> {
     let _ = hub;
     loop {
@@ -445,13 +496,126 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                 // fail-fast — end the drive, do not remount.
                 return Ok(DriveOutcome::Faulted(fault.reason));
             }
+            FederationMessage::AgentStatus(status_msg) => {
+                // Update the mirror (S14.1/S14.2 honest display source) and
+                // forward the same status straight to the pane's own
+                // detection loop via the router's raw-terminal-id-keyed
+                // sink — `apply_agent_status`'s `ReducerAction` return is
+                // display bookkeeping only, `route_agent_status` here is
+                // the actual sidebar-visible relay (P6/P8/P9 wiring).
+                match mirror.apply_agent_status(&status_msg, generation, hub) {
+                    ReducerAction::RejectedStale => continue,
+                    ReducerAction::GapDetected { .. } | ReducerAction::ResetRequired => {
+                        return Ok(DriveOutcome::ResyncRequired);
+                    }
+                    ReducerAction::Ignored | ReducerAction::Applied { .. } => {}
+                }
+                router.route_agent_status(&status_msg.terminal_id, status_msg.status);
+            }
             // Handshake/HandshakeResponse/MountSnapshot are already
-            // consumed during `connect_and_mount`; AgentStatus relay is P6
-            // scope. Neither is this driver's concern.
+            // consumed during `connect_and_mount`.
             FederationMessage::Handshake(_)
             | FederationMessage::HandshakeResponse(_)
-            | FederationMessage::MountSnapshot(_)
-            | FederationMessage::AgentStatus(_) => continue,
+            | FederationMessage::MountSnapshot(_) => continue,
+            // `SplitPaneRequest` is client->server only (this loop drives
+            // the client side of a mount); the peer should never send one.
+            FederationMessage::SplitPaneRequest(_) => {
+                tracing::debug!("federation client received a SplitPaneRequest; ignoring");
+            }
+            // The remote host already performed the real split (see
+            // `server::federation_actor::FederationCommand::SplitPane`) by
+            // the time this arrives. This loop owns `router`/`out_tx` (the
+            // only place the mount's `TerminalChannelRouter`/writer handle
+            // live), so it opens the new pane's terminal channel and spawns
+            // its `TerminalRuntime` directly here, then hands the finished
+            // runtime back to `App` via `AppEvent::FederationSplitPaneReady`
+            // for layout insertion (which needs `&mut App`, unavailable in
+            // this task). `split_materialization` is `None` for callers that
+            // never wire a live session behind this mount (e.g. tests, or a
+            // future path with nothing to materialize into).
+            FederationMessage::SplitPaneResponse(response) => match response {
+                super::protocol::SplitPaneResponse::Created {
+                    request_id,
+                    new_pane_id: _,
+                    new_terminal_id,
+                } => {
+                    let Some(ctx) = split_materialization else {
+                        tracing::info!(
+                            request_id,
+                            %new_terminal_id,
+                            "remote split succeeded; no live session to materialize it into"
+                        );
+                        continue;
+                    };
+                    let output_rx =
+                        router.open_terminal(new_terminal_id.clone(), generation, out_tx);
+                    let pane_id = crate::layout::PaneId::alloc();
+                    let terminal_id = crate::terminal::TerminalId::alloc();
+                    match crate::terminal::TerminalRuntime::spawn_remote(
+                        pane_id,
+                        ctx.rows,
+                        ctx.cols,
+                        ctx.scrollback_limit_bytes,
+                        ctx.host_terminal_theme,
+                        None,
+                        new_terminal_id.clone(),
+                        generation,
+                        out_tx.clone(),
+                        output_rx,
+                        outbound_clipboard_tx.clone(),
+                        ctx.events.clone(),
+                        ctx.render_notify.clone(),
+                        ctx.render_dirty.clone(),
+                    ) {
+                        Ok(runtime) => {
+                            if let Some(sender) = runtime.relayed_agent_status_sender() {
+                                router.register_agent_status_sender(
+                                    new_terminal_id.clone(),
+                                    sender,
+                                );
+                            }
+                            let terminal = crate::terminal::TerminalState::new(
+                                terminal_id.clone(),
+                                std::path::PathBuf::from("/"),
+                            );
+                            let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+                            let ready = crate::events::FederationSplitPaneReady {
+                                request_id,
+                                pane_id,
+                                terminal_id,
+                                terminal,
+                                runtime,
+                                pane_state,
+                            };
+                            let _ = ctx
+                                .events
+                                .send(crate::events::AppEvent::FederationSplitPaneReady(
+                                    Box::new(ready),
+                                ))
+                                .await;
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                request_id,
+                                %err,
+                                "failed to spawn a local runtime for the remote-split pane"
+                            );
+                        }
+                    }
+                }
+                super::protocol::SplitPaneResponse::Failed { request_id, reason } => {
+                    tracing::warn!(request_id, %reason, "remote split failed");
+                    if let Some(ctx) = split_materialization {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationSplitPaneFailed {
+                                request_id,
+                                reason,
+                            })
+                            .await;
+                    }
+                }
+            },
         }
     }
 }
@@ -989,6 +1153,7 @@ mod tests {
 
         let (clipboard_tx, mut clipboard_rx) =
             mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+        let (outbound_clip_tx, _outbound_clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
         let hub = EventHub::default();
         let _ = tokio::time::timeout(
             std::time::Duration::from_millis(300),
@@ -999,6 +1164,9 @@ mod tests {
                 &hub,
                 &mut router,
                 &clipboard_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                None,
             ),
         )
         .await;
@@ -1015,6 +1183,238 @@ mod tests {
             .unwrap();
         assert_eq!(clip.origin_tag, "remote");
         assert_eq!(clip.payload, b"remote clip".to_vec());
+
+        fake_server.await.unwrap();
+    }
+
+    // Root-cause fix regression (H3, plans/260721-2353-federation-agents-
+    // sidebar-remote-detection): an inbound `AgentStatus` frame must both
+    // update the mirror AND reach the pane's registered relayed-status sink
+    // via `TerminalChannelRouter::route_agent_status`, keyed by the same
+    // raw `terminal_id` `open_terminal` uses — not just get silently
+    // dropped as it was before this fix.
+    #[tokio::test]
+    async fn drive_mount_channel_relays_agent_status_to_the_registered_pane_sink() {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+        let fake_server = tokio::spawn(async move {
+            let Some(FederationMessage::Handshake(_)) =
+                read_frame(&mut server_reader).await.unwrap()
+            else {
+                panic!("expected a Handshake");
+            };
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                    agreed_capabilities: BTreeSet::new(),
+                }),
+            )
+            .await
+            .unwrap();
+
+            let mut snapshot = crate::remote::federation::serve::empty_snapshot();
+            snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+                pane_id: "pane_1".to_string(),
+                terminal_id: "term_1".to_string(),
+                workspace_id: "w1".to_string(),
+                tab_id: "w1-tab".to_string(),
+                focused: false,
+                cwd: None,
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Idle,
+                state_labels: Default::default(),
+                tokens: Default::default(),
+                agent_session: None,
+                scroll: None,
+                revision: 0,
+            });
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::MountSnapshot(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot,
+                    cursor: crate::remote::federation::protocol::EventCursor(0),
+                }),
+            )
+            .await
+            .unwrap();
+
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::AgentStatus(
+                    crate::remote::federation::protocol::AgentStatusMessage {
+                        terminal_id: "term_1".to_string(),
+                        mount_generation: 1,
+                        status: AgentStatus::Working,
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let client = FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new());
+        let mounted = client
+            .connect_and_mount(client_reader, client_writer)
+            .await
+            .unwrap();
+        let generation = mounted.mirror.mount().mount_generation;
+        let MountedConnection {
+            mut mirror,
+            mut reader,
+            ..
+        } = mounted;
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let _output_rx = router.open_terminal("term_1".to_string(), generation, &out_tx);
+        let (status_tx, mut status_rx) = mpsc::channel::<AgentStatus>(8);
+        router.register_agent_status_sender("term_1".to_string(), status_tx);
+
+        let (clipboard_tx, _clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+        let (outbound_clip_tx, _outbound_clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let hub = EventHub::default();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            drive_mount_channel(
+                &mut reader,
+                &mut mirror,
+                generation,
+                &hub,
+                &mut router,
+                &clipboard_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                None,
+            ),
+        )
+        .await;
+
+        let relayed = tokio::time::timeout(std::time::Duration::from_millis(200), status_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(relayed, AgentStatus::Working);
+
+        fake_server.await.unwrap();
+    }
+
+    // Remote-split materialization (260722 follow-up): a `SplitPaneResponse::
+    // Created` arriving while `split_materialization` is `Some` must spawn a
+    // real local `TerminalRuntime` (via `router.open_terminal` + `TerminalRuntime::
+    // spawn_remote`, both already proven independently by `build_remote_pane`'s
+    // own tests) and hand it back on `AppEvent::FederationSplitPaneReady`.
+    #[tokio::test]
+    async fn drive_mount_channel_materializes_a_runtime_on_split_pane_created() {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+        let fake_server = tokio::spawn(async move {
+            let Some(FederationMessage::Handshake(_)) =
+                read_frame(&mut server_reader).await.unwrap()
+            else {
+                panic!("expected a Handshake");
+            };
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                    agreed_capabilities: BTreeSet::new(),
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::MountSnapshot(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: crate::remote::federation::serve::empty_snapshot(),
+                    cursor: crate::remote::federation::protocol::EventCursor(0),
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::SplitPaneResponse(
+                    crate::remote::federation::protocol::SplitPaneResponse::Created {
+                        request_id: 42,
+                        new_pane_id: "pane_2".to_string(),
+                        new_terminal_id: "term_2".to_string(),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let client = FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new());
+        let mounted = client
+            .connect_and_mount(client_reader, client_writer)
+            .await
+            .unwrap();
+        let generation = mounted.mirror.mount().mount_generation;
+        let MountedConnection {
+            mut mirror,
+            mut reader,
+            ..
+        } = mounted;
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let (clipboard_tx, _clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+        let (outbound_clip_tx, _outbound_clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let (events_tx, mut events_rx) = mpsc::channel::<crate::events::AppEvent>(4);
+        let ctx = SplitMaterializationContext {
+            rows: 24,
+            cols: 80,
+            scrollback_limit_bytes: 1 << 16,
+            host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            events: events_tx,
+            render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let hub = EventHub::default();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            drive_mount_channel(
+                &mut reader,
+                &mut mirror,
+                generation,
+                &hub,
+                &mut router,
+                &clipboard_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                Some(&ctx),
+            ),
+        )
+        .await;
+
+        let ready = tokio::time::timeout(std::time::Duration::from_millis(200), events_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ready {
+            crate::events::AppEvent::FederationSplitPaneReady(ready) => {
+                assert_eq!(ready.request_id, 42);
+            }
+            other => panic!("expected FederationSplitPaneReady, got {other:?}"),
+        }
 
         fake_server.await.unwrap();
     }
