@@ -169,6 +169,17 @@ pub enum AppEvent {
     /// server daemon itself are unaffected; surfaces as a sidebar notice.
     #[cfg(unix)]
     FederationMountFailed { target: String, reason: String },
+    /// A federation link's drive task ended (closed, faulted, or errored)
+    /// for a specific mount generation. The handler fences on `generation`
+    /// so a stale ended-notice from a superseded drive task cannot tear
+    /// down a mount that has since been remounted.
+    #[cfg(unix)]
+    FederationMountEnded {
+        host_key: crate::remote::federation::id::HostKey,
+        generation: u64,
+        target: String,
+        reason: String,
+    },
 }
 
 /// Payload for [`AppEvent::FederationMountReady`] — everything

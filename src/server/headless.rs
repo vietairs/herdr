@@ -2248,6 +2248,19 @@ impl HeadlessServer {
 
                 true
             }
+            #[cfg(unix)]
+            AppEvent::FederationMountFailed { target, reason } => {
+                let (target, reason) = (target.clone(), reason.clone());
+                self.app.handle_internal_event(ev);
+                if should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
+                    self.send_flat_toast_to_foreground_client(
+                        toast_notify_kind(self.app.state.toast_config.delivery)
+                            .expect("toast forwarding requires a client notification kind"),
+                        format!("federated mount to {target} failed: {reason}"),
+                    );
+                }
+                true
+            }
             _ => {
                 self.app.handle_internal_event(ev);
                 true
@@ -8329,6 +8342,90 @@ next_tab = ""
                 );
             }
             other => panic!("expected system toast notify, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn federation_mount_failed_system_toast_forwards_to_foreground_client() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+
+        let changed =
+            server.handle_internal_event_with_forwarding(AppEvent::FederationMountFailed {
+                target: "host1".into(),
+                reason: "connection refused".into(),
+            });
+
+        assert!(changed);
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("system toast message"),
+        ) {
+            ServerMessage::Notify { kind, message, body } => {
+                assert_eq!(kind, protocol::NotifyKind::SystemToast);
+                assert!(message.contains("host1"));
+                assert!(body.as_deref().is_some_and(|body| body.contains("connection refused")));
+            }
+            other => panic!("expected system toast notify, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn federation_mount_failed_terminal_toast_forwards_to_foreground_client() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
+
+        let changed =
+            server.handle_internal_event_with_forwarding(AppEvent::FederationMountFailed {
+                target: "host1".into(),
+                reason: "connection refused".into(),
+            });
+
+        assert!(changed);
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("terminal toast message"),
+        ) {
+            ServerMessage::Notify { kind, message, body } => {
+                assert_eq!(kind, protocol::NotifyKind::Toast);
+                assert!(message.contains("host1"));
+                assert!(body.as_deref().is_some_and(|body| body.contains("connection refused")));
+            }
+            other => panic!("expected terminal toast notify, got {other:?}"),
         }
     }
 

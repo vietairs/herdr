@@ -191,7 +191,10 @@ impl App {
         self.render_notify.notify_one();
 
         let event_hub = self.event_hub.clone();
+        let event_tx = self.event_tx.clone();
         let mut mirror_task = mirror;
+        let drive_host_key = host_key.clone();
+        let drive_target = target.clone();
         tokio::spawn(async move {
             let mut reader = tunnel_reader;
             let outcome = crate::remote::federation::client::drive_mount_channel(
@@ -203,7 +206,7 @@ impl App {
                 &inbound_clip_tx,
             )
             .await;
-            match outcome {
+            match &outcome {
                 Ok(outcome) => {
                     tracing::info!(?outcome, "federated mount ended");
                 }
@@ -214,10 +217,28 @@ impl App {
             // Teardown mirrors `run_federated_session`: drop the writer
             // sender first so the writer task drains and exits, bounded so
             // a half-open peer can never hang this task, then kill the ssh
-            // child regardless.
+            // child regardless. This runs before the `FederationMountEnded`
+            // send below so the registry entry (freed by the handler that
+            // processes that event) is only released once the old
+            // connection is actually dying — otherwise a remount to the
+            // same host could start a second live connection while the old
+            // ssh child might still be alive.
             drop(out_tx);
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer_handle).await;
             drop(tunnel_guard);
+
+            if let Some(reason) =
+                crate::remote::federation::client::drive_outcome_ended_reason(&outcome)
+            {
+                let _ = event_tx
+                    .send(crate::events::AppEvent::FederationMountEnded {
+                        host_key: drive_host_key,
+                        generation,
+                        target: drive_target,
+                        reason,
+                    })
+                    .await;
+            }
         });
     }
 
@@ -227,18 +248,121 @@ impl App {
     #[cfg(unix)]
     pub(crate) fn handle_federation_mount_failed(&mut self, target: String, reason: String) {
         tracing::warn!(%target, %reason, "federation mount failed");
-        if matches!(
-            self.state.toast_config.delivery,
-            crate::config::ToastDelivery::Herdr
-        ) {
-            self.state.toast = Some(crate::app::state::ToastNotification {
-                kind: ToastKind::NeedsAttention,
-                title: format!("federated mount to {target} failed"),
-                context: reason,
-                position: None,
-                target: None,
+        match self.state.toast_config.delivery {
+            crate::config::ToastDelivery::Herdr => {
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: ToastKind::NeedsAttention,
+                    title: format!("federated mount to {target} failed"),
+                    context: reason,
+                    position: None,
+                    target: None,
+                });
+            }
+            crate::config::ToastDelivery::Terminal | crate::config::ToastDelivery::System
+                if self.local_terminal_notifications =>
+            {
+                let notify = match self.state.toast_config.delivery {
+                    crate::config::ToastDelivery::Terminal => {
+                        crate::terminal_notify::show_notification
+                    }
+                    crate::config::ToastDelivery::System => {
+                        crate::platform::show_desktop_notification
+                    }
+                    _ => unreachable!("toast delivery was matched above"),
+                };
+                let _ = notify(&format!("federated mount to {target} failed"), Some(&reason));
+            }
+            _ => {}
+        }
+        self.render_dirty.store(true, Ordering::Release);
+        self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationMountEnded` handler: the mount's drive task
+    /// exited for a session-ending reason (link closed, faulted, or an I/O
+    /// error) — tear down the registry entry and the workspaces it
+    /// materialized. Fenced on `generation` so a stale ended-notice from a
+    /// drive task superseded by a fresh remount can never nuke the newer
+    /// mount (the race the generation field exists to prevent).
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_mount_ended(
+        &mut self,
+        host_key: crate::remote::federation::id::HostKey,
+        generation: u64,
+        target: String,
+        reason: String,
+    ) {
+        if self
+            .state
+            .remote_mirrors
+            .get(&host_key)
+            .map(|mirror| mirror.mount().mount_generation)
+            != Some(generation)
+        {
+            tracing::debug!(
+                %target,
+                generation,
+                "federation mount ended notice for a superseded generation; ignoring"
+            );
+            return;
+        }
+
+        self.state.end_federation_mount(&host_key);
+
+        let space_key = format!("federation:{}", host_key.as_str());
+        let Some(idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.worktree_space().is_some_and(|space| space.key == space_key))
+        else {
+            tracing::warn!(%target, %reason, "federation mount ended but no workspaces to remove");
+            self.render_dirty.store(true, Ordering::Release);
+            self.render_notify.notify_one();
+            return;
+        };
+
+        let closing_indices = self.state.close_indices_for(idx);
+        let closing_ids: std::collections::HashSet<String> = closing_indices
+            .iter()
+            .filter_map(|&i| self.state.workspaces.get(i).map(|ws| ws.id.clone()))
+            .collect();
+        let closing: Vec<_> = closing_indices
+            .iter()
+            .map(|&i| (self.public_workspace_id(i), self.workspace_info(i)))
+            .collect();
+
+        // Capture the user's actual focus by identity (not index — indices
+        // shift once the closing workspaces are removed) so this background
+        // event doesn't steal focus onto whichever workspace the close-clamp
+        // happens to land on when the user was looking at something else.
+        let previously_selected_id = self
+            .state
+            .workspaces
+            .get(self.state.selected)
+            .filter(|ws| !closing_ids.contains(&ws.id))
+            .map(|ws| ws.id.clone());
+
+        self.state.selected = idx;
+        self.state.close_selected_workspace();
+        self.shutdown_detached_terminal_runtimes();
+
+        if let Some(prev_id) = previously_selected_id {
+            if let Some(new_idx) = self.state.workspaces.iter().position(|ws| ws.id == prev_id) {
+                self.state.switch_workspace(new_idx);
+            }
+        }
+
+        for (workspace_id, workspace) in closing {
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceClosed,
+                data: EventData::WorkspaceClosed {
+                    workspace_id,
+                    workspace: Some(workspace),
+                },
             });
         }
+
         self.render_dirty.store(true, Ordering::Release);
         self.render_notify.notify_one();
     }
@@ -819,12 +943,91 @@ mod tests {
 
     #[cfg(unix)]
     fn test_federation_mirror(target: &str) -> crate::remote::federation::reducer::RemoteMirror {
+        test_federation_mirror_at_generation(target, 1)
+    }
+
+    #[cfg(unix)]
+    fn test_federation_mirror_at_generation(
+        target: &str,
+        generation: u64,
+    ) -> crate::remote::federation::reducer::RemoteMirror {
         use crate::remote::federation::id::{HostKey, Mount, ServerInstanceId};
         crate::remote::federation::reducer::RemoteMirror::new(Mount {
             host_key: HostKey::new(target, "s1"),
             server_instance_id: ServerInstanceId("inst-1".to_string()),
-            mount_generation: 1,
+            mount_generation: generation,
         })
+    }
+
+    /// A mirror carrying one materializable workspace/tab/pane, so
+    /// `handle_federation_mount_ready` actually produces a federation
+    /// workspace (a bare `test_federation_mirror` has no panes to
+    /// materialize). Mirrors `federation_materialization_tests`'
+    /// `two_pane_snapshot` fixture in `creation.rs`, narrowed to one pane.
+    #[cfg(unix)]
+    fn test_federation_mirror_with_workspace(
+        target: &str,
+        generation: u64,
+    ) -> crate::remote::federation::reducer::RemoteMirror {
+        use crate::api::schema::common::AgentStatus;
+        use crate::api::schema::session::SessionSnapshot;
+        use crate::api::schema::{PaneInfo as RemotePaneInfo, TabInfo as RemoteTabInfo, WorkspaceInfo};
+        use crate::remote::federation::protocol::EventCursor;
+
+        let mut mirror = test_federation_mirror_at_generation(target, generation);
+        let snapshot = SessionSnapshot {
+            version: "0.0.0-test".to_string(),
+            protocol: 1,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: vec![WorkspaceInfo {
+                workspace_id: "w1".to_string(),
+                number: 1,
+                label: "remote workspace".to_string(),
+                focused: false,
+                pane_count: 1,
+                tab_count: 1,
+                active_tab_id: "w1-tab".to_string(),
+                agent_status: AgentStatus::Idle,
+                tokens: Default::default(),
+                worktree: None,
+            }],
+            tabs: vec![RemoteTabInfo {
+                tab_id: "w1-tab".to_string(),
+                workspace_id: "w1".to_string(),
+                number: 1,
+                label: "remote tab".to_string(),
+                focused: false,
+                pane_count: 1,
+                agent_status: AgentStatus::Idle,
+            }],
+            panes: vec![RemotePaneInfo {
+                pane_id: "p1".to_string(),
+                terminal_id: "t1".to_string(),
+                workspace_id: "w1".to_string(),
+                tab_id: "w1-tab".to_string(),
+                focused: false,
+                cwd: Some("/home/alice/project".to_string()),
+                foreground_cwd: None,
+                label: Some("remote pane".to_string()),
+                agent: None,
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Idle,
+                state_labels: Default::default(),
+                tokens: Default::default(),
+                agent_session: None,
+                scroll: None,
+                revision: 0,
+            }],
+            layouts: Vec::new(),
+            agents: Vec::new(),
+        };
+        mirror.apply_snapshot(&snapshot, EventCursor(0));
+        mirror
     }
 
     /// Real spawned child (`cat`) so `ChildGuard`/`ChildStdout`/`ChildStdin`
@@ -836,14 +1039,32 @@ mod tests {
         tokio::process::ChildStdout,
         tokio::process::ChildStdin,
     ) {
+        let (guard, stdout, stdin, _pid) = spawn_test_tunnel_with_pid().await;
+        (guard, stdout, stdin)
+    }
+
+    /// Like `spawn_test_tunnel`, but also returns the child's OS pid so a
+    /// test can kill it externally (the `ChildGuard`/reader/writer are all
+    /// consumed by `handle_federation_mount_ready`, leaving no other handle
+    /// to end the process from outside) — the mechanism
+    /// `federation_mount_ended_wiring_link_closed_reaches_event_channel`
+    /// uses to force the drive task's `read_frame` to observe EOF.
+    #[cfg(unix)]
+    async fn spawn_test_tunnel_with_pid() -> (
+        crate::remote::ChildGuard,
+        tokio::process::ChildStdout,
+        tokio::process::ChildStdin,
+        u32,
+    ) {
         let mut child = tokio::process::Command::new("cat")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("spawn cat for test tunnel");
+        let pid = child.id().expect("cat pid");
         let stdin = child.stdin.take().expect("cat stdin");
         let stdout = child.stdout.take().expect("cat stdout");
-        (crate::remote::ChildGuard::for_test(child), stdout, stdin)
+        (crate::remote::ChildGuard::for_test(child), stdout, stdin, pid)
     }
 
     // Phase-a TDD test 1: after a successful mount task completes,
@@ -905,6 +1126,52 @@ mod tests {
             .unwrap()
             .title
             .contains("remote-host"));
+    }
+
+    // Terminal/System delivery must never populate `state.toast` (that
+    // field drives the Herdr in-app toast only) — it goes out through
+    // `terminal_notify`/`platform::show_desktop_notification` instead, same
+    // as every other Terminal/System notification.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_failure_terminal_delivery_calls_local_notify_when_enabled() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
+        assert!(app.local_terminal_notifications);
+
+        app.handle_federation_mount_failed(
+            "remote-host".to_string(),
+            "federation dial failed: connection refused".to_string(),
+        );
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app.state.toast.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_failure_system_delivery_is_noop_when_local_notifications_disabled() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+        app.local_terminal_notifications = false;
+
+        app.handle_federation_mount_failed(
+            "remote-host".to_string(),
+            "federation dial failed: connection refused".to_string(),
+        );
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app.state.toast.is_none());
     }
 
     // Phase-a TDD test 6: a mount task that produced an `Err` (the async
@@ -990,6 +1257,254 @@ mod tests {
         assert!(
             outcome.is_err(),
             "a panicking tokio::spawn task must fail its JoinHandle, not unwind the caller"
+        );
+    }
+
+    // A mount's own drive task, not just an external caller, sends
+    // `FederationMountEnded` once its `drive_mount_channel` loop ends for a
+    // session-ending reason.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ended_wiring_link_closed_reaches_event_channel() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        let (guard, tunnel_reader, tunnel_writer, pid) = spawn_test_tunnel_with_pid().await;
+
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+
+        let host_key = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+
+        // Kill the tunnel's child so the drive task's `read_frame` observes
+        // EOF and the loop exits with `DriveOutcome::LinkClosed`.
+        unsafe {
+            libc::kill(pid as libc::c_int, libc::SIGKILL);
+        }
+
+        // The event is sent only after the drive task's teardown (dropping
+        // the writer sender, awaiting it with a bounded timeout, dropping
+        // the tunnel guard) completes, so poll past several 200ms timeouts
+        // rather than stopping at the first one — only a closed channel
+        // (`Ok(None)`) means no event is coming.
+        let mut saw_ended = false;
+        for _ in 0..25 {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv())
+                .await
+            {
+                Ok(Some(crate::events::AppEvent::FederationMountEnded {
+                    host_key: got_host_key,
+                    generation,
+                    ..
+                })) => {
+                    assert_eq!(got_host_key, host_key);
+                    assert_eq!(generation, 1);
+                    saw_ended = true;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            saw_ended,
+            "expected a FederationMountEnded event after the tunnel's child died"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ended_removes_workspaces_and_unmounts_registry() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+
+        let host_key = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+        assert!(app.state.remote_mirrors.contains_key(&host_key));
+        assert_eq!(app.state.workspaces.len(), 2, "the federation mount must have materialized a workspace");
+
+        app.handle_federation_mount_ended(
+            host_key.clone(),
+            1,
+            "remote-host".to_string(),
+            "link closed".to_string(),
+        );
+
+        assert!(app.state.remote_mirrors.is_empty());
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app
+            .state
+            .workspaces
+            .iter()
+            .all(|ws| ws.worktree_space().is_none()));
+        assert!(event_hub
+            .events_after(0)
+            .iter()
+            .any(|(_, event)| matches!(&event.data, EventData::WorkspaceClosed { .. })));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ended_stale_generation_is_ignored() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+        assert_eq!(app.state.workspaces.len(), 2);
+
+        let host_key = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+        // Simulate a completed remount that already replaced the gen-1 mirror
+        // with a gen-2 one before the gen-1 drive task's stale ended-notice
+        // arrives.
+        app.state.end_federation_mount(&host_key);
+        let remounted = test_federation_mirror_at_generation("remote-host", 2);
+        app.state.begin_federation_mount(remounted).unwrap();
+
+        app.handle_federation_mount_ended(
+            host_key.clone(),
+            1,
+            "remote-host".to_string(),
+            "stale link closed".to_string(),
+        );
+
+        assert_eq!(
+            app.state
+                .remote_mirrors
+                .get(&host_key)
+                .map(|mirror| mirror.mount().mount_generation),
+            Some(2),
+            "the stale gen-1 notice must not touch the fresh gen-2 registry entry"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            2,
+            "the stale gen-1 notice must not remove workspaces materialized under a newer mount"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ended_drains_detached_terminal_runtimes() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+        assert!(app.terminal_runtimes.len() > 0);
+
+        let host_key = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+        app.handle_federation_mount_ended(
+            host_key,
+            1,
+            "remote-host".to_string(),
+            "link closed".to_string(),
+        );
+
+        assert_eq!(
+            app.terminal_runtimes.len(),
+            0,
+            "terminal runtimes for removed federation panes must be actually shut down, not just queued"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ended_preserves_user_focus_on_a_later_unrelated_workspace() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local-a")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+        assert_eq!(app.state.workspaces.len(), 2, "local-a plus the materialized federation workspace");
+
+        // A workspace created after the federation mount sits after the
+        // federation group in index order.
+        app.state.workspaces.push(Workspace::test_new("local-b"));
+        let local_b_id = app.state.workspaces[2].id.clone();
+        app.state.active = Some(2);
+        app.state.selected = 2;
+
+        let host_key = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+        app.handle_federation_mount_ended(
+            host_key,
+            1,
+            "remote-host".to_string(),
+            "link closed".to_string(),
+        );
+
+        assert_eq!(app.state.workspaces.len(), 2, "local-a and local-b remain");
+        assert_eq!(
+            app.state.workspaces.get(app.state.selected).map(|ws| ws.id.clone()),
+            Some(local_b_id.clone()),
+            "selection must still point at local-b, not wherever the federation group's clamp landed"
+        );
+        assert_eq!(
+            app.state.active,
+            Some(app.state.selected),
+            "active must track the restored selection"
         );
     }
 }

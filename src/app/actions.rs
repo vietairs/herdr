@@ -1500,24 +1500,7 @@ impl AppState {
         self.selection = None;
         self.selection_autoscroll = None;
         self.mark_session_dirty();
-        let close_indices = self
-            .workspaces
-            .get(self.selected)
-            .and_then(|ws| ws.worktree_space())
-            .filter(|space| !space.is_linked_worktree)
-            .map(|space| {
-                self.workspaces
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, ws)| {
-                        ws.worktree_space()
-                            .is_some_and(|member| member.key == space.key)
-                            .then_some(idx)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .filter(|indices| indices.len() >= 2)
-            .unwrap_or_else(|| vec![self.selected]);
+        let close_indices = self.close_indices_for(self.selected);
 
         let mut terminal_ids = Vec::new();
         let mut pane_ids = Vec::new();
@@ -2744,6 +2727,8 @@ impl AppState {
             AppEvent::FederationMountReady(_) => Vec::new(),
             #[cfg(unix)]
             AppEvent::FederationMountFailed { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationMountEnded { .. } => Vec::new(),
         }
     }
 

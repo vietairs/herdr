@@ -1560,6 +1560,32 @@ impl AppState {
         self.remote_mirrors.contains_key(host_key)
     }
 
+    /// Every workspace index that closing `index` should also close: the
+    /// full set of sibling workspaces sharing `index`'s non-linked worktree
+    /// space, or just `index` itself when it has no such shared space (or is
+    /// a linked worktree). Shared body with `close_selected_workspace`'s
+    /// inline grouping so any other close path (e.g. a federation mount
+    /// ending) closes the same sibling set the manual close flow does.
+    pub(crate) fn close_indices_for(&self, index: usize) -> Vec<usize> {
+        self.workspaces
+            .get(index)
+            .and_then(|ws| ws.worktree_space())
+            .filter(|space| !space.is_linked_worktree)
+            .map(|space| {
+                self.workspaces
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, ws)| {
+                        ws.worktree_space()
+                            .is_some_and(|member| member.key == space.key)
+                            .then_some(idx)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|indices| indices.len() >= 2)
+            .unwrap_or_else(|| vec![index])
+    }
+
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
         self.pane_id_aliases.remove(&pane_id.raw());
     }
@@ -2351,6 +2377,34 @@ mod tests {
             "alice@10.0.0.1",
             "s1"
         )));
+    }
+
+    #[test]
+    fn close_indices_for_groups_shared_worktree_space_key_else_falls_back_to_single() {
+        let mut state = AppState::test_new();
+        let mut ws0 = crate::workspace::Workspace::test_new("main");
+        let mut ws1 = crate::workspace::Workspace::test_new("issue");
+        ws0.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        ws1.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-issue".into(),
+            is_linked_worktree: true,
+        });
+        state.workspaces = vec![ws0, ws1];
+
+        assert_eq!(state.close_indices_for(0), vec![0, 1]);
+
+        let mut lone = AppState::test_new();
+        lone.workspaces = vec![crate::workspace::Workspace::test_new("solo")];
+        assert_eq!(lone.close_indices_for(0), vec![0]);
     }
 
     // P8 TDD test 4 (S4.1/S8.1 Blocker, focus barrier): input routing is

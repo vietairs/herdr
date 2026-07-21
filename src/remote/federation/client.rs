@@ -237,6 +237,21 @@ pub(crate) enum DriveOutcome {
     ResyncRequired,
 }
 
+/// Classifies a drive task's exit as session-ending or not. `Some(reason)`
+/// for `LinkClosed`/`Faulted`/`Err` — the caller should tear the mount and
+/// its materialized workspaces down. `None` for `Ok(ResyncRequired)`, which
+/// requires a remount rather than teardown.
+pub(crate) fn drive_outcome_ended_reason(
+    outcome: &Result<DriveOutcome, std::io::Error>,
+) -> Option<String> {
+    match outcome {
+        Ok(DriveOutcome::LinkClosed) => Some("link closed".to_string()),
+        Ok(DriveOutcome::Faulted(reason)) => Some(format!("{reason:?}")),
+        Ok(DriveOutcome::ResyncRequired) => None,
+        Err(err) => Some(err.to_string()),
+    }
+}
+
 /// Reads event-channel messages from `reader` in a loop, applying each to
 /// `mirror`. Runs until the link closes or a gap/reset requires a remount.
 /// `generation` is the mount generation this task was spawned to serve —
@@ -1088,5 +1103,23 @@ mod tests {
             "drained {drained} messages, expected at most the configured budget of {CLIPBOARD_CHANNEL_CAPACITY}"
         );
         assert!(drained > 0, "at least the first burst up to capacity must have been queued");
+    }
+
+    #[test]
+    fn drive_outcome_ended_reason_link_closed_faulted_err_return_some() {
+        assert!(drive_outcome_ended_reason(&Ok(DriveOutcome::LinkClosed)).is_some());
+        assert!(drive_outcome_ended_reason(&Ok(DriveOutcome::Faulted(
+            FaultReason::PeerClosed
+        )))
+        .is_some());
+        assert!(drive_outcome_ended_reason(&Err(std::io::Error::other("boom"))).is_some());
+    }
+
+    #[test]
+    fn drive_outcome_ended_reason_resync_required_returns_none() {
+        assert_eq!(
+            drive_outcome_ended_reason(&Ok(DriveOutcome::ResyncRequired)),
+            None
+        );
     }
 }
