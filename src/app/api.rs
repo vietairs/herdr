@@ -155,6 +155,18 @@ impl App {
             return;
         }
 
+        #[cfg(unix)]
+        if let AppEvent::FederationMountEnded {
+            host_key,
+            generation,
+            target,
+            reason,
+        } = ev
+        {
+            self.handle_federation_mount_ended(host_key, generation, target, reason);
+            return;
+        }
+
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_worktree_add_finished(*result);
             return;

@@ -246,6 +246,52 @@ fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
     }
 }
 
+/// Whether `workspace` was materialized from a live federation mount rather
+/// than created locally. Federation workspaces are remount-derived from a
+/// live `RemoteMirror` (see `App::materialize_federation_mount`), never
+/// restorable as a local session on their own — persisting them would
+/// duplicate the mount's own workspaces on the next remount.
+fn is_federation_materialized(workspace: &Workspace) -> bool {
+    workspace
+        .worktree_space
+        .as_ref()
+        .is_some_and(|membership| membership.key.starts_with("federation:"))
+}
+
+/// Remaps an index into the unfiltered `workspaces` slice to its position in
+/// the filtered (federation-workspaces-removed) snapshot list, per `keep`
+/// (`keep[i]` is true when the workspace at `i` survives the filter).
+///
+/// When the workspace at `idx` itself is filtered out (the active/selected
+/// workspace *was* the federation one), falls back to the nearest surviving
+/// workspace by original-index distance so `active`/`selected` still lands on
+/// a real snapshot entry instead of drifting onto an unrelated workspace.
+fn remap_workspace_index(keep: &[bool], idx: usize) -> usize {
+    if keep.is_empty() {
+        return 0;
+    }
+    let idx = idx.min(keep.len() - 1);
+    let effective = if keep[idx] {
+        idx
+    } else {
+        let before = (0..idx).rev().find(|&i| keep[i]);
+        let after = (idx + 1..keep.len()).find(|&i| keep[i]);
+        match (before, after) {
+            (Some(b), Some(a)) => {
+                if idx - b <= a - idx {
+                    b
+                } else {
+                    a
+                }
+            }
+            (Some(b), None) => b,
+            (None, Some(a)) => a,
+            (None, None) => return 0,
+        }
+    };
+    keep[..effective].iter().filter(|&&k| k).count()
+}
+
 /// Capture the current app state into a serializable snapshot.
 pub fn capture(
     workspaces: &[Workspace],
@@ -260,14 +306,19 @@ pub fn capture(
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
 ) -> SessionSnapshot {
+    let keep: Vec<bool> = workspaces
+        .iter()
+        .map(|workspace| !is_federation_materialized(workspace))
+        .collect();
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
             .iter()
+            .filter(|workspace| !is_federation_materialized(workspace))
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
             .collect(),
-        active,
-        selected,
+        active: active.map(|idx| remap_workspace_index(&keep, idx)),
+        selected: remap_workspace_index(&keep, selected),
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
@@ -854,6 +905,54 @@ mod tests {
         assert_eq!(
             snapshot.workspaces[0].worktree_space,
             state.workspaces[0].worktree_space
+        );
+    }
+
+    #[test]
+    fn capture_skips_federation_materialized_workspaces() {
+        let mut state = state_with_workspaces(&["main", "remote"]);
+        state.workspaces[1].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "federation:alice@10.0.0.1".into(),
+            label: "alice@10.0.0.1".into(),
+            repo_root: PathBuf::new(),
+            checkout_path: PathBuf::new(),
+            is_linked_worktree: false,
+        });
+
+        let snapshot = capture_from_state(&state);
+
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(snapshot.workspaces[0].custom_name.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn capture_remaps_active_and_selected_past_a_preceding_federation_workspace() {
+        let mut state = state_with_workspaces(&["remote", "main"]);
+        state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "federation:alice@10.0.0.1".into(),
+            label: "alice@10.0.0.1".into(),
+            repo_root: PathBuf::new(),
+            checkout_path: PathBuf::new(),
+            is_linked_worktree: false,
+        });
+        // The user is focused on the local workspace ("main"), which sits
+        // after the federation workspace ("remote") in the pre-filter index
+        // space but becomes index 0 once "remote" is filtered out.
+        state.active = Some(1);
+        state.selected = 1;
+
+        let snapshot = capture_from_state(&state);
+
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(snapshot.workspaces[0].custom_name.as_deref(), Some("main"));
+        assert_eq!(
+            snapshot.active,
+            Some(0),
+            "active must be remapped to the surviving local workspace's post-filter index"
+        );
+        assert_eq!(
+            snapshot.selected, 0,
+            "selected must be remapped to the surviving local workspace's post-filter index"
         );
     }
 
