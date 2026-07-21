@@ -696,7 +696,7 @@ impl App {
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
-            remote_mirror: None,
+            remote_mirrors: std::collections::HashMap::new(),
         };
 
         state.terminals = restored_terminals;

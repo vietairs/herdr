@@ -156,4 +156,44 @@ pub enum AppEvent {
     WorktreeAddFinished(Box<WorktreeAddResult>),
     /// Background `git worktree remove` completed.
     WorktreeRemoveFinished(Box<WorktreeRemoveResult>),
+    /// A server-owned `workspace.mount_remote` dial+mount task succeeded.
+    /// `App::run`'s own tick materializes the mirror into real
+    /// workspaces/tabs/panes (needs `&mut App`, which the spawned task
+    /// itself cannot hold) and spawns the ongoing drive task. Unix-only:
+    /// mirrors the `#[cfg(unix)]` gate on `remote::unix`, which owns the
+    /// dial/mount primitives this payload carries.
+    #[cfg(unix)]
+    FederationMountReady(Box<FederationMountReady>),
+    /// A server-owned `workspace.mount_remote` dial+mount task failed
+    /// (SSH/timeout/unsupported/empty mirror). Local workspace(s) and the
+    /// server daemon itself are unaffected; surfaces as a sidebar notice.
+    #[cfg(unix)]
+    FederationMountFailed { target: String, reason: String },
+}
+
+/// Payload for [`AppEvent::FederationMountReady`] — everything
+/// `App::materialize_federation_mount` + the ongoing drive task need, handed
+/// back from the server-owned dial+mount task spawned by the
+/// `workspace.mount_remote` API handler.
+#[cfg(unix)]
+pub struct FederationMountReady {
+    pub target: String,
+    pub mirror: crate::remote::federation::reducer::RemoteMirror,
+    pub generation: u64,
+    pub tunnel_guard: crate::remote::ChildGuard,
+    pub tunnel_reader: tokio::process::ChildStdout,
+    pub tunnel_writer: tokio::process::ChildStdin,
+}
+
+// `RemoteMirror`/`ChildGuard` don't derive `Debug` (out of this phase's file
+// ownership to change), so `AppEvent`'s own `#[derive(Debug)]` needs a manual
+// impl here rather than pulling the whole enum off the derive.
+#[cfg(unix)]
+impl std::fmt::Debug for FederationMountReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FederationMountReady")
+            .field("target", &self.target)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
 }

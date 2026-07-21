@@ -79,6 +79,15 @@ pub(crate) enum AgentStatusDisplay {
 
 /// Per-mount replica mirror: namespaced (`FedRef`-encoded) copies of the
 /// remote's workspaces/tabs/panes. Metadata only — no pane bytes (P5).
+///
+/// `Clone` (REVISED Phase A): the server-owned mount handler needs a
+/// point-in-time snapshot for `AppState.remote_mirror` (bookkeeping /
+/// `double_attach_conflict`) while the ORIGINAL mirror moves into the
+/// ongoing drive task, which is the one that stays live-synced — mirrors
+/// `run_federated_session`'s existing materialize-then-move disposition.
+/// `AppState.remote_mirror` is therefore a mount-time snapshot, not
+/// continuously updated post-mount in v1 (logged in implementation-notes.md).
+#[derive(Clone)]
 pub(crate) struct RemoteMirror {
     mount: Mount,
     cursor: u64,
@@ -207,7 +216,8 @@ impl RemoteMirror {
         self.panes.clear();
         for workspace in &snapshot.workspaces {
             let namespaced = namespace_workspace(&self.mount, workspace);
-            self.workspaces.insert(namespaced.workspace_id.clone(), namespaced);
+            self.workspaces
+                .insert(namespaced.workspace_id.clone(), namespaced);
         }
         for tab in &snapshot.tabs {
             let namespaced = namespace_tab(&self.mount, tab);
@@ -329,7 +339,8 @@ fn namespace_pane(mount: &Mount, pane: &PaneInfo) -> PaneInfo {
     namespaced.agent = sanitize_remote_string_opt(namespaced.agent);
     namespaced.title = sanitize_remote_string_opt(namespaced.title);
     namespaced.terminal_title = sanitize_remote_string_opt(namespaced.terminal_title);
-    namespaced.terminal_title_stripped = sanitize_remote_string_opt(namespaced.terminal_title_stripped);
+    namespaced.terminal_title_stripped =
+        sanitize_remote_string_opt(namespaced.terminal_title_stripped);
     namespaced.display_agent = sanitize_remote_string_opt(namespaced.display_agent);
     for value in namespaced.state_labels.values_mut() {
         *value = sanitize_remote_string(value);
@@ -376,7 +387,11 @@ fn reconcile_workspaces(
             }
         }
     }
-    let retired: Vec<String> = mirror.keys().filter(|id| !seen.contains(*id)).cloned().collect();
+    let retired: Vec<String> = mirror
+        .keys()
+        .filter(|id| !seen.contains(*id))
+        .cloned()
+        .collect();
     for id in retired {
         mirror.remove(&id);
         hub.push(EventEnvelope {
@@ -389,7 +404,12 @@ fn reconcile_workspaces(
     }
 }
 
-fn reconcile_tabs(mount: &Mount, mirror: &mut HashMap<String, TabInfo>, incoming: &[TabInfo], hub: &EventHub) {
+fn reconcile_tabs(
+    mount: &Mount,
+    mirror: &mut HashMap<String, TabInfo>,
+    incoming: &[TabInfo],
+    hub: &EventHub,
+) {
     let mut seen: HashSet<String> = HashSet::new();
     for tab in incoming {
         let namespaced = namespace_tab(mount, tab);
@@ -436,7 +456,12 @@ fn reconcile_tabs(mount: &Mount, mirror: &mut HashMap<String, TabInfo>, incoming
     }
 }
 
-fn reconcile_panes(mount: &Mount, mirror: &mut HashMap<String, PaneInfo>, incoming: &[PaneInfo], hub: &EventHub) {
+fn reconcile_panes(
+    mount: &Mount,
+    mirror: &mut HashMap<String, PaneInfo>,
+    incoming: &[PaneInfo],
+    hub: &EventHub,
+) {
     let mut seen: HashSet<String> = HashSet::new();
     for pane in incoming {
         let namespaced = namespace_pane(mount, pane);
@@ -652,7 +677,10 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.iter().any(|id| id.ends_with(":w1")));
         assert!(ids.iter().any(|id| id.ends_with(":w3")));
-        assert!(!ids.iter().any(|id| id.ends_with(":w2")), "w2 must be tombstoned");
+        assert!(
+            !ids.iter().any(|id| id.ends_with(":w2")),
+            "w2 must be tombstoned"
+        );
 
         // w1 updated (label changed) + w2 closed (retired) + w3 created.
         let events = hub.events_after(0);
@@ -743,7 +771,11 @@ mod tests {
             &hub,
         );
         assert_eq!(unknown, ReducerAction::Ignored);
-        assert_eq!(hub.events_after(0).len(), 1, "no spurious event for an unknown pane");
+        assert_eq!(
+            hub.events_after(0).len(),
+            1,
+            "no spurious event for an unknown pane"
+        );
     }
 
     // Phase 06: relayed status is fenced exactly like event-channel traffic
@@ -831,7 +863,9 @@ mod tests {
     #[test]
     fn agent_status_display_reports_stale_while_disconnected() {
         let mut snapshot = empty_snapshot();
-        snapshot.panes.push(pane("p1", "term_1", AgentStatus::Working));
+        snapshot
+            .panes
+            .push(pane("p1", "term_1", AgentStatus::Working));
         let mut mirror = RemoteMirror::new(mount(1));
         mirror.apply_snapshot(&snapshot, EventCursor(1));
 
@@ -896,7 +930,10 @@ mod tests {
         assert_eq!(pane_info.cwd.as_deref(), Some(expect_sanitized));
         assert_eq!(pane_info.label.as_deref(), Some(expect_sanitized));
         assert_eq!(pane_info.agent.as_deref(), Some(expect_sanitized));
-        assert_eq!(pane_info.state_labels.get("k").map(String::as_str), Some(expect_sanitized));
+        assert_eq!(
+            pane_info.state_labels.get("k").map(String::as_str),
+            Some(expect_sanitized)
+        );
 
         // Path 2: gap-triggered resync (`reconcile_by_diff`) — the OTHER
         // choke point a caller reaches after a `Gap`/`Reset`. A hand-rolled
@@ -939,7 +976,10 @@ mod tests {
         mirror.apply_snapshot(&snapshot, EventCursor(1));
 
         assert_eq!(mirror.mount().host_key, alice_mount.host_key);
-        assert_eq!(mirror.mount().server_instance_id, alice_mount.server_instance_id);
+        assert_eq!(
+            mirror.mount().server_instance_id,
+            alice_mount.server_instance_id
+        );
 
         let public_id = mirror.workspaces().keys().next().unwrap();
         assert!(public_id.starts_with("r:alice@10.0.0.1#s1:"));
