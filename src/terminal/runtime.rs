@@ -348,6 +348,27 @@ impl TerminalRuntime {
         self.0.detection_text()
     }
 
+    pub(crate) fn relayed_agent_status_sender(
+        &self,
+    ) -> Option<tokio::sync::mpsc::Sender<crate::api::schema::common::AgentStatus>> {
+        self.0.relayed_agent_status_sender()
+    }
+
+    /// This pane's raw remote terminal id (delegates to
+    /// `PaneRuntime::remote_terminal_id`); `None` for a locally-spawned pane.
+    pub(crate) fn remote_terminal_id(&self) -> Option<&str> {
+        self.0.remote_terminal_id()
+    }
+
+    /// A clone of this pane's shared mount out-tx (delegates to
+    /// `PaneRuntime::remote_out_tx`); `None` for a locally-spawned pane.
+    pub(crate) fn remote_out_tx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedSender<crate::remote::federation::protocol::FederationMessage>>
+    {
+        self.0.remote_out_tx()
+    }
+
     pub fn terminal_title(&self) -> Option<String> {
         self.0.terminal_title()
     }

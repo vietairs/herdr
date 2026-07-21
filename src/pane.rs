@@ -1069,6 +1069,15 @@ enum PaneRuntimeIo {
 }
 
 impl PaneRuntimeIo {
+    /// True when the pane's authoritative PTY lives on a remote host and
+    /// repaints arrive asynchronously over the federation link (see
+    /// `remote::federation::pane_source`'s RT-F10 comment). Used to gate
+    /// local-only resize recovery heuristics that assume a near-synchronous
+    /// same-machine repaint (`PaneTerminal::resize`'s replay-recovery block).
+    fn is_remote(&self) -> bool {
+        matches!(self, PaneRuntimeIo::Remote(_))
+    }
+
     fn shutdown(&self) {
         match self {
             // Non-`Actor` variants of `PaneRuntimeIo` (`Remote` and the
@@ -2711,9 +2720,13 @@ impl PaneRuntime {
             return;
         }
         self.current_size.set(size);
-        let terminal_responses = self
-            .terminal
-            .resize(rows, cols, cell_width_px, cell_height_px);
+        // Remote-backed panes: the authoritative repaint is an async round
+        // trip over the federation link (pane_source.rs RT-F10), not a
+        // same-machine SIGWINCH repaint, so the local replay-recovery
+        // heuristic below must not run for them (see `PaneTerminal::resize`).
+        let terminal_responses =
+            self.terminal
+                .resize(rows, cols, cell_width_px, cell_height_px, self.io.is_remote());
         mark_detection_content_changed(&self.detection_content_seq);
         self.io.resize(
             rows,
@@ -2822,12 +2835,37 @@ impl PaneRuntime {
     /// Sender for relaying a remote's foreground-process-equivalent
     /// `AgentStatus` into this pane's detection loop (P6). `None` for
     /// locally-spawned runtimes (which already have a real process to
-    /// probe); `Some` only for `spawn_remote`-constructed runtimes. Dormant
-    /// until a live federation call site (P8/P9) drives it from
-    /// `remote::federation::reducer::RemoteMirror::apply_agent_status`.
-    #[allow(dead_code)]
+    /// probe); `Some` only for `spawn_remote`-constructed runtimes. Wired
+    /// by `App::build_remote_pane` into
+    /// `TerminalChannelRouter::register_agent_status_sender`, driven by
+    /// `remote::federation::client::drive_mount_channel`'s `AgentStatus`
+    /// handling (which reads `remote::federation::reducer::RemoteMirror::
+    /// apply_agent_status`'s companion status).
     pub(crate) fn relayed_agent_status_sender(&self) -> Option<mpsc::Sender<AgentStatus>> {
         self.relayed_agent_status_tx.clone()
+    }
+
+    /// This pane's raw (un-namespaced) remote terminal id, if it is
+    /// `spawn_remote`-constructed (`PaneRuntimeIo::Remote`). `None` for a
+    /// locally-spawned pane. Used by `handle_pane_split` (P9 follow-up) to
+    /// address a `SplitPaneRequest` at the correct remote pane without a
+    /// separate id-mapping registry.
+    pub(crate) fn remote_terminal_id(&self) -> Option<&str> {
+        match &self.io {
+            PaneRuntimeIo::Remote(remote) => Some(remote.raw_terminal_id()),
+            _ => None,
+        }
+    }
+
+    /// A clone of this pane's shared mount out-tx, if it is
+    /// `spawn_remote`-constructed. `None` for a locally-spawned pane. Lets a
+    /// caller enqueue a control-channel message (e.g. `SplitPaneRequest`) on
+    /// the exact mount tunnel this pane already rides.
+    pub(crate) fn remote_out_tx(&self) -> Option<mpsc::UnboundedSender<FederationMessage>> {
+        match &self.io {
+            PaneRuntimeIo::Remote(remote) => Some(remote.out_tx()),
+            _ => None,
+        }
     }
 
     pub fn terminal_title(&self) -> Option<String> {
@@ -4386,6 +4424,22 @@ mod remote_spawn_tests {
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
         assert_eq!(remote_runtime.visible_text(), local_reference.visible_text());
+    }
+
+    // `remote_terminal_id`/`remote_out_tx` (P9 remote-split follow-up):
+    // `spawn_remote`-constructed runtimes expose their raw wire id and
+    // shared mount out-tx so `handle_pane_split` can address a
+    // `SplitPaneRequest` without a separate id-mapping registry; a local
+    // (non-remote) runtime must expose neither.
+    #[tokio::test]
+    async fn remote_runtime_exposes_its_raw_terminal_id_and_out_tx() {
+        let (remote_runtime, _output_tx, _out_rx, _events_rx) = spawn_test_remote_pane("term_1", 1);
+        assert_eq!(remote_runtime.remote_terminal_id(), Some("term_1"));
+        assert!(remote_runtime.remote_out_tx().is_some());
+
+        let local_runtime = PaneRuntime::test_with_channel(80, 24).0;
+        assert_eq!(local_runtime.remote_terminal_id(), None);
+        assert!(local_runtime.remote_out_tx().is_none());
     }
 
     // Test 6 (RT-F6 scrollback-on-hydrate): the caller is expected to push

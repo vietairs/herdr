@@ -122,7 +122,8 @@ mod tests {
     use super::super::{
         AgentStatusMessage, Capability, Channel, ClipboardMessage, EventChannelMessage,
         EventCursor, EventFrame, FaultMessage, FaultReason, FederationMessage, Handshake,
-        HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, TerminalChannelMessage,
+        HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, SplitDirection,
+        SplitPaneRequest, SplitPaneResponse, TerminalChannelMessage,
     };
     use super::*;
     use crate::api::schema::common::AgentStatus;
@@ -210,6 +211,22 @@ mod tests {
             }),
             FederationMessage::Fault(FaultMessage {
                 reason: FaultReason::EgressOverflow,
+            }),
+            FederationMessage::SplitPaneRequest(SplitPaneRequest {
+                request_id: 7,
+                target_pane_id: "term_1".to_string(),
+                direction: SplitDirection::Right,
+                ratio: Some(0.5),
+                focus: true,
+            }),
+            FederationMessage::SplitPaneResponse(SplitPaneResponse::Created {
+                request_id: 7,
+                new_pane_id: "term_2".to_string(),
+                new_terminal_id: "term_2".to_string(),
+            }),
+            FederationMessage::SplitPaneResponse(SplitPaneResponse::Failed {
+                request_id: 7,
+                reason: "no such pane".to_string(),
             }),
         ]
     }

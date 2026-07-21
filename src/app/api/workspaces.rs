@@ -195,6 +195,21 @@ impl App {
         let mut mirror_task = mirror;
         let drive_host_key = host_key.clone();
         let drive_target = target.clone();
+        // Captured once at mount time (same simplification
+        // `materialize_federation_mount`/`build_remote_pane` already make for
+        // mount-time panes) so a later `SplitPaneResponse::Created` can spawn
+        // a real local `TerminalRuntime` for the new remote pane without
+        // needing `&mut App` inside the drive task.
+        let (rows, cols) = self.state.estimate_pane_size();
+        let split_materialization = crate::remote::federation::client::SplitMaterializationContext {
+            rows,
+            cols,
+            scrollback_limit_bytes: self.state.pane_scrollback_limit_bytes,
+            host_terminal_theme: self.state.host_terminal_theme,
+            events: event_tx.clone(),
+            render_notify: self.render_notify.clone(),
+            render_dirty: self.render_dirty.clone(),
+        };
         tokio::spawn(async move {
             let mut reader = tunnel_reader;
             let outcome = crate::remote::federation::client::drive_mount_channel(
@@ -204,6 +219,9 @@ impl App {
                 &event_hub,
                 &mut router,
                 &inbound_clip_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                Some(&split_materialization),
             )
             .await;
             match &outcome {
@@ -342,6 +360,8 @@ impl App {
             .get(self.state.selected)
             .filter(|ws| !closing_ids.contains(&ws.id))
             .map(|ws| ws.id.clone());
+
+        self.purge_pending_remote_splits_for_workspaces(&closing_ids);
 
         self.state.selected = idx;
         self.state.close_selected_workspace();
@@ -1367,6 +1387,122 @@ mod tests {
             .events_after(0)
             .iter()
             .any(|(_, event)| matches!(&event.data, EventData::WorkspaceClosed { .. })));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ended_purges_pending_remote_splits_for_its_workspaces() {
+        // Regression test for the stale-index splice hazard: a
+        // `pending_remote_splits` entry registered for a federated
+        // workspace must be purged when that workspace's mount ends, so a
+        // late/never-arriving `SplitPaneResponse` can't later splice its
+        // pane into whatever workspace ends up reusing the same `Vec`
+        // index (see `handle_federation_mount_ended` and
+        // `PendingRemoteSplit::workspace_id`).
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+        assert_eq!(app.state.workspaces.len(), 2, "the federation mount must have materialized a workspace");
+        let remote_ws_idx = 1;
+        let remote_workspace_id = app.public_workspace_id(remote_ws_idx);
+
+        // Register a pending remote split as `dispatch_remote_pane_split`
+        // would, targeting the federated workspace.
+        let request_id = 4242u64;
+        app.register_pending_remote_split(
+            request_id,
+            crate::app::creation::PendingRemoteSplit {
+                workspace_id: remote_workspace_id,
+                target_pane_id: crate::layout::PaneId::from_raw(1),
+                direction: ratatui::layout::Direction::Horizontal,
+                ratio: 0.5,
+                focus: false,
+            },
+        );
+        assert!(app.pending_remote_splits.contains_key(&request_id));
+
+        let host_key = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+        app.handle_federation_mount_ended(
+            host_key,
+            1,
+            "remote-host".to_string(),
+            "link closed".to_string(),
+        );
+
+        assert!(
+            !app.pending_remote_splits.contains_key(&request_id),
+            "the pending split for a torn-down mount's workspace must be purged, not leaked"
+        );
+        assert_eq!(app.state.workspaces.len(), 1);
+
+        // Simulate a late `SplitPaneResponse` arriving after the purge: the
+        // ready-handler must find no pending registration and drop it
+        // instead of panicking or splicing the pane into the local
+        // workspace that now occupies index 1's old slot.
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel::<crate::events::AppEvent>(4);
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote(
+            crate::layout::PaneId::alloc(),
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            terminal_id.to_string(),
+            1,
+            out_tx,
+            output_rx,
+            clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        )
+        .expect("spawn_remote must succeed for a fresh channel pair");
+        let terminal = crate::terminal::TerminalState::new(
+            terminal_id.clone(),
+            std::path::PathBuf::from("/"),
+        );
+        let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+        let pane_id = crate::layout::PaneId::alloc();
+        let workspaces_before = app.state.workspaces.len();
+
+        app.handle_federation_split_pane_ready(crate::events::FederationSplitPaneReady {
+            request_id,
+            pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            workspaces_before,
+            "a late response for a purged request must not splice a pane into any workspace"
+        );
+        assert!(
+            app.state.workspaces[0].pane_state(pane_id).is_none(),
+            "the local workspace that now occupies the old index must not receive the stale pane"
+        );
     }
 
     #[cfg(unix)]

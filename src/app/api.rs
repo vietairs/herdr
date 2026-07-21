@@ -167,6 +167,18 @@ impl App {
             return;
         }
 
+        #[cfg(unix)]
+        if let AppEvent::FederationSplitPaneReady(ready) = ev {
+            self.handle_federation_split_pane_ready(*ready);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationSplitPaneFailed { request_id, reason } = ev {
+            self.handle_federation_split_pane_failed(request_id, reason);
+            return;
+        }
+
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_worktree_add_finished(*result);
             return;

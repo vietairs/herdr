@@ -197,9 +197,10 @@ impl PaneTerminal {
         cols: u16,
         cell_width_px: u32,
         cell_height_px: u32,
+        is_remote_backed: bool,
     ) -> Vec<Bytes> {
         self.ghostty
-            .resize(rows, cols, cell_width_px, cell_height_px)
+            .resize(rows, cols, cell_width_px, cell_height_px, is_remote_backed)
     }
 
     pub fn scroll_up(&self, lines: usize) {
@@ -1338,12 +1339,23 @@ impl GhosttyPaneTerminal {
         }
     }
 
+    /// `is_remote_backed`: true when this pane's authoritative PTY lives on
+    /// a remote host (federation). The replay-recovery heuristic below
+    /// papers over the transient blank frame a *locally* resized PTY app
+    /// produces before its near-synchronous SIGWINCH repaint; a
+    /// remote-backed pane's real repaint is instead an async round trip
+    /// over the federation link, so replaying stale pre-resize ANSI here
+    /// would race and interleave with that later authoritative repaint
+    /// (see `remote::federation::pane_source`'s RT-F10 comment). Skip the
+    /// replay entirely in that case and let the remote repaint be the sole
+    /// source of truth.
     pub fn resize(
         &self,
         rows: u16,
         cols: u16,
         cell_width_px: u32,
         cell_height_px: u32,
+        is_remote_backed: bool,
     ) -> Vec<Bytes> {
         if let Ok(mut core) = self.core.lock() {
             let offset_from_bottom = core
@@ -1362,8 +1374,8 @@ impl GhosttyPaneTerminal {
             let resize_recovery_probe_lines = usize::from(rows)
                 .saturating_mul(8)
                 .max(DEFAULT_DETECTION_ROWS);
-            let replay_ansi = if core.terminal.active_screen().ok()
-                == Some(crate::ghostty::ActiveScreen::Primary)
+            let replay_ansi = if !is_remote_backed
+                && core.terminal.active_screen().ok() == Some(crate::ghostty::ActiveScreen::Primary)
                 && bottom_before_resize
             {
                 ghostty_recent_ansi(&core, resize_recovery_probe_lines, true)
@@ -4203,7 +4215,7 @@ mod tests {
         assert!(!pane.visible_text().trim().is_empty());
 
         for (rows, cols) in [(4, 10), (4, 7), (6, 18), (3, 9), (5, 12)] {
-            pane.resize(rows, cols, 0, 0);
+            pane.resize(rows, cols, 0, 0, false);
 
             let metrics = pane.scroll_metrics().expect("scroll metrics after resize");
             assert_eq!(metrics.viewport_rows, rows as usize);
@@ -4237,7 +4249,7 @@ mod tests {
         assert!(pane.visible_text().trim().is_empty());
         assert!(pane.detection_text().trim().is_empty());
 
-        pane.resize(3, 20, 0, 0);
+        pane.resize(3, 20, 0, 0, false);
 
         assert!(pane.visible_text().trim().is_empty());
         assert!(pane.detection_text().trim().is_empty());
@@ -4257,7 +4269,7 @@ mod tests {
         pane.set_scroll_offset_from_bottom(metrics.max_offset_from_bottom);
         assert!(!pane.visible_text().trim().is_empty());
 
-        pane.resize(3, 20, 0, 0);
+        pane.resize(3, 20, 0, 0, false);
 
         assert!(pane.detection_text().trim().is_empty());
         assert!(pane.recent_text(3).trim().is_empty());
@@ -4270,12 +4282,37 @@ mod tests {
         terminal.mode_set(2048, true).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
-        let responses = pane.resize(40, 100, 9, 18);
+        let responses = pane.resize(40, 100, 9, 18, false);
 
         assert_eq!(
             responses,
             vec![Bytes::from_static(b"\x1B[48;40;100;720;900t")]
         );
+    }
+
+    #[test]
+    fn resize_recovery_skips_replay_for_remote_backed_pane() {
+        // A remote-backed pane's authoritative repaint is an async round
+        // trip over the federation link, not a same-machine SIGWINCH
+        // repaint, so the local replay-recovery heuristic must not paper
+        // over a transient blank bottom with stale pre-resize content.
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(20, 3, 10_000).unwrap();
+        write_numbered_lines(&mut terminal, 20);
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        assert!(!pane.detection_text().trim().is_empty());
+
+        // Same resize that would otherwise trigger the replay-recovery
+        // block for a local pane (see `resize_reflow_keeps_scrolled_viewport_and_bottom_detection_sane`),
+        // but gated off here via `is_remote_backed = true`.
+        pane.resize(3, 9, 0, 0, true);
+
+        // No assertion on stale content resurrection: the point is that the
+        // replay path taken for local panes is not exercised for remote
+        // ones. Confirm resize still applied by checking viewport rows.
+        let metrics = pane.scroll_metrics().expect("scroll metrics after resize");
+        assert_eq!(metrics.viewport_rows, 3);
     }
 
     #[test]

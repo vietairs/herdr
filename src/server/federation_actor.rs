@@ -96,6 +96,22 @@ pub(crate) enum FederationCommand {
     },
     /// Current per-terminal agent statuses.
     AgentStatuses(oneshot::Sender<Vec<(String, AgentStatus)>>),
+    /// Performs a real split of `target_pane_id` (a raw, un-namespaced
+    /// remote pane id) on this host's own live workspace, mirroring
+    /// `AppFederationHost::split_pane`'s contract but going through the
+    /// live `App` instead of a `FederationHost` implementor (the co-located
+    /// accept path never constructs one — see `federation_accept.rs`'s doc
+    /// comment). Reuses the exact same JSON-API method the local TUI/CLI
+    /// split action calls (`Method::PaneSplit`) rather than duplicating
+    /// `Workspace::split_pane`'s logic, so remote-origin splits get the
+    /// same validation/eventing/session-save behavior as a local split.
+    SplitPane {
+        target_pane_id: String,
+        direction: crate::remote::federation::protocol::SplitDirection,
+        ratio: Option<f32>,
+        focus: bool,
+        reply: oneshot::Sender<Result<(String, String), String>>,
+    },
 }
 
 // `ServerEvent` derives `Debug`, so its `Federation` variant needs one — but the
@@ -128,6 +144,9 @@ impl std::fmt::Debug for FederationCommand {
                 ..
             } => write!(f, "Resize({terminal_id}, {cols}x{rows})"),
             FederationCommand::AgentStatuses(_) => f.write_str("AgentStatuses"),
+            FederationCommand::SplitPane { target_pane_id, .. } => {
+                write!(f, "SplitPane({target_pane_id})")
+            }
         }
     }
 }
@@ -244,6 +263,56 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
                 })
                 .unwrap_or_default();
             let _ = reply.send(statuses);
+        }
+        FederationCommand::SplitPane {
+            target_pane_id,
+            direction,
+            ratio,
+            focus,
+            reply,
+        } => {
+            let direction = match direction {
+                crate::remote::federation::protocol::SplitDirection::Right => {
+                    crate::api::schema::SplitDirection::Right
+                }
+                crate::remote::federation::protocol::SplitDirection::Down => {
+                    crate::api::schema::SplitDirection::Down
+                }
+            };
+            let response = app.handle_api_request_after_internal_events_drained(Request {
+                id: "federation-split-pane".to_string(),
+                method: Method::PaneSplit(crate::api::schema::PaneSplitParams {
+                    workspace_id: None,
+                    target_pane_id: Some(target_pane_id),
+                    direction,
+                    ratio,
+                    cwd: None,
+                    focus,
+                    env: std::collections::HashMap::new(),
+                }),
+            });
+            let outcome = serde_json::from_str::<SuccessResponse>(&response)
+                .ok()
+                .and_then(|success| match success.result {
+                    ResponseResult::PaneInfo { pane } => {
+                        Some(Ok((pane.pane_id, pane.terminal_id)))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    let reason = serde_json::from_str::<serde_json::Value>(&response)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("error")
+                                .and_then(|error| error.get("message"))
+                                .and_then(|message| message.as_str())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| "pane split failed".to_string());
+                    Err(reason)
+                });
+            let _ = reply.send(outcome);
         }
     }
 }
@@ -459,5 +528,69 @@ mod tests {
         let (tx, mut rx) = oneshot::channel();
         dispatch(&mut app, &mut lease, FederationCommand::EventsAfter(0, tx));
         assert!(rx.try_recv().expect("reply delivered").is_empty());
+    }
+
+    /// `SplitPane` performs a real split against the live `App` (via the
+    /// same `Method::PaneSplit` handler the local TUI/CLI path uses) and
+    /// replies with the new pane's raw id + terminal id.
+    #[tokio::test]
+    async fn split_pane_against_a_known_target_pane_creates_a_real_pane_and_replies_ok() {
+        let mut app = test_app();
+        // Seed one workspace/pane the same way `app/api/panes.rs`'s own
+        // `app_with_test_workspace` helper does.
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("metadata")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let mut lease = FederationLease::new();
+        let response = app.handle_api_request_after_internal_events_drained(Request {
+            id: "seed".to_string(),
+            method: Method::PaneCurrent(crate::api::schema::PaneCurrentParams {
+                caller_pane_id: None,
+            }),
+        });
+        let target_pane_id = serde_json::from_str::<SuccessResponse>(&response)
+            .ok()
+            .and_then(|success| match success.result {
+                ResponseResult::PaneCurrent { pane } => Some(pane.pane_id),
+                _ => None,
+            })
+            .expect("a seeded App has one focused pane");
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::SplitPane {
+                target_pane_id,
+                direction: crate::remote::federation::protocol::SplitDirection::Right,
+                ratio: None,
+                focus: false,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        let (new_pane_id, new_terminal_id) = outcome.expect("split against a known pane succeeds");
+        assert!(!new_pane_id.is_empty());
+        assert!(!new_terminal_id.is_empty());
+    }
+
+    #[test]
+    fn split_pane_against_an_unknown_target_pane_replies_with_a_reason() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::SplitPane {
+                target_pane_id: "no-such-pane".to_string(),
+                direction: crate::remote::federation::protocol::SplitDirection::Right,
+                ratio: None,
+                focus: false,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(outcome.is_err(), "an unknown target pane must fail, not misfile");
     }
 }

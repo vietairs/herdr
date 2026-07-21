@@ -24,7 +24,10 @@ use super::id::ServerInstanceId;
 /// `crate::protocol::wire::PROTOCOL_VERSION` (the client/UI wire protocol).
 /// Bumped 1 -> 2 with the addition of the control-channel `Fault` frame
 /// (b0.3-tail): a peer on v1 cannot decode a `Fault`, so the version gates it.
-pub const FEDERATION_PROTOCOL_VERSION: u32 = 2;
+/// Bumped 2 -> 3 with the addition of `SplitPaneRequest`/`SplitPaneResponse`
+/// (remote-split protocol scaffolding): a peer on v2 cannot decode either
+/// variant.
+pub const FEDERATION_PROTOCOL_VERSION: u32 = 3;
 
 /// An optional feature two federation peers may support. Modeled as an
 /// opaque name rather than a closed enum so an older peer can simply not
@@ -215,6 +218,52 @@ pub struct ClipboardMessage {
     pub payload: Vec<u8>,
 }
 
+/// Request to split an existing remote pane on the serving host's own
+/// workspace, sent by a mounting client so a local "split right"/"split
+/// down" action creates the new pane on the mounted host instead of
+/// falling back to a local spawn. `request_id` correlates the eventual
+/// `SplitPaneResponse` (the control channel carries no other request/
+/// response pairing today, so this is deliberately simple: a bare u64
+/// minted per outstanding request, not a full RPC framework).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplitPaneRequest {
+    pub request_id: u64,
+    /// Raw (un-namespaced) remote pane id to split, as carried by the
+    /// mount's own `SessionSnapshot`/event stream — never a locally
+    /// namespaced `r:<host>:...` id.
+    pub target_pane_id: String,
+    pub direction: SplitDirection,
+    pub ratio: Option<f32>,
+    pub focus: bool,
+}
+
+/// A split direction, mirroring `crate::api::schema::common::SplitDirection`
+/// but defined locally so the federation wire protocol never depends on the
+/// client/UI JSON API's schema types (independent evolution, matching this
+/// module's existing "purpose-built wire types" doc comment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitDirection {
+    Right,
+    Down,
+}
+
+/// Response to a `SplitPaneRequest`: either the new pane's raw remote
+/// terminal id (the client re-namespaces it under its own mount, the same
+/// way `App::build_remote_pane` namespaces mount-time panes), or a reason
+/// the split could not be performed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitPaneResponse {
+    Created {
+        request_id: u64,
+        new_pane_id: String,
+        new_terminal_id: String,
+    },
+    Failed {
+        request_id: u64,
+        reason: String,
+    },
+}
+
 /// The six federation channel classes, used to select a per-channel frame
 /// cap in the codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,8 +274,9 @@ pub enum Channel {
     Terminal,
     AgentStatus,
     Clipboard,
-    /// Small out-of-band control frames (fault/teardown). Kept tiny so a fault
-    /// can never be mistaken for a bulk channel and its cap is trivially met.
+    /// Small out-of-band control frames (fault/teardown, split requests).
+    /// Kept tiny so a fault can never be mistaken for a bulk channel and its
+    /// cap is trivially met.
     Control,
 }
 
@@ -259,6 +309,8 @@ pub enum FederationMessage {
     AgentStatus(AgentStatusMessage),
     Clipboard(ClipboardMessage),
     Fault(FaultMessage),
+    SplitPaneRequest(SplitPaneRequest),
+    SplitPaneResponse(SplitPaneResponse),
 }
 
 impl FederationMessage {
@@ -272,6 +324,7 @@ impl FederationMessage {
             Self::AgentStatus(_) => Channel::AgentStatus,
             Self::Clipboard(_) => Channel::Clipboard,
             Self::Fault(_) => Channel::Control,
+            Self::SplitPaneRequest(_) | Self::SplitPaneResponse(_) => Channel::Control,
         }
     }
 }
@@ -294,6 +347,45 @@ mod tests {
             layouts: Vec::new(),
             agents: Vec::new(),
         }
+    }
+
+    #[test]
+    fn split_pane_request_response_roundtrip_through_the_wire_codec() {
+        let request = FederationMessage::SplitPaneRequest(SplitPaneRequest {
+            request_id: 7,
+            target_pane_id: "term_1".to_string(),
+            direction: SplitDirection::Right,
+            ratio: Some(0.5),
+            focus: true,
+        });
+        assert_eq!(request.channel(), Channel::Control);
+        let encoded = codec::encode(&request).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, request);
+
+        let response = FederationMessage::SplitPaneResponse(SplitPaneResponse::Created {
+            request_id: 7,
+            new_pane_id: "term_2".to_string(),
+            new_terminal_id: "term_2".to_string(),
+        });
+        assert_eq!(response.channel(), Channel::Control);
+        let encoded = codec::encode(&response).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, response);
+
+        let failed = FederationMessage::SplitPaneResponse(SplitPaneResponse::Failed {
+            request_id: 7,
+            reason: "no such pane".to_string(),
+        });
+        let encoded = codec::encode(&failed).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, failed);
     }
 
     #[test]

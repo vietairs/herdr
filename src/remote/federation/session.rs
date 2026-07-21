@@ -337,6 +337,11 @@ pub(crate) fn run_federated_session(
         // just-flushed Opens is consumed live (the generation fence inside
         // `drive_mount_channel` keeps a superseded mount from mutating a newer
         // mirror — moot in v1, which never remounts).
+        // Cloned (not moved): `out_tx` itself is dropped further below, after
+        // this drive task ends, to signal the writer task to exit (see the
+        // teardown comment at that `drop(out_tx)` call).
+        let drive_out_tx = out_tx.clone();
+        let drive_outbound_clip_tx = outbound_clip_tx.clone();
         let mut drive = tokio::spawn(async move {
             let mut reader = tunnel_reader;
             let mut mirror_task = mirror;
@@ -348,6 +353,13 @@ pub(crate) fn run_federated_session(
                 &event_hub,
                 &mut router_task,
                 &inbound_clip_tx,
+                &drive_out_tx,
+                &drive_outbound_clip_tx,
+                // The classic full-screen `--remote` session is a standalone
+                // client process, not the server-owned materialization path
+                // this follow-up wires (`app/api/workspaces.rs`); a remote
+                // split here still logs, matching the prior behavior.
+                None,
             )
             .await
         });

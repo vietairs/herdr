@@ -95,6 +95,21 @@ pub(crate) trait FederationHost: 'static {
     fn send_input(&self, terminal_id: &str, bytes: &[u8]);
     fn resize(&self, terminal_id: &str, cols: u16, rows: u16);
 
+    /// Performs a real split on this host's own workspace, splitting the
+    /// pane backing `target_pane_id` (a raw, un-namespaced remote pane id)
+    /// in `direction`. Returns the new pane's raw remote pane id and
+    /// terminal id (the two happen to coincide today, matching how mount-
+    /// time panes are addressed — see `TerminalChannelMessage`'s
+    /// `terminal_id` field), or an error string describing why the split
+    /// could not be performed (unknown pane, spawn failure, ...).
+    fn split_pane(
+        &self,
+        target_pane_id: &str,
+        direction: super::protocol::SplitDirection,
+        ratio: Option<f32>,
+        focus: bool,
+    ) -> Result<(String, String), String>;
+
     /// Snapshot of every known terminal's current agent status, polled and
     /// diffed by this module so only changes are sent over the wire.
     fn agent_statuses(&self) -> Vec<(String, AgentStatus)>;
@@ -390,11 +405,33 @@ fn handle_inbound<H: FederationHost>(
     out_tx: &mpsc::UnboundedSender<FederationMessage>,
     open_terminals: &mut HashMap<String, tokio::task::JoinHandle<()>>,
 ) {
-    let FederationMessage::Terminal(term_msg) = msg else {
-        // Handshake/MountSnapshot/Event/AgentStatus are server->client only;
-        // Clipboard forwarding is deferred (see implementation-notes.md).
-        // Anything else inbound is simply not actionable here.
-        return;
+    let term_msg = match msg {
+        FederationMessage::Terminal(term_msg) => term_msg,
+        FederationMessage::SplitPaneRequest(super::protocol::SplitPaneRequest {
+            request_id,
+            target_pane_id,
+            direction,
+            ratio,
+            focus,
+        }) => {
+            let response = match host.split_pane(&target_pane_id, direction, ratio, focus) {
+                Ok((new_pane_id, new_terminal_id)) => {
+                    super::protocol::SplitPaneResponse::Created {
+                        request_id,
+                        new_pane_id,
+                        new_terminal_id,
+                    }
+                }
+                Err(reason) => super::protocol::SplitPaneResponse::Failed { request_id, reason },
+            };
+            let _ = out_tx.send(FederationMessage::SplitPaneResponse(response));
+            return;
+        }
+        // Handshake/MountSnapshot/Event/AgentStatus/SplitPaneResponse are
+        // server->client only; Clipboard forwarding is deferred (see
+        // implementation-notes.md). Anything else inbound is simply not
+        // actionable here.
+        _ => return,
     };
     if term_msg.mount_generation() != MOUNT_GENERATION {
         // Stale traffic from a prior mount generation must never be routed.
