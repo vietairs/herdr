@@ -1379,3 +1379,169 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
 **Reversibility:** `/opt/orca/orca-linux.AppImage.bak-1.4.141` kept on VM105 for rollback.
 
 **Note:** VM105 has no `orca-xvfb` unit at all (unlike VM100) — its `orca-serve` unit has no DISPLAY env var and doesn't need one; left untouched, don't invent a unit that isn't broken.
+
+## 2026-07-21 13:48 — interactive live smoke found a new bug: pane shows local shell, not remote stream
+
+**What:** Ran the D9/D10 manual smoke for real (vm100 -> vm105, `--remote-workspace --session fedsmoke`). Sidebar
+correctly showed the federated workspace (`131.172.248.163#fedsmoke`), but the selected pane showed a live,
+keystroke-responsive `hvnguyen@bio-1-ubuntu:~$` (vm100's own shell), not vm105's mirrored stream. Root-caused via
+hvn:hvn-root-causer (report: reports/from-root-causer-federated-pane-shows-local-shell-instead-of-remote-stream.md).
+Both a-priori hypotheses (local pty spawned during materialize; guard bypassed via keybinding) were DISCONFIRMED by
+source: `PaneRuntime::spawn_remote` never touches `spawn_with_portable_pty` (pane.rs:1796-1871), and every
+mutation path shares one `federated_mode`-gated dispatch (api.rs:851). Strongest remaining hypothesis: D2's own
+documented "fail-fast: exit to shell" (session.rs:7-9,333-346) fired silently after a correct first render — no
+`DriveOutcome` branch prints anything to the alt-screen, `run_remote`'s `Federated` arm returns `Ok(())` with no
+message (unix.rs:513-514), so control silently returns to vm100's real login shell in the same tty.
+**Why:** This is the FIRST live interactive exercise of `materialize_federation_mount`'s render path (prior
+verification was headless/no-TTY per auto-decisions D10). Not yet confirmed which `DriveOutcome` (or panic) ended
+the session — needs vm100's herdr log.
+**Evidence:** root-causer's file:line citations (session.rs, client.rs, creation.rs, pane.rs, api.rs, unix.rs);
+screenshot showing live `^C` echoes in the "wrong" pane, consistent with a real restored shell, not stale buffer.
+**Reversibility:** investigation-only, no code changed. Next: pull vm100's log at
+`~/.config/herdr/sessions/fedsmoke/herdr.log` (or wherever XDG_CONFIG_HOME points) to identify the exact
+`DriveOutcome`/panic, then decide fix scope. Ship-gate CONDITIONAL PASS downgraded — a real functional gap, not
+just an unmet-in-env test.
+
+## 2026-07-21 13:56 — CORRECTION: "wrong pane" was a false alarm (hostname confusion); real finding is a silent-logging gap + an unexplained live exit
+
+**What:** Got direct SSH access to vm100 (`ssh appn-ltu-vm-100`). Confirmed vm100's own hostname is `gpu-ml`, NOT
+`bio-1-ubuntu`. Queried vm105 THROUGH the live fedsmoke process's own ssh ControlMaster socket
+(`-F /tmp/herdr-ssh-831358-0/config -S .../ctl 131.172.248.163 hostname`) and got `bio-1-ubuntu` back — i.e.
+vm105's REAL hostname is `bio-1-ubuntu`. The pane the user saw was NOT a local vm100 shell; it was genuinely
+vm105's remote content, correctly mirrored. The 13:48 root-cause finding (both prior hypotheses disconfirmed,
+D2 silent-exit theorized) is superseded for the "wrong content" framing — there was no wrong content.
+Separately confirmed: no `~/.config/herdr/sessions/fedsmoke/` directory was ever created on vm100 (only the old
+`fedtest` from Jul14 exists) -&gt; `init_file_logging` (logging.rs:12-20) silently returns when
+`RotatingFileMakeWriter::new` can't create the log file in a non-existent dir -&gt; **zero log output for the
+entire fedsmoke run**, on either the render question or anything else.
+While gathering this evidence (between confirming the mux socket worked and the next check ~1 command later),
+the whole session tore down: `herdr-fed` on vm100 (pid 831358) AND `federation-serve` on vm105 (pid 1075781)
+both disappeared. `journalctl --since "10 min ago"` on vm100 shows no OOM/kill entry for that pid, so it was not
+killed by the kernel. Cannot rule out that my own diagnostics (`stty -F /dev/pts/1 -a`, or reusing the process's
+own ssh ControlMaster socket for an extra hostname query) disturbed the live session, though both are normally
+safe/read-only operations and ssh multiplexing is designed to support extra sessions over one master
+non-disruptively. Equally plausible: an unrelated timeout/fault fired around the ~20min mark on its own (matches
+D2 fail-fast design) — there is no log to distinguish these.
+**Why:** Correcting the record before it misdirects a fix — the original bug report was a hostname-identity
+mistake, not a rendering/routing bug. The REAL open items are (1) the missing session-log-dir bug (independently
+real, blocks all future debugging of federated runs) and (2) confirming disconnect-survival (F1) and
+New-Worktree-rejection (F4) from the actual manual smoke checklist, neither of which got exercised before the
+session ended.
+**Evidence:** `ssh appn-ltu-vm-100 hostname` -&gt; `gpu-ml`; `ssh -F /tmp/herdr-ssh-831358-0/config -S ctl
+131.172.248.163 hostname` (via the fedsmoke process's own tunnel) -&gt; `bio-1-ubuntu`; `ps aux` before/after
+showing both endpoint processes vanish; `find ~/.config/herdr/sessions` showing only `fedtest`, never `fedsmoke`.
+**Reversibility:** no code changed, read-only SSH investigation only. Next: re-run the smoke test with the
+session directory pre-created (or `HERDR_LOG=debug`) so a future exit actually leaves a log trail, then complete
+the disconnect-survival and New-Worktree-rejection checks the runbook still requires.
+
+## 2026-07-21 14:02 — D9 manual smoke test executed end-to-end via SSH (vm100->vm105); ALL 4 checks PASS
+
+**What:** Ran a fresh dial (`--session fedsmoke2`, tmux-wrapped so output could be captured non-interactively)
+and drove it directly over SSH: (1) mount/render — sidebar + pane matched the earlier screenshot exactly,
+confirming that finding was correctly resolved as a false alarm, not a regression; (2) live-stream proof — typed
+`echo REMOTE_LIVE_CHECK_958938; hostname` into the federated pane, got both back including `bio-1-ubuntu`,
+proving genuine live round-trip to vm105, not a cached/static buffer; (3) New Worktree guard (F4) — prefix+G
+opened the dialog, submitting "create and open" produced the visible message "this operation is not permitted on
+a federated remote workspace", `git -C ~/Projects/herdr worktree list` on vm100 unchanged (still just the main
+checkout), `~/.herdr/worktrees/` never created; (4) disconnect-survival (F1) — killed the ssh ControlMaster
+(pid 954474) to sever the tunnel; herdr-fed (pid 954464) fully exited within ~3s (confirmed via `ps`, plus its
+wrapping tmux server auto-closed because its one window's command had exited — i.e. a clean return, not a hang);
+on vm105 the backing bash (pid 1119962, child of the session's own `herdr server` 1119946) was STILL RUNNING
+after disconnect — the remote PTY survived exactly as required.
+Separately reconfirmed the missing-log bug is NOT simply "directory doesn't exist": pre-created
+`~/.config/herdr/sessions/fedsmoke2/` AND set `HERDR_LOG=debug` before launch, and still zero `herdr.log` was
+written anywhere (not in the session dir, not at `~/.config/herdr/herdr.log`). The federated `--remote
+--remote-workspace` startup path does not appear to call `init_file_logging` at all (or something before it
+short-circuits), independent of directory existence. Filed as a real but non-blocking gap (observability only —
+every acceptance check above was verified by direct behavior, not logs).
+**Why:** User asked me to run the smoke test myself given direct SSH access was available. This is the exact D9
+manual-smoke gate ship-gate's CONDITIONAL PASS was waiting on.
+**Evidence:** command transcripts captured via `tmux capture-pane` at each step (dialog rejection text, live
+echo/hostname round-trip, process tables before/after disconnect on both hosts).
+**Reversibility:** test-only; cleaned up `/tmp/fedsmoke2-stderr.log` and the empty session dirs on vm100 after.
+No code changed. PR #1 is not un-drafted by me — that handover decision goes back to the user with this evidence.
+
+## 2026-07-21 14:04 — PR #1 un-drafted (user-confirmed)
+
+**What:** User explicitly said "yes" to un-drafting after reviewing the D9 smoke evidence. Ran `gh pr ready 1`.
+PR #1 is now "ready for review" (isDraft: false).
+**Why:** All human-only ship-gate acceptance criteria empirically satisfied (13a); this was purely the
+human sign-off cortex/I cannot make unilaterally.
+**Evidence:** `gh pr view 1 --json isDraft` -&gt; `false`.
+**Reversibility:** `gh pr ready 1 --undo` re-drafts it. Merge itself still not performed — stays with the user.
+
+## 260721 15:42 -- Phase B (multi-target CLI + concurrent mounts + HashMap mirror) implementation (implementer)
+**What:** Generalized Phase A's local+1-remote coexistence to local+N-remote.
+Files touched: `src/remote/unix.rs`, `src/remote.rs` (Windows parity),
+`src/api/schema/workspaces.rs`, `src/api/schema/response.rs`,
+`src/app/api/workspaces.rs`, `src/app/state.rs`, `src/app/mod.rs`,
+`src/main.rs`, `src/server/autodetect.rs`, `src/ui/sidebar.rs`,
+`docs/next/api/herdr-api.schema.json` (regenerated artifact).
+
+**Deviations from the phase file:**
+1. Concurrent-dial location: the phase file assumed the driver lives in
+   `src/api/server.rs`. In the actual (already-corrected) Phase A
+   architecture the driver lives in `src/app/api/workspaces.rs::handle_
+   workspace_mount_remote` -- that is the file generalized, not
+   `server.rs` (which only maps the method name, unchanged).
+2. No `FuturesUnordered`: `handle_workspace_mount_remote` is fire-and-
+   forget -- it never awaits the mounts it starts (success/failure arrives
+   later via `AppEvent::FederationMountReady`/`Failed`). Looping
+   `tokio::spawn` once per target is already fully concurrent: each task
+   runs independently with its own internal ~25s dial budget
+   (`FEDERATION_CONNECT_TIMEOUT + FEDERATION_MOUNT_TIMEOUT` in
+   `session.rs::dial_and_mount`, unchanged). Test 7 (mock 3x20s dials, fake
+   clock) was not written -- there is no seam to mock the internal SSH dial;
+   documenting the gap rather than fabricating a weak test.
+3. Duplicate `HostKey` in a batch is rejected before any dial, via
+   `AppState::double_attach_conflict` checked against `session_name` +
+   target before spawning, immediately emitting a per-host
+   `FederationMountFailed`.
+4. One-request-N-targets chosen over N-requests (implementer's choice per
+   requirement 9): `WorkspaceMountRemoteParams.target: String` -> `targets:
+   Vec<String>`; `WorkspaceMountRemoteRequested.target: String` -> `targets:
+   Vec<String>`.
+5. `localhost` filtering implemented as `is_local_target`/`remote_ssh_
+   targets` pure functions in `unix.rs`. Exact-string match only, no
+   `127.0.0.1`/hostname canonicalization (documented v1 limitation, per
+   predict's explicit allowance).
+6. `--remote` space-form grammar: a single `--remote` greedily consumes
+   bare tokens after its first required value as additional targets,
+   stopping at the next `--`-prefixed flag or `--` separator. The old
+   "--remote can only be specified once" error was removed entirely (not
+   just for the space form), satisfying the inverted duplicate-values test
+   for both space and equals forms. A malformed value starting with a
+   single `-` still errors via `validate_remote_target`.
+7. Classic single-target dispatch (`run_remote`) reads
+   `remote.target.first()` only; extra targets on a classic (non-federated)
+   `--remote` invocation are silently ignored rather than rejected at parse
+   time -- minor documented gap, not enforced since not requested.
+8. Windows parity test (phase test 10) not added as a runnable test: the
+   `#[cfg(windows)]` code cannot be built/executed on this macOS sandbox and
+   there is no shared cross-platform parsing function. The Windows grammar
+   was mirrored by hand to match unix.rs's `is_flag_like`/multi-value loop;
+   not compiler-verified this pass.
+9. `HashMap<HostKey, RemoteMirror>` teardown on natural drive-task end is
+   still missing (pre-existing Phase A gap, not newly introduced) --
+   `remote_mirrors` entries are only removed on materialize failure, not
+   when a live tunnel closes normally. Needs a new `AppEvent` variant to
+   hand `&mut App` back after the spawned task ends; out of this phase's
+   locked requirements.
+
+**Validation:**
+- `cargo check --bin herdr` (ZIG=~/.local/zig-0.15.2/zig; sandbox default
+  zig 0.16.0 is incompatible with vendored libghostty-vt's pinned 0.15.2):
+  clean.
+- `cargo test --bin herdr -- --test-threads=4`: 2681 passed, 0 failed (up
+  from pre-Phase-B baseline of 2673; net +8 new/inverted tests across
+  unix.rs, state.rs, workspaces.rs, sidebar.rs; just/nextest unavailable in
+  this sandbox).
+- `cargo clippy --bin herdr --all-targets -- -D warnings`: 3 remaining
+  errors, all verified pre-existing via `git stash`/re-run (dead-code
+  `map_out`, dead-code `Capability::CLIPBOARD`, `type_complexity` in
+  `pane_source.rs`) -- zero new clippy findings from this phase.
+- `docs/next/api/herdr-api.schema.json` regenerated via
+  `HERDR_UPDATE_API_SCHEMA=1 cargo test generated_protocol_schema_artifact_
+  is_current` to match the `targets: Vec<String>` shape change.
+- Manual two-machine smoke not run (out-of-env for this sandbox), same as
+  Phase A.
