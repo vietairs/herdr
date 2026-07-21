@@ -1,0 +1,2286 @@
+diff --git a/docs/next/api/herdr-api.schema.json b/docs/next/api/herdr-api.schema.json
+index a769d05..c8af3e7 100644
+--- a/docs/next/api/herdr-api.schema.json
++++ b/docs/next/api/herdr-api.schema.json
+@@ -3618,6 +3618,25 @@
+           },
+           "type": "object"
+         },
++        "WorkspaceMountRemoteParams": {
++          "description": "REVISED Phase A (multi-remote federated workspace launch); generalized to\nN targets in Phase B: mounts one or more federation targets as\nserver-daemon-owned state, alongside the local workspace(s) already\nrunning in this session. `main.rs` sends this instead of running the\nfederation driver itself (runtime/client boundary guardrail — mount =\nshared runtime/session fact). One request carries the full target list\n(Phase B requirement 9's \"one request with a target list\" option) so the\nserver-side handler owns the concurrent-dial fan-out.",
++          "properties": {
++            "remote_keybindings": {
++              "default": false,
++              "type": "boolean"
++            },
++            "targets": {
++              "items": {
++                "type": "string"
++              },
++              "type": "array"
++            }
++          },
++          "required": [
++            "targets"
++          ],
++          "type": "object"
++        },
+         "WorkspaceMoveParams": {
+           "properties": {
+             "insert_index": {
+@@ -4029,6 +4048,22 @@
+           ],
+           "type": "object"
+         },
++        {
++          "properties": {
++            "method": {
++              "const": "workspace.mount_remote",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/schemas/request/$defs/WorkspaceMountRemoteParams"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "type": "object"
++        },
+         {
+           "properties": {
+             "method": {
+@@ -7871,6 +7906,26 @@
+               ],
+               "type": "object"
+             },
++            {
++              "description": "Acknowledges a `workspace.mount_remote` request: the dial+mount task\nwas spawned inside the server daemon's own tokio runtime. Does not\nimply the mount succeeded — success/failure lands later as a sidebar\nnotice (mount failure) or new remote-origin workspace group (mount\nsuccess), both delivered through the existing event/render path.",
++              "properties": {
++                "targets": {
++                  "items": {
++                    "type": "string"
++                  },
++                  "type": "array"
++                },
++                "type": {
++                  "const": "workspace_mount_remote_requested",
++                  "type": "string"
++                }
++              },
++              "required": [
++                "type",
++                "targets"
++              ],
++              "type": "object"
++            },
+             {
+               "properties": {
+                 "source": {
+diff --git a/plans/260713-1217-herdr-remote-workspace-federation/implementation-notes.md b/plans/260713-1217-herdr-remote-workspace-federation/implementation-notes.md
+index de0c44e..4221379 100644
+--- a/plans/260713-1217-herdr-remote-workspace-federation/implementation-notes.md
++++ b/plans/260713-1217-herdr-remote-workspace-federation/implementation-notes.md
+@@ -1379,3 +1379,169 @@ for remote-backed panes; capability negotiation preserves legacy full-screen `--
+ **Reversibility:** `/opt/orca/orca-linux.AppImage.bak-1.4.141` kept on VM105 for rollback.
+ 
+ **Note:** VM105 has no `orca-xvfb` unit at all (unlike VM100) — its `orca-serve` unit has no DISPLAY env var and doesn't need one; left untouched, don't invent a unit that isn't broken.
++
++## 2026-07-21 13:48 — interactive live smoke found a new bug: pane shows local shell, not remote stream
++
++**What:** Ran the D9/D10 manual smoke for real (vm100 -> vm105, `--remote-workspace --session fedsmoke`). Sidebar
++correctly showed the federated workspace (`131.172.248.163#fedsmoke`), but the selected pane showed a live,
++keystroke-responsive `hvnguyen@bio-1-ubuntu:~$` (vm100's own shell), not vm105's mirrored stream. Root-caused via
++hvn:hvn-root-causer (report: reports/from-root-causer-federated-pane-shows-local-shell-instead-of-remote-stream.md).
++Both a-priori hypotheses (local pty spawned during materialize; guard bypassed via keybinding) were DISCONFIRMED by
++source: `PaneRuntime::spawn_remote` never touches `spawn_with_portable_pty` (pane.rs:1796-1871), and every
++mutation path shares one `federated_mode`-gated dispatch (api.rs:851). Strongest remaining hypothesis: D2's own
++documented "fail-fast: exit to shell" (session.rs:7-9,333-346) fired silently after a correct first render — no
++`DriveOutcome` branch prints anything to the alt-screen, `run_remote`'s `Federated` arm returns `Ok(())` with no
++message (unix.rs:513-514), so control silently returns to vm100's real login shell in the same tty.
++**Why:** This is the FIRST live interactive exercise of `materialize_federation_mount`'s render path (prior
++verification was headless/no-TTY per auto-decisions D10). Not yet confirmed which `DriveOutcome` (or panic) ended
++the session — needs vm100's herdr log.
++**Evidence:** root-causer's file:line citations (session.rs, client.rs, creation.rs, pane.rs, api.rs, unix.rs);
++screenshot showing live `^C` echoes in the "wrong" pane, consistent with a real restored shell, not stale buffer.
++**Reversibility:** investigation-only, no code changed. Next: pull vm100's log at
++`~/.config/herdr/sessions/fedsmoke/herdr.log` (or wherever XDG_CONFIG_HOME points) to identify the exact
++`DriveOutcome`/panic, then decide fix scope. Ship-gate CONDITIONAL PASS downgraded — a real functional gap, not
++just an unmet-in-env test.
++
++## 2026-07-21 13:56 — CORRECTION: "wrong pane" was a false alarm (hostname confusion); real finding is a silent-logging gap + an unexplained live exit
++
++**What:** Got direct SSH access to vm100 (`ssh appn-ltu-vm-100`). Confirmed vm100's own hostname is `gpu-ml`, NOT
++`bio-1-ubuntu`. Queried vm105 THROUGH the live fedsmoke process's own ssh ControlMaster socket
++(`-F /tmp/herdr-ssh-831358-0/config -S .../ctl 131.172.248.163 hostname`) and got `bio-1-ubuntu` back — i.e.
++vm105's REAL hostname is `bio-1-ubuntu`. The pane the user saw was NOT a local vm100 shell; it was genuinely
++vm105's remote content, correctly mirrored. The 13:48 root-cause finding (both prior hypotheses disconfirmed,
++D2 silent-exit theorized) is superseded for the "wrong content" framing — there was no wrong content.
++Separately confirmed: no `~/.config/herdr/sessions/fedsmoke/` directory was ever created on vm100 (only the old
++`fedtest` from Jul14 exists) -&gt; `init_file_logging` (logging.rs:12-20) silently returns when
++`RotatingFileMakeWriter::new` can't create the log file in a non-existent dir -&gt; **zero log output for the
++entire fedsmoke run**, on either the render question or anything else.
++While gathering this evidence (between confirming the mux socket worked and the next check ~1 command later),
++the whole session tore down: `herdr-fed` on vm100 (pid 831358) AND `federation-serve` on vm105 (pid 1075781)
++both disappeared. `journalctl --since "10 min ago"` on vm100 shows no OOM/kill entry for that pid, so it was not
++killed by the kernel. Cannot rule out that my own diagnostics (`stty -F /dev/pts/1 -a`, or reusing the process's
++own ssh ControlMaster socket for an extra hostname query) disturbed the live session, though both are normally
++safe/read-only operations and ssh multiplexing is designed to support extra sessions over one master
++non-disruptively. Equally plausible: an unrelated timeout/fault fired around the ~20min mark on its own (matches
++D2 fail-fast design) — there is no log to distinguish these.
++**Why:** Correcting the record before it misdirects a fix — the original bug report was a hostname-identity
++mistake, not a rendering/routing bug. The REAL open items are (1) the missing session-log-dir bug (independently
++real, blocks all future debugging of federated runs) and (2) confirming disconnect-survival (F1) and
++New-Worktree-rejection (F4) from the actual manual smoke checklist, neither of which got exercised before the
++session ended.
++**Evidence:** `ssh appn-ltu-vm-100 hostname` -&gt; `gpu-ml`; `ssh -F /tmp/herdr-ssh-831358-0/config -S ctl
++131.172.248.163 hostname` (via the fedsmoke process's own tunnel) -&gt; `bio-1-ubuntu`; `ps aux` before/after
++showing both endpoint processes vanish; `find ~/.config/herdr/sessions` showing only `fedtest`, never `fedsmoke`.
++**Reversibility:** no code changed, read-only SSH investigation only. Next: re-run the smoke test with the
++session directory pre-created (or `HERDR_LOG=debug`) so a future exit actually leaves a log trail, then complete
++the disconnect-survival and New-Worktree-rejection checks the runbook still requires.
++
++## 2026-07-21 14:02 — D9 manual smoke test executed end-to-end via SSH (vm100->vm105); ALL 4 checks PASS
++
++**What:** Ran a fresh dial (`--session fedsmoke2`, tmux-wrapped so output could be captured non-interactively)
++and drove it directly over SSH: (1) mount/render — sidebar + pane matched the earlier screenshot exactly,
++confirming that finding was correctly resolved as a false alarm, not a regression; (2) live-stream proof — typed
++`echo REMOTE_LIVE_CHECK_958938; hostname` into the federated pane, got both back including `bio-1-ubuntu`,
++proving genuine live round-trip to vm105, not a cached/static buffer; (3) New Worktree guard (F4) — prefix+G
++opened the dialog, submitting "create and open" produced the visible message "this operation is not permitted on
++a federated remote workspace", `git -C ~/Projects/herdr worktree list` on vm100 unchanged (still just the main
++checkout), `~/.herdr/worktrees/` never created; (4) disconnect-survival (F1) — killed the ssh ControlMaster
++(pid 954474) to sever the tunnel; herdr-fed (pid 954464) fully exited within ~3s (confirmed via `ps`, plus its
++wrapping tmux server auto-closed because its one window's command had exited — i.e. a clean return, not a hang);
++on vm105 the backing bash (pid 1119962, child of the session's own `herdr server` 1119946) was STILL RUNNING
++after disconnect — the remote PTY survived exactly as required.
++Separately reconfirmed the missing-log bug is NOT simply "directory doesn't exist": pre-created
++`~/.config/herdr/sessions/fedsmoke2/` AND set `HERDR_LOG=debug` before launch, and still zero `herdr.log` was
++written anywhere (not in the session dir, not at `~/.config/herdr/herdr.log`). The federated `--remote
++--remote-workspace` startup path does not appear to call `init_file_logging` at all (or something before it
++short-circuits), independent of directory existence. Filed as a real but non-blocking gap (observability only —
++every acceptance check above was verified by direct behavior, not logs).
++**Why:** User asked me to run the smoke test myself given direct SSH access was available. This is the exact D9
++manual-smoke gate ship-gate's CONDITIONAL PASS was waiting on.
++**Evidence:** command transcripts captured via `tmux capture-pane` at each step (dialog rejection text, live
++echo/hostname round-trip, process tables before/after disconnect on both hosts).
++**Reversibility:** test-only; cleaned up `/tmp/fedsmoke2-stderr.log` and the empty session dirs on vm100 after.
++No code changed. PR #1 is not un-drafted by me — that handover decision goes back to the user with this evidence.
++
++## 2026-07-21 14:04 — PR #1 un-drafted (user-confirmed)
++
++**What:** User explicitly said "yes" to un-drafting after reviewing the D9 smoke evidence. Ran `gh pr ready 1`.
++PR #1 is now "ready for review" (isDraft: false).
++**Why:** All human-only ship-gate acceptance criteria empirically satisfied (13a); this was purely the
++human sign-off cortex/I cannot make unilaterally.
++**Evidence:** `gh pr view 1 --json isDraft` -&gt; `false`.
++**Reversibility:** `gh pr ready 1 --undo` re-drafts it. Merge itself still not performed — stays with the user.
++
++## 260721 15:42 -- Phase B (multi-target CLI + concurrent mounts + HashMap mirror) implementation (implementer)
++**What:** Generalized Phase A's local+1-remote coexistence to local+N-remote.
++Files touched: `src/remote/unix.rs`, `src/remote.rs` (Windows parity),
++`src/api/schema/workspaces.rs`, `src/api/schema/response.rs`,
++`src/app/api/workspaces.rs`, `src/app/state.rs`, `src/app/mod.rs`,
++`src/main.rs`, `src/server/autodetect.rs`, `src/ui/sidebar.rs`,
++`docs/next/api/herdr-api.schema.json` (regenerated artifact).
++
++**Deviations from the phase file:**
++1. Concurrent-dial location: the phase file assumed the driver lives in
++   `src/api/server.rs`. In the actual (already-corrected) Phase A
++   architecture the driver lives in `src/app/api/workspaces.rs::handle_
++   workspace_mount_remote` -- that is the file generalized, not
++   `server.rs` (which only maps the method name, unchanged).
++2. No `FuturesUnordered`: `handle_workspace_mount_remote` is fire-and-
++   forget -- it never awaits the mounts it starts (success/failure arrives
++   later via `AppEvent::FederationMountReady`/`Failed`). Looping
++   `tokio::spawn` once per target is already fully concurrent: each task
++   runs independently with its own internal ~25s dial budget
++   (`FEDERATION_CONNECT_TIMEOUT + FEDERATION_MOUNT_TIMEOUT` in
++   `session.rs::dial_and_mount`, unchanged). Test 7 (mock 3x20s dials, fake
++   clock) was not written -- there is no seam to mock the internal SSH dial;
++   documenting the gap rather than fabricating a weak test.
++3. Duplicate `HostKey` in a batch is rejected before any dial, via
++   `AppState::double_attach_conflict` checked against `session_name` +
++   target before spawning, immediately emitting a per-host
++   `FederationMountFailed`.
++4. One-request-N-targets chosen over N-requests (implementer's choice per
++   requirement 9): `WorkspaceMountRemoteParams.target: String` -> `targets:
++   Vec<String>`; `WorkspaceMountRemoteRequested.target: String` -> `targets:
++   Vec<String>`.
++5. `localhost` filtering implemented as `is_local_target`/`remote_ssh_
++   targets` pure functions in `unix.rs`. Exact-string match only, no
++   `127.0.0.1`/hostname canonicalization (documented v1 limitation, per
++   predict's explicit allowance).
++6. `--remote` space-form grammar: a single `--remote` greedily consumes
++   bare tokens after its first required value as additional targets,
++   stopping at the next `--`-prefixed flag or `--` separator. The old
++   "--remote can only be specified once" error was removed entirely (not
++   just for the space form), satisfying the inverted duplicate-values test
++   for both space and equals forms. A malformed value starting with a
++   single `-` still errors via `validate_remote_target`.
++7. Classic single-target dispatch (`run_remote`) reads
++   `remote.target.first()` only; extra targets on a classic (non-federated)
++   `--remote` invocation are silently ignored rather than rejected at parse
++   time -- minor documented gap, not enforced since not requested.
++8. Windows parity test (phase test 10) not added as a runnable test: the
++   `#[cfg(windows)]` code cannot be built/executed on this macOS sandbox and
++   there is no shared cross-platform parsing function. The Windows grammar
++   was mirrored by hand to match unix.rs's `is_flag_like`/multi-value loop;
++   not compiler-verified this pass.
++9. `HashMap<HostKey, RemoteMirror>` teardown on natural drive-task end is
++   still missing (pre-existing Phase A gap, not newly introduced) --
++   `remote_mirrors` entries are only removed on materialize failure, not
++   when a live tunnel closes normally. Needs a new `AppEvent` variant to
++   hand `&mut App` back after the spawned task ends; out of this phase's
++   locked requirements.
++
++**Validation:**
++- `cargo check --bin herdr` (ZIG=~/.local/zig-0.15.2/zig; sandbox default
++  zig 0.16.0 is incompatible with vendored libghostty-vt's pinned 0.15.2):
++  clean.
++- `cargo test --bin herdr -- --test-threads=4`: 2681 passed, 0 failed (up
++  from pre-Phase-B baseline of 2673; net +8 new/inverted tests across
++  unix.rs, state.rs, workspaces.rs, sidebar.rs; just/nextest unavailable in
++  this sandbox).
++- `cargo clippy --bin herdr --all-targets -- -D warnings`: 3 remaining
++  errors, all verified pre-existing via `git stash`/re-run (dead-code
++  `map_out`, dead-code `Capability::CLIPBOARD`, `type_complexity` in
++  `pane_source.rs`) -- zero new clippy findings from this phase.
++- `docs/next/api/herdr-api.schema.json` regenerated via
++  `HERDR_UPDATE_API_SCHEMA=1 cargo test generated_protocol_schema_artifact_
++  is_current` to match the `targets: Vec<String>` shape change.
++- Manual two-machine smoke not run (out-of-env for this sandbox), same as
++  Phase A.
+diff --git a/plans/260713-1217-herdr-remote-workspace-federation/pipeline-progress.md b/plans/260713-1217-herdr-remote-workspace-federation/pipeline-progress.md
+index 4c876ff..2fd44e1 100644
+--- a/plans/260713-1217-herdr-remote-workspace-federation/pipeline-progress.md
++++ b/plans/260713-1217-herdr-remote-workspace-federation/pipeline-progress.md
+@@ -283,6 +283,14 @@
+       (phase-09b:162), a HUMAN-ONLY gate (macOS-27 can't build; remote host is a headless build sandbox).
+       In-env gates all green (build EXIT_0, 2685/0, clippy baseline, 2 adversarial reviews' blockers fixed).
+       See auto-decisions D9 for the attestation + the exact manual smoke steps.
+-- [ ] 13. un-draft PR #1 — NOT DONE (deliberate). Do NOT un-draft: un-drafting would assert merge-readiness the
+-      unmet human-only live smoke does not support; cortex never weakens a gate to ship, never merges. PR stays
+-      DRAFT; the human runs the two-machine smoke (D9), then un-drafts + merges. STOP here (--auto: record + stop).
++- [x] 13a. D9 manual smoke — DONE 14:02, executed directly over SSH (vm100->vm105, `--session fedsmoke2`).
++      ALL 4 checks PASS: mount/render correct (13:48's "wrong pane" was a false alarm — `bio-1-ubuntu` is vm105's
++      real hostname, not vm100's, confirmed via `gpu-ml` vm100 vs `bio-1-ubuntu` vm105); live-stream proven with a
++      real echo/hostname round-trip; New Worktree (F4) correctly REJECTED with a visible message, no worktree
++      created; disconnect (F1) — herdr-fed exits cleanly within ~3s (no hang) and vm105's backing shell survives.
++      Separately reconfirmed (non-blocking): federated `--remote --remote-workspace` writes NO log file at all,
++      even with the session dir pre-created and `HERDR_LOG=debug` set — an observability gap, not a functional
++      one (every check above verified by direct behavior, not logs). See implementation-notes.md 14:02 entry.
++- [x] 13b. un-draft PR #1 — DONE 14:04, user-confirmed (`gh pr ready 1`). PR #1 is "ready for review".
++      https://github.com/vietairs/herdr/pull/1
++- [ ] 14. MERGE PR #1 — NOT cortex's to do (see Scope: cortex never merges). Belongs to the user or `/hvn-vibe`.
+diff --git a/src/api/mod.rs b/src/api/mod.rs
+index 3a2cd4c..bd69fc7 100644
+--- a/src/api/mod.rs
++++ b/src/api/mod.rs
+@@ -25,6 +25,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
+             | Method::ServerReloadAgentManifests(_)
+             | Method::NotificationShow(_)
+             | Method::WorkspaceCreate(_)
++            | Method::WorkspaceMountRemote(_)
+             | Method::WorkspaceFocus(_)
+             | Method::WorkspaceRename(_)
+             | Method::WorkspaceMove(_)
+@@ -134,6 +135,7 @@ pub(crate) fn federated_session_allows(method: &Method) -> bool {
+         | Method::ClientWindowTitleSet(_)
+         | Method::ClientWindowTitleClear(_)
+         | Method::WorkspaceCreate(_)
++        | Method::WorkspaceMountRemote(_)
+         | Method::WorkspaceRename(_)
+         | Method::WorkspaceMove(_)
+         | Method::WorkspaceReportMetadata(_)
+@@ -209,21 +211,31 @@ mod federated_allowlist_tests {
+ 
+     #[test]
+     fn allows_read_only_navigation_and_remote_input() {
+-        assert!(federated_session_allows(&Method::SessionSnapshot(EmptyParams {})));
+-        assert!(federated_session_allows(&Method::WorkspaceList(EmptyParams {})));
++        assert!(federated_session_allows(&Method::SessionSnapshot(
++            EmptyParams {}
++        )));
++        assert!(federated_session_allows(&Method::WorkspaceList(
++            EmptyParams {}
++        )));
+         assert!(federated_session_allows(&Method::AgentList(EmptyParams {})));
+         // Read-only server query stays allowed...
+-        assert!(federated_session_allows(&Method::ServerAgentManifests(EmptyParams {})));
++        assert!(federated_session_allows(&Method::ServerAgentManifests(
++            EmptyParams {}
++        )));
+     }
+ 
+     #[test]
+     fn forbids_server_control_and_client_display_methods() {
+-        assert!(!federated_session_allows(&Method::ServerStop(EmptyParams {})));
+-        assert!(!federated_session_allows(&Method::ServerReloadConfig(EmptyParams {})));
+-        // ...but the reload counterpart of the allowed query is forbidden.
+-        assert!(!federated_session_allows(&Method::ServerReloadAgentManifests(
++        assert!(!federated_session_allows(&Method::ServerStop(
+             EmptyParams {}
+         )));
++        assert!(!federated_session_allows(&Method::ServerReloadConfig(
++            EmptyParams {}
++        )));
++        // ...but the reload counterpart of the allowed query is forbidden.
++        assert!(!federated_session_allows(
++            &Method::ServerReloadAgentManifests(EmptyParams {})
++        ));
+         assert!(!federated_session_allows(&Method::ClientWindowTitleClear(
+             EmptyParams {}
+         )));
+diff --git a/src/api/schema.rs b/src/api/schema.rs
+index 4fb3d84..c58fe5f 100644
+--- a/src/api/schema.rs
++++ b/src/api/schema.rs
+@@ -65,6 +65,8 @@ pub enum Method {
+     SessionSnapshot(EmptyParams),
+     #[serde(rename = "workspace.create")]
+     WorkspaceCreate(WorkspaceCreateParams),
++    #[serde(rename = "workspace.mount_remote")]
++    WorkspaceMountRemote(WorkspaceMountRemoteParams),
+     #[serde(rename = "workspace.list")]
+     WorkspaceList(EmptyParams),
+     #[serde(rename = "workspace.get")]
+diff --git a/src/api/schema/response.rs b/src/api/schema/response.rs
+index 18a2635..f2970b8 100644
+--- a/src/api/schema/response.rs
++++ b/src/api/schema/response.rs
+@@ -62,6 +62,14 @@ pub enum ResponseResult {
+     WorkspaceList {
+         workspaces: Vec<WorkspaceInfo>,
+     },
++    /// Acknowledges a `workspace.mount_remote` request: the dial+mount task
++    /// was spawned inside the server daemon's own tokio runtime. Does not
++    /// imply the mount succeeded — success/failure lands later as a sidebar
++    /// notice (mount failure) or new remote-origin workspace group (mount
++    /// success), both delivered through the existing event/render path.
++    WorkspaceMountRemoteRequested {
++        targets: Vec<String>,
++    },
+     WorktreeList {
+         source: WorktreeSourceInfo,
+         worktrees: Vec<WorktreeInfo>,
+diff --git a/src/api/schema/workspaces.rs b/src/api/schema/workspaces.rs
+index a617798..ba5635c 100644
+--- a/src/api/schema/workspaces.rs
++++ b/src/api/schema/workspaces.rs
+@@ -16,6 +16,21 @@ pub struct WorkspaceCreateParams {
+     pub env: HashMap<String, String>,
+ }
+ 
++/// REVISED Phase A (multi-remote federated workspace launch); generalized to
++/// N targets in Phase B: mounts one or more federation targets as
++/// server-daemon-owned state, alongside the local workspace(s) already
++/// running in this session. `main.rs` sends this instead of running the
++/// federation driver itself (runtime/client boundary guardrail — mount =
++/// shared runtime/session fact). One request carries the full target list
++/// (Phase B requirement 9's "one request with a target list" option) so the
++/// server-side handler owns the concurrent-dial fan-out.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
++pub struct WorkspaceMountRemoteParams {
++    pub targets: Vec<String>,
++    #[serde(default)]
++    pub remote_keybindings: bool,
++}
++
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+ pub struct WorkspaceRenameParams {
+     pub workspace_id: String,
+diff --git a/src/api/server.rs b/src/api/server.rs
+index 9cef5ec..49abf5c 100644
+--- a/src/api/server.rs
++++ b/src/api/server.rs
+@@ -317,6 +317,7 @@ fn api_method_name(method: &Method) -> &'static str {
+         Method::ClientWindowTitleClear(_) => "client.window_title.clear",
+         Method::SessionSnapshot(_) => "session.snapshot",
+         Method::WorkspaceCreate(_) => "workspace.create",
++        Method::WorkspaceMountRemote(_) => "workspace.mount_remote",
+         Method::WorkspaceList(_) => "workspace.list",
+         Method::WorkspaceGet(_) => "workspace.get",
+         Method::WorkspaceFocus(_) => "workspace.focus",
+diff --git a/src/app/actions.rs b/src/app/actions.rs
+index 7cf43e7..98d9505 100644
+--- a/src/app/actions.rs
++++ b/src/app/actions.rs
+@@ -2736,6 +2736,14 @@ impl AppState {
+             AppEvent::WorktreeAddFinished(_) => Vec::new(),
+             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
+             AppEvent::PluginCommandFinished { .. } => Vec::new(),
++            // Handled directly in `App::handle_internal_event`, which owns
++            // the terminal-channel/router state this event needs and
++            // `return`s before this fallback ever runs — arms exist here
++            // only to satisfy the exhaustive match over `AppEvent`.
++            #[cfg(unix)]
++            AppEvent::FederationMountReady(_) => Vec::new(),
++            #[cfg(unix)]
++            AppEvent::FederationMountFailed { .. } => Vec::new(),
+         }
+     }
+ 
+diff --git a/src/app/api.rs b/src/app/api.rs
+index bf13e52..86b5a71 100644
+--- a/src/app/api.rs
++++ b/src/app/api.rs
+@@ -143,6 +143,18 @@ impl App {
+             return;
+         }
+ 
++        #[cfg(unix)]
++        if let AppEvent::FederationMountReady(ready) = ev {
++            self.handle_federation_mount_ready(*ready);
++            return;
++        }
++
++        #[cfg(unix)]
++        if let AppEvent::FederationMountFailed { target, reason } = ev {
++            self.handle_federation_mount_failed(target, reason);
++            return;
++        }
++
+         if let AppEvent::WorktreeAddFinished(result) = ev {
+             self.handle_worktree_add_finished(*result);
+             return;
+@@ -931,6 +943,9 @@ impl App {
+             Method::WorkspaceCreate(params) => {
+                 return self.handle_workspace_create(request.id, params);
+             }
++            Method::WorkspaceMountRemote(params) => {
++                return self.handle_workspace_mount_remote(request.id, params);
++            }
+             Method::WorkspaceFocus(target) => {
+                 return self.handle_workspace_focus(request.id, target)
+             }
+diff --git a/src/app/api/workspaces.rs b/src/app/api/workspaces.rs
+index b7260c1..685c6be 100644
+--- a/src/app/api/workspaces.rs
++++ b/src/app/api/workspaces.rs
+@@ -1,15 +1,248 @@
+ use std::path::PathBuf;
++#[cfg(unix)]
++use std::sync::atomic::Ordering;
+ 
+ use crate::api::schema::{
+     EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
+-    WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget,
++    WorkspaceMountRemoteParams, WorkspaceMoveParams, WorkspaceRenameParams,
++    WorkspaceReportMetadataParams, WorkspaceTarget,
+ };
+ use crate::app::App;
++#[cfg(unix)]
++use crate::app::ToastKind;
+ 
+ use super::super::api_helpers::{normalize_metadata_source, normalize_metadata_ttl};
+ use super::responses::{encode_error, encode_success};
+ 
+ impl App {
++    /// REVISED Phase A (multi-remote federated workspace launch): mounts a
++    /// federation target as server-daemon-owned state, spawned inside this
++    /// daemon's own tokio runtime (`app.run()` is polled inside
++    /// `rt.block_on`, so `tokio::spawn` here is always in-context). The
++    /// response only acknowledges the dial+mount task was started — success
++    /// materializes into real workspaces (`AppEvent::FederationMountReady`,
++    /// handled by `App::run`'s own event loop, which owns `&mut App`);
++    /// failure surfaces as a sidebar notice
++    /// (`AppEvent::FederationMountFailed`). Neither outcome ever tears down
++    /// the local session or the server daemon itself.
++    #[cfg(not(unix))]
++    pub(super) fn handle_workspace_mount_remote(
++        &mut self,
++        id: String,
++        _params: WorkspaceMountRemoteParams,
++    ) -> String {
++        encode_error(
++            id,
++            "unsupported_platform",
++            "workspace.mount_remote is not supported on this platform",
++        )
++    }
++
++    /// Phase B requirement 3/9: one request carries the full target list;
++    /// each non-empty, non-duplicate target is spawned as its own
++    /// `tokio::spawn` dial+mount task. Because each task is independently
++    /// spawned rather than awaited together in this handler, all N dials
++    /// already run concurrently against the daemon's tokio runtime (no
++    /// per-target serial stacking) — each task carries its own ~25s dial
++    /// budget internally (`dial_and_mount`'s `FEDERATION_CONNECT_TIMEOUT` +
++    /// `FEDERATION_MOUNT_TIMEOUT`), so N targets still complete in ~25s
++    /// wall-clock, not 25s×N. A target whose `HostKey` is already mounted is
++    /// rejected immediately (before spawning any dial) with a per-host
++    /// failure event, isolating it from the other targets in the same
++    /// request (requirement 4).
++    #[cfg(unix)]
++    pub(super) fn handle_workspace_mount_remote(
++        &mut self,
++        id: String,
++        params: WorkspaceMountRemoteParams,
++    ) -> String {
++        let targets: Vec<String> = params
++            .targets
++            .into_iter()
++            .map(|target| target.trim().to_string())
++            .filter(|target| !target.is_empty())
++            .collect();
++        if targets.is_empty() {
++            return encode_error(
++                id,
++                "invalid_request",
++                "workspace.mount_remote requires at least one non-empty target",
++            );
++        }
++
++        let session_name = crate::session::active_name()
++            .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
++
++        for target in &targets {
++            let host_key = crate::remote::federation::id::HostKey::new(target, &session_name);
++            if self.state.double_attach_conflict(&host_key) {
++                tracing::warn!(%target, "federation mount requested but this host is already mounted");
++                let event_tx = self.event_tx.clone();
++                let target = target.clone();
++                tokio::spawn(async move {
++                    let _ = event_tx
++                        .send(crate::events::AppEvent::FederationMountFailed {
++                            target,
++                            reason: "a federation mount for this host is already live"
++                                .to_string(),
++                        })
++                        .await;
++                });
++                continue;
++            }
++
++            let event_tx = self.event_tx.clone();
++            let task_target = target.clone();
++            let task_session_name = session_name.clone();
++            tokio::spawn(async move {
++                let result = crate::remote::prepare_and_mount_federation_target(
++                    task_target.clone(),
++                    task_session_name,
++                )
++                .await;
++                let event = match result {
++                    Ok(outcome) => crate::events::AppEvent::FederationMountReady(Box::new(
++                        crate::events::FederationMountReady {
++                            target: task_target,
++                            mirror: outcome.mirror,
++                            generation: outcome.generation,
++                            tunnel_guard: outcome.tunnel_guard,
++                            tunnel_reader: outcome.tunnel_reader,
++                            tunnel_writer: outcome.tunnel_writer,
++                        },
++                    )),
++                    Err(err) => crate::events::AppEvent::FederationMountFailed {
++                        target: task_target,
++                        reason: err.to_string(),
++                    },
++                };
++                let _ = event_tx.send(event).await;
++            });
++        }
++
++        encode_success(id, ResponseResult::WorkspaceMountRemoteRequested { targets })
++    }
++
++    /// `AppEvent::FederationMountReady` handler — runs inside `App::run`'s
++    /// own tick, so it owns `&mut App` and can call
++    /// `materialize_federation_mount` (session.rs's exact
++    /// materialize-then-move-router disposition, relocated here). Records a
++    /// mount-time snapshot in `AppState.remote_mirror` for bookkeeping
++    /// (`double_attach_conflict`), then hands the live-syncing mirror off to
++    /// a spawned drive task exactly like `run_federated_session` does.
++    #[cfg(unix)]
++    pub(crate) fn handle_federation_mount_ready(
++        &mut self,
++        ready: crate::events::FederationMountReady,
++    ) {
++        let crate::events::FederationMountReady {
++            target,
++            mirror,
++            generation,
++            tunnel_guard,
++            tunnel_reader,
++            tunnel_writer,
++        } = ready;
++
++        if self.state.begin_federation_mount(mirror.clone()).is_err() {
++            tracing::warn!(%target, "federation mount ready but this host is already mounted; dropping");
++            return;
++        }
++        let host_key = mirror.mount().host_key.clone();
++
++        let (out_tx, writer_handle) =
++            crate::remote::federation::client::spawn_mount_writer(tunnel_writer);
++        let (inbound_clip_tx, _inbound_clip_rx) =
++            tokio::sync::mpsc::channel::<crate::remote::federation::protocol::ClipboardMessage>(64);
++        let (outbound_clip_tx, _outbound_clip_rx) = tokio::sync::mpsc::unbounded_channel::<
++            crate::remote::federation::protocol::ClipboardMessage,
++        >();
++
++        let mut router = crate::remote::federation::client::TerminalChannelRouter::new();
++        let opened = match self.materialize_federation_mount(
++            &mirror,
++            &mut router,
++            &out_tx,
++            &outbound_clip_tx,
++        ) {
++            Ok(opened) => opened,
++            Err(err) => {
++                tracing::warn!(%target, %err, "failed to materialize federation mount");
++                self.state.end_federation_mount(&host_key);
++                // Mirror the success path's teardown order below (drop
++                // `out_tx` first so the writer task drains and exits,
++                // bounded so a half-open peer can never hang this, then
++                // kill the ssh child) instead of dropping `out_tx` /
++                // `writer_handle` / `tunnel_guard` un-awaited in whatever
++                // order they happen to be declared in.
++                tokio::spawn(async move {
++                    drop(out_tx);
++                    let _ =
++                        tokio::time::timeout(std::time::Duration::from_secs(2), writer_handle)
++                            .await;
++                    drop(tunnel_guard);
++                });
++                return;
++            }
++        };
++        let _ = opened;
++
++        self.render_dirty.store(true, Ordering::Release);
++        self.render_notify.notify_one();
++
++        let event_hub = self.event_hub.clone();
++        let mut mirror_task = mirror;
++        tokio::spawn(async move {
++            let mut reader = tunnel_reader;
++            let outcome = crate::remote::federation::client::drive_mount_channel(
++                &mut reader,
++                &mut mirror_task,
++                generation,
++                &event_hub,
++                &mut router,
++                &inbound_clip_tx,
++            )
++            .await;
++            match outcome {
++                Ok(outcome) => {
++                    tracing::info!(?outcome, "federated mount ended");
++                }
++                Err(err) => {
++                    tracing::warn!(%err, "federated mount I/O error");
++                }
++            }
++            // Teardown mirrors `run_federated_session`: drop the writer
++            // sender first so the writer task drains and exits, bounded so
++            // a half-open peer can never hang this task, then kill the ssh
++            // child regardless.
++            drop(out_tx);
++            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer_handle).await;
++            drop(tunnel_guard);
++        });
++    }
++
++    /// `AppEvent::FederationMountFailed` handler: surfaces a sidebar notice
++    /// through the existing toast mechanism — local session and server
++    /// daemon stay up unaffected (requirement 3).
++    #[cfg(unix)]
++    pub(crate) fn handle_federation_mount_failed(&mut self, target: String, reason: String) {
++        tracing::warn!(%target, %reason, "federation mount failed");
++        if matches!(
++            self.state.toast_config.delivery,
++            crate::config::ToastDelivery::Herdr
++        ) {
++            self.state.toast = Some(crate::app::state::ToastNotification {
++                kind: ToastKind::NeedsAttention,
++                title: format!("federated mount to {target} failed"),
++                context: reason,
++                position: None,
++                target: None,
++            });
++        }
++        self.render_dirty.store(true, Ordering::Release);
++        self.render_notify.notify_one();
++    }
++
+     pub(super) fn handle_workspace_list(&mut self, id: String) -> String {
+         encode_success(
+             id,
+@@ -583,4 +816,180 @@ mod tests {
+         assert_eq!(workspaces[0].workspace_id, moved_id);
+         assert!(event_hub.events_after(0).is_empty());
+     }
++
++    #[cfg(unix)]
++    fn test_federation_mirror(target: &str) -> crate::remote::federation::reducer::RemoteMirror {
++        use crate::remote::federation::id::{HostKey, Mount, ServerInstanceId};
++        crate::remote::federation::reducer::RemoteMirror::new(Mount {
++            host_key: HostKey::new(target, "s1"),
++            server_instance_id: ServerInstanceId("inst-1".to_string()),
++            mount_generation: 1,
++        })
++    }
++
++    /// Real spawned child (`cat`) so `ChildGuard`/`ChildStdout`/`ChildStdin`
++    /// are the genuine types `handle_federation_mount_ready` expects —
++    /// there is no fabricated stand-in for these process-backed types.
++    #[cfg(unix)]
++    async fn spawn_test_tunnel() -> (
++        crate::remote::ChildGuard,
++        tokio::process::ChildStdout,
++        tokio::process::ChildStdin,
++    ) {
++        let mut child = tokio::process::Command::new("cat")
++            .stdin(std::process::Stdio::piped())
++            .stdout(std::process::Stdio::piped())
++            .spawn()
++            .expect("spawn cat for test tunnel");
++        let stdin = child.stdin.take().expect("cat stdin");
++        let stdout = child.stdout.take().expect("cat stdout");
++        (crate::remote::ChildGuard::for_test(child), stdout, stdin)
++    }
++
++    // Phase-a TDD test 1: after a successful mount task completes,
++    // `AppState.workspaces` (local) and `AppState.remote_mirror` (remote)
++    // are both populated in the same instance — proves no more
++    // "federated-alone" branch (REVISED Phase A reverses P9.2b).
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn coexistence_local_and_remote_render_together() {
++        let event_hub = crate::api::EventHub::default();
++        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
++        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
++        app.state.workspaces = vec![Workspace::test_new("local")];
++        app.state.active = Some(0);
++        app.state.selected = 0;
++
++        let mirror = test_federation_mirror("remote-host");
++        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
++
++        app.handle_federation_mount_ready(crate::events::FederationMountReady {
++            target: "remote-host".to_string(),
++            mirror,
++            generation: 1,
++            tunnel_guard: guard,
++            tunnel_reader,
++            tunnel_writer,
++        });
++
++        assert_eq!(app.state.workspaces.len(), 1);
++        assert!(!app.state.remote_mirrors.is_empty());
++    }
++
++    // Phase-a TDD test 2: mount failure keeps the local session alive — no
++    // process-exit path, `AppState.workspaces` unchanged, sidebar notice
++    // (toast) fired.
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn coexistence_mount_failure_keeps_local_session_alive() {
++        let event_hub = crate::api::EventHub::default();
++        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
++        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
++        app.state.workspaces = vec![Workspace::test_new("local")];
++        app.state.active = Some(0);
++        app.state.selected = 0;
++        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
++
++        app.handle_federation_mount_failed(
++            "remote-host".to_string(),
++            "federation dial failed: connection refused".to_string(),
++        );
++
++        assert_eq!(app.state.workspaces.len(), 1);
++        assert!(app.state.remote_mirrors.is_empty());
++        assert!(app.state.toast.is_some());
++        assert!(app
++            .state
++            .toast
++            .as_ref()
++            .unwrap()
++            .title
++            .contains("remote-host"));
++    }
++
++    // Phase-a TDD test 6: a mount task that produced an `Err` (the async
++    // catch-unwind-free failure path `handle_workspace_mount_remote`
++    // already routes through `AppEvent::FederationMountFailed`) never
++    // reaches `handle_federation_mount_ready`/panics the process — asserted
++    // at the type level: the spawned task's `match result` in
++    // `handle_workspace_mount_remote` is exhaustive over `Result`, so a
++    // `dial_and_mount` panic inside the spawned `tokio::task` is caught by
++    // Tokio's own task boundary (a panicking task fails its `JoinHandle`,
++    // it does not unwind into `App::run`) — the same isolation
++    // `run_federated_session`'s drive-task `select!` arm already relies on
++    // (session.rs's `Err(join_err) => ... "drive task aborted/panicked"`).
++    // No separate `catch_unwind` wrapper is needed for a `tokio::spawn`ed
++    // future; this test documents the isolation this relies on.
++    // Phase B test 6/8: a duplicate `HostKey` target in the same
++    // `workspace.mount_remote` request is rejected immediately (no SSH dial
++    // spawned) with a per-host `FederationMountFailed` naming the host,
++    // while the pre-existing mount stays untouched.
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn duplicate_host_key_target_is_isolated_and_named_in_failure_event() {
++        let event_hub = crate::api::EventHub::default();
++        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
++        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
++        app.state.workspaces = vec![Workspace::test_new("local")];
++
++        let session_name =
++            crate::session::active_name().unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
++        let mirror = crate::remote::federation::reducer::RemoteMirror::new(
++            crate::remote::federation::id::Mount {
++                host_key: crate::remote::federation::id::HostKey::new(
++                    "already-mounted-host",
++                    &session_name,
++                ),
++                server_instance_id: crate::remote::federation::id::ServerInstanceId(
++                    "inst-1".to_string(),
++                ),
++                mount_generation: 1,
++            },
++        );
++        app.state.begin_federation_mount(mirror).unwrap();
++
++        let response = app.handle_workspace_mount_remote(
++            "req".into(),
++            WorkspaceMountRemoteParams {
++                targets: vec!["already-mounted-host".to_string()],
++                remote_keybindings: false,
++            },
++        );
++        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
++
++        // The pre-existing mount is untouched (still exactly one entry).
++        assert_eq!(app.state.remote_mirrors.len(), 1);
++
++        // Drain the fire-and-forget failure event.
++        let mut saw_failure = false;
++        for _ in 0..10 {
++            match tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv())
++                .await
++            {
++                Ok(Some(crate::events::AppEvent::FederationMountFailed { target, reason })) => {
++                    assert_eq!(target, "already-mounted-host");
++                    assert!(reason.contains("already"));
++                    saw_failure = true;
++                    break;
++                }
++                Ok(Some(_)) => continue,
++                _ => break,
++            }
++        }
++        assert!(saw_failure, "expected a FederationMountFailed event naming the duplicate host");
++    }
++
++    #[test]
++    fn coexistence_mount_panic_isolated_by_tokio_task_boundary() {
++        let rt = tokio::runtime::Runtime::new().unwrap();
++        let outcome: Result<(), _> = rt.block_on(async {
++            tokio::spawn(async { panic!("simulated dial+mount panic") })
++                .await
++                .map(|_: ()| ())
++        });
++        assert!(
++            outcome.is_err(),
++            "a panicking tokio::spawn task must fail its JoinHandle, not unwind the caller"
++        );
++    }
+ }
+diff --git a/src/app/mod.rs b/src/app/mod.rs
+index 4cafad1..5eb31c4 100644
+--- a/src/app/mod.rs
++++ b/src/app/mod.rs
+@@ -696,7 +696,7 @@ impl App {
+             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+             session_dirty: false,
+             terminal_runtime_shutdowns: Vec::new(),
+-            remote_mirror: None,
++            remote_mirrors: std::collections::HashMap::new(),
+         };
+ 
+         state.terminals = restored_terminals;
+diff --git a/src/app/state.rs b/src/app/state.rs
+index 88d8c5b..ed45686 100644
+--- a/src/app/state.rs
++++ b/src/app/state.rs
+@@ -1485,27 +1485,32 @@ pub struct AppState {
+     /// Terminal runtimes that should be shut down by the app/runtime layer
+     /// after state has detached their terminal metadata.
+     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+-    /// Metadata-only mirror of a single mounted remote federation workspace
+-    /// (P4 of the remote-workspace-federation plan). `None` when no mount is
+-    /// live. Additive, alongside `workspaces` — no render switch here.
+-    /// Always `None` until P8 wires the CLI trigger that mounts a remote and
+-    /// sets this to `Some`.
+-    #[allow(dead_code)]
+-    pub(crate) remote_mirror: Option<crate::remote::federation::reducer::RemoteMirror>,
++    /// Metadata-only mirrors of the currently mounted remote federation
++    /// workspaces, keyed by `HostKey` (Phase B: generalized from P4/P8's
++    /// single `Option<RemoteMirror>` to N concurrent mounts). Empty when no
++    /// mount is live. Additive, alongside `workspaces` — no render switch
++    /// here.
++    pub(crate) remote_mirrors: std::collections::HashMap<
++        crate::remote::federation::id::HostKey,
++        crate::remote::federation::reducer::RemoteMirror,
++    >,
+ }
+ 
+-/// Outcome of [`AppState::begin_federation_mount`] (P8 requirement 5, S10.1).
+-/// Dormant outside tests until a real call site materializes a mount into a
+-/// running session (see `implementation-notes.md`'s P8 entry) —
+-/// `#[allow(dead_code)]` at this scope, matching `remote_mirror`'s and
++/// Outcome of [`AppState::begin_federation_mount`] (P8 requirement 5, S10.1;
++/// Phase B requirement 5: narrowed from "any second mount" to "same
++/// `HostKey` mount"). Dormant outside tests until a real call site
++/// materializes a mount into a running session (see
++/// `implementation-notes.md`'s P8/Phase B entries) —
++/// `#[allow(dead_code)]` at this scope, matching `remote_mirrors`'s and
+ /// `client.rs`/`pane_source.rs`'s identical precedent for the same reason.
+ #[allow(dead_code)]
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) enum FederationMountConflict {
+-    /// A federation mount is already live; the data model
+-    /// (`HostKey`/`server_instance_id`/`mount_generation`) is multi-remote
+-    /// ready, but v1 enforces exactly one concurrent mount.
+-    AlreadyMounted,
++    /// A federation mount for this exact `HostKey` is already live. Distinct
++    /// hosts are allowed to mount concurrently (Phase B); only a literal
++    /// duplicate `HostKey` is rejected. Carries the colliding host so
++    /// callers can name it in a notice.
++    AlreadyMounted(crate::remote::federation::id::HostKey),
+ }
+ 
+ impl AppState {
+@@ -1513,49 +1518,46 @@ impl AppState {
+         self.session_dirty = true;
+     }
+ 
+-    /// P8 requirement 5 (S10.1): registers a new federation mount, rejecting
+-    /// a second concurrent one. `remote_mirror` being `Option` (P4) already
+-    /// models "at most one mount" — this makes the single-mount enforcement
+-    /// (and its typed rejection) explicit rather than an accidental
+-    /// consequence of `Option::replace` silently dropping a prior mount.
+-    #[allow(dead_code)]
++    /// P8 requirement 5 (S10.1); Phase B requirement 5: registers a new
++    /// federation mount, rejecting only a literal duplicate `HostKey` —
++    /// distinct hosts mount concurrently into `remote_mirrors`.
+     pub(crate) fn begin_federation_mount(
+         &mut self,
+         mirror: crate::remote::federation::reducer::RemoteMirror,
+     ) -> Result<(), FederationMountConflict> {
+-        if self.remote_mirror.is_some() {
+-            return Err(FederationMountConflict::AlreadyMounted);
++        let host_key = mirror.mount().host_key.clone();
++        if self.remote_mirrors.contains_key(&host_key) {
++            return Err(FederationMountConflict::AlreadyMounted(host_key));
+         }
+-        self.remote_mirror = Some(mirror);
++        self.remote_mirrors.insert(host_key, mirror);
+         Ok(())
+     }
+ 
+-    /// Tears down the live federation mount (disconnect / P9 lifecycle), if
+-    /// any. A no-op when nothing is mounted.
+-    #[allow(dead_code)]
+-    pub(crate) fn end_federation_mount(&mut self) {
+-        self.remote_mirror = None;
++    /// Tears down the live federation mount for `host_key` (disconnect / P9
++    /// lifecycle), if any. A no-op when nothing is mounted for that host —
++    /// never touches sibling mounts (Phase B requirement 2).
++    pub(crate) fn end_federation_mount(
++        &mut self,
++        host_key: &crate::remote::federation::id::HostKey,
++    ) {
++        self.remote_mirrors.remove(host_key);
+     }
+ 
+-    /// P8 requirement 6 (RT-F11/S8.2): whether a classic `--remote` attach to
+-    /// `host_key` would collide with an already-mounted federated host.
+-    /// Detection key is `HostKey` on the local mount registry (`remote_mirror`
+-    /// — v1 allows exactly one mount, so this reduces to "is the live mount's
+-    /// host the same one"). This only answers the question for the *local
+-    /// in-process* registry; wiring an actual classic-attach call site to
+-    /// consult a *running* local server's registry over the JSON API is not
+-    /// built (no API method exists for it) — downgraded to
++    /// P8 requirement 6 (RT-F11/S8.2); Phase B: whether a classic `--remote`
++    /// attach to `host_key` would collide with an already-mounted federated
++    /// host. Detection key is `HostKey` membership in the local mount
++    /// registry (`remote_mirrors`). This only answers the question for the
++    /// *local in-process* registry; wiring an actual classic-attach call
++    /// site to consult a *running* local server's registry over the JSON API
++    /// is not built (no API method exists for it) — downgraded to
+     /// documented-not-enforced across process boundaries for v1, per the
+     /// phase file's explicit allowance ("If detection proves costly,
+     /// downgrade to documented-not-enforced for v1 — state the choice").
+-    #[allow(dead_code)]
+     pub(crate) fn double_attach_conflict(
+         &self,
+         host_key: &crate::remote::federation::id::HostKey,
+     ) -> bool {
+-        self.remote_mirror
+-            .as_ref()
+-            .is_some_and(|mirror| &mirror.mount().host_key == host_key)
++        self.remote_mirrors.contains_key(host_key)
+     }
+ 
+     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
+@@ -1899,7 +1901,7 @@ impl AppState {
+             host_terminal_theme: TerminalTheme::default(),
+             session_dirty: false,
+             terminal_runtime_shutdowns: Vec::new(),
+-            remote_mirror: None,
++            remote_mirrors: std::collections::HashMap::new(),
+         }
+     }
+ 
+@@ -2249,20 +2251,49 @@ mod tests {
+         })
+     }
+ 
+-    // P8 TDD test 6 (S10.1): a second concurrent federation mount is
+-    // rejected with a typed error; the first mount stays live.
++    // A duplicate `HostKey` mount is rejected with a typed error naming the
++    // colliding host; the first mount stays live (narrowed from P8's "any
++    // second mount" per Phase B requirement 5/6).
+     #[test]
+-    fn a_second_concurrent_federation_mount_is_rejected() {
++    fn a_duplicate_host_key_federation_mount_is_rejected() {
+         let mut state = AppState::test_new();
+         assert!(state.begin_federation_mount(test_mount("alice@10.0.0.1")).is_ok());
+-        assert!(state.remote_mirror.is_some());
++        assert!(state.remote_mirrors.contains_key(&crate::remote::federation::id::HostKey::new(
++            "alice@10.0.0.1",
++            "s1"
++        )));
+ 
+-        let result = state.begin_federation_mount(test_mount("bob@10.0.0.2"));
+-        assert_eq!(result, Err(FederationMountConflict::AlreadyMounted));
++        let result = state.begin_federation_mount(test_mount("alice@10.0.0.1"));
++        assert_eq!(
++            result,
++            Err(FederationMountConflict::AlreadyMounted(
++                crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1")
++            ))
++        );
+         // The original mount must still be the live one.
++        assert_eq!(state.remote_mirrors.len(), 1);
++    }
++
++    // Phase B test 5: `begin_federation_mount` called twice with distinct
++    // `HostKey`s succeeds both times.
++    #[test]
++    fn mount_hashmap_allows_two_distinct_hosts() {
++        let mut state = AppState::test_new();
++        assert!(state.begin_federation_mount(test_mount("alice@10.0.0.1")).is_ok());
++        assert!(state.begin_federation_mount(test_mount("bob@10.0.0.2")).is_ok());
++        assert_eq!(state.remote_mirrors.len(), 2);
++    }
++
++    // Phase B test 6: the guard narrows to a per-`HostKey` duplicate, it
++    // doesn't disappear.
++    #[test]
++    fn mount_hashmap_rejects_duplicate_host_key() {
++        let mut state = AppState::test_new();
++        state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
++        let host_key = crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1");
+         assert_eq!(
+-            state.remote_mirror.as_ref().unwrap().mount().host_key,
+-            crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1")
++            state.begin_federation_mount(test_mount("alice@10.0.0.1")),
++            Err(FederationMountConflict::AlreadyMounted(host_key))
+         );
+     }
+ 
+@@ -2270,11 +2301,31 @@ mod tests {
+     fn ending_a_mount_allows_a_fresh_one() {
+         let mut state = AppState::test_new();
+         state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
+-        state.end_federation_mount();
+-        assert!(state.remote_mirror.is_none());
++        let host_key = crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1");
++        state.end_federation_mount(&host_key);
++        assert!(state.remote_mirrors.is_empty());
+         assert!(state.begin_federation_mount(test_mount("bob@10.0.0.2")).is_ok());
+     }
+ 
++    // Phase B requirement 2: per-mount teardown never touches siblings.
++    #[test]
++    fn ending_one_mount_does_not_touch_sibling_mounts() {
++        let mut state = AppState::test_new();
++        state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
++        state.begin_federation_mount(test_mount("bob@10.0.0.2")).unwrap();
++
++        state.end_federation_mount(&crate::remote::federation::id::HostKey::new(
++            "alice@10.0.0.1",
++            "s1",
++        ));
++
++        assert_eq!(state.remote_mirrors.len(), 1);
++        assert!(state.remote_mirrors.contains_key(&crate::remote::federation::id::HostKey::new(
++            "bob@10.0.0.2",
++            "s1"
++        )));
++    }
++
+     // P8 TDD test 7 (RT-F11/S8.2): a classic `--remote` attach targeting an
+     // already-federated host's `HostKey` is detected as a collision; a
+     // different host is not.
+diff --git a/src/events.rs b/src/events.rs
+index a3869ef..e98093b 100644
+--- a/src/events.rs
++++ b/src/events.rs
+@@ -156,4 +156,44 @@ pub enum AppEvent {
+     WorktreeAddFinished(Box<WorktreeAddResult>),
+     /// Background `git worktree remove` completed.
+     WorktreeRemoveFinished(Box<WorktreeRemoveResult>),
++    /// A server-owned `workspace.mount_remote` dial+mount task succeeded.
++    /// `App::run`'s own tick materializes the mirror into real
++    /// workspaces/tabs/panes (needs `&mut App`, which the spawned task
++    /// itself cannot hold) and spawns the ongoing drive task. Unix-only:
++    /// mirrors the `#[cfg(unix)]` gate on `remote::unix`, which owns the
++    /// dial/mount primitives this payload carries.
++    #[cfg(unix)]
++    FederationMountReady(Box<FederationMountReady>),
++    /// A server-owned `workspace.mount_remote` dial+mount task failed
++    /// (SSH/timeout/unsupported/empty mirror). Local workspace(s) and the
++    /// server daemon itself are unaffected; surfaces as a sidebar notice.
++    #[cfg(unix)]
++    FederationMountFailed { target: String, reason: String },
++}
++
++/// Payload for [`AppEvent::FederationMountReady`] — everything
++/// `App::materialize_federation_mount` + the ongoing drive task need, handed
++/// back from the server-owned dial+mount task spawned by the
++/// `workspace.mount_remote` API handler.
++#[cfg(unix)]
++pub struct FederationMountReady {
++    pub target: String,
++    pub mirror: crate::remote::federation::reducer::RemoteMirror,
++    pub generation: u64,
++    pub tunnel_guard: crate::remote::ChildGuard,
++    pub tunnel_reader: tokio::process::ChildStdout,
++    pub tunnel_writer: tokio::process::ChildStdin,
++}
++
++// `RemoteMirror`/`ChildGuard` don't derive `Debug` (out of this phase's file
++// ownership to change), so `AppEvent`'s own `#[derive(Debug)]` needs a manual
++// impl here rather than pulling the whole enum off the derive.
++#[cfg(unix)]
++impl std::fmt::Debug for FederationMountReady {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("FederationMountReady")
++            .field("target", &self.target)
++            .field("generation", &self.generation)
++            .finish_non_exhaustive()
++    }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 7959dbf..382f1ff 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -691,7 +691,38 @@ fn main() -> io::Result<()> {
+     }
+ 
+     if let Some(remote_launch) = remote_launch {
+-        let remote_target = remote_launch.target.clone();
++        // REVISED Phase A (multi-remote federated workspace launch):
++        // `--remote-workspace`/`HERDR_REMOTE_FEDERATION=1` now route through
++        // the server-daemon-owned mount (local + remote coexist in one TUI)
++        // instead of the old federated-alone in-process path. Classic
++        // `--remote` (no federation opt-in) is untouched below.
++        #[cfg(unix)]
++        {
++            let route = remote::decide_launch_route(
++                Some(&remote_launch),
++                std::env::var(remote::REMOTE_FEDERATION_ENV_VAR)
++                    .ok()
++                    .as_deref(),
++            );
++            if route == remote::LaunchRoute::Coexistence {
++                if remote::coexistence_keybindings_conflict(&remote_launch) {
++                    eprintln!(
++                        "herdr: --remote-keybindings is not supported together with \
++                         --remote-workspace (federated coexistence mode) yet; drop \
++                         --remote-keybindings or run without --remote-workspace"
++                    );
++                    std::process::exit(1);
++                }
++                let targets = remote_launch.target.clone();
++                if let Err(err) = server::autodetect::auto_detect_launch_with_mount(targets) {
++                    eprintln!("herdr: {err}");
++                    std::process::exit(1);
++                }
++                return Ok(());
++            }
++        }
++
++        let remote_target = remote_launch.target.first().cloned().unwrap_or_default();
+         if let Err(err) = remote::run_remote(remote_launch) {
+             eprintln!("error: {err}");
+             remote::print_remote_error_hint(&err, &remote_target);
+diff --git a/src/remote.rs b/src/remote.rs
+index f173063..32b7f33 100644
+--- a/src/remote.rs
++++ b/src/remote.rs
+@@ -32,11 +32,20 @@ impl RemoteKeybindings {
+ #[cfg(windows)]
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) struct RemoteLaunch {
+-    pub(crate) target: String,
++    /// Phase B requirement 7 (Windows parity): mirrors unix.rs's
++    /// `RemoteLaunch.target: Vec<String>` grammar change even though
++    /// federation itself is unix-only — this keeps CLI parsing identical
++    /// across platforms.
++    pub(crate) target: Vec<String>,
+     pub(crate) keybindings: RemoteKeybindings,
+     pub(crate) live_handoff: bool,
+ }
+ 
++#[cfg(windows)]
++fn is_flag_like(value: &str) -> bool {
++    value.starts_with("--")
++}
++
+ #[cfg(windows)]
+ pub(crate) fn extract_remote_args(
+     args: &[String],
+@@ -46,7 +55,7 @@ pub(crate) fn extract_remote_args(
+         cleaned.push(program.clone());
+     }
+ 
+-    let mut remote_target = None;
++    let mut remote_targets: Vec<String> = Vec::new();
+     let mut keybindings = RemoteKeybindings::Local;
+     let mut keybindings_seen = false;
+     let mut live_handoff = false;
+@@ -63,21 +72,22 @@ pub(crate) fn extract_remote_args(
+             continue;
+         }
+         if arg == "--remote" {
+-            if remote_target.is_some() {
+-                return Err("--remote can only be specified once".to_string());
+-            }
+-            let Some(value) = args.get(index + 1) else {
++            let Some(first) = args.get(index + 1) else {
+                 return Err("missing value for --remote".to_string());
+             };
+-            remote_target = Some(validate_remote_target(value)?.to_owned());
++            remote_targets.push(validate_remote_target(first)?.to_owned());
+             index += 2;
++            while let Some(value) = args.get(index) {
++                if is_flag_like(value) {
++                    break;
++                }
++                remote_targets.push(validate_remote_target(value)?.to_owned());
++                index += 1;
++            }
+             continue;
+         }
+         if let Some(value) = arg.strip_prefix("--remote=") {
+-            if remote_target.is_some() {
+-                return Err("--remote can only be specified once".to_string());
+-            }
+-            remote_target = Some(validate_remote_target(value)?.to_owned());
++            remote_targets.push(validate_remote_target(value)?.to_owned());
+             index += 1;
+             continue;
+         }
+@@ -107,8 +117,8 @@ pub(crate) fn extract_remote_args(
+         index += 1;
+     }
+ 
+-    let remote = remote_target.map(|target| RemoteLaunch {
+-        target,
++    let remote = (!remote_targets.is_empty()).then_some(RemoteLaunch {
++        target: remote_targets,
+         keybindings,
+         live_handoff,
+     });
+diff --git a/src/remote/federation/reducer.rs b/src/remote/federation/reducer.rs
+index ba44229..c821748 100644
+--- a/src/remote/federation/reducer.rs
++++ b/src/remote/federation/reducer.rs
+@@ -79,6 +79,15 @@ pub(crate) enum AgentStatusDisplay {
+ 
+ /// Per-mount replica mirror: namespaced (`FedRef`-encoded) copies of the
+ /// remote's workspaces/tabs/panes. Metadata only — no pane bytes (P5).
++///
++/// `Clone` (REVISED Phase A): the server-owned mount handler needs a
++/// point-in-time snapshot for `AppState.remote_mirror` (bookkeeping /
++/// `double_attach_conflict`) while the ORIGINAL mirror moves into the
++/// ongoing drive task, which is the one that stays live-synced — mirrors
++/// `run_federated_session`'s existing materialize-then-move disposition.
++/// `AppState.remote_mirror` is therefore a mount-time snapshot, not
++/// continuously updated post-mount in v1 (logged in implementation-notes.md).
++#[derive(Clone)]
+ pub(crate) struct RemoteMirror {
+     mount: Mount,
+     cursor: u64,
+@@ -207,7 +216,8 @@ impl RemoteMirror {
+         self.panes.clear();
+         for workspace in &snapshot.workspaces {
+             let namespaced = namespace_workspace(&self.mount, workspace);
+-            self.workspaces.insert(namespaced.workspace_id.clone(), namespaced);
++            self.workspaces
++                .insert(namespaced.workspace_id.clone(), namespaced);
+         }
+         for tab in &snapshot.tabs {
+             let namespaced = namespace_tab(&self.mount, tab);
+@@ -329,7 +339,8 @@ fn namespace_pane(mount: &Mount, pane: &PaneInfo) -> PaneInfo {
+     namespaced.agent = sanitize_remote_string_opt(namespaced.agent);
+     namespaced.title = sanitize_remote_string_opt(namespaced.title);
+     namespaced.terminal_title = sanitize_remote_string_opt(namespaced.terminal_title);
+-    namespaced.terminal_title_stripped = sanitize_remote_string_opt(namespaced.terminal_title_stripped);
++    namespaced.terminal_title_stripped =
++        sanitize_remote_string_opt(namespaced.terminal_title_stripped);
+     namespaced.display_agent = sanitize_remote_string_opt(namespaced.display_agent);
+     for value in namespaced.state_labels.values_mut() {
+         *value = sanitize_remote_string(value);
+@@ -376,7 +387,11 @@ fn reconcile_workspaces(
+             }
+         }
+     }
+-    let retired: Vec<String> = mirror.keys().filter(|id| !seen.contains(*id)).cloned().collect();
++    let retired: Vec<String> = mirror
++        .keys()
++        .filter(|id| !seen.contains(*id))
++        .cloned()
++        .collect();
+     for id in retired {
+         mirror.remove(&id);
+         hub.push(EventEnvelope {
+@@ -389,7 +404,12 @@ fn reconcile_workspaces(
+     }
+ }
+ 
+-fn reconcile_tabs(mount: &Mount, mirror: &mut HashMap<String, TabInfo>, incoming: &[TabInfo], hub: &EventHub) {
++fn reconcile_tabs(
++    mount: &Mount,
++    mirror: &mut HashMap<String, TabInfo>,
++    incoming: &[TabInfo],
++    hub: &EventHub,
++) {
+     let mut seen: HashSet<String> = HashSet::new();
+     for tab in incoming {
+         let namespaced = namespace_tab(mount, tab);
+@@ -436,7 +456,12 @@ fn reconcile_tabs(mount: &Mount, mirror: &mut HashMap<String, TabInfo>, incoming
+     }
+ }
+ 
+-fn reconcile_panes(mount: &Mount, mirror: &mut HashMap<String, PaneInfo>, incoming: &[PaneInfo], hub: &EventHub) {
++fn reconcile_panes(
++    mount: &Mount,
++    mirror: &mut HashMap<String, PaneInfo>,
++    incoming: &[PaneInfo],
++    hub: &EventHub,
++) {
+     let mut seen: HashSet<String> = HashSet::new();
+     for pane in incoming {
+         let namespaced = namespace_pane(mount, pane);
+@@ -652,7 +677,10 @@ mod tests {
+         assert_eq!(ids.len(), 2);
+         assert!(ids.iter().any(|id| id.ends_with(":w1")));
+         assert!(ids.iter().any(|id| id.ends_with(":w3")));
+-        assert!(!ids.iter().any(|id| id.ends_with(":w2")), "w2 must be tombstoned");
++        assert!(
++            !ids.iter().any(|id| id.ends_with(":w2")),
++            "w2 must be tombstoned"
++        );
+ 
+         // w1 updated (label changed) + w2 closed (retired) + w3 created.
+         let events = hub.events_after(0);
+@@ -743,7 +771,11 @@ mod tests {
+             &hub,
+         );
+         assert_eq!(unknown, ReducerAction::Ignored);
+-        assert_eq!(hub.events_after(0).len(), 1, "no spurious event for an unknown pane");
++        assert_eq!(
++            hub.events_after(0).len(),
++            1,
++            "no spurious event for an unknown pane"
++        );
+     }
+ 
+     // Phase 06: relayed status is fenced exactly like event-channel traffic
+@@ -831,7 +863,9 @@ mod tests {
+     #[test]
+     fn agent_status_display_reports_stale_while_disconnected() {
+         let mut snapshot = empty_snapshot();
+-        snapshot.panes.push(pane("p1", "term_1", AgentStatus::Working));
++        snapshot
++            .panes
++            .push(pane("p1", "term_1", AgentStatus::Working));
+         let mut mirror = RemoteMirror::new(mount(1));
+         mirror.apply_snapshot(&snapshot, EventCursor(1));
+ 
+@@ -896,7 +930,10 @@ mod tests {
+         assert_eq!(pane_info.cwd.as_deref(), Some(expect_sanitized));
+         assert_eq!(pane_info.label.as_deref(), Some(expect_sanitized));
+         assert_eq!(pane_info.agent.as_deref(), Some(expect_sanitized));
+-        assert_eq!(pane_info.state_labels.get("k").map(String::as_str), Some(expect_sanitized));
++        assert_eq!(
++            pane_info.state_labels.get("k").map(String::as_str),
++            Some(expect_sanitized)
++        );
+ 
+         // Path 2: gap-triggered resync (`reconcile_by_diff`) — the OTHER
+         // choke point a caller reaches after a `Gap`/`Reset`. A hand-rolled
+@@ -939,7 +976,10 @@ mod tests {
+         mirror.apply_snapshot(&snapshot, EventCursor(1));
+ 
+         assert_eq!(mirror.mount().host_key, alice_mount.host_key);
+-        assert_eq!(mirror.mount().server_instance_id, alice_mount.server_instance_id);
++        assert_eq!(
++            mirror.mount().server_instance_id,
++            alice_mount.server_instance_id
++        );
+ 
+         let public_id = mirror.workspaces().keys().next().unwrap();
+         assert!(public_id.starts_with("r:alice@10.0.0.1#s1:"));
+diff --git a/src/remote/federation/session.rs b/src/remote/federation/session.rs
+index 6cb082d..c1816c8 100644
+--- a/src/remote/federation/session.rs
++++ b/src/remote/federation/session.rs
+@@ -31,7 +31,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
+ 
+ use crossterm::event::{
+     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+-    EnableFocusChange, EnableMouseCapture, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
++    EnableFocusChange, EnableMouseCapture, PopKeyboardEnhancementFlags,
++    PushKeyboardEnhancementFlags,
+ };
+ use crossterm::execute;
+ 
+@@ -56,8 +57,7 @@ const INBOUND_CLIPBOARD_CAPACITY: usize = 64;
+ /// after `out_tx` is dropped, before killing the ssh child regardless. Bounds
+ /// the fault case (a half-open peer that stopped reading) so teardown can never
+ /// hang and strand the user in the alt-screen; the clean case exits far sooner.
+-const FEDERATION_TEARDOWN_DRAIN_TIMEOUT: std::time::Duration =
+-    std::time::Duration::from_secs(2);
++const FEDERATION_TEARDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+ 
+ /// Process-global: true only while an in-proc federated session is running.
+ /// Read by the low-level local-PTY spawn choke (`pty::backend::unix::
+@@ -158,6 +158,83 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
+     .collect()
+ }
+ 
++/// Live outcome of dialing + mounting a federation target: everything the
++/// caller needs to materialize the mount into an `App` and drive it, with no
++/// terminal/TTY ownership assumed. Extracted out of `run_federated_session`
++/// (REVISED Phase A step 3) so the server daemon's own async task can reuse
++/// exactly this dial+mount sequence without pulling in any of
++/// `run_federated_session`'s terminal-mode setup.
++pub(crate) struct DialAndMountOutcome {
++    pub(crate) mirror: crate::remote::federation::reducer::RemoteMirror,
++    pub(crate) generation: u64,
++    pub(crate) tunnel_guard: crate::remote::ChildGuard,
++    pub(crate) tunnel_reader: tokio::process::ChildStdout,
++    pub(crate) tunnel_writer: tokio::process::ChildStdin,
++}
++
++/// Dials `target`'s live herdr server and mounts a federation session over
++/// it, applying the same connect/mount timeouts and empty-mirror rejection
++/// `run_federated_session` always has. No `App`, no TTY — pure async I/O,
++/// `Send`-shaped, safe to `tokio::spawn` from any tokio context (server
++/// daemon or CLI process alike).
++pub(crate) async fn dial_and_mount(
++    target: &str,
++    remote_herdr: &RemoteHerdr,
++    session_name: &str,
++    ssh_options: Option<&ManagedSshOptions>,
++) -> io::Result<DialAndMountOutcome> {
++    let tunnel = dial_federation(target, remote_herdr, session_name, ssh_options)
++        .await
++        .map_err(|err| io::Error::other(format!("federation dial failed: {err:?}")))?;
++    let crate::remote::LiveTunnel {
++        guard: tunnel_guard,
++        reader,
++        writer,
++    } = tunnel;
++
++    let client = FederationClient::new(
++        HostKey::new(target, session_name),
++        local_capabilities(),
++        std::collections::BTreeSet::new(),
++    );
++
++    // Wrap `connect_and_mount`'s otherwise-unbounded reads: a live tunnel
++    // (unlike the one-shot snapshot dial) can hang forever on a stalled
++    // link. Use the connect budget for the whole handshake+mount round — it
++    // is the tighter of the two; mount is bounded by the same await.
++    let mount_budget = FEDERATION_CONNECT_TIMEOUT + FEDERATION_MOUNT_TIMEOUT;
++    let mounted =
++        match tokio::time::timeout(mount_budget, client.connect_and_mount(reader, writer)).await {
++            Ok(Ok(mounted)) => mounted,
++            Ok(Err(err)) => {
++                return Err(io::Error::other(format!("federation mount failed: {err}")));
++            }
++            Err(_elapsed) => {
++                return Err(io::Error::other(
++                    "federation mount timed out before a live workspace was ready",
++                ));
++            }
++        };
++
++    // Non-empty required: an empty mount has nothing to render — abort so
++    // the caller falls back to classic rather than entering an empty TUI.
++    if mounted.mirror.workspaces().is_empty() {
++        return Err(io::Error::other(
++            "federation mount returned no remote workspaces",
++        ));
++    }
++
++    let mirror = mounted.mirror;
++    let generation = mirror.mount().mount_generation;
++    Ok(DialAndMountOutcome {
++        mirror,
++        generation,
++        tunnel_guard,
++        tunnel_reader: mounted.reader,
++        tunnel_writer: mounted.writer,
++    })
++}
++
+ /// Runs an interactive in-proc federated session against `target`'s live herdr
+ /// server. Mirrors `main.rs`'s classic runtime + terminal template.
+ ///
+@@ -183,55 +260,13 @@ pub(crate) fn run_federated_session(
+         // --- Pre-run (classic-fallback-eligible): dial + mount, no TTY yet. ---
+         let _active_guard = FederatedSessionActiveGuard::arm();
+ 
+-        let tunnel = dial_federation(target, remote_herdr, session_name, ssh_options)
+-            .await
+-            .map_err(|err| io::Error::other(format!("federation dial failed: {err:?}")))?;
+-        let crate::remote::LiveTunnel {
+-            guard: tunnel_guard,
+-            reader,
+-            writer,
+-        } = tunnel;
+-
+-        let client = FederationClient::new(
+-            HostKey::new(target, session_name),
+-            local_capabilities(),
+-            std::collections::BTreeSet::new(),
+-        );
+-
+-        // Wrap `connect_and_mount`'s otherwise-unbounded reads: a live tunnel
+-        // (unlike the one-shot snapshot dial) can hang forever on a stalled
+-        // link. Use the connect budget for the whole handshake+mount round —
+-        // it is the tighter of the two; mount is bounded by the same await.
+-        let mount_budget = FEDERATION_CONNECT_TIMEOUT + FEDERATION_MOUNT_TIMEOUT;
+-        let mounted = match tokio::time::timeout(
+-            mount_budget,
+-            client.connect_and_mount(reader, writer),
+-        )
+-        .await
+-        {
+-            Ok(Ok(mounted)) => mounted,
+-            Ok(Err(err)) => {
+-                return Err(io::Error::other(format!("federation mount failed: {err}")));
+-            }
+-            Err(_elapsed) => {
+-                return Err(io::Error::other(
+-                    "federation mount timed out before a live workspace was ready",
+-                ));
+-            }
+-        };
+-
+-        // Non-empty required: an empty mount has nothing to render — abort so
+-        // b3 falls back to classic rather than entering an empty TUI.
+-        if mounted.mirror.workspaces().is_empty() {
+-            return Err(io::Error::other(
+-                "federation mount returned no remote workspaces",
+-            ));
+-        }
+-
+-        let mirror = mounted.mirror;
+-        let generation = mirror.mount().mount_generation;
+-        let tunnel_reader = mounted.reader;
+-        let tunnel_writer = mounted.writer;
++        let DialAndMountOutcome {
++            mirror,
++            generation,
++            tunnel_guard,
++            tunnel_reader,
++            tunnel_writer,
++        } = dial_and_mount(target, remote_herdr, session_name, ssh_options).await?;
+ 
+         // --- Terminal mode (D2: from here every exit returns Ok, no fallback). ---
+         let modify_other_keys_mode = crate::input::host_modify_other_keys_mode();
+@@ -285,12 +320,8 @@ pub(crate) fn run_federated_session(
+         // Eager-open: populates the App model + `router.output_senders` and
+         // queues one outbound `Open` per pane into `out_tx` (flushed by the
+         // writer task). `router` moves into the drive task right after.
+-        let opened = app.materialize_federation_mount(
+-            &mirror,
+-            &mut router,
+-            &out_tx,
+-            &outbound_clip_tx,
+-        )?;
++        let opened =
++            app.materialize_federation_mount(&mirror, &mut router, &out_tx, &outbound_clip_tx)?;
+ 
+         // Land the user in the first materialized workspace, interactively.
+         if let Some(&first_ws_idx) = opened.first() {
+diff --git a/src/remote/unix.rs b/src/remote/unix.rs
+index 53d8f65..1a55170 100644
+--- a/src/remote/unix.rs
++++ b/src/remote/unix.rs
+@@ -59,7 +59,12 @@ pub(crate) const REMOTE_FEDERATION_ENV_VAR: &str = "HERDR_REMOTE_FEDERATION";
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) struct RemoteLaunch {
+-    pub(crate) target: String,
++    /// Phase B requirement 1: one or more space-separated `--remote`
++    /// targets. Classic single-target usage (no `--remote-workspace`) keeps
++    /// exactly one element — the classic dispatch path (`run_remote`) always
++    /// reads `target[0]`, so that usage stays byte-for-byte unchanged
++    /// (requirement 6).
++    pub(crate) target: Vec<String>,
+     pub(crate) keybindings: RemoteKeybindings,
+     pub(crate) live_handoff: bool,
+     /// P8 requirement 1: `--remote-workspace` was passed. Combined with
+@@ -79,6 +84,94 @@ pub(crate) fn federation_requested(remote: &RemoteLaunch, env_value: Option<&str
+     remote.federation_flag || env_value == Some("1")
+ }
+ 
++/// REVISED Phase A (multi-remote federated workspace launch) launch-time
++/// routing decision — pure, so tests 3/3b in the phase's TDD list can assert
++/// `main.rs`'s branch selection without any process/socket I/O.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum LaunchRoute {
++    /// No `--remote` target: local-only autodetect launch, untouched.
++    LocalOnly,
++    /// `--remote` without `--remote-workspace`/env opt-in: the classic
++    /// single-target full-screen attach (`run_remote`), byte-for-byte
++    /// unchanged (requirement 5, explicit acceptance test).
++    ClassicRemote,
++    /// `--remote` WITH federation opted in: local + remote coexist in one
++    /// TUI via the server-daemon-owned `workspace.mount_remote` mount
++    /// (REVISED Phase A design) — replaces the old federated-alone path.
++    Coexistence,
++}
++
++/// Decides `main.rs`'s launch route from the already-parsed `RemoteLaunch`
++/// and federation env var, with no I/O of its own.
++pub(crate) fn decide_launch_route(
++    remote: Option<&RemoteLaunch>,
++    env_value: Option<&str>,
++) -> LaunchRoute {
++    match remote {
++        None => LaunchRoute::LocalOnly,
++        Some(remote) if federation_requested(remote, env_value) => LaunchRoute::Coexistence,
++        Some(_) => LaunchRoute::ClassicRemote,
++    }
++}
++
++/// Builds the `workspace.mount_remote` JSON API request `main.rs` sends to
++/// the local server daemon for the `LaunchRoute::Coexistence` branch — pure
++/// construction, no socket I/O, so test 3b can assert its shape directly.
++/// Phase B requirement 9: carries the full non-localhost target list in one
++/// request; the server-side handler owns the concurrent-dial fan-out.
++pub(crate) fn mount_remote_request(targets: &[String]) -> crate::api::schema::Request {
++    crate::api::schema::Request {
++        id: "cli:workspace:mount_remote".to_string(),
++        method: crate::api::schema::Method::WorkspaceMountRemote(
++            crate::api::schema::WorkspaceMountRemoteParams {
++                targets: targets.to_vec(),
++                // Always `false`: the Coexistence path has no analogous hook
++                // for `--remote-keybindings` (see
++                // `coexistence_keybindings_conflict`'s doc comment) — the
++                // caller (`main.rs`) rejects that flag combination before a
++                // request is ever built, so this field is currently reserved
++                // rather than read server-side.
++                remote_keybindings: false,
++            },
++        ),
++    }
++}
++
++/// REVISED Phase A follow-up (code review finding): whether `remote`'s
++/// launch would silently drop `--remote-keybindings` if routed through
++/// Coexistence. The classic `run_remote` path's `remote_keybindings` value
++/// travels over the *client/server Hello handshake* (`ClientKeybindings`,
++/// see `client::requested_keybindings`) to the far end of an ssh-forwarded
++/// socket, telling that remote server whether to parse this connection's raw
++/// keys with the local keybinding profile or its own. The Coexistence path
++/// has no equivalent hook: the local client attaches to the *local* daemon
++/// as normal, and federated panes are driven over the federation wire
++/// (`TerminalChannelMessage::Input`), which only ever carries raw bytes
++/// already resolved by this daemon's own local `Config` — there is no
++/// connection-level keybindings handshake to carry the flag to. Rather than
++/// silently ignore an explicit `--remote-keybindings server`/`local` flag
++/// (the reviewed bug), the caller must reject the combination up front.
++pub(crate) fn coexistence_keybindings_conflict(remote: &RemoteLaunch) -> bool {
++    remote.keybindings != RemoteKeybindings::Local
++}
++
++/// Phase B requirement 2: `localhost` (exact string match only — not
++/// `127.0.0.1` or a hostname; no v1 canonicalization, per predict's decision)
++/// means "local workspace, no SSH dial".
++pub(crate) fn is_local_target(target: &str) -> bool {
++    target == "localhost"
++}
++
++/// Phase B requirement 3: the subset of `targets` that must be dialed over
++/// SSH — `localhost` entries are filtered out (requirement 2).
++pub(crate) fn remote_ssh_targets(targets: &[String]) -> Vec<String> {
++    targets
++        .iter()
++        .filter(|target| !is_local_target(target))
++        .cloned()
++        .collect()
++}
++
+ pub(crate) fn extract_remote_args(
+     args: &[String],
+ ) -> Result<(Vec<String>, Option<RemoteLaunch>), String> {
+@@ -87,7 +180,7 @@ pub(crate) fn extract_remote_args(
+         cleaned.push(program.clone());
+     }
+ 
+-    let mut remote_target = None;
++    let mut remote_targets: Vec<String> = Vec::new();
+     let mut keybindings = RemoteKeybindings::Local;
+     let mut keybindings_seen = false;
+     let mut live_handoff = false;
+@@ -110,21 +203,25 @@ pub(crate) fn extract_remote_args(
+             continue;
+         }
+         if arg == "--remote" {
+-            if remote_target.is_some() {
+-                return Err("--remote can only be specified once".to_string());
+-            }
+-            let Some(value) = args.get(index + 1) else {
++            // Phase B requirement 1: `--remote` accepts one or more
++            // space-separated targets, terminated by the next recognized
++            // flag or `--`. At least one value is still required.
++            let Some(first) = args.get(index + 1) else {
+                 return Err("missing value for --remote".to_string());
+             };
+-            remote_target = Some(validate_remote_target(value)?.to_owned());
++            remote_targets.push(validate_remote_target(first)?.to_owned());
+             index += 2;
++            while let Some(value) = args.get(index) {
++                if is_flag_like(value) {
++                    break;
++                }
++                remote_targets.push(validate_remote_target(value)?.to_owned());
++                index += 1;
++            }
+             continue;
+         }
+         if let Some(value) = arg.strip_prefix("--remote=") {
+-            if remote_target.is_some() {
+-                return Err("--remote can only be specified once".to_string());
+-            }
+-            remote_target = Some(validate_remote_target(value)?.to_owned());
++            remote_targets.push(validate_remote_target(value)?.to_owned());
+             index += 1;
+             continue;
+         }
+@@ -154,8 +251,8 @@ pub(crate) fn extract_remote_args(
+         index += 1;
+     }
+ 
+-    let remote = remote_target.map(|target| RemoteLaunch {
+-        target,
++    let remote = (!remote_targets.is_empty()).then_some(RemoteLaunch {
++        target: remote_targets,
+         keybindings,
+         live_handoff,
+         federation_flag,
+@@ -173,6 +270,18 @@ pub(crate) fn extract_remote_args(
+     Ok((cleaned, remote))
+ }
+ 
++/// Phase B: stops the `--remote` space-form multi-value consumption loop at
++/// the next double-dash CLI flag (`--handoff`, `--remote-workspace`, a
++/// second `--remote`, `--remote-keybindings`, `--help`, the `--` separator,
++/// ...), matching every other flag this parser already recognizes. A
++/// single-dash token (e.g. an SSH-option-like `-oProxyCommand=x`) is left to
++/// fall through to `validate_remote_target`, which still rejects it as a
++/// malformed target (requirement 4) rather than silently passing it through
++/// as a CLI flag.
++fn is_flag_like(value: &str) -> bool {
++    value.starts_with("--")
++}
++
+ fn validate_remote_target(target: &str) -> Result<&str, String> {
+     if target.is_empty() {
+         return Err("missing value for --remote".to_string());
+@@ -366,9 +475,9 @@ fn attempt_federation_mount(
+         };
+         match mount_result {
+             Ok(mounted) => Ok(mounted.mirror),
+-            Err(crate::remote::federation::client::MountError::Rejected(reason)) => Err(
+-                FederationMountFailure::Unsupported(format!("{reason:?}")),
+-            ),
++            Err(crate::remote::federation::client::MountError::Rejected(reason)) => {
++                Err(FederationMountFailure::Unsupported(format!("{reason:?}")))
++            }
+             Err(crate::remote::federation::client::MountError::MissingCapability(cap)) => Err(
+                 FederationMountFailure::Unsupported(format!("missing capability {cap:?}")),
+             ),
+@@ -388,6 +497,17 @@ impl Drop for ChildGuard {
+     }
+ }
+ 
++#[cfg(test)]
++impl ChildGuard {
++    /// Test-only constructor: `ChildGuard`'s inner field is private to this
++    /// module even at `pub(crate)` visibility, so cross-module app-level
++    /// tests (e.g. `app::api::workspaces`'s federation-mount tests) need
++    /// this seam to build a real guard around a real spawned child.
++    pub(crate) fn for_test(child: tokio::process::Child) -> Self {
++        Self(child)
++    }
++}
++
+ /// A live, un-killed federation SSH tunnel: the child is retained (guarded)
+ /// while the reader/writer halves drive the mount + session (b2).
+ #[allow(dead_code)] // b1 scaffolding: not yet wired up until b3.
+@@ -446,15 +566,23 @@ pub(crate) const FEDERATION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+ pub(crate) const FEDERATION_MOUNT_TIMEOUT: Duration = Duration::from_secs(15);
+ 
+ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
++    // Phase B requirement 6: classic single-target attach always uses the
++    // first (and, for the classic-unchanged usage, only) parsed target —
++    // byte-for-byte unchanged from the pre-Phase-B single-`String` behavior.
++    let target = remote
++        .target
++        .first()
++        .cloned()
++        .ok_or_else(|| io::Error::other("--remote requires at least one target"))?;
+     let session_name = crate::session::active_name()
+         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+-    let local_socket = local_forward_socket_path(&remote.target, &session_name);
++    let local_socket = local_forward_socket_path(&target, &session_name);
+     let program = std::env::args()
+         .next()
+         .unwrap_or_else(|| "herdr".to_string());
+     let reattach_command = reattach_command(
+         &program,
+-        &remote.target,
++        &target,
+         &session_name,
+         remote.keybindings,
+         remote.live_handoff,
+@@ -463,7 +591,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+         .config
+         .remote
+         .manage_ssh_config;
+-    let remote_ssh = RemoteSsh::new(remote.target.clone(), manage_ssh_config);
++    let remote_ssh = RemoteSsh::new(target.clone(), manage_ssh_config);
+     let prepared_remote = prepare_remote_herdr(&remote_ssh, remote.live_handoff)?;
+     ensure_remote_server_ready(
+         &remote_ssh,
+@@ -476,11 +604,13 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+     // P8 requirement 1/2: attempt the federated workspace path when opted in
+     // (default OFF — classic path below is otherwise reached identically to
+     // today, byte-for-byte, requirement 1 test 1).
+-    let federation_requested_now =
+-        federation_requested(&remote, std::env::var(REMOTE_FEDERATION_ENV_VAR).ok().as_deref());
++    let federation_requested_now = federation_requested(
++        &remote,
++        std::env::var(REMOTE_FEDERATION_ENV_VAR).ok().as_deref(),
++    );
+     let mount_outcome = federation_requested_now.then(|| {
+         attempt_federation_mount(
+-            &remote.target,
++            &target,
+             &prepared_remote.remote_herdr,
+             &session_name,
+             remote_ssh.options(),
+@@ -488,7 +618,9 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+     });
+     let route = decide_federation_route(
+         federation_requested_now,
+-        mount_outcome.as_ref().map(|result| result.as_ref().map(|_| ())),
++        mount_outcome
++            .as_ref()
++            .map(|result| result.as_ref().map(|_| ())),
+     );
+     match &route {
+         FederationRoute::Federated => {
+@@ -504,7 +636,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+             let config_diagnostic =
+                 crate::config::config_diagnostic_summary(&loaded_config.diagnostics);
+             match crate::remote::federation::session::run_federated_session(
+-                &remote.target,
++                &target,
+                 &prepared_remote.remote_herdr,
+                 &session_name,
+                 remote_ssh.options(),
+@@ -514,9 +646,8 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+                 Ok(()) => return Ok(()),
+                 Err(err) => {
+                     eprintln!(
+-                        "herdr: federated session to {} could not start ({err}); \
+-                         attaching via the classic full-screen view instead.",
+-                        remote.target
++                        "herdr: federated session to {target} could not start ({err}); \
++                         attaching via the classic full-screen view instead."
+                     );
+                 }
+             }
+@@ -528,7 +659,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+     }
+ 
+     let _bridge = SshStdioBridge::start(
+-        remote.target,
++        target,
+         prepared_remote.remote_herdr,
+         local_socket.clone(),
+         session_name,
+@@ -538,6 +669,49 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+     run_client_process(&local_socket, &reattach_command, remote.keybindings)
+ }
+ 
++/// REVISED Phase A (multi-remote federated workspace launch): the
++/// server-daemon-owned counterpart to `run_remote`'s "prepare the remote
++/// binary, ensure its server is running, then dial+mount" sequence — minus
++/// the classic-attach fallback and terminal-mode setup, which stay local to
++/// `run_remote`/`run_federated_session`. Runs entirely inside the caller's
++/// tokio runtime: the synchronous SSH provisioning steps (`prepare_remote_herdr`,
++/// `ensure_remote_server_ready`) are moved to a blocking thread so they never
++/// stall the daemon's async executor, then `session::dial_and_mount` runs the
++/// live tunnel dial + federation handshake/mount.
++pub(crate) async fn prepare_and_mount_federation_target(
++    target: String,
++    session_name: String,
++) -> io::Result<crate::remote::federation::session::DialAndMountOutcome> {
++    let manage_ssh_config = crate::config::Config::load()
++        .config
++        .remote
++        .manage_ssh_config;
++
++    let prep_target = target.clone();
++    let (remote_herdr, ssh_options) = tokio::task::spawn_blocking(move || -> io::Result<_> {
++        let remote_ssh = RemoteSsh::new(prep_target, manage_ssh_config);
++        let prepared_remote = prepare_remote_herdr(&remote_ssh, false)?;
++        ensure_remote_server_ready(
++            &remote_ssh,
++            &prepared_remote.remote_herdr,
++            prepared_remote.installed_or_replaced,
++            prepared_remote.stop_after_install_approved,
++            false,
++        )?;
++        Ok((prepared_remote.remote_herdr, remote_ssh.options().cloned()))
++    })
++    .await
++    .map_err(|err| io::Error::other(format!("remote preparation task failed: {err}")))??;
++
++    crate::remote::federation::session::dial_and_mount(
++        &target,
++        &remote_herdr,
++        &session_name,
++        ssh_options.as_ref(),
++    )
++    .await
++}
++
+ pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
+     ensure_remote_server_running()?;
+ 
+@@ -2583,7 +2757,7 @@ mod tests {
+         let (cleaned, remote) = extract_remote_args(&args).unwrap();
+         assert_eq!(cleaned, vec!["herdr", "--help"]);
+         let remote = remote.unwrap();
+-        assert_eq!(remote.target, "dev");
++        assert_eq!(remote.target, vec!["dev".to_string()]);
+         assert_eq!(remote.keybindings, RemoteKeybindings::Local);
+     }
+ 
+@@ -2593,7 +2767,7 @@ mod tests {
+         let (cleaned, remote) = extract_remote_args(&args).unwrap();
+         assert_eq!(cleaned, vec!["herdr"]);
+         let remote = remote.unwrap();
+-        assert_eq!(remote.target, "user@host");
++        assert_eq!(remote.target, vec!["user@host".to_string()]);
+         assert_eq!(remote.keybindings, RemoteKeybindings::Local);
+     }
+ 
+@@ -2608,7 +2782,7 @@ mod tests {
+         let (cleaned, remote) = extract_remote_args(&args).unwrap();
+         assert_eq!(cleaned, vec!["herdr"]);
+         let remote = remote.unwrap();
+-        assert_eq!(remote.target, "dev");
++        assert_eq!(remote.target, vec!["dev".to_string()]);
+         assert_eq!(remote.keybindings, RemoteKeybindings::Server);
+     }
+ 
+@@ -2633,7 +2807,7 @@ mod tests {
+ 
+         assert_eq!(cleaned, vec!["herdr"]);
+         let remote = remote.unwrap();
+-        assert_eq!(remote.target, "dev");
++        assert_eq!(remote.target, vec!["dev".to_string()]);
+         assert!(remote.live_handoff);
+     }
+ 
+@@ -2804,15 +2978,75 @@ mod tests {
+         assert_eq!(err, "missing value for --remote");
+     }
+ 
++    // Inverted (Phase B requirement 1): a second `--remote` value used to be
++    // an error; the new grammar accepts every value as an additional target
++    // instead of rejecting it.
+     #[test]
+-    fn extract_remote_args_rejects_duplicate_values() {
++    fn extract_remote_args_accepts_multiple_targets() {
+         let args = vec![
+             "herdr".into(),
+-            "--remote=dev".into(),
+-            "--remote=prod".into(),
++            "--remote".into(),
++            "localhost".into(),
++            "host1".into(),
++            "host2".into(),
++            "--remote-workspace".into(),
++        ];
++        let (cleaned, remote) = extract_remote_args(&args).unwrap();
++        assert_eq!(cleaned, vec!["herdr"]);
++        let remote = remote.unwrap();
++        assert_eq!(
++            remote.target,
++            vec!["localhost".to_string(), "host1".to_string(), "host2".to_string()]
++        );
++        assert!(remote.federation_flag);
++    }
++
++    // Explicit acceptance test (Phase B requirement 6): classic single
++    // `--remote host` (no `--remote-workspace`) still parses to a `Vec` of
++    // len 1, and the classic dispatch predicate still selects `run_remote`'s
++    // single-target path — byte-for-byte preserved.
++    #[test]
++    fn extract_remote_args_single_target_classic_path_unchanged() {
++        let args = vec!["herdr".into(), "--remote".into(), "host".into()];
++        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
++        let remote = remote.unwrap();
++        assert_eq!(remote.target, vec!["host".to_string()]);
++        assert_eq!(
++            decide_launch_route(Some(&remote), None),
++            LaunchRoute::ClassicRemote
++        );
++    }
++
++    // Phase B requirement 2: `localhost` filtered out of the SSH-dial list;
++    // when it's the only target, the local-only launch predicate is
++    // selected (no SSH machinery invoked).
++    #[test]
++    fn extract_remote_args_localhost_only_no_ssh() {
++        let args = vec![
++            "herdr".into(),
++            "--remote".into(),
++            "localhost".into(),
++            "--remote-workspace".into(),
++        ];
++        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
++        let remote = remote.unwrap();
++        assert_eq!(remote.target, vec!["localhost".to_string()]);
++        assert!(remote_ssh_targets(&remote.target).is_empty());
++    }
++
++    // Malformed value starting with `-` (e.g. an accidental extra flag-like
++    // token) is still rejected via the existing `validate_remote_target`
++    // rule, replacing the old duplicate-value rejection semantics.
++    #[test]
++    fn extract_remote_args_rejects_option_like_value_between_targets() {
++        let args = vec![
++            "herdr".into(),
++            "--remote".into(),
++            "host1".into(),
++            "-oProxyCommand=x".into(),
+         ];
+         let err = extract_remote_args(&args).unwrap_err();
+-        assert_eq!(err, "--remote can only be specified once");
++        assert_eq!(err, "--remote target must not start with '-'");
+     }
+ 
+     #[test]
+@@ -3572,4 +3806,74 @@ mod tests {
+ 
+         assert!(!dir.exists());
+     }
++
++    fn test_remote_launch(federation_flag: bool) -> RemoteLaunch {
++        RemoteLaunch {
++            target: vec!["host1".to_string()],
++            keybindings: RemoteKeybindings::Local,
++            live_handoff: false,
++            federation_flag,
++        }
++    }
++
++    #[test]
++    fn coexistence_classic_remote_unaffected() {
++        // Test 3 (phase-a TDD list): no `--remote-workspace` and no env
++        // opt-in must select the classic single-target attach, never the
++        // coexistence branch, regardless of env var noise.
++        let remote = test_remote_launch(false);
++        assert_eq!(
++            decide_launch_route(Some(&remote), None),
++            LaunchRoute::ClassicRemote
++        );
++        assert_eq!(
++            decide_launch_route(Some(&remote), Some("0")),
++            LaunchRoute::ClassicRemote
++        );
++    }
++
++    #[test]
++    fn coexistence_local_only_route_has_no_remote_launch() {
++        assert_eq!(decide_launch_route(None, None), LaunchRoute::LocalOnly);
++        assert_eq!(decide_launch_route(None, Some("1")), LaunchRoute::LocalOnly);
++    }
++
++    #[test]
++    fn coexistence_dispatch_sends_mount_remote_request() {
++        // Test 3b: federation flag selects the coexistence route, and the
++        // request-construction function produces a `WorkspaceMountRemote`
++        // request carrying the target — never a call into `run_remote`.
++        let remote = test_remote_launch(true);
++        assert_eq!(
++            decide_launch_route(Some(&remote), None),
++            LaunchRoute::Coexistence
++        );
++
++        let request = mount_remote_request(&remote.target);
++        match request.method {
++            crate::api::schema::Method::WorkspaceMountRemote(params) => {
++                assert_eq!(params.targets, vec!["host1".to_string()]);
++                assert!(!params.remote_keybindings);
++            }
++            other => panic!("expected WorkspaceMountRemote, got {other:?}"),
++        }
++    }
++
++    #[test]
++    fn coexistence_keybindings_conflict_flags_explicit_server_keybindings() {
++        let mut remote = test_remote_launch(true);
++        assert!(!coexistence_keybindings_conflict(&remote));
++
++        remote.keybindings = RemoteKeybindings::Server;
++        assert!(coexistence_keybindings_conflict(&remote));
++    }
++
++    #[test]
++    fn coexistence_dispatch_env_opt_in_also_selects_coexistence() {
++        let remote = test_remote_launch(false);
++        assert_eq!(
++            decide_launch_route(Some(&remote), Some("1")),
++            LaunchRoute::Coexistence
++        );
++    }
+ }
+diff --git a/src/server/autodetect.rs b/src/server/autodetect.rs
+index 4b58196..80f0a91 100644
+--- a/src/server/autodetect.rs
++++ b/src/server/autodetect.rs
+@@ -289,6 +289,16 @@ pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Resu
+ /// 2. If no server → spawn server daemon → wait for socket readiness
+ /// 3. Run the thin client (which connects to the server)
+ pub fn auto_detect_launch() -> io::Result<()> {
++    ensure_server_running()?;
++
++    // Now attach as a thin client.
++    crate::client::run_client()
++}
++
++/// Shared "check for server, spawn if needed" half of [`auto_detect_launch`],
++/// extracted (REVISED Phase A) so [`auto_detect_launch_with_mount`] can reuse
++/// it before sending its own API request, ahead of attaching as a client.
++fn ensure_server_running() -> io::Result<()> {
+     let socket_path = client_socket_path();
+     info!(path = %socket_path.display(), "auto-detect launch starting");
+ 
+@@ -301,8 +311,31 @@ pub fn auto_detect_launch() -> io::Result<()> {
+         wait_for_server_socket(&socket_path, SERVER_READY_TIMEOUT)?;
+         info!("server ready, attaching as client");
+     }
++    Ok(())
++}
++
++/// REVISED Phase A (multi-remote federated workspace launch); generalized to
++/// N targets in Phase B: `main.rs`'s coexistence-branch entry point. Ensures
++/// a local server is running (same autodetect machinery as
++/// [`auto_detect_launch`]), filters `localhost` out of the CLI-parsed target
++/// list (requirement 2), and — if any non-local targets remain — sends the
++/// server one `workspace.mount_remote` request carrying the full list (the
++/// mount itself runs server-side, in the daemon's own tokio runtime — see
++/// `app::api::workspaces::handle_workspace_mount_remote`), then attaches as
++/// a normal thin client. No federation-aware code runs in this process; a
++/// failed mount request only logs a warning; the local session still starts.
++#[cfg(unix)]
++pub fn auto_detect_launch_with_mount(targets: Vec<String>) -> io::Result<()> {
++    ensure_server_running()?;
++
++    let ssh_targets = crate::remote::remote_ssh_targets(&targets);
++    if !ssh_targets.is_empty() {
++        let request = crate::remote::mount_remote_request(&ssh_targets);
++        if let Err(err) = crate::api::client::ApiClient::local().request(request) {
++            eprintln!("herdr: could not request federated mount for {ssh_targets:?} ({err}); continuing with the local workspace only");
++        }
++    }
+ 
+-    // Now attach as a thin client.
+     crate::client::run_client()
+ }
+ 
+diff --git a/src/ui/sidebar.rs b/src/ui/sidebar.rs
+index 9ba5092..1ef4b79 100644
+--- a/src/ui/sidebar.rs
++++ b/src/ui/sidebar.rs
+@@ -2075,6 +2075,45 @@ mod tests {
+         assert!(entries.iter().any(|WorkspaceListEntry::Workspace { indented, .. }| *indented));
+     }
+ 
++    // Phase B test 9: sidebar grouping scales to N hosts — extends
++    // `federated_workspace_groups_under_its_host_via_worktree_space_reuse`'s
++    // single-host case to two distinct federated hosts, each rendering its
++    // own badge/group. Additive verification only, per requirement 8: this
++    // is the same `workspace_list_entries`/`worktree_space` grouping
++    // primitive, not new grouping logic.
++    #[test]
++    fn sidebar_groups_scale_to_n_hosts() {
++        let mut app = crate::app::state::AppState::test_new();
++        let mut host_a = Workspace::test_new("remote-a");
++        host_a.id = "r:alice@10.0.0.1#s1:w1".to_string();
++        host_a.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
++            key: "federation:alice@10.0.0.1#s1".to_string(),
++            label: "alice@10.0.0.1".to_string(),
++            repo_root: std::path::PathBuf::new(),
++            checkout_path: std::path::PathBuf::new(),
++            is_linked_worktree: false,
++        });
++        let mut host_b = Workspace::test_new("remote-b");
++        host_b.id = "r:bob@10.0.0.2#s1:w1".to_string();
++        host_b.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
++            key: "federation:bob@10.0.0.2#s1".to_string(),
++            label: "bob@10.0.0.2".to_string(),
++            repo_root: std::path::PathBuf::new(),
++            checkout_path: std::path::PathBuf::new(),
++            is_linked_worktree: false,
++        });
++        let badge_a = federation_origin_badge(&host_a).expect("host a must carry a badge");
++        let badge_b = federation_origin_badge(&host_b).expect("host b must carry a badge");
++        app.workspaces = vec![host_a, host_b];
++
++        let entries = workspace_list_entries(&app);
++        assert_eq!(entries.len(), 2, "both distinct-host federated workspaces render");
++
++        assert_ne!(badge_a, badge_b, "distinct hosts must render distinct badges");
++        assert!(badge_a.contains("alice@10.0.0.1"));
++        assert!(badge_b.contains("bob@10.0.0.2"));
++    }
++
+     #[test]
+     fn workspace_list_truncates_cjk_branch_without_panic() {
+         let mut app = crate::app::state::AppState::test_new();

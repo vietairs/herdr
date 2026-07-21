@@ -283,6 +283,14 @@
       (phase-09b:162), a HUMAN-ONLY gate (macOS-27 can't build; remote host is a headless build sandbox).
       In-env gates all green (build EXIT_0, 2685/0, clippy baseline, 2 adversarial reviews' blockers fixed).
       See auto-decisions D9 for the attestation + the exact manual smoke steps.
-- [ ] 13. un-draft PR #1 — NOT DONE (deliberate). Do NOT un-draft: un-drafting would assert merge-readiness the
-      unmet human-only live smoke does not support; cortex never weakens a gate to ship, never merges. PR stays
-      DRAFT; the human runs the two-machine smoke (D9), then un-drafts + merges. STOP here (--auto: record + stop).
+- [x] 13a. D9 manual smoke — DONE 14:02, executed directly over SSH (vm100->vm105, `--session fedsmoke2`).
+      ALL 4 checks PASS: mount/render correct (13:48's "wrong pane" was a false alarm — `bio-1-ubuntu` is vm105's
+      real hostname, not vm100's, confirmed via `gpu-ml` vm100 vs `bio-1-ubuntu` vm105); live-stream proven with a
+      real echo/hostname round-trip; New Worktree (F4) correctly REJECTED with a visible message, no worktree
+      created; disconnect (F1) — herdr-fed exits cleanly within ~3s (no hang) and vm105's backing shell survives.
+      Separately reconfirmed (non-blocking): federated `--remote --remote-workspace` writes NO log file at all,
+      even with the session dir pre-created and `HERDR_LOG=debug` set — an observability gap, not a functional
+      one (every check above verified by direct behavior, not logs). See implementation-notes.md 14:02 entry.
+- [x] 13b. un-draft PR #1 — DONE 14:04, user-confirmed (`gh pr ready 1`). PR #1 is "ready for review".
+      https://github.com/vietairs/herdr/pull/1
+- [ ] 14. MERGE PR #1 — NOT cortex's to do (see Scope: cortex never merges). Belongs to the user or `/hvn-vibe`.
