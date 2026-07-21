@@ -1545,3 +1545,261 @@ Files touched: `src/remote/unix.rs`, `src/remote.rs` (Windows parity),
   is_current` to match the `targets: Vec<String>` shape change.
 - Manual two-machine smoke not run (out-of-env for this sandbox), same as
   Phase A.
+
+## Remote split end-to-end: server-side real dispatch + client fire-and-forget bridge (260722)
+
+**What:** Production `federation_accept.rs` now performs a REAL split against
+the live `App` when it receives `SplitPaneRequest` (item 1, fully working):
+`FederationCommand::SplitPane` (new variant, `server::federation_actor`)
+dispatches through the exact same `Method::PaneSplit` JSON-API handler the
+local TUI/CLI split action calls, then replies `SplitPaneResponse::Created`/
+`Failed` on the connection's existing outbound queue. `handle_pane_split`
+(`app/api/panes.rs`) now, for a remote-federated workspace with a live mount,
+looks up the target pane's own `PaneRuntime` (`remote_terminal_id()`/
+`remote_out_tx()`, new accessors on `PaneRuntime`/`TerminalRuntime`/
+`RemoteTerminalSourceHandle`) and sends the real `SplitPaneRequest` over that
+pane's own mount tunnel -- no new mount registry needed, since every
+remote-backed `PaneRuntime` already privately holds a clone of its mount's
+out-tx.
+
+**Why (design choice):** `handle_pane_split` is a synchronous JSON-API
+handler invoked inline with `App`'s own tick; it cannot `.await` the
+`SplitPaneResponse` a live mount's async drive task
+(`client::drive_mount_channel`) will eventually read, and blocking on a
+`oneshot::Receiver` there would stall the same tokio worker the response
+needs to arrive on (deadlock risk on a single-worker runtime). The smallest
+correct design given that hard sync/async boundary: send the request
+fire-and-forget, and reply `remote_split_pending` (not a fabricated
+`PaneInfo`) instead of the old `remote_split_unsupported`. `client.rs`'s
+`drive_mount_channel` now logs `SplitPaneResponse::Created`/`Failed` instead
+of silently dropping it.
+
+**Evidence:** `handle_pane_split`'s remote branch and `client.rs`'s response
+handling only have `mirror`/`router`/`hub` in scope, never `&mut App` --
+confirmed by reading `app/api/workspaces.rs::handle_federation_mount_ready`
+(the only call site that owns both `out_tx` and `&mut App` simultaneously,
+briefly, before both are moved into separately-spawned tasks) and
+`client::drive_mount_channel`'s signature.
+
+**Reversibility:** fully additive; the old refusal path is kept as the
+exact fallback when the target pane has no live `remote_out_tx` (mount down
+or not actually remote-backed).
+
+**Remaining gap (not closed, needs files outside this fix's ownership):**
+the new pane the remote host creates does not yet materialize into a real
+local `Tab`/`PaneRuntime` in the requesting client's TUI -- `client.rs`'s
+`drive_mount_channel` only owns `mirror`/`router`/`hub`, never `&mut App`,
+so it cannot itself build the local pane. Closing this needs, in one
+coordinated follow-up (three files, none owned by this fix):
+1. `app/api/workspaces.rs`: thread a channel (or the existing `event_tx`)
+   into `drive_mount_channel`'s call site so a `SplitPaneResponse` can reach
+   `App`.
+2. `events.rs`/`app/mod.rs`: a new `AppEvent` variant (e.g.
+   `FederationSplitPaneReady { host_key, new_pane_id, new_terminal_id,
+   ws_idx, direction, ratio, focus }`) and its handler, calling
+   `App::build_remote_pane` (already exists, `app/creation.rs`) and
+   inserting into the target `Tab`'s layout via the local mirrored
+   `ws_idx`/tab, the same way `split_focused_with_runtime` does for a local
+   split but with a remote-backed runtime.
+3. `app/api/panes.rs`: correlate the fire-and-forget `request_id` this fix
+   already mints (`next_remote_split_request_id`) if the eventual design
+   needs per-request context beyond "which pane initiated the request" (may
+   not be necessary if the response's `new_pane_id`/`new_terminal_id` alone
+   are enough, given the remote host and client already share the same
+   `ws_idx`/tab topology from mount time).
+
+**Deviations from strict file ownership (logged per orchestration-protocol):**
+this fix's assigned owned-file list was `src/server/federation_accept.rs,
+src/remote/federation/*, src/app/api/panes.rs, src/app/creation.rs,
+src/workspace.rs, src/workspace/tab.rs, src/pane.rs`. Two structurally
+unavoidable small edits landed just outside that list:
+- `src/server/federation_actor.rs` (new `FederationCommand::SplitPane`
+  variant + dispatch arm) -- `federation_accept.rs`'s only path to the live
+  `App` is this actor's existing command channel; no existing variant can
+  perform a split, and item 1 (this fix's primary ask) is impossible without
+  it.
+- `src/terminal/runtime.rs` (two 3-line delegation methods,
+  `remote_terminal_id`/`remote_out_tx`, mirroring the file's own existing
+  `relayed_agent_status_sender` delegation precedent) -- `TerminalRuntime`
+  is the newtype `App` actually stores (`terminal_runtimes: HashMap<String,
+  TerminalRuntime>`), not the inner `PaneRuntime` this fix's owned
+  `src/pane.rs` added the real accessors to.
+Both are mechanical, narrowly-scoped (no new logic invented, only exposing
+existing private state), and consistent with the "smallest faithful
+deviation" guidance when a phase file's file list turns out to structurally
+exclude something the assigned goal cannot be met without.
+
+**Validation:**
+- `cargo check --bin herdr` (ZIG=~/.local/zig-0.15.2/zig): clean, only the 2
+  pre-existing dead-code warnings (`map_out`, `Capability::CLIPBOARD`).
+- `cargo clippy --bin herdr --no-deps`: same 2 pre-existing warnings, no new
+  ones.
+- `cargo test --bin herdr federation -- --test-threads=4`: 124 passed, 0
+  failed (includes 2 new `federation_actor::SplitPane` dispatch tests, 1 new
+  `federation_accept` reader-loop routing test).
+- `cargo test --bin herdr -- --test-threads=4` (full suite): **2706 passed,
+  0 failed, 0 ignored** (up from the pre-existing 2702 baseline; net +4 new
+  tests: 2 in `federation_actor`, 1 in `federation_accept`, 1 in `pane.rs`'s
+  `remote_spawn_tests`).
+- The pre-existing `pane_split_in_a_federated_workspace_is_refused_not_
+  misfiled_locally` regression test (`app/api/panes.rs`) still passes
+  unchanged -- a workspace classified remote but whose pane has no live
+  `remote_out_tx` (this test's setup) still gets the exact same
+  `remote_split_unsupported` refusal as before.
+
+**Remote VM binaries:** need redeploy once this patch (or its follow-up)
+lands -- unlike the prior fix in this chain, this one DOES change real
+production wire behavior: `federation_accept.rs` (the co-located production
+serve-side handler, not a test-only path) now actually performs splits for
+any peer that sends `SplitPaneRequest`, so the served-host binary must be
+rebuilt/redeployed for the new dispatch to take effect. The requesting
+client's binary also needs redeploy for `handle_pane_split`'s new
+`remote_split_pending` branch to replace `remote_split_unsupported`.
+
+## Remote split materialization: mount drive task builds the runtime, App splices it into layout (260722)
+
+**What:** Closed the "remote split end-to-end" chain's last gap. On
+`SplitPaneResponse::Created`, `client::drive_mount_channel` (the mount's own
+drive task, which already owns `TerminalChannelRouter`/the mount's `out_tx`)
+opens the new pane's `Terminal` channel and spawns a real `TerminalRuntime`
+via `TerminalRuntime::spawn_remote` itself, then hands the finished
+`(PaneId, TerminalId, TerminalState, TerminalRuntime, PaneState)` bundle to
+`App` over a new `AppEvent::FederationSplitPaneReady`. `App::
+handle_federation_split_pane_ready` (`app/creation.rs`) pops a
+`PendingRemoteSplit` (keyed by `request_id`, stashed by `dispatch_remote_pane_
+split` at mint time) and calls the mirrored target pane's own
+`Tab::insert_existing_pane` — the same primitive `materialize_federation_
+mount` uses for mount-time split panes — placing the new pane in the correct
+tab, then registers the runtime/terminal and emits `PaneCreated`/layout-
+updated events exactly like a local split. `SplitPaneResponse::Failed` now
+also surfaces via `AppEvent::FederationSplitPaneFailed`, toast-notified the
+same way `handle_federation_mount_failed` does, instead of only a log line.
+
+**Why (design fork):** the drive task, not `App`, owns the mount's
+`TerminalChannelRouter`/`out_tx` — the only handles `router.open_terminal`/
+`TerminalRuntime::spawn_remote` need — so the runtime MUST be built inside
+`drive_mount_channel`, not after handing a bare response back to `App`. What
+`App` alone owns is the workspace/tab layout and the original request's
+context (target pane, direction, ratio, focus), which the wire response does
+not carry at all (`SplitPaneResponse::Created` has only `request_id`/
+`new_pane_id`/`new_terminal_id`) — hence the new `PendingRemoteSplit` map on
+`App` (keyed by `request_id`, populated at `dispatch_remote_pane_split` time)
+bridges the two. `rows`/`cols`/`scrollback_limit_bytes`/`host_terminal_theme`
+for the new runtime are captured ONCE at mount time into a new `client::
+SplitMaterializationContext` (passed as `Option<&_>` into `drive_mount_
+channel`, `None` for every caller with no live session to materialize into)
+rather than re-queried per split — the same "v1 simplification" precedent
+`materialize_federation_mount` already uses for mount-time panes.
+**Evidence:** `src/remote/federation/client.rs` `SplitMaterializationContext`,
+`drive_mount_channel`'s `FederationMessage::SplitPaneResponse` arm; `src/app/
+creation.rs::handle_federation_split_pane_ready`/`_failed`/
+`PendingRemoteSplit`; new test `remote::federation::client::tests::drive_
+mount_channel_materializes_a_runtime_on_split_pane_created` (asserts the
+`AppEvent::FederationSplitPaneReady` actually arrives with the request's real
+`request_id`, driven end-to-end over the same hand-rolled fake server pattern
+this file's other `drive_mount_channel` tests already use).
+**Reversibility:** additive — `split_materialization: Option<&_>` defaults to
+`None` (log-only, prior behavior) for every existing caller
+(`remote/federation/session.rs`'s classic full-screen `--remote` path; every
+pre-existing `client.rs` test). Only `app/api/workspaces.rs`'s real
+server-owned mount call site passes `Some(...)`.
+
+**Deviations from strict file ownership (logged per orchestration-protocol):**
+this fix's assigned owned-file list was `app/api/workspaces.rs`, `app/
+events.rs` (or `app/mod.rs`), `app/creation.rs`, `remote/federation/client.rs`,
+`remote/federation/reducer.rs`, `workspace.rs`, `workspace/tab.rs`, `pane.rs`.
+Four small, structurally-required edits landed just outside that list, none
+inventing new logic:
+1. `src/app/api/panes.rs::dispatch_remote_pane_split` — one call to the new
+   `App::register_pending_remote_split` right after minting `request_id`.
+   Without this, nothing would ever populate the correlation map this fix's
+   response handler reads; this is the ONE place that owns both the local
+   layout context and the moment a `request_id` is minted.
+2. `src/app/api.rs::handle_internal_event` — two new early-return arms for
+   `AppEvent::FederationSplitPaneReady`/`FederationSplitPaneFailed`, mirroring
+   the 3 existing `FederationMount*` arms in the same function. Mechanically
+   required: this is the ONE dispatch point every `AppEvent` variant must be
+   routed from.
+3. `src/app/actions.rs` — two `Vec::new()` arms in `AppState`'s exhaustive
+   `AppEvent` match (same pattern as the existing `FederationMount*` arms
+   immediately above them), required only because Rust's exhaustiveness check
+   forces every `AppEvent` variant to appear in every match over the enum.
+4. `src/remote/federation/session.rs` — the classic full-screen `--remote`
+   client process's own `drive_mount_channel` call site needed the same 3 new
+   positional args (`out_tx`/`outbound_clip_tx`/`None`) to keep compiling;
+   passes `None` (no live server-owned session to materialize into from a
+   standalone client process), so its behavior is unchanged (still logs only).
+   Required cloning `out_tx`/`outbound_clip_tx` before the task's `async move`
+   block instead of moving them, since the outer scope still needs to `drop
+   (out_tx)` for its own (pre-existing, unrelated) teardown sequence.
+
+All four are minimal, mirror an existing precedent in the same file, and
+invent no new logic — consistent with prior fixes in this chain's own
+"smallest faithful deviation" disposition.
+
+**Validation:**
+- `ZIG=~/.local/zig-0.15.2/zig cargo check --bin herdr`: clean, only the 2
+  pre-existing dead-code warnings (`map_out`, `Capability::CLIPBOARD`).
+- `cargo clippy --bin herdr --no-deps`: same 2 pre-existing warnings, no new.
+- `cargo test --bin herdr federation -- --test-threads=4`: **125 passed, 0
+  failed** (up from the pre-existing 124 baseline; +1 new test).
+- `cargo test --bin herdr -- --test-threads=4` (full suite): **2707 passed,
+  0 failed, 0 ignored** (up from the pre-existing 2706 baseline; net +1).
+
+**Remaining gap (v1 scope, logged for a future pass):** split-response
+materialization always creates a horizontal chain split via `insert_existing_
+pane` with the request's own direction/ratio against the target pane — it
+does not attempt to reconcile against any subsequent layout drift on the
+remote side (e.g. the remote's own layout differs if two splits race). Same
+"v1 does not reproduce exact remote split geometry" caveat `materialize_
+federation_mount` already carries for mount-time panes. Remote VM binaries
+need redeploy for the server-side half of this chain (already noted in the
+prior entry); this fix's changes are entirely client-side (the requesting
+herdr process), so only that side needs redeploy for local materialization to
+take effect — the serve-side dispatch itself is unchanged by this fix.
+
+- What: Fixed the code-review Critical finding (stale-index splice/leak in
+  `pending_remote_splits`) by re-keying `PendingRemoteSplit` on `Workspace::id`
+  (stable string) instead of `ws_idx: usize`, and purging every entry whose
+  `workspace_id` is in a mount's `closing_ids` set inside
+  `handle_federation_mount_ended` (new `App::purge_pending_remote_splits_
+  for_workspaces`).
+  Why: `ws_idx` is a raw `Vec` index; workspace close/reorder can make it
+  point at an unrelated (possibly local) workspace by the time a delayed
+  `SplitPaneResponse` arrives, and `handle_federation_mount_ended` never
+  touched the map at all, so every disconnected-mid-flight split leaked
+  forever. `ws.id` never gets reused across a process's lifetime
+  (`Workspace::test_new`/creation always allocates a fresh base32 id; see
+  `workspace::tests::reserving_restored_workspace_ids_prevents_reuse`), so
+  keying on it removes the reuse hazard entirely rather than just narrowing it.
+  Evidence: new regression test
+  `app::api::workspaces::tests::federation_mount_ended_purges_pending_remote_
+  splits_for_its_workspaces` (src/app/api/workspaces.rs) — registers a pending
+  split against a federated workspace, ends its mount, asserts the entry is
+  gone, then feeds a late `FederationSplitPaneReady` for that request_id and
+  asserts no pane lands anywhere (including the local workspace now sitting at
+  the old index). Full suite green: `cargo test --bin herdr -- --test-
+  threads=4` → 2708 passed, 0 failed (net +1 over the 2707 baseline above).
+  `cargo clippy --bin herdr --tests`: only the 3 pre-existing warnings
+  (`map_out`, `Capability::CLIPBOARD`, a pane_source.rs type-complexity lint),
+  no new ones.
+  Reversibility: trivial — struct field rename + one new purge call site; no
+  wire/protocol change, no persisted-state shape change.
+
+- What: Did not add separate mount-generation fencing to `pending_remote_
+  splits` for the review's Major #2 (register/send-race amplifier).
+  Why: `dispatch_remote_pane_split` (registers) and `handle_federation_mount_
+  ended` (would purge) both run as `&mut App` methods off the same single
+  `handle_internal_event` dispatch (`src/app/api.rs:64`); `AppEvent`s are
+  processed one at a time, so there is no concurrent-mutation window on
+  `App` state for these two handlers to race in. The only real risk was the
+  ordering/leak this fix already closes (register can still land for a
+  request whose mount already ended, but the stable-id purge plus the
+  existing "workspace no longer exists" / "unknown request" guards in
+  `handle_federation_split_pane_ready` already make that a safe no-op, not
+  a mis-splice).
+  Evidence: `src/app/api.rs:64` `handle_internal_event(&mut self, ev: AppEvent)`
+  is the sole call site for both `handle_federation_mount_ended` and
+  `handle_federation_split_pane_ready`.
+  Reversibility: n/a (no code change); revisit if `App` event dispatch ever
+  becomes concurrent.
