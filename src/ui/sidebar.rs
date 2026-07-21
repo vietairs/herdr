@@ -2075,6 +2075,45 @@ mod tests {
         assert!(entries.iter().any(|WorkspaceListEntry::Workspace { indented, .. }| *indented));
     }
 
+    // Phase B test 9: sidebar grouping scales to N hosts — extends
+    // `federated_workspace_groups_under_its_host_via_worktree_space_reuse`'s
+    // single-host case to two distinct federated hosts, each rendering its
+    // own badge/group. Additive verification only, per requirement 8: this
+    // is the same `workspace_list_entries`/`worktree_space` grouping
+    // primitive, not new grouping logic.
+    #[test]
+    fn sidebar_groups_scale_to_n_hosts() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut host_a = Workspace::test_new("remote-a");
+        host_a.id = "r:alice@10.0.0.1#s1:w1".to_string();
+        host_a.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "federation:alice@10.0.0.1#s1".to_string(),
+            label: "alice@10.0.0.1".to_string(),
+            repo_root: std::path::PathBuf::new(),
+            checkout_path: std::path::PathBuf::new(),
+            is_linked_worktree: false,
+        });
+        let mut host_b = Workspace::test_new("remote-b");
+        host_b.id = "r:bob@10.0.0.2#s1:w1".to_string();
+        host_b.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "federation:bob@10.0.0.2#s1".to_string(),
+            label: "bob@10.0.0.2".to_string(),
+            repo_root: std::path::PathBuf::new(),
+            checkout_path: std::path::PathBuf::new(),
+            is_linked_worktree: false,
+        });
+        let badge_a = federation_origin_badge(&host_a).expect("host a must carry a badge");
+        let badge_b = federation_origin_badge(&host_b).expect("host b must carry a badge");
+        app.workspaces = vec![host_a, host_b];
+
+        let entries = workspace_list_entries(&app);
+        assert_eq!(entries.len(), 2, "both distinct-host federated workspaces render");
+
+        assert_ne!(badge_a, badge_b, "distinct hosts must render distinct badges");
+        assert!(badge_a.contains("alice@10.0.0.1"));
+        assert!(badge_b.contains("bob@10.0.0.2"));
+    }
+
     #[test]
     fn workspace_list_truncates_cjk_branch_without_panic() {
         let mut app = crate::app::state::AppState::test_new();

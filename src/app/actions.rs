@@ -2736,6 +2736,14 @@ impl AppState {
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
+            // Handled directly in `App::handle_internal_event`, which owns
+            // the terminal-channel/router state this event needs and
+            // `return`s before this fallback ever runs — arms exist here
+            // only to satisfy the exhaustive match over `AppEvent`.
+            #[cfg(unix)]
+            AppEvent::FederationMountReady(_) => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationMountFailed { .. } => Vec::new(),
         }
     }
 

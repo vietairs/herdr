@@ -31,7 +31,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    EnableFocusChange, EnableMouseCapture, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 
@@ -56,8 +57,7 @@ const INBOUND_CLIPBOARD_CAPACITY: usize = 64;
 /// after `out_tx` is dropped, before killing the ssh child regardless. Bounds
 /// the fault case (a half-open peer that stopped reading) so teardown can never
 /// hang and strand the user in the alt-screen; the clean case exits far sooner.
-const FEDERATION_TEARDOWN_DRAIN_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(2);
+const FEDERATION_TEARDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Process-global: true only while an in-proc federated session is running.
 /// Read by the low-level local-PTY spawn choke (`pty::backend::unix::
@@ -158,6 +158,83 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
     .collect()
 }
 
+/// Live outcome of dialing + mounting a federation target: everything the
+/// caller needs to materialize the mount into an `App` and drive it, with no
+/// terminal/TTY ownership assumed. Extracted out of `run_federated_session`
+/// (REVISED Phase A step 3) so the server daemon's own async task can reuse
+/// exactly this dial+mount sequence without pulling in any of
+/// `run_federated_session`'s terminal-mode setup.
+pub(crate) struct DialAndMountOutcome {
+    pub(crate) mirror: crate::remote::federation::reducer::RemoteMirror,
+    pub(crate) generation: u64,
+    pub(crate) tunnel_guard: crate::remote::ChildGuard,
+    pub(crate) tunnel_reader: tokio::process::ChildStdout,
+    pub(crate) tunnel_writer: tokio::process::ChildStdin,
+}
+
+/// Dials `target`'s live herdr server and mounts a federation session over
+/// it, applying the same connect/mount timeouts and empty-mirror rejection
+/// `run_federated_session` always has. No `App`, no TTY — pure async I/O,
+/// `Send`-shaped, safe to `tokio::spawn` from any tokio context (server
+/// daemon or CLI process alike).
+pub(crate) async fn dial_and_mount(
+    target: &str,
+    remote_herdr: &RemoteHerdr,
+    session_name: &str,
+    ssh_options: Option<&ManagedSshOptions>,
+) -> io::Result<DialAndMountOutcome> {
+    let tunnel = dial_federation(target, remote_herdr, session_name, ssh_options)
+        .await
+        .map_err(|err| io::Error::other(format!("federation dial failed: {err:?}")))?;
+    let crate::remote::LiveTunnel {
+        guard: tunnel_guard,
+        reader,
+        writer,
+    } = tunnel;
+
+    let client = FederationClient::new(
+        HostKey::new(target, session_name),
+        local_capabilities(),
+        std::collections::BTreeSet::new(),
+    );
+
+    // Wrap `connect_and_mount`'s otherwise-unbounded reads: a live tunnel
+    // (unlike the one-shot snapshot dial) can hang forever on a stalled
+    // link. Use the connect budget for the whole handshake+mount round — it
+    // is the tighter of the two; mount is bounded by the same await.
+    let mount_budget = FEDERATION_CONNECT_TIMEOUT + FEDERATION_MOUNT_TIMEOUT;
+    let mounted =
+        match tokio::time::timeout(mount_budget, client.connect_and_mount(reader, writer)).await {
+            Ok(Ok(mounted)) => mounted,
+            Ok(Err(err)) => {
+                return Err(io::Error::other(format!("federation mount failed: {err}")));
+            }
+            Err(_elapsed) => {
+                return Err(io::Error::other(
+                    "federation mount timed out before a live workspace was ready",
+                ));
+            }
+        };
+
+    // Non-empty required: an empty mount has nothing to render — abort so
+    // the caller falls back to classic rather than entering an empty TUI.
+    if mounted.mirror.workspaces().is_empty() {
+        return Err(io::Error::other(
+            "federation mount returned no remote workspaces",
+        ));
+    }
+
+    let mirror = mounted.mirror;
+    let generation = mirror.mount().mount_generation;
+    Ok(DialAndMountOutcome {
+        mirror,
+        generation,
+        tunnel_guard,
+        tunnel_reader: mounted.reader,
+        tunnel_writer: mounted.writer,
+    })
+}
+
 /// Runs an interactive in-proc federated session against `target`'s live herdr
 /// server. Mirrors `main.rs`'s classic runtime + terminal template.
 ///
@@ -183,55 +260,13 @@ pub(crate) fn run_federated_session(
         // --- Pre-run (classic-fallback-eligible): dial + mount, no TTY yet. ---
         let _active_guard = FederatedSessionActiveGuard::arm();
 
-        let tunnel = dial_federation(target, remote_herdr, session_name, ssh_options)
-            .await
-            .map_err(|err| io::Error::other(format!("federation dial failed: {err:?}")))?;
-        let crate::remote::LiveTunnel {
-            guard: tunnel_guard,
-            reader,
-            writer,
-        } = tunnel;
-
-        let client = FederationClient::new(
-            HostKey::new(target, session_name),
-            local_capabilities(),
-            std::collections::BTreeSet::new(),
-        );
-
-        // Wrap `connect_and_mount`'s otherwise-unbounded reads: a live tunnel
-        // (unlike the one-shot snapshot dial) can hang forever on a stalled
-        // link. Use the connect budget for the whole handshake+mount round —
-        // it is the tighter of the two; mount is bounded by the same await.
-        let mount_budget = FEDERATION_CONNECT_TIMEOUT + FEDERATION_MOUNT_TIMEOUT;
-        let mounted = match tokio::time::timeout(
-            mount_budget,
-            client.connect_and_mount(reader, writer),
-        )
-        .await
-        {
-            Ok(Ok(mounted)) => mounted,
-            Ok(Err(err)) => {
-                return Err(io::Error::other(format!("federation mount failed: {err}")));
-            }
-            Err(_elapsed) => {
-                return Err(io::Error::other(
-                    "federation mount timed out before a live workspace was ready",
-                ));
-            }
-        };
-
-        // Non-empty required: an empty mount has nothing to render — abort so
-        // b3 falls back to classic rather than entering an empty TUI.
-        if mounted.mirror.workspaces().is_empty() {
-            return Err(io::Error::other(
-                "federation mount returned no remote workspaces",
-            ));
-        }
-
-        let mirror = mounted.mirror;
-        let generation = mirror.mount().mount_generation;
-        let tunnel_reader = mounted.reader;
-        let tunnel_writer = mounted.writer;
+        let DialAndMountOutcome {
+            mirror,
+            generation,
+            tunnel_guard,
+            tunnel_reader,
+            tunnel_writer,
+        } = dial_and_mount(target, remote_herdr, session_name, ssh_options).await?;
 
         // --- Terminal mode (D2: from here every exit returns Ok, no fallback). ---
         let modify_other_keys_mode = crate::input::host_modify_other_keys_mode();
@@ -285,12 +320,8 @@ pub(crate) fn run_federated_session(
         // Eager-open: populates the App model + `router.output_senders` and
         // queues one outbound `Open` per pane into `out_tx` (flushed by the
         // writer task). `router` moves into the drive task right after.
-        let opened = app.materialize_federation_mount(
-            &mirror,
-            &mut router,
-            &out_tx,
-            &outbound_clip_tx,
-        )?;
+        let opened =
+            app.materialize_federation_mount(&mirror, &mut router, &out_tx, &outbound_clip_tx)?;
 
         // Land the user in the first materialized workspace, interactively.
         if let Some(&first_ws_idx) = opened.first() {

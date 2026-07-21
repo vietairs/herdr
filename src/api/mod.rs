@@ -25,6 +25,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::ServerReloadAgentManifests(_)
             | Method::NotificationShow(_)
             | Method::WorkspaceCreate(_)
+            | Method::WorkspaceMountRemote(_)
             | Method::WorkspaceFocus(_)
             | Method::WorkspaceRename(_)
             | Method::WorkspaceMove(_)
@@ -134,6 +135,7 @@ pub(crate) fn federated_session_allows(method: &Method) -> bool {
         | Method::ClientWindowTitleSet(_)
         | Method::ClientWindowTitleClear(_)
         | Method::WorkspaceCreate(_)
+        | Method::WorkspaceMountRemote(_)
         | Method::WorkspaceRename(_)
         | Method::WorkspaceMove(_)
         | Method::WorkspaceReportMetadata(_)
@@ -209,21 +211,31 @@ mod federated_allowlist_tests {
 
     #[test]
     fn allows_read_only_navigation_and_remote_input() {
-        assert!(federated_session_allows(&Method::SessionSnapshot(EmptyParams {})));
-        assert!(federated_session_allows(&Method::WorkspaceList(EmptyParams {})));
+        assert!(federated_session_allows(&Method::SessionSnapshot(
+            EmptyParams {}
+        )));
+        assert!(federated_session_allows(&Method::WorkspaceList(
+            EmptyParams {}
+        )));
         assert!(federated_session_allows(&Method::AgentList(EmptyParams {})));
         // Read-only server query stays allowed...
-        assert!(federated_session_allows(&Method::ServerAgentManifests(EmptyParams {})));
+        assert!(federated_session_allows(&Method::ServerAgentManifests(
+            EmptyParams {}
+        )));
     }
 
     #[test]
     fn forbids_server_control_and_client_display_methods() {
-        assert!(!federated_session_allows(&Method::ServerStop(EmptyParams {})));
-        assert!(!federated_session_allows(&Method::ServerReloadConfig(EmptyParams {})));
-        // ...but the reload counterpart of the allowed query is forbidden.
-        assert!(!federated_session_allows(&Method::ServerReloadAgentManifests(
+        assert!(!federated_session_allows(&Method::ServerStop(
             EmptyParams {}
         )));
+        assert!(!federated_session_allows(&Method::ServerReloadConfig(
+            EmptyParams {}
+        )));
+        // ...but the reload counterpart of the allowed query is forbidden.
+        assert!(!federated_session_allows(
+            &Method::ServerReloadAgentManifests(EmptyParams {})
+        ));
         assert!(!federated_session_allows(&Method::ClientWindowTitleClear(
             EmptyParams {}
         )));
