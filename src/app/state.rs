@@ -1485,27 +1485,32 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
-    /// Metadata-only mirror of a single mounted remote federation workspace
-    /// (P4 of the remote-workspace-federation plan). `None` when no mount is
-    /// live. Additive, alongside `workspaces` — no render switch here.
-    /// Always `None` until P8 wires the CLI trigger that mounts a remote and
-    /// sets this to `Some`.
-    #[allow(dead_code)]
-    pub(crate) remote_mirror: Option<crate::remote::federation::reducer::RemoteMirror>,
+    /// Metadata-only mirrors of the currently mounted remote federation
+    /// workspaces, keyed by `HostKey` (Phase B: generalized from P4/P8's
+    /// single `Option<RemoteMirror>` to N concurrent mounts). Empty when no
+    /// mount is live. Additive, alongside `workspaces` — no render switch
+    /// here.
+    pub(crate) remote_mirrors: std::collections::HashMap<
+        crate::remote::federation::id::HostKey,
+        crate::remote::federation::reducer::RemoteMirror,
+    >,
 }
 
-/// Outcome of [`AppState::begin_federation_mount`] (P8 requirement 5, S10.1).
-/// Dormant outside tests until a real call site materializes a mount into a
-/// running session (see `implementation-notes.md`'s P8 entry) —
-/// `#[allow(dead_code)]` at this scope, matching `remote_mirror`'s and
+/// Outcome of [`AppState::begin_federation_mount`] (P8 requirement 5, S10.1;
+/// Phase B requirement 5: narrowed from "any second mount" to "same
+/// `HostKey` mount"). Dormant outside tests until a real call site
+/// materializes a mount into a running session (see
+/// `implementation-notes.md`'s P8/Phase B entries) —
+/// `#[allow(dead_code)]` at this scope, matching `remote_mirrors`'s and
 /// `client.rs`/`pane_source.rs`'s identical precedent for the same reason.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FederationMountConflict {
-    /// A federation mount is already live; the data model
-    /// (`HostKey`/`server_instance_id`/`mount_generation`) is multi-remote
-    /// ready, but v1 enforces exactly one concurrent mount.
-    AlreadyMounted,
+    /// A federation mount for this exact `HostKey` is already live. Distinct
+    /// hosts are allowed to mount concurrently (Phase B); only a literal
+    /// duplicate `HostKey` is rejected. Carries the colliding host so
+    /// callers can name it in a notice.
+    AlreadyMounted(crate::remote::federation::id::HostKey),
 }
 
 impl AppState {
@@ -1513,49 +1518,46 @@ impl AppState {
         self.session_dirty = true;
     }
 
-    /// P8 requirement 5 (S10.1): registers a new federation mount, rejecting
-    /// a second concurrent one. `remote_mirror` being `Option` (P4) already
-    /// models "at most one mount" — this makes the single-mount enforcement
-    /// (and its typed rejection) explicit rather than an accidental
-    /// consequence of `Option::replace` silently dropping a prior mount.
-    #[allow(dead_code)]
+    /// P8 requirement 5 (S10.1); Phase B requirement 5: registers a new
+    /// federation mount, rejecting only a literal duplicate `HostKey` —
+    /// distinct hosts mount concurrently into `remote_mirrors`.
     pub(crate) fn begin_federation_mount(
         &mut self,
         mirror: crate::remote::federation::reducer::RemoteMirror,
     ) -> Result<(), FederationMountConflict> {
-        if self.remote_mirror.is_some() {
-            return Err(FederationMountConflict::AlreadyMounted);
+        let host_key = mirror.mount().host_key.clone();
+        if self.remote_mirrors.contains_key(&host_key) {
+            return Err(FederationMountConflict::AlreadyMounted(host_key));
         }
-        self.remote_mirror = Some(mirror);
+        self.remote_mirrors.insert(host_key, mirror);
         Ok(())
     }
 
-    /// Tears down the live federation mount (disconnect / P9 lifecycle), if
-    /// any. A no-op when nothing is mounted.
-    #[allow(dead_code)]
-    pub(crate) fn end_federation_mount(&mut self) {
-        self.remote_mirror = None;
+    /// Tears down the live federation mount for `host_key` (disconnect / P9
+    /// lifecycle), if any. A no-op when nothing is mounted for that host —
+    /// never touches sibling mounts (Phase B requirement 2).
+    pub(crate) fn end_federation_mount(
+        &mut self,
+        host_key: &crate::remote::federation::id::HostKey,
+    ) {
+        self.remote_mirrors.remove(host_key);
     }
 
-    /// P8 requirement 6 (RT-F11/S8.2): whether a classic `--remote` attach to
-    /// `host_key` would collide with an already-mounted federated host.
-    /// Detection key is `HostKey` on the local mount registry (`remote_mirror`
-    /// — v1 allows exactly one mount, so this reduces to "is the live mount's
-    /// host the same one"). This only answers the question for the *local
-    /// in-process* registry; wiring an actual classic-attach call site to
-    /// consult a *running* local server's registry over the JSON API is not
-    /// built (no API method exists for it) — downgraded to
+    /// P8 requirement 6 (RT-F11/S8.2); Phase B: whether a classic `--remote`
+    /// attach to `host_key` would collide with an already-mounted federated
+    /// host. Detection key is `HostKey` membership in the local mount
+    /// registry (`remote_mirrors`). This only answers the question for the
+    /// *local in-process* registry; wiring an actual classic-attach call
+    /// site to consult a *running* local server's registry over the JSON API
+    /// is not built (no API method exists for it) — downgraded to
     /// documented-not-enforced across process boundaries for v1, per the
     /// phase file's explicit allowance ("If detection proves costly,
     /// downgrade to documented-not-enforced for v1 — state the choice").
-    #[allow(dead_code)]
     pub(crate) fn double_attach_conflict(
         &self,
         host_key: &crate::remote::federation::id::HostKey,
     ) -> bool {
-        self.remote_mirror
-            .as_ref()
-            .is_some_and(|mirror| &mirror.mount().host_key == host_key)
+        self.remote_mirrors.contains_key(host_key)
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
@@ -1899,7 +1901,7 @@ impl AppState {
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
-            remote_mirror: None,
+            remote_mirrors: std::collections::HashMap::new(),
         }
     }
 
@@ -2249,20 +2251,49 @@ mod tests {
         })
     }
 
-    // P8 TDD test 6 (S10.1): a second concurrent federation mount is
-    // rejected with a typed error; the first mount stays live.
+    // A duplicate `HostKey` mount is rejected with a typed error naming the
+    // colliding host; the first mount stays live (narrowed from P8's "any
+    // second mount" per Phase B requirement 5/6).
     #[test]
-    fn a_second_concurrent_federation_mount_is_rejected() {
+    fn a_duplicate_host_key_federation_mount_is_rejected() {
         let mut state = AppState::test_new();
         assert!(state.begin_federation_mount(test_mount("alice@10.0.0.1")).is_ok());
-        assert!(state.remote_mirror.is_some());
+        assert!(state.remote_mirrors.contains_key(&crate::remote::federation::id::HostKey::new(
+            "alice@10.0.0.1",
+            "s1"
+        )));
 
-        let result = state.begin_federation_mount(test_mount("bob@10.0.0.2"));
-        assert_eq!(result, Err(FederationMountConflict::AlreadyMounted));
-        // The original mount must still be the live one.
+        let result = state.begin_federation_mount(test_mount("alice@10.0.0.1"));
         assert_eq!(
-            state.remote_mirror.as_ref().unwrap().mount().host_key,
-            crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1")
+            result,
+            Err(FederationMountConflict::AlreadyMounted(
+                crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1")
+            ))
+        );
+        // The original mount must still be the live one.
+        assert_eq!(state.remote_mirrors.len(), 1);
+    }
+
+    // Phase B test 5: `begin_federation_mount` called twice with distinct
+    // `HostKey`s succeeds both times.
+    #[test]
+    fn mount_hashmap_allows_two_distinct_hosts() {
+        let mut state = AppState::test_new();
+        assert!(state.begin_federation_mount(test_mount("alice@10.0.0.1")).is_ok());
+        assert!(state.begin_federation_mount(test_mount("bob@10.0.0.2")).is_ok());
+        assert_eq!(state.remote_mirrors.len(), 2);
+    }
+
+    // Phase B test 6: the guard narrows to a per-`HostKey` duplicate, it
+    // doesn't disappear.
+    #[test]
+    fn mount_hashmap_rejects_duplicate_host_key() {
+        let mut state = AppState::test_new();
+        state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
+        let host_key = crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1");
+        assert_eq!(
+            state.begin_federation_mount(test_mount("alice@10.0.0.1")),
+            Err(FederationMountConflict::AlreadyMounted(host_key))
         );
     }
 
@@ -2270,9 +2301,29 @@ mod tests {
     fn ending_a_mount_allows_a_fresh_one() {
         let mut state = AppState::test_new();
         state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
-        state.end_federation_mount();
-        assert!(state.remote_mirror.is_none());
+        let host_key = crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1");
+        state.end_federation_mount(&host_key);
+        assert!(state.remote_mirrors.is_empty());
         assert!(state.begin_federation_mount(test_mount("bob@10.0.0.2")).is_ok());
+    }
+
+    // Phase B requirement 2: per-mount teardown never touches siblings.
+    #[test]
+    fn ending_one_mount_does_not_touch_sibling_mounts() {
+        let mut state = AppState::test_new();
+        state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
+        state.begin_federation_mount(test_mount("bob@10.0.0.2")).unwrap();
+
+        state.end_federation_mount(&crate::remote::federation::id::HostKey::new(
+            "alice@10.0.0.1",
+            "s1",
+        ));
+
+        assert_eq!(state.remote_mirrors.len(), 1);
+        assert!(state.remote_mirrors.contains_key(&crate::remote::federation::id::HostKey::new(
+            "bob@10.0.0.2",
+            "s1"
+        )));
     }
 
     // P8 TDD test 7 (RT-F11/S8.2): a classic `--remote` attach targeting an

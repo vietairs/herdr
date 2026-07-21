@@ -59,7 +59,12 @@ pub(crate) const REMOTE_FEDERATION_ENV_VAR: &str = "HERDR_REMOTE_FEDERATION";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteLaunch {
-    pub(crate) target: String,
+    /// Phase B requirement 1: one or more space-separated `--remote`
+    /// targets. Classic single-target usage (no `--remote-workspace`) keeps
+    /// exactly one element — the classic dispatch path (`run_remote`) always
+    /// reads `target[0]`, so that usage stays byte-for-byte unchanged
+    /// (requirement 6).
+    pub(crate) target: Vec<String>,
     pub(crate) keybindings: RemoteKeybindings,
     pub(crate) live_handoff: bool,
     /// P8 requirement 1: `--remote-workspace` was passed. Combined with
@@ -79,6 +84,94 @@ pub(crate) fn federation_requested(remote: &RemoteLaunch, env_value: Option<&str
     remote.federation_flag || env_value == Some("1")
 }
 
+/// REVISED Phase A (multi-remote federated workspace launch) launch-time
+/// routing decision — pure, so tests 3/3b in the phase's TDD list can assert
+/// `main.rs`'s branch selection without any process/socket I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchRoute {
+    /// No `--remote` target: local-only autodetect launch, untouched.
+    LocalOnly,
+    /// `--remote` without `--remote-workspace`/env opt-in: the classic
+    /// single-target full-screen attach (`run_remote`), byte-for-byte
+    /// unchanged (requirement 5, explicit acceptance test).
+    ClassicRemote,
+    /// `--remote` WITH federation opted in: local + remote coexist in one
+    /// TUI via the server-daemon-owned `workspace.mount_remote` mount
+    /// (REVISED Phase A design) — replaces the old federated-alone path.
+    Coexistence,
+}
+
+/// Decides `main.rs`'s launch route from the already-parsed `RemoteLaunch`
+/// and federation env var, with no I/O of its own.
+pub(crate) fn decide_launch_route(
+    remote: Option<&RemoteLaunch>,
+    env_value: Option<&str>,
+) -> LaunchRoute {
+    match remote {
+        None => LaunchRoute::LocalOnly,
+        Some(remote) if federation_requested(remote, env_value) => LaunchRoute::Coexistence,
+        Some(_) => LaunchRoute::ClassicRemote,
+    }
+}
+
+/// Builds the `workspace.mount_remote` JSON API request `main.rs` sends to
+/// the local server daemon for the `LaunchRoute::Coexistence` branch — pure
+/// construction, no socket I/O, so test 3b can assert its shape directly.
+/// Phase B requirement 9: carries the full non-localhost target list in one
+/// request; the server-side handler owns the concurrent-dial fan-out.
+pub(crate) fn mount_remote_request(targets: &[String]) -> crate::api::schema::Request {
+    crate::api::schema::Request {
+        id: "cli:workspace:mount_remote".to_string(),
+        method: crate::api::schema::Method::WorkspaceMountRemote(
+            crate::api::schema::WorkspaceMountRemoteParams {
+                targets: targets.to_vec(),
+                // Always `false`: the Coexistence path has no analogous hook
+                // for `--remote-keybindings` (see
+                // `coexistence_keybindings_conflict`'s doc comment) — the
+                // caller (`main.rs`) rejects that flag combination before a
+                // request is ever built, so this field is currently reserved
+                // rather than read server-side.
+                remote_keybindings: false,
+            },
+        ),
+    }
+}
+
+/// REVISED Phase A follow-up (code review finding): whether `remote`'s
+/// launch would silently drop `--remote-keybindings` if routed through
+/// Coexistence. The classic `run_remote` path's `remote_keybindings` value
+/// travels over the *client/server Hello handshake* (`ClientKeybindings`,
+/// see `client::requested_keybindings`) to the far end of an ssh-forwarded
+/// socket, telling that remote server whether to parse this connection's raw
+/// keys with the local keybinding profile or its own. The Coexistence path
+/// has no equivalent hook: the local client attaches to the *local* daemon
+/// as normal, and federated panes are driven over the federation wire
+/// (`TerminalChannelMessage::Input`), which only ever carries raw bytes
+/// already resolved by this daemon's own local `Config` — there is no
+/// connection-level keybindings handshake to carry the flag to. Rather than
+/// silently ignore an explicit `--remote-keybindings server`/`local` flag
+/// (the reviewed bug), the caller must reject the combination up front.
+pub(crate) fn coexistence_keybindings_conflict(remote: &RemoteLaunch) -> bool {
+    remote.keybindings != RemoteKeybindings::Local
+}
+
+/// Phase B requirement 2: `localhost` (exact string match only — not
+/// `127.0.0.1` or a hostname; no v1 canonicalization, per predict's decision)
+/// means "local workspace, no SSH dial".
+pub(crate) fn is_local_target(target: &str) -> bool {
+    target == "localhost"
+}
+
+/// Phase B requirement 3: the subset of `targets` that must be dialed over
+/// SSH — `localhost` entries are filtered out (requirement 2).
+pub(crate) fn remote_ssh_targets(targets: &[String]) -> Vec<String> {
+    targets
+        .iter()
+        .filter(|target| !is_local_target(target))
+        .cloned()
+        .collect()
+}
+
 pub(crate) fn extract_remote_args(
     args: &[String],
 ) -> Result<(Vec<String>, Option<RemoteLaunch>), String> {
@@ -87,7 +180,7 @@ pub(crate) fn extract_remote_args(
         cleaned.push(program.clone());
     }
 
-    let mut remote_target = None;
+    let mut remote_targets: Vec<String> = Vec::new();
     let mut keybindings = RemoteKeybindings::Local;
     let mut keybindings_seen = false;
     let mut live_handoff = false;
@@ -110,21 +203,25 @@ pub(crate) fn extract_remote_args(
             continue;
         }
         if arg == "--remote" {
-            if remote_target.is_some() {
-                return Err("--remote can only be specified once".to_string());
-            }
-            let Some(value) = args.get(index + 1) else {
+            // Phase B requirement 1: `--remote` accepts one or more
+            // space-separated targets, terminated by the next recognized
+            // flag or `--`. At least one value is still required.
+            let Some(first) = args.get(index + 1) else {
                 return Err("missing value for --remote".to_string());
             };
-            remote_target = Some(validate_remote_target(value)?.to_owned());
+            remote_targets.push(validate_remote_target(first)?.to_owned());
             index += 2;
+            while let Some(value) = args.get(index) {
+                if is_flag_like(value) {
+                    break;
+                }
+                remote_targets.push(validate_remote_target(value)?.to_owned());
+                index += 1;
+            }
             continue;
         }
         if let Some(value) = arg.strip_prefix("--remote=") {
-            if remote_target.is_some() {
-                return Err("--remote can only be specified once".to_string());
-            }
-            remote_target = Some(validate_remote_target(value)?.to_owned());
+            remote_targets.push(validate_remote_target(value)?.to_owned());
             index += 1;
             continue;
         }
@@ -154,8 +251,8 @@ pub(crate) fn extract_remote_args(
         index += 1;
     }
 
-    let remote = remote_target.map(|target| RemoteLaunch {
-        target,
+    let remote = (!remote_targets.is_empty()).then_some(RemoteLaunch {
+        target: remote_targets,
         keybindings,
         live_handoff,
         federation_flag,
@@ -171,6 +268,18 @@ pub(crate) fn extract_remote_args(
     }
 
     Ok((cleaned, remote))
+}
+
+/// Phase B: stops the `--remote` space-form multi-value consumption loop at
+/// the next double-dash CLI flag (`--handoff`, `--remote-workspace`, a
+/// second `--remote`, `--remote-keybindings`, `--help`, the `--` separator,
+/// ...), matching every other flag this parser already recognizes. A
+/// single-dash token (e.g. an SSH-option-like `-oProxyCommand=x`) is left to
+/// fall through to `validate_remote_target`, which still rejects it as a
+/// malformed target (requirement 4) rather than silently passing it through
+/// as a CLI flag.
+fn is_flag_like(value: &str) -> bool {
+    value.starts_with("--")
 }
 
 fn validate_remote_target(target: &str) -> Result<&str, String> {
@@ -366,9 +475,9 @@ fn attempt_federation_mount(
         };
         match mount_result {
             Ok(mounted) => Ok(mounted.mirror),
-            Err(crate::remote::federation::client::MountError::Rejected(reason)) => Err(
-                FederationMountFailure::Unsupported(format!("{reason:?}")),
-            ),
+            Err(crate::remote::federation::client::MountError::Rejected(reason)) => {
+                Err(FederationMountFailure::Unsupported(format!("{reason:?}")))
+            }
             Err(crate::remote::federation::client::MountError::MissingCapability(cap)) => Err(
                 FederationMountFailure::Unsupported(format!("missing capability {cap:?}")),
             ),
@@ -385,6 +494,17 @@ pub(crate) struct ChildGuard(tokio::process::Child);
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.0.start_kill();
+    }
+}
+
+#[cfg(test)]
+impl ChildGuard {
+    /// Test-only constructor: `ChildGuard`'s inner field is private to this
+    /// module even at `pub(crate)` visibility, so cross-module app-level
+    /// tests (e.g. `app::api::workspaces`'s federation-mount tests) need
+    /// this seam to build a real guard around a real spawned child.
+    pub(crate) fn for_test(child: tokio::process::Child) -> Self {
+        Self(child)
     }
 }
 
@@ -446,15 +566,23 @@ pub(crate) const FEDERATION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const FEDERATION_MOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+    // Phase B requirement 6: classic single-target attach always uses the
+    // first (and, for the classic-unchanged usage, only) parsed target —
+    // byte-for-byte unchanged from the pre-Phase-B single-`String` behavior.
+    let target = remote
+        .target
+        .first()
+        .cloned()
+        .ok_or_else(|| io::Error::other("--remote requires at least one target"))?;
     let session_name = crate::session::active_name()
         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
-    let local_socket = local_forward_socket_path(&remote.target, &session_name);
+    let local_socket = local_forward_socket_path(&target, &session_name);
     let program = std::env::args()
         .next()
         .unwrap_or_else(|| "herdr".to_string());
     let reattach_command = reattach_command(
         &program,
-        &remote.target,
+        &target,
         &session_name,
         remote.keybindings,
         remote.live_handoff,
@@ -463,7 +591,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         .config
         .remote
         .manage_ssh_config;
-    let remote_ssh = RemoteSsh::new(remote.target.clone(), manage_ssh_config);
+    let remote_ssh = RemoteSsh::new(target.clone(), manage_ssh_config);
     let prepared_remote = prepare_remote_herdr(&remote_ssh, remote.live_handoff)?;
     ensure_remote_server_ready(
         &remote_ssh,
@@ -476,11 +604,13 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     // P8 requirement 1/2: attempt the federated workspace path when opted in
     // (default OFF — classic path below is otherwise reached identically to
     // today, byte-for-byte, requirement 1 test 1).
-    let federation_requested_now =
-        federation_requested(&remote, std::env::var(REMOTE_FEDERATION_ENV_VAR).ok().as_deref());
+    let federation_requested_now = federation_requested(
+        &remote,
+        std::env::var(REMOTE_FEDERATION_ENV_VAR).ok().as_deref(),
+    );
     let mount_outcome = federation_requested_now.then(|| {
         attempt_federation_mount(
-            &remote.target,
+            &target,
             &prepared_remote.remote_herdr,
             &session_name,
             remote_ssh.options(),
@@ -488,7 +618,9 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     });
     let route = decide_federation_route(
         federation_requested_now,
-        mount_outcome.as_ref().map(|result| result.as_ref().map(|_| ())),
+        mount_outcome
+            .as_ref()
+            .map(|result| result.as_ref().map(|_| ())),
     );
     match &route {
         FederationRoute::Federated => {
@@ -504,7 +636,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
             let config_diagnostic =
                 crate::config::config_diagnostic_summary(&loaded_config.diagnostics);
             match crate::remote::federation::session::run_federated_session(
-                &remote.target,
+                &target,
                 &prepared_remote.remote_herdr,
                 &session_name,
                 remote_ssh.options(),
@@ -514,9 +646,8 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     eprintln!(
-                        "herdr: federated session to {} could not start ({err}); \
-                         attaching via the classic full-screen view instead.",
-                        remote.target
+                        "herdr: federated session to {target} could not start ({err}); \
+                         attaching via the classic full-screen view instead."
                     );
                 }
             }
@@ -528,7 +659,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     }
 
     let _bridge = SshStdioBridge::start(
-        remote.target,
+        target,
         prepared_remote.remote_herdr,
         local_socket.clone(),
         session_name,
@@ -536,6 +667,49 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     )?;
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
+}
+
+/// REVISED Phase A (multi-remote federated workspace launch): the
+/// server-daemon-owned counterpart to `run_remote`'s "prepare the remote
+/// binary, ensure its server is running, then dial+mount" sequence — minus
+/// the classic-attach fallback and terminal-mode setup, which stay local to
+/// `run_remote`/`run_federated_session`. Runs entirely inside the caller's
+/// tokio runtime: the synchronous SSH provisioning steps (`prepare_remote_herdr`,
+/// `ensure_remote_server_ready`) are moved to a blocking thread so they never
+/// stall the daemon's async executor, then `session::dial_and_mount` runs the
+/// live tunnel dial + federation handshake/mount.
+pub(crate) async fn prepare_and_mount_federation_target(
+    target: String,
+    session_name: String,
+) -> io::Result<crate::remote::federation::session::DialAndMountOutcome> {
+    let manage_ssh_config = crate::config::Config::load()
+        .config
+        .remote
+        .manage_ssh_config;
+
+    let prep_target = target.clone();
+    let (remote_herdr, ssh_options) = tokio::task::spawn_blocking(move || -> io::Result<_> {
+        let remote_ssh = RemoteSsh::new(prep_target, manage_ssh_config);
+        let prepared_remote = prepare_remote_herdr(&remote_ssh, false)?;
+        ensure_remote_server_ready(
+            &remote_ssh,
+            &prepared_remote.remote_herdr,
+            prepared_remote.installed_or_replaced,
+            prepared_remote.stop_after_install_approved,
+            false,
+        )?;
+        Ok((prepared_remote.remote_herdr, remote_ssh.options().cloned()))
+    })
+    .await
+    .map_err(|err| io::Error::other(format!("remote preparation task failed: {err}")))??;
+
+    crate::remote::federation::session::dial_and_mount(
+        &target,
+        &remote_herdr,
+        &session_name,
+        ssh_options.as_ref(),
+    )
+    .await
 }
 
 pub(crate) fn run_remote_client_bridge() -> io::Result<()> {
@@ -2583,7 +2757,7 @@ mod tests {
         let (cleaned, remote) = extract_remote_args(&args).unwrap();
         assert_eq!(cleaned, vec!["herdr", "--help"]);
         let remote = remote.unwrap();
-        assert_eq!(remote.target, "dev");
+        assert_eq!(remote.target, vec!["dev".to_string()]);
         assert_eq!(remote.keybindings, RemoteKeybindings::Local);
     }
 
@@ -2593,7 +2767,7 @@ mod tests {
         let (cleaned, remote) = extract_remote_args(&args).unwrap();
         assert_eq!(cleaned, vec!["herdr"]);
         let remote = remote.unwrap();
-        assert_eq!(remote.target, "user@host");
+        assert_eq!(remote.target, vec!["user@host".to_string()]);
         assert_eq!(remote.keybindings, RemoteKeybindings::Local);
     }
 
@@ -2608,7 +2782,7 @@ mod tests {
         let (cleaned, remote) = extract_remote_args(&args).unwrap();
         assert_eq!(cleaned, vec!["herdr"]);
         let remote = remote.unwrap();
-        assert_eq!(remote.target, "dev");
+        assert_eq!(remote.target, vec!["dev".to_string()]);
         assert_eq!(remote.keybindings, RemoteKeybindings::Server);
     }
 
@@ -2633,7 +2807,7 @@ mod tests {
 
         assert_eq!(cleaned, vec!["herdr"]);
         let remote = remote.unwrap();
-        assert_eq!(remote.target, "dev");
+        assert_eq!(remote.target, vec!["dev".to_string()]);
         assert!(remote.live_handoff);
     }
 
@@ -2804,15 +2978,75 @@ mod tests {
         assert_eq!(err, "missing value for --remote");
     }
 
+    // Inverted (Phase B requirement 1): a second `--remote` value used to be
+    // an error; the new grammar accepts every value as an additional target
+    // instead of rejecting it.
     #[test]
-    fn extract_remote_args_rejects_duplicate_values() {
+    fn extract_remote_args_accepts_multiple_targets() {
         let args = vec![
             "herdr".into(),
-            "--remote=dev".into(),
-            "--remote=prod".into(),
+            "--remote".into(),
+            "localhost".into(),
+            "host1".into(),
+            "host2".into(),
+            "--remote-workspace".into(),
+        ];
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+        assert_eq!(cleaned, vec!["herdr"]);
+        let remote = remote.unwrap();
+        assert_eq!(
+            remote.target,
+            vec!["localhost".to_string(), "host1".to_string(), "host2".to_string()]
+        );
+        assert!(remote.federation_flag);
+    }
+
+    // Explicit acceptance test (Phase B requirement 6): classic single
+    // `--remote host` (no `--remote-workspace`) still parses to a `Vec` of
+    // len 1, and the classic dispatch predicate still selects `run_remote`'s
+    // single-target path — byte-for-byte preserved.
+    #[test]
+    fn extract_remote_args_single_target_classic_path_unchanged() {
+        let args = vec!["herdr".into(), "--remote".into(), "host".into()];
+        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
+        let remote = remote.unwrap();
+        assert_eq!(remote.target, vec!["host".to_string()]);
+        assert_eq!(
+            decide_launch_route(Some(&remote), None),
+            LaunchRoute::ClassicRemote
+        );
+    }
+
+    // Phase B requirement 2: `localhost` filtered out of the SSH-dial list;
+    // when it's the only target, the local-only launch predicate is
+    // selected (no SSH machinery invoked).
+    #[test]
+    fn extract_remote_args_localhost_only_no_ssh() {
+        let args = vec![
+            "herdr".into(),
+            "--remote".into(),
+            "localhost".into(),
+            "--remote-workspace".into(),
+        ];
+        let (_cleaned, remote) = extract_remote_args(&args).unwrap();
+        let remote = remote.unwrap();
+        assert_eq!(remote.target, vec!["localhost".to_string()]);
+        assert!(remote_ssh_targets(&remote.target).is_empty());
+    }
+
+    // Malformed value starting with `-` (e.g. an accidental extra flag-like
+    // token) is still rejected via the existing `validate_remote_target`
+    // rule, replacing the old duplicate-value rejection semantics.
+    #[test]
+    fn extract_remote_args_rejects_option_like_value_between_targets() {
+        let args = vec![
+            "herdr".into(),
+            "--remote".into(),
+            "host1".into(),
+            "-oProxyCommand=x".into(),
         ];
         let err = extract_remote_args(&args).unwrap_err();
-        assert_eq!(err, "--remote can only be specified once");
+        assert_eq!(err, "--remote target must not start with '-'");
     }
 
     #[test]
@@ -3571,5 +3805,75 @@ mod tests {
         InstallSource::temporary(path, dir.clone()).cleanup();
 
         assert!(!dir.exists());
+    }
+
+    fn test_remote_launch(federation_flag: bool) -> RemoteLaunch {
+        RemoteLaunch {
+            target: vec!["host1".to_string()],
+            keybindings: RemoteKeybindings::Local,
+            live_handoff: false,
+            federation_flag,
+        }
+    }
+
+    #[test]
+    fn coexistence_classic_remote_unaffected() {
+        // Test 3 (phase-a TDD list): no `--remote-workspace` and no env
+        // opt-in must select the classic single-target attach, never the
+        // coexistence branch, regardless of env var noise.
+        let remote = test_remote_launch(false);
+        assert_eq!(
+            decide_launch_route(Some(&remote), None),
+            LaunchRoute::ClassicRemote
+        );
+        assert_eq!(
+            decide_launch_route(Some(&remote), Some("0")),
+            LaunchRoute::ClassicRemote
+        );
+    }
+
+    #[test]
+    fn coexistence_local_only_route_has_no_remote_launch() {
+        assert_eq!(decide_launch_route(None, None), LaunchRoute::LocalOnly);
+        assert_eq!(decide_launch_route(None, Some("1")), LaunchRoute::LocalOnly);
+    }
+
+    #[test]
+    fn coexistence_dispatch_sends_mount_remote_request() {
+        // Test 3b: federation flag selects the coexistence route, and the
+        // request-construction function produces a `WorkspaceMountRemote`
+        // request carrying the target — never a call into `run_remote`.
+        let remote = test_remote_launch(true);
+        assert_eq!(
+            decide_launch_route(Some(&remote), None),
+            LaunchRoute::Coexistence
+        );
+
+        let request = mount_remote_request(&remote.target);
+        match request.method {
+            crate::api::schema::Method::WorkspaceMountRemote(params) => {
+                assert_eq!(params.targets, vec!["host1".to_string()]);
+                assert!(!params.remote_keybindings);
+            }
+            other => panic!("expected WorkspaceMountRemote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coexistence_keybindings_conflict_flags_explicit_server_keybindings() {
+        let mut remote = test_remote_launch(true);
+        assert!(!coexistence_keybindings_conflict(&remote));
+
+        remote.keybindings = RemoteKeybindings::Server;
+        assert!(coexistence_keybindings_conflict(&remote));
+    }
+
+    #[test]
+    fn coexistence_dispatch_env_opt_in_also_selects_coexistence() {
+        let remote = test_remote_launch(false);
+        assert_eq!(
+            decide_launch_route(Some(&remote), Some("1")),
+            LaunchRoute::Coexistence
+        );
     }
 }

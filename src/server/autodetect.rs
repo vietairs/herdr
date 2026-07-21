@@ -289,6 +289,16 @@ pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Resu
 /// 2. If no server → spawn server daemon → wait for socket readiness
 /// 3. Run the thin client (which connects to the server)
 pub fn auto_detect_launch() -> io::Result<()> {
+    ensure_server_running()?;
+
+    // Now attach as a thin client.
+    crate::client::run_client()
+}
+
+/// Shared "check for server, spawn if needed" half of [`auto_detect_launch`],
+/// extracted (REVISED Phase A) so [`auto_detect_launch_with_mount`] can reuse
+/// it before sending its own API request, ahead of attaching as a client.
+fn ensure_server_running() -> io::Result<()> {
     let socket_path = client_socket_path();
     info!(path = %socket_path.display(), "auto-detect launch starting");
 
@@ -301,8 +311,31 @@ pub fn auto_detect_launch() -> io::Result<()> {
         wait_for_server_socket(&socket_path, SERVER_READY_TIMEOUT)?;
         info!("server ready, attaching as client");
     }
+    Ok(())
+}
 
-    // Now attach as a thin client.
+/// REVISED Phase A (multi-remote federated workspace launch); generalized to
+/// N targets in Phase B: `main.rs`'s coexistence-branch entry point. Ensures
+/// a local server is running (same autodetect machinery as
+/// [`auto_detect_launch`]), filters `localhost` out of the CLI-parsed target
+/// list (requirement 2), and — if any non-local targets remain — sends the
+/// server one `workspace.mount_remote` request carrying the full list (the
+/// mount itself runs server-side, in the daemon's own tokio runtime — see
+/// `app::api::workspaces::handle_workspace_mount_remote`), then attaches as
+/// a normal thin client. No federation-aware code runs in this process; a
+/// failed mount request only logs a warning; the local session still starts.
+#[cfg(unix)]
+pub fn auto_detect_launch_with_mount(targets: Vec<String>) -> io::Result<()> {
+    ensure_server_running()?;
+
+    let ssh_targets = crate::remote::remote_ssh_targets(&targets);
+    if !ssh_targets.is_empty() {
+        let request = crate::remote::mount_remote_request(&ssh_targets);
+        if let Err(err) = crate::api::client::ApiClient::local().request(request) {
+            eprintln!("herdr: could not request federated mount for {ssh_targets:?} ({err}); continuing with the local workspace only");
+        }
+    }
+
     crate::client::run_client()
 }
 

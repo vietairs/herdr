@@ -1,15 +1,248 @@
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
-    WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget,
+    WorkspaceMountRemoteParams, WorkspaceMoveParams, WorkspaceRenameParams,
+    WorkspaceReportMetadataParams, WorkspaceTarget,
 };
 use crate::app::App;
+#[cfg(unix)]
+use crate::app::ToastKind;
 
 use super::super::api_helpers::{normalize_metadata_source, normalize_metadata_ttl};
 use super::responses::{encode_error, encode_success};
 
 impl App {
+    /// REVISED Phase A (multi-remote federated workspace launch): mounts a
+    /// federation target as server-daemon-owned state, spawned inside this
+    /// daemon's own tokio runtime (`app.run()` is polled inside
+    /// `rt.block_on`, so `tokio::spawn` here is always in-context). The
+    /// response only acknowledges the dial+mount task was started — success
+    /// materializes into real workspaces (`AppEvent::FederationMountReady`,
+    /// handled by `App::run`'s own event loop, which owns `&mut App`);
+    /// failure surfaces as a sidebar notice
+    /// (`AppEvent::FederationMountFailed`). Neither outcome ever tears down
+    /// the local session or the server daemon itself.
+    #[cfg(not(unix))]
+    pub(super) fn handle_workspace_mount_remote(
+        &mut self,
+        id: String,
+        _params: WorkspaceMountRemoteParams,
+    ) -> String {
+        encode_error(
+            id,
+            "unsupported_platform",
+            "workspace.mount_remote is not supported on this platform",
+        )
+    }
+
+    /// Phase B requirement 3/9: one request carries the full target list;
+    /// each non-empty, non-duplicate target is spawned as its own
+    /// `tokio::spawn` dial+mount task. Because each task is independently
+    /// spawned rather than awaited together in this handler, all N dials
+    /// already run concurrently against the daemon's tokio runtime (no
+    /// per-target serial stacking) — each task carries its own ~25s dial
+    /// budget internally (`dial_and_mount`'s `FEDERATION_CONNECT_TIMEOUT` +
+    /// `FEDERATION_MOUNT_TIMEOUT`), so N targets still complete in ~25s
+    /// wall-clock, not 25s×N. A target whose `HostKey` is already mounted is
+    /// rejected immediately (before spawning any dial) with a per-host
+    /// failure event, isolating it from the other targets in the same
+    /// request (requirement 4).
+    #[cfg(unix)]
+    pub(super) fn handle_workspace_mount_remote(
+        &mut self,
+        id: String,
+        params: WorkspaceMountRemoteParams,
+    ) -> String {
+        let targets: Vec<String> = params
+            .targets
+            .into_iter()
+            .map(|target| target.trim().to_string())
+            .filter(|target| !target.is_empty())
+            .collect();
+        if targets.is_empty() {
+            return encode_error(
+                id,
+                "invalid_request",
+                "workspace.mount_remote requires at least one non-empty target",
+            );
+        }
+
+        let session_name = crate::session::active_name()
+            .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+
+        for target in &targets {
+            let host_key = crate::remote::federation::id::HostKey::new(target, &session_name);
+            if self.state.double_attach_conflict(&host_key) {
+                tracing::warn!(%target, "federation mount requested but this host is already mounted");
+                let event_tx = self.event_tx.clone();
+                let target = target.clone();
+                tokio::spawn(async move {
+                    let _ = event_tx
+                        .send(crate::events::AppEvent::FederationMountFailed {
+                            target,
+                            reason: "a federation mount for this host is already live"
+                                .to_string(),
+                        })
+                        .await;
+                });
+                continue;
+            }
+
+            let event_tx = self.event_tx.clone();
+            let task_target = target.clone();
+            let task_session_name = session_name.clone();
+            tokio::spawn(async move {
+                let result = crate::remote::prepare_and_mount_federation_target(
+                    task_target.clone(),
+                    task_session_name,
+                )
+                .await;
+                let event = match result {
+                    Ok(outcome) => crate::events::AppEvent::FederationMountReady(Box::new(
+                        crate::events::FederationMountReady {
+                            target: task_target,
+                            mirror: outcome.mirror,
+                            generation: outcome.generation,
+                            tunnel_guard: outcome.tunnel_guard,
+                            tunnel_reader: outcome.tunnel_reader,
+                            tunnel_writer: outcome.tunnel_writer,
+                        },
+                    )),
+                    Err(err) => crate::events::AppEvent::FederationMountFailed {
+                        target: task_target,
+                        reason: err.to_string(),
+                    },
+                };
+                let _ = event_tx.send(event).await;
+            });
+        }
+
+        encode_success(id, ResponseResult::WorkspaceMountRemoteRequested { targets })
+    }
+
+    /// `AppEvent::FederationMountReady` handler — runs inside `App::run`'s
+    /// own tick, so it owns `&mut App` and can call
+    /// `materialize_federation_mount` (session.rs's exact
+    /// materialize-then-move-router disposition, relocated here). Records a
+    /// mount-time snapshot in `AppState.remote_mirror` for bookkeeping
+    /// (`double_attach_conflict`), then hands the live-syncing mirror off to
+    /// a spawned drive task exactly like `run_federated_session` does.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_mount_ready(
+        &mut self,
+        ready: crate::events::FederationMountReady,
+    ) {
+        let crate::events::FederationMountReady {
+            target,
+            mirror,
+            generation,
+            tunnel_guard,
+            tunnel_reader,
+            tunnel_writer,
+        } = ready;
+
+        if self.state.begin_federation_mount(mirror.clone()).is_err() {
+            tracing::warn!(%target, "federation mount ready but this host is already mounted; dropping");
+            return;
+        }
+        let host_key = mirror.mount().host_key.clone();
+
+        let (out_tx, writer_handle) =
+            crate::remote::federation::client::spawn_mount_writer(tunnel_writer);
+        let (inbound_clip_tx, _inbound_clip_rx) =
+            tokio::sync::mpsc::channel::<crate::remote::federation::protocol::ClipboardMessage>(64);
+        let (outbound_clip_tx, _outbound_clip_rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::remote::federation::protocol::ClipboardMessage,
+        >();
+
+        let mut router = crate::remote::federation::client::TerminalChannelRouter::new();
+        let opened = match self.materialize_federation_mount(
+            &mirror,
+            &mut router,
+            &out_tx,
+            &outbound_clip_tx,
+        ) {
+            Ok(opened) => opened,
+            Err(err) => {
+                tracing::warn!(%target, %err, "failed to materialize federation mount");
+                self.state.end_federation_mount(&host_key);
+                // Mirror the success path's teardown order below (drop
+                // `out_tx` first so the writer task drains and exits,
+                // bounded so a half-open peer can never hang this, then
+                // kill the ssh child) instead of dropping `out_tx` /
+                // `writer_handle` / `tunnel_guard` un-awaited in whatever
+                // order they happen to be declared in.
+                tokio::spawn(async move {
+                    drop(out_tx);
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(2), writer_handle)
+                            .await;
+                    drop(tunnel_guard);
+                });
+                return;
+            }
+        };
+        let _ = opened;
+
+        self.render_dirty.store(true, Ordering::Release);
+        self.render_notify.notify_one();
+
+        let event_hub = self.event_hub.clone();
+        let mut mirror_task = mirror;
+        tokio::spawn(async move {
+            let mut reader = tunnel_reader;
+            let outcome = crate::remote::federation::client::drive_mount_channel(
+                &mut reader,
+                &mut mirror_task,
+                generation,
+                &event_hub,
+                &mut router,
+                &inbound_clip_tx,
+            )
+            .await;
+            match outcome {
+                Ok(outcome) => {
+                    tracing::info!(?outcome, "federated mount ended");
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "federated mount I/O error");
+                }
+            }
+            // Teardown mirrors `run_federated_session`: drop the writer
+            // sender first so the writer task drains and exits, bounded so
+            // a half-open peer can never hang this task, then kill the ssh
+            // child regardless.
+            drop(out_tx);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer_handle).await;
+            drop(tunnel_guard);
+        });
+    }
+
+    /// `AppEvent::FederationMountFailed` handler: surfaces a sidebar notice
+    /// through the existing toast mechanism — local session and server
+    /// daemon stay up unaffected (requirement 3).
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_mount_failed(&mut self, target: String, reason: String) {
+        tracing::warn!(%target, %reason, "federation mount failed");
+        if matches!(
+            self.state.toast_config.delivery,
+            crate::config::ToastDelivery::Herdr
+        ) {
+            self.state.toast = Some(crate::app::state::ToastNotification {
+                kind: ToastKind::NeedsAttention,
+                title: format!("federated mount to {target} failed"),
+                context: reason,
+                position: None,
+                target: None,
+            });
+        }
+        self.render_dirty.store(true, Ordering::Release);
+        self.render_notify.notify_one();
+    }
+
     pub(super) fn handle_workspace_list(&mut self, id: String) -> String {
         encode_success(
             id,
@@ -582,5 +815,181 @@ mod tests {
         };
         assert_eq!(workspaces[0].workspace_id, moved_id);
         assert!(event_hub.events_after(0).is_empty());
+    }
+
+    #[cfg(unix)]
+    fn test_federation_mirror(target: &str) -> crate::remote::federation::reducer::RemoteMirror {
+        use crate::remote::federation::id::{HostKey, Mount, ServerInstanceId};
+        crate::remote::federation::reducer::RemoteMirror::new(Mount {
+            host_key: HostKey::new(target, "s1"),
+            server_instance_id: ServerInstanceId("inst-1".to_string()),
+            mount_generation: 1,
+        })
+    }
+
+    /// Real spawned child (`cat`) so `ChildGuard`/`ChildStdout`/`ChildStdin`
+    /// are the genuine types `handle_federation_mount_ready` expects —
+    /// there is no fabricated stand-in for these process-backed types.
+    #[cfg(unix)]
+    async fn spawn_test_tunnel() -> (
+        crate::remote::ChildGuard,
+        tokio::process::ChildStdout,
+        tokio::process::ChildStdin,
+    ) {
+        let mut child = tokio::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn cat for test tunnel");
+        let stdin = child.stdin.take().expect("cat stdin");
+        let stdout = child.stdout.take().expect("cat stdout");
+        (crate::remote::ChildGuard::for_test(child), stdout, stdin)
+    }
+
+    // Phase-a TDD test 1: after a successful mount task completes,
+    // `AppState.workspaces` (local) and `AppState.remote_mirror` (remote)
+    // are both populated in the same instance — proves no more
+    // "federated-alone" branch (REVISED Phase A reverses P9.2b).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn coexistence_local_and_remote_render_together() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror("remote-host");
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(!app.state.remote_mirrors.is_empty());
+    }
+
+    // Phase-a TDD test 2: mount failure keeps the local session alive — no
+    // process-exit path, `AppState.workspaces` unchanged, sidebar notice
+    // (toast) fired.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn coexistence_mount_failure_keeps_local_session_alive() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        app.handle_federation_mount_failed(
+            "remote-host".to_string(),
+            "federation dial failed: connection refused".to_string(),
+        );
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app.state.remote_mirrors.is_empty());
+        assert!(app.state.toast.is_some());
+        assert!(app
+            .state
+            .toast
+            .as_ref()
+            .unwrap()
+            .title
+            .contains("remote-host"));
+    }
+
+    // Phase-a TDD test 6: a mount task that produced an `Err` (the async
+    // catch-unwind-free failure path `handle_workspace_mount_remote`
+    // already routes through `AppEvent::FederationMountFailed`) never
+    // reaches `handle_federation_mount_ready`/panics the process — asserted
+    // at the type level: the spawned task's `match result` in
+    // `handle_workspace_mount_remote` is exhaustive over `Result`, so a
+    // `dial_and_mount` panic inside the spawned `tokio::task` is caught by
+    // Tokio's own task boundary (a panicking task fails its `JoinHandle`,
+    // it does not unwind into `App::run`) — the same isolation
+    // `run_federated_session`'s drive-task `select!` arm already relies on
+    // (session.rs's `Err(join_err) => ... "drive task aborted/panicked"`).
+    // No separate `catch_unwind` wrapper is needed for a `tokio::spawn`ed
+    // future; this test documents the isolation this relies on.
+    // Phase B test 6/8: a duplicate `HostKey` target in the same
+    // `workspace.mount_remote` request is rejected immediately (no SSH dial
+    // spawned) with a per-host `FederationMountFailed` naming the host,
+    // while the pre-existing mount stays untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn duplicate_host_key_target_is_isolated_and_named_in_failure_event() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let session_name =
+            crate::session::active_name().unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+        let mirror = crate::remote::federation::reducer::RemoteMirror::new(
+            crate::remote::federation::id::Mount {
+                host_key: crate::remote::federation::id::HostKey::new(
+                    "already-mounted-host",
+                    &session_name,
+                ),
+                server_instance_id: crate::remote::federation::id::ServerInstanceId(
+                    "inst-1".to_string(),
+                ),
+                mount_generation: 1,
+            },
+        );
+        app.state.begin_federation_mount(mirror).unwrap();
+
+        let response = app.handle_workspace_mount_remote(
+            "req".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["already-mounted-host".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        // The pre-existing mount is untouched (still exactly one entry).
+        assert_eq!(app.state.remote_mirrors.len(), 1);
+
+        // Drain the fire-and-forget failure event.
+        let mut saw_failure = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv())
+                .await
+            {
+                Ok(Some(crate::events::AppEvent::FederationMountFailed { target, reason })) => {
+                    assert_eq!(target, "already-mounted-host");
+                    assert!(reason.contains("already"));
+                    saw_failure = true;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        assert!(saw_failure, "expected a FederationMountFailed event naming the duplicate host");
+    }
+
+    #[test]
+    fn coexistence_mount_panic_isolated_by_tokio_task_boundary() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome: Result<(), _> = rt.block_on(async {
+            tokio::spawn(async { panic!("simulated dial+mount panic") })
+                .await
+                .map(|_: ()| ())
+        });
+        assert!(
+            outcome.is_err(),
+            "a panicking tokio::spawn task must fail its JoinHandle, not unwind the caller"
+        );
     }
 }

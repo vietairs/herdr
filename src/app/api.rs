@@ -143,6 +143,18 @@ impl App {
             return;
         }
 
+        #[cfg(unix)]
+        if let AppEvent::FederationMountReady(ready) = ev {
+            self.handle_federation_mount_ready(*ready);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationMountFailed { target, reason } = ev {
+            self.handle_federation_mount_failed(target, reason);
+            return;
+        }
+
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_worktree_add_finished(*result);
             return;
@@ -930,6 +942,9 @@ impl App {
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {
                 return self.handle_workspace_create(request.id, params);
+            }
+            Method::WorkspaceMountRemote(params) => {
+                return self.handle_workspace_mount_remote(request.id, params);
             }
             Method::WorkspaceFocus(target) => {
                 return self.handle_workspace_focus(request.id, target)

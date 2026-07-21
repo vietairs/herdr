@@ -3618,6 +3618,25 @@
           },
           "type": "object"
         },
+        "WorkspaceMountRemoteParams": {
+          "description": "REVISED Phase A (multi-remote federated workspace launch); generalized to\nN targets in Phase B: mounts one or more federation targets as\nserver-daemon-owned state, alongside the local workspace(s) already\nrunning in this session. `main.rs` sends this instead of running the\nfederation driver itself (runtime/client boundary guardrail — mount =\nshared runtime/session fact). One request carries the full target list\n(Phase B requirement 9's \"one request with a target list\" option) so the\nserver-side handler owns the concurrent-dial fan-out.",
+          "properties": {
+            "remote_keybindings": {
+              "default": false,
+              "type": "boolean"
+            },
+            "targets": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "targets"
+          ],
+          "type": "object"
+        },
         "WorkspaceMoveParams": {
           "properties": {
             "insert_index": {
@@ -4021,6 +4040,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.mount_remote",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceMountRemoteParams"
             }
           },
           "required": [
@@ -7868,6 +7903,26 @@
               "required": [
                 "type",
                 "workspaces"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Acknowledges a `workspace.mount_remote` request: the dial+mount task\nwas spawned inside the server daemon's own tokio runtime. Does not\nimply the mount succeeded — success/failure lands later as a sidebar\nnotice (mount failure) or new remote-origin workspace group (mount\nsuccess), both delivered through the existing event/render path.",
+              "properties": {
+                "targets": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "workspace_mount_remote_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "targets"
               ],
               "type": "object"
             },
