@@ -197,13 +197,28 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
     sync_terminal_size_ownership(app, lease);
 }
 
-/// Mirror "a controller is mounted" from the lease into `AppState`, where the
-/// render path can see it. Called after every lease mutation — dispatch here
-/// and the handoff revoke/reopen pair in `headless.rs` — so the lease stays
-/// the single source of truth and the flag can never latch on after a
-/// revocation.
+/// Drop every federation size claim once no controller is mounted. Called
+/// after every lease mutation — dispatch here and the handoff revoke/reopen
+/// pair in `headless.rs` — so the lease stays the single source of truth and
+/// ownership can never latch on past a revocation.
 pub(crate) fn sync_terminal_size_ownership(app: &mut App, lease: &FederationLease) {
-    app.state.federation_owns_terminal_sizes = lease.has_mounted_controller();
+    if !lease.has_mounted_controller() {
+        app.state.federation_owned_terminal_sizes.clear();
+    }
+}
+
+/// Records that the mounted controller drives `terminal_id`'s size, so this
+/// host's render loop and any direct attach client stop resizing it.
+fn claim_terminal_size(app: &mut App, terminal_id: &str) {
+    let claimed = app
+        .state
+        .terminals
+        .keys()
+        .find(|id| id.to_string() == terminal_id)
+        .cloned();
+    if let Some(claimed) = claimed {
+        app.state.federation_owned_terminal_sizes.insert(claimed);
+    }
 }
 
 fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: FederationCommand) {
@@ -286,6 +301,7 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                 // client's mirror freshly reflowed and unpainted, and that leg
                 // sends no `SIGWINCH` at all.
                 nudge_child_redraw(runtime);
+                claim_terminal_size(app, &terminal_id);
             }
         }
         FederationCommand::NudgeRedraw {
@@ -298,6 +314,7 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
             }
             if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
                 nudge_child_redraw(runtime);
+                claim_terminal_size(app, &terminal_id);
             }
         }
         FederationCommand::AgentStatuses(reply) => {
@@ -593,23 +610,43 @@ mod tests {
         );
     }
 
-    // While a controller is mounted it owns this host's terminal sizes, so the
+    /// Registers `count` terminals in `app` and returns their ids as strings.
+    fn seed_terminals(app: &mut App, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|_| {
+                let id = crate::terminal::TerminalId::alloc();
+                app.state.terminals.insert(
+                    id.clone(),
+                    crate::terminal::TerminalState::new(
+                        id.clone(),
+                        std::path::PathBuf::from("/tmp"),
+                    ),
+                );
+                id.to_string()
+            })
+            .collect()
+    }
+
+    // While a controller drives a terminal it owns that terminal's size, so the
     // host's own render pass must stand down — otherwise it reverts the mount's
     // geometry within one frame and every repaint lands at the wrong width.
-    // The flag tracks the lease exactly, including across release.
+    // Ownership tracks the lease exactly, including across release.
     #[test]
     fn a_mounted_controller_owns_terminal_sizes_until_it_releases() {
         let mut app = test_app();
         let mut lease = FederationLease::new();
+        let terminals = seed_terminals(&mut app, 1);
         assert!(
-            !app.state.federation_owns_terminal_sizes,
+            app.state.federation_owned_terminal_sizes.is_empty(),
             "no mount, no lock"
         );
 
         let epoch = acquire_and_mount(&mut app, &mut lease, 1);
-        assert!(
-            app.state.federation_owns_terminal_sizes,
-            "mounting takes size ownership"
+        claim_terminal_size(&mut app, &terminals[0]);
+        assert_eq!(
+            app.state.federation_owned_terminal_sizes.len(),
+            1,
+            "driving a terminal takes ownership of its size"
         );
 
         dispatch(
@@ -618,25 +655,50 @@ mod tests {
             FederationCommand::Release { epoch, connid: 1 },
         );
         assert!(
-            !app.state.federation_owns_terminal_sizes,
+            app.state.federation_owned_terminal_sizes.is_empty(),
             "releasing hands size ownership back to the host"
         );
     }
 
     // Revocation happens outside `dispatch` (the handoff path in headless.rs),
-    // so the flag must not latch on when the lease is torn down that way.
+    // so ownership must not latch on when the lease is torn down that way.
     #[test]
     fn revoking_a_mounted_lease_hands_terminal_sizes_back() {
         let mut app = test_app();
         let mut lease = FederationLease::new();
+        let terminals = seed_terminals(&mut app, 1);
         acquire_and_mount(&mut app, &mut lease, 1);
-        assert!(app.state.federation_owns_terminal_sizes);
+        claim_terminal_size(&mut app, &terminals[0]);
+        assert!(!app.state.federation_owned_terminal_sizes.is_empty());
 
         lease.begin_revocation();
         sync_terminal_size_ownership(&mut app, &lease);
         assert!(
-            !app.state.federation_owns_terminal_sizes,
+            app.state.federation_owned_terminal_sizes.is_empty(),
             "a revoked mount owns nothing"
+        );
+    }
+
+    // A mounting client opens terminals lazily, so ownership must stay scoped
+    // to the ones it actually drives. Session-wide ownership would freeze the
+    // size of every host terminal the mount never renders.
+    #[test]
+    fn a_mount_owns_only_the_terminals_it_drives() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let terminals = seed_terminals(&mut app, 2);
+        acquire_and_mount(&mut app, &mut lease, 1);
+
+        claim_terminal_size(&mut app, &terminals[0]);
+
+        let owned = &app.state.federation_owned_terminal_sizes;
+        assert!(
+            owned.iter().any(|id| id.to_string() == terminals[0]),
+            "the driven terminal is owned by the mount"
+        );
+        assert!(
+            !owned.iter().any(|id| id.to_string() == terminals[1]),
+            "a terminal the mount never opened stays host owned"
         );
     }
 
