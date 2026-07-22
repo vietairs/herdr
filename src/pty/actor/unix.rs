@@ -375,6 +375,7 @@ impl PtyIoActor {
             on_read: config.on_read,
             on_reader_exit: config.on_reader_exit,
             poll_observer,
+            last_applied_size: None,
         };
         std::thread::Builder::new()
             .name(format!("herdr-pty-{}", config.pane_id))
@@ -406,6 +407,10 @@ struct PtyIoActorRunner {
     on_read: ReadCallback,
     on_reader_exit: Option<ReaderExitCallback>,
     poll_observer: Option<std_mpsc::Sender<()>>,
+    /// Size of the last `TIOCSWINSZ` this actor applied. A nudge freezes its
+    /// target size when it is requested, so restoring that stale size would
+    /// undo a newer resize that landed in between; restore this instead.
+    last_applied_size: Option<PtyResize>,
 }
 
 impl PtyIoActorRunner {
@@ -682,7 +687,8 @@ impl PtyIoActorRunner {
         let _ = self.file.flush();
     }
 
-    fn resize(&self, resize: PtyResize) {
+    fn resize(&mut self, resize: PtyResize) {
+        self.last_applied_size = Some(resize);
         self.log_resize_result(fd::resize_pty_fd(
             self.file.as_raw_fd(),
             resize.rows,
@@ -692,50 +698,31 @@ impl PtyIoActorRunner {
         ));
     }
 
-    fn nudge(&mut self, resize: PtyResize) {
+    fn nudge(&mut self, requested: PtyResize) {
         if self.state == ActorState::Released {
             return;
         }
+        // Jiggle away from, and restore to, whatever size is actually current.
+        // A resize applied after this nudge was queued would otherwise be
+        // clobbered by the restore below.
+        let resize = self.last_applied_size.unwrap_or(requested);
         let nudge = if resize.rows > 2 {
-            (
-                resize.rows - 1,
-                resize.cols,
-                resize.cell_width_px,
-                resize.cell_height_px,
-            )
+            PtyResize {
+                rows: resize.rows - 1,
+                ..resize
+            }
         } else {
-            (
-                resize.rows,
-                resize.cols.saturating_sub(1).max(4),
-                resize.cell_width_px,
-                resize.cell_height_px,
-            )
+            PtyResize {
+                cols: resize.cols.saturating_sub(1).max(4),
+                ..resize
+            }
         };
-        if nudge
-            == (
-                resize.rows,
-                resize.cols,
-                resize.cell_width_px,
-                resize.cell_height_px,
-            )
-        {
+        if nudge == resize {
             return;
         }
-        self.log_resize_result(fd::resize_pty_fd(
-            self.file.as_raw_fd(),
-            nudge.0,
-            nudge.1,
-            nudge.2,
-            nudge.3,
-        ));
+        self.resize(nudge);
         std::thread::sleep(Duration::from_millis(30));
-        self.log_resize_result(fd::resize_pty_fd(
-            self.file.as_raw_fd(),
-            resize.rows,
-            resize.cols,
-            resize.cell_width_px,
-            resize.cell_height_px,
-        ));
+        self.resize(resize);
     }
 
     fn log_resize_result(&self, result: std::io::Result<()>) {
@@ -820,6 +807,7 @@ mod tests {
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
             poll_observer: None,
+            last_applied_size: None,
         };
         (runner, peer)
     }
@@ -990,6 +978,66 @@ mod tests {
             .expect("actor still reads after duplicate closes");
         assert_eq!(read, Bytes::from_static(b"still-live"));
         handle.shutdown();
+    }
+
+    #[test]
+    fn a_nudge_restores_the_size_of_a_resize_that_overtook_it() {
+        let (actor_socket, _peer) = UnixStream::pair().expect("socket pair");
+        actor_socket
+            .set_nonblocking(true)
+            .expect("actor socket nonblocking");
+        let (_data_tx, data_rx) = mpsc::channel(ACTOR_COMMAND_BUFFER);
+        let (_control_tx, control_rx) = std_mpsc::channel();
+        let controls = Arc::new(Mutex::new(SharedPtyControls::default()));
+        let mut runner = PtyIoActorRunner {
+            pane_id: 1,
+            file: std::fs::File::from(unsafe { OwnedFd::from_raw_fd(actor_socket.into_raw_fd()) }),
+            data_rx,
+            control_rx,
+            state: ActorState::Running,
+            pending_writes: VecDeque::new(),
+            current_write_offset: 0,
+            wake_read_fd: fd::create_wake_pipe().expect("wake pipe").read_fd,
+            controls: Arc::clone(&controls),
+            on_read: Box::new(|_| PtyReadResult::empty()),
+            on_reader_exit: None,
+            poll_observer: None,
+            last_applied_size: None,
+        };
+
+        // A nudge queued for the old size, then a newer resize from another
+        // owner (direct attach, terminal stream) landing in the same drain.
+        {
+            let mut controls = controls.lock().expect("controls lock");
+            controls.nudge = Some(PtyResize {
+                rows: 24,
+                cols: 80,
+                cell_width_px: 8,
+                cell_height_px: 16,
+            });
+            controls.resize = Some(PtyResizeRequest {
+                resize: PtyResize {
+                    rows: 40,
+                    cols: 120,
+                    cell_width_px: 9,
+                    cell_height_px: 18,
+                },
+                terminal_responses: Vec::new(),
+            });
+        }
+
+        runner.apply_pending_controls();
+
+        assert_eq!(
+            runner.last_applied_size,
+            Some(PtyResize {
+                rows: 40,
+                cols: 120,
+                cell_width_px: 9,
+                cell_height_px: 18,
+            }),
+            "the nudge must restore the newer size, not the one it froze"
+        );
     }
 
     #[test]
@@ -1215,6 +1263,7 @@ mod tests {
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
             poll_observer: None,
+            last_applied_size: None,
         };
 
         runner.begin_handoff().expect("handoff drains queued write");
