@@ -73,7 +73,9 @@ impl App {
                     self.state.name_input.pop();
                 }
                 if let Some(remote_mount) = &mut self.state.remote_mount {
-                    remote_mount.error = None;
+                    if !remote_mount.submitting {
+                        remote_mount.error = None;
+                    }
                 }
             }
             KeyCode::Char(c) => {
@@ -91,11 +93,26 @@ impl App {
         }
         self.state.name_input.push_str(text);
         if let Some(remote_mount) = &mut self.state.remote_mount {
-            remote_mount.error = None;
+            if !remote_mount.submitting {
+                remote_mount.error = None;
+            }
         }
     }
 
     pub(crate) fn submit_remote_mount_via_api(&mut self) {
+        // Re-entrancy guard: a real ssh dial is already in flight for the
+        // current submission, so a repeat submit (Enter, or the mount
+        // button click routed through `request_submit_remote_mount`) must
+        // not dispatch a second `workspace.mount_remote` request.
+        if self
+            .state
+            .remote_mount
+            .as_ref()
+            .is_some_and(|remote_mount| remote_mount.submitting)
+        {
+            return;
+        }
+
         let targets = match parse_mount_targets(&self.state.name_input) {
             Ok(targets) => targets,
             Err(err) => {
@@ -108,10 +125,17 @@ impl App {
 
         let response = self.runtime_workspace_mount_remote(
             "tui.workspace.mount_remote",
-            mount_remote_params(targets),
+            mount_remote_params(targets.clone()),
         );
         if serde_json::from_str::<SuccessResponse>(&response).is_ok() {
-            self.close_remote_mount_dialog();
+            // The ack only means the dial+mount task(s) were accepted and
+            // spawned server-side, not that any target is mounted yet — keep
+            // the dialog open and showing "mounting…" until
+            // `handle_federation_mount_ready`/`handle_federation_mount_failed`
+            // resolve every submitted target.
+            if let Some(remote_mount) = &mut self.state.remote_mount {
+                remote_mount.begin_submission(targets);
+            }
         } else if let Ok(error) = serde_json::from_str::<ErrorResponse>(&response) {
             if let Some(remote_mount) = &mut self.state.remote_mount {
                 remote_mount.error = Some(error.error.message);
@@ -246,6 +270,78 @@ mod tests {
             .is_some_and(|remote_mount| remote_mount.error.is_some()));
     }
 
+    // Re-entrancy guard: a real ssh dial is already running for the pending
+    // target, so a second Enter must not send a second
+    // `workspace.mount_remote` request. `name_input` is deliberately a
+    // *different* target than `pending` ("different-host" vs
+    // "already-mounted-host") — with the same target in both fields, an
+    // unguarded `begin_submission` reproduces an identical post-state and
+    // this test only fails by accident (a `tokio::spawn` panicking outside a
+    // runtime), not on its own assertions. `different-host` is pre-mounted
+    // so, if the guard is deleted, the resulting synchronous
+    // already-mounted-conflict ack still lets `begin_submission` run and
+    // overwrite `pending` with `["different-host"]`, which this test's own
+    // assertion then catches — mirrors
+    // `submit_remote_mount_keeps_dialog_open_and_submitting_on_success_ack`
+    // (`src/app/api/workspaces.rs`)'s pre-seeded-mirror technique for
+    // avoiding a real ssh child in tests.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn enter_is_a_noop_while_a_submission_is_in_flight() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("local")];
+        app.state.active = Some(0);
+
+        let session_name = crate::session::active_name()
+            .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+        let mirror = crate::remote::federation::reducer::RemoteMirror::new(
+            crate::remote::federation::id::Mount {
+                host_key: crate::remote::federation::id::HostKey::new(
+                    "different-host",
+                    &session_name,
+                ),
+                server_instance_id: crate::remote::federation::id::ServerInstanceId(
+                    "inst-1".to_string(),
+                ),
+                mount_generation: 1,
+            },
+        );
+        app.state.begin_federation_mount(mirror).unwrap();
+
+        app.open_remote_mount_dialog();
+        let mut remote_mount = RemoteMountState::default();
+        remote_mount.begin_submission(vec!["already-mounted-host".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+        app.state.name_input = "different-host".into();
+
+        app.handle_remote_mount_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        let remote_mount = app.state.remote_mount.as_ref().unwrap();
+        assert!(remote_mount.submitting);
+        assert_eq!(
+            remote_mount.pending,
+            vec!["already-mounted-host".to_string()]
+        );
+    }
+
+    #[test]
+    fn esc_dismisses_the_dialog_even_while_submitting() {
+        // Deliberate: an ssh dial can hang ~25s and trapping the user in an
+        // undismissable modal is worse than the problem — the mount
+        // continues in the background and reports via the sidebar-notice
+        // path in `handle_federation_mount_ready`/`handle_federation_mount_failed`.
+        let mut app = test_app();
+        app.open_remote_mount_dialog();
+        let mut remote_mount = RemoteMountState::default();
+        remote_mount.begin_submission(vec!["already-mounted-host".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+
+        app.handle_remote_mount_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert!(app.state.remote_mount.is_none());
+        assert_ne!(app.state.mode, Mode::MountRemoteWorkspace);
+    }
+
     #[test]
     fn mount_remote_params_always_send_remote_keybindings_false() {
         let params = mount_remote_params(vec!["host-a".to_string()]);
@@ -263,7 +359,13 @@ mod tests {
     // and dialog state, not "no event".
     #[cfg(unix)]
     #[tokio::test]
-    async fn submit_remote_mount_closes_dialog_on_success_ack() {
+    async fn submit_remote_mount_keeps_dialog_open_and_submitting_on_success_ack() {
+        // The success ack only means the dial+mount task was accepted, not
+        // that the target is mounted yet (the real ssh dial reports back via
+        // `FederationMountReady`/`FederationMountFailed` ~25s later) — the
+        // dialog must stay open in a "submitting" state rather than close
+        // immediately, which is exactly why `RemoteMountState::submitting`
+        // exists.
         let mut app = test_app();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("local")];
         app.state.active = Some(0);
@@ -288,8 +390,20 @@ mod tests {
         app.state.name_input = "already-mounted-host".into();
         app.submit_remote_mount_via_api();
 
-        assert!(app.state.remote_mount.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        let remote_mount = app
+            .state
+            .remote_mount
+            .as_ref()
+            .expect("dialog should stay open on a success ack");
+        assert!(remote_mount.submitting);
+        assert_eq!(
+            remote_mount.pending,
+            vec!["already-mounted-host".to_string()]
+        );
+        assert!(remote_mount.error.is_none());
+        assert_eq!(app.state.mode, Mode::MountRemoteWorkspace);
+        // Nothing is actually mounted yet — only the (unrelated, pre-seeded)
+        // mirror from `begin_federation_mount` above exists so far.
         assert_eq!(app.state.remote_mirrors.len(), 1);
     }
 
