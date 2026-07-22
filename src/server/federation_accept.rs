@@ -659,7 +659,17 @@ fn handle_terminal_inbound(
                 pump.stop.store(true, Ordering::SeqCst);
                 let _ = pump.handle.join();
             }
-            Ok(())
+            // The mount stopped mirroring this terminal, so it must not keep
+            // owning the size: otherwise the host stays locked out of resizing
+            // a terminal nobody drives until the whole mount goes away.
+            send_command(
+                server_event_tx,
+                FederationCommand::ReleaseTerminalSize {
+                    epoch,
+                    connid,
+                    terminal_id,
+                },
+            )
         }
         // The controller never streams Output upstream; ignore it defensively.
         TerminalChannelMessage::Output { .. } => Ok(()),
