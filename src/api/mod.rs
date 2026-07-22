@@ -156,6 +156,7 @@ pub(crate) fn federated_session_allows(method: &Method) -> bool {
         | Method::PaneLayout(_)
         | Method::LayoutApply(_)
         | Method::LayoutSetSplitRatio(_)
+        | Method::LayoutBalance(_)
         | Method::PaneResize(_)
         | Method::PaneRename(_)
         | Method::PaneReportAgent(_)

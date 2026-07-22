@@ -1115,6 +1115,7 @@ impl AppState {
                             pane_id: info.id,
                             source_pane_id,
                             has_manual_label,
+                            auto_resize_enabled: self.auto_resize_splits,
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -2255,6 +2256,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pane_right_click_menu_reflects_live_auto_resize_state() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        ws.test_split(Direction::Horizontal);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.auto_resize_splits = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 100, 20));
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let info = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane_id)
+            .expect("pane info")
+            .clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            info.inner_rect.x,
+            info.inner_rect.y,
+        ));
+
+        let menu = app.state.context_menu.as_ref().expect("pane context menu");
+        assert!(matches!(
+            menu.kind,
+            ContextMenuKind::Pane {
+                auto_resize_enabled: true,
+                ..
+            }
+        ));
+        assert!(menu
+            .items()
+            .iter()
+            .any(|item| *item == "Auto-resize splits: On"));
+    }
+
+    #[tokio::test]
     async fn right_click_passthrough_requires_exact_modifier_match() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
@@ -2765,6 +2807,7 @@ mod tests {
                 pane_id,
                 source_pane_id: None,
                 has_manual_label: false,
+                auto_resize_enabled: false,
             },
             x: 2,
             y: 2,

@@ -92,6 +92,14 @@ impl App {
         }
     }
 
+    pub(super) fn save_auto_resize_splits(&mut self, enabled: bool) {
+        if self.update_config_file("auto-resize splits", |content| {
+            crate::config::upsert_section_bool(content, "ui", "auto_resize_splits", enabled)
+        }) {
+            self.apply_config_from_disk(false);
+        }
+    }
+
     pub(super) fn save_pane_history_persistence(&mut self, enabled: bool) {
         if self.update_config_file("pane screen history", |content| {
             crate::config::upsert_section_bool(content, "experimental", "pane_history", enabled)

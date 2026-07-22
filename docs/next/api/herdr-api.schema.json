@@ -4627,6 +4627,22 @@
         {
           "properties": {
             "method": {
+              "const": "layout.balance",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LayoutExportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.neighbor",
               "type": "string"
             },
@@ -8316,6 +8332,22 @@
                 },
                 "type": {
                   "const": "layout_split_ratio_set",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "layout"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "layout": {
+                  "$ref": "#/schemas/success_response/$defs/LayoutDescription"
+                },
+                "type": {
+                  "const": "layout_balance",
                   "type": "string"
                 }
               },
