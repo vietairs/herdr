@@ -621,6 +621,15 @@ pub struct WorkspaceCardArea {
     pub indented: bool,
 }
 
+/// Collector state for the `Mode::MountRemoteWorkspace` dialog. The typed
+/// target list reuses the existing `AppState::name_input` field (same
+/// pattern as `WorktreeCreateState`'s branch input); this struct only holds
+/// what a free-text collector needs beyond that shared input.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteMountState {
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeCreateState {
     pub source_workspace_id: String,
@@ -804,6 +813,12 @@ pub enum Mode {
     NewLinkedWorktree,
     OpenExistingWorktree,
     ConfirmRemoveWorktree,
+    /// Free-text collector for `workspace.mount_remote` (server/runtime fact,
+    /// `src/api/schema/workspaces.rs::WorkspaceMountRemoteParams`); the TUI
+    /// only owns the input dialog. Unreachable on non-unix (the global-menu
+    /// entry that opens it is `#[cfg(unix)]`), but the variant itself stays
+    /// cross-platform so exhaustive `match state.mode` still compiles there.
+    MountRemoteWorkspace,
     Resize,
     ConfirmClose,
     ContextMenu,
@@ -1427,6 +1442,13 @@ pub struct AppState {
     pub request_submit_worktree_create: bool,
     pub request_submit_worktree_open: bool,
     pub request_submit_worktree_remove: bool,
+    /// Set when the global menu's "mount remote" entry (unix only) was
+    /// activated; drained by `App`'s own event loop, which owns the
+    /// `&mut App` `open_remote_mount_dialog` needs.
+    pub request_open_remote_mount_dialog: bool,
+    /// Set when the remote-mount dialog's primary action (mouse click) was
+    /// activated; drained the same way as `request_open_remote_mount_dialog`.
+    pub request_submit_remote_mount: bool,
     pub request_reload_config: bool,
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
@@ -1444,6 +1466,10 @@ pub struct AppState {
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
+    /// `Mode::MountRemoteWorkspace` dialog state; `None` when the dialog is
+    /// closed. The typed target list lives in `name_input` (shared with
+    /// `WorktreeCreateState`'s pattern).
+    pub remote_mount: Option<RemoteMountState>,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
     pub release_notes: Option<ReleaseNotesState>,
@@ -1910,6 +1936,8 @@ impl AppState {
             request_submit_worktree_create: false,
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
+            request_open_remote_mount_dialog: false,
+            request_submit_remote_mount: false,
             request_reload_config: false,
             request_client_config_reload: false,
             request_clipboard_write: None,
@@ -1923,6 +1951,7 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             request_complete_onboarding: false,
+            remote_mount: None,
             name_input: String::new(),
             name_input_replace_on_type: false,
             release_notes: None,

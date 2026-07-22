@@ -1310,16 +1310,23 @@ mod tests {
         assert_eq!(agent_panel_entries(&app).len(), 2);
         // agents title (1) + 2 agents * 2 rows = 5, then spaces title + "new
         // workspace" (2) before the first workspace ribbon at doc row 7.
-        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).start, 7);
+        let workspace_doc_row = mobile_switcher_workspace_doc_range(&app, 0).start;
+        assert_eq!(workspace_doc_row, 7);
 
         let viewport = mobile_switcher_areas(&app).viewport;
+        // Scroll far beyond the real max on purpose; hit-testing clamps to
+        // the actual max scroll (which shifts with the global menu's item
+        // count, e.g. the unix-only "mount remote" entry), so derive the
+        // expected on-screen row from that clamp rather than a fixed offset.
         app.mobile_switcher_scroll = 100;
+        let scroll = mobile_switcher_max_scroll_for_height(&app, viewport.height);
         let agent_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 1);
         assert!(matches!(
             agent_hit,
             Some(MobileSwitcherTarget::Agent { .. })
         ));
-        let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 7);
+        let workspace_row = viewport.y + (workspace_doc_row - scroll) as u16;
+        let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, workspace_row);
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
     }
 

@@ -100,6 +100,7 @@ impl App {
                 Mode::NewLinkedWorktree => self.handle_worktree_create_key(key_event),
                 Mode::OpenExistingWorktree => self.handle_worktree_open_key(key_event),
                 Mode::ConfirmRemoveWorktree => self.handle_worktree_remove_key(key_event),
+                Mode::MountRemoteWorkspace => self.handle_remote_mount_key(key_event),
                 Mode::Resize => self.handle_resize_key_via_api(key),
                 Mode::ConfirmClose => self.handle_confirm_close_key_via_api(key_event),
                 Mode::ContextMenu => {
@@ -148,6 +149,10 @@ impl App {
             }
             Mode::NewLinkedWorktree => {
                 self.insert_worktree_create_text(text);
+                true
+            }
+            Mode::MountRemoteWorkspace => {
+                self.insert_remote_mount_text(text);
                 true
             }
             Mode::OpenExistingWorktree => {
@@ -605,9 +610,11 @@ pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
 
 pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     match state.mode {
-        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
-            true
-        }
+        Mode::RenameWorkspace
+        | Mode::RenameTab
+        | Mode::RenamePane
+        | Mode::NewLinkedWorktree
+        | Mode::MountRemoteWorkspace => true,
         Mode::OpenExistingWorktree => state
             .worktree_open
             .as_ref()
