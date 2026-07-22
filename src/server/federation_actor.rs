@@ -193,6 +193,20 @@ impl std::fmt::Debug for FederationCommand {
 /// `send` result is discarded.
 #[allow(dead_code)] // dormant until b0.4 wires the federation listener
 pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: FederationCommand) {
+    dispatch_command(app, lease, command);
+    sync_terminal_size_ownership(app, lease);
+}
+
+/// Mirror "a controller is mounted" from the lease into `AppState`, where the
+/// render path can see it. Called after every lease mutation — dispatch here
+/// and the handoff revoke/reopen pair in `headless.rs` — so the lease stays
+/// the single source of truth and the flag can never latch on after a
+/// revocation.
+pub(crate) fn sync_terminal_size_ownership(app: &mut App, lease: &FederationLease) {
+    app.state.federation_owns_terminal_sizes = lease.has_mounted_controller();
+}
+
+fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: FederationCommand) {
     match command {
         FederationCommand::AcquireController {
             epoch,
@@ -576,6 +590,53 @@ mod tests {
                 connid: 999,
                 terminal_id: "no-such-terminal".to_string(),
             },
+        );
+    }
+
+    // While a controller is mounted it owns this host's terminal sizes, so the
+    // host's own render pass must stand down — otherwise it reverts the mount's
+    // geometry within one frame and every repaint lands at the wrong width.
+    // The flag tracks the lease exactly, including across release.
+    #[test]
+    fn a_mounted_controller_owns_terminal_sizes_until_it_releases() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        assert!(
+            !app.state.federation_owns_terminal_sizes,
+            "no mount, no lock"
+        );
+
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        assert!(
+            app.state.federation_owns_terminal_sizes,
+            "mounting takes size ownership"
+        );
+
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::Release { epoch, connid: 1 },
+        );
+        assert!(
+            !app.state.federation_owns_terminal_sizes,
+            "releasing hands size ownership back to the host"
+        );
+    }
+
+    // Revocation happens outside `dispatch` (the handoff path in headless.rs),
+    // so the flag must not latch on when the lease is torn down that way.
+    #[test]
+    fn revoking_a_mounted_lease_hands_terminal_sizes_back() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        acquire_and_mount(&mut app, &mut lease, 1);
+        assert!(app.state.federation_owns_terminal_sizes);
+
+        lease.begin_revocation();
+        sync_terminal_size_ownership(&mut app, &lease);
+        assert!(
+            !app.state.federation_owns_terminal_sizes,
+            "a revoked mount owns nothing"
         );
     }
 
