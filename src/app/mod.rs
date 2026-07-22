@@ -672,6 +672,7 @@ impl App {
             confirm_close: config.ui.confirm_close,
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             pane_borders: config.ui.pane_borders,
+            auto_resize_splits: config.ui.auto_resize_splits,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
@@ -1503,6 +1504,7 @@ impl App {
                 self.state.confirm_close = config.ui.confirm_close;
                 self.state.prompt_new_tab_name = config.ui.prompt_new_tab_name;
                 self.state.pane_borders = config.ui.pane_borders;
+                self.state.auto_resize_splits = config.ui.auto_resize_splits;
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
@@ -3235,6 +3237,53 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("[experimental]"));
         assert!(content.contains("pane_history = true"));
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn save_auto_resize_splits_writes_ui_section_and_reloads_state() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("save-auto-resize-splits");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert!(!app.state.auto_resize_splits);
+
+        app.save_auto_resize_splits(true);
+
+        assert!(app.state.auto_resize_splits);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[ui]"));
+        assert!(content.contains("auto_resize_splits = true"));
+        assert!(content.contains("onboarding = false"));
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn save_auto_resize_splits_false_after_true_clears_it() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("save-auto-resize-splits-toggle-off");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.save_auto_resize_splits(true);
+        assert!(app.state.auto_resize_splits);
+
+        app.save_auto_resize_splits(false);
+
+        assert!(!app.state.auto_resize_splits);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("auto_resize_splits = false"));
         assert!(app.state.config_diagnostic.is_none());
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);

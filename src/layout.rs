@@ -272,6 +272,37 @@ impl TileLayout {
     pub fn from_saved(root: Node, focus: PaneId) -> Self {
         Self { root, focus }
     }
+
+    /// Locate the path (branch choices from root) to the leaf holding `pane_id`.
+    /// Matches the `SplitBorder.path` / `set_ratio_at` convention: `false` means
+    /// take the `first` child at that `Split`, `true` means `second`. `None` if
+    /// `pane_id` isn't in this tree.
+    pub fn path_to_pane(&self, pane_id: PaneId) -> Option<Vec<bool>> {
+        let mut path = Vec::new();
+        if find_path_to_pane(&self.root, pane_id, &mut path) {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    /// Rebalance every split ratio in the whole tree so each leaf gets an
+    /// equal share of area, weighted by leaf count rather than tree shape.
+    /// No-op on a single-pane tree.
+    pub fn balance_areas(&mut self) {
+        balance_subtree_areas(&mut self.root);
+    }
+
+    /// Rebalance only the split ratios `path` walks through, from root down
+    /// to (but not past) the node `path` addresses. Used for auto-resize:
+    /// touching only the ancestor chain of a split/close leaves sibling
+    /// subtrees untouched. Tolerates a `path` that runs past the current
+    /// tree shape (e.g. captured before a `remove_pane` collapse) by
+    /// stopping silently instead of panicking. Returns `true` if any ratio
+    /// changed.
+    pub fn balance_areas_along_path(&mut self, path: &[bool]) -> bool {
+        balance_split_ratios_along_path(&mut self.root, path)
+    }
 }
 
 // --- Directional pane navigation ---
@@ -639,6 +670,87 @@ fn split_rect(area: Rect, direction: Direction, ratio: f32) -> (Rect, Rect) {
     }
 }
 
+fn find_path_to_pane(node: &Node, target: PaneId, path: &mut Vec<bool>) -> bool {
+    match node {
+        Node::Pane(id) => *id == target,
+        Node::Split { first, second, .. } => {
+            path.push(false);
+            if find_path_to_pane(first, target, path) {
+                return true;
+            }
+            path.pop();
+            path.push(true);
+            if find_path_to_pane(second, target, path) {
+                return true;
+            }
+            path.pop();
+            false
+        }
+    }
+}
+
+/// Ratio that gives `first_leaves` out of `first_leaves + second_leaves` leaves
+/// an equal share of area, clamped to the same 0.1..=0.9 range every other
+/// ratio write in this file respects (see `valid_split_ratio`). When the true
+/// equal-area ratio falls outside that range (e.g. 1 leaf against 10+ leaves,
+/// true ratio ~0.0909), the result clamps to 0.1 rather than write a ratio
+/// nothing else in the layout can round-trip -- this is an accepted,
+/// documented degradation, not a bug.
+fn equal_area_ratio(first_leaves: usize, second_leaves: usize) -> f32 {
+    let total = (first_leaves + second_leaves) as f32;
+    valid_split_ratio(first_leaves as f32 / total)
+}
+
+/// Recursively rebalance every split in `node` to equal-area ratios,
+/// returning the leaf count of `node` so callers can weight ancestor splits.
+/// Same recursion shape as `count_panes`, extended with a ratio-setting side
+/// effect.
+fn balance_subtree_areas(node: &mut Node) -> usize {
+    match node {
+        Node::Pane(_) => 1,
+        Node::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            let first_leaves = balance_subtree_areas(first);
+            let second_leaves = balance_subtree_areas(second);
+            *ratio = equal_area_ratio(first_leaves, second_leaves);
+            first_leaves + second_leaves
+        }
+    }
+}
+
+/// Rebalance only the splits `path` walks through, stopping as soon as
+/// `path` is exhausted or the walk reaches a `Node::Pane`. Never descends
+/// past what the current tree actually contains, so a stale/overlong `path`
+/// (e.g. captured before a `remove_pane` collapse shortened the tree) is
+/// tolerated rather than panicking.
+fn balance_split_ratios_along_path(node: &mut Node, path: &[bool]) -> bool {
+    let Node::Split {
+        ratio,
+        first,
+        second,
+        ..
+    } = node
+    else {
+        return false;
+    };
+
+    let new_ratio = equal_area_ratio(count_panes(first), count_panes(second));
+    let changed = (*ratio - new_ratio).abs() > f32::EPSILON;
+    *ratio = new_ratio;
+
+    let descended = match path.first() {
+        Some(true) => balance_split_ratios_along_path(second, &path[1..]),
+        Some(false) => balance_split_ratios_along_path(first, &path[1..]),
+        None => false,
+    };
+
+    changed || descended
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -953,5 +1065,411 @@ mod tests {
             find_in_direction(&focused, NavDirection::Left, &panes),
             Some(pane(3))
         );
+    }
+
+    /// Builds a right-leaning chain of `ids.len()` leaves: each split peels
+    /// off `ids[0]` as `first` and nests the rest under `second`, cycling
+    /// through `directions` (wrapping) for split direction. Every split
+    /// starts at a skewed ratio (0.9) so tests can prove `balance_areas`
+    /// corrects it rather than trivially matching an already-balanced tree.
+    fn skewed_chain(ids: &[u32], directions: &[Direction]) -> Node {
+        if ids.len() == 1 {
+            return Node::Pane(pane(ids[0]));
+        }
+        let dir = directions[0];
+        let rest_dirs = if directions.len() > 1 {
+            &directions[1..]
+        } else {
+            directions
+        };
+        Node::Split {
+            direction: dir,
+            ratio: 0.9,
+            first: Box::new(Node::Pane(pane(ids[0]))),
+            second: Box::new(skewed_chain(&ids[1..], rest_dirs)),
+        }
+    }
+
+    /// Builds a complete binary BSP tree over `ids.len()` leaves (must be a
+    /// power of two), splitting the leaf set evenly at every level and
+    /// cycling through `directions` (wrapping) per depth level. Every split
+    /// starts at a skewed ratio (0.9) so tests can prove `balance_areas`
+    /// corrects it. Unlike `skewed_chain`, leaf counts are equal on both
+    /// sides of every split, so with power-of-two `Rect` dimensions every
+    /// split divides evenly -- no rounding error compounds toward the
+    /// leaves, which is what makes an exact-equal-area assertion valid here
+    /// (a lopsided "1 vs rest" chain does not have this property: a 1-pixel
+    /// rounding error near the leaves gets multiplied by whatever large
+    /// dimension remains on the other axis).
+    fn balanced_binary_tree(ids: &[u32], directions: &[Direction]) -> Node {
+        if ids.len() == 1 {
+            return Node::Pane(pane(ids[0]));
+        }
+        let mid = ids.len() / 2;
+        let dir = directions[0];
+        let rest_dirs = if directions.len() > 1 {
+            &directions[1..]
+        } else {
+            directions
+        };
+        Node::Split {
+            direction: dir,
+            ratio: 0.9,
+            first: Box::new(balanced_binary_tree(&ids[..mid], rest_dirs)),
+            second: Box::new(balanced_binary_tree(&ids[mid..], rest_dirs)),
+        }
+    }
+
+    fn leaf_areas(layout: &TileLayout, area: Rect) -> Vec<i64> {
+        layout
+            .panes(area)
+            .into_iter()
+            .map(|p| p.rect.width as i64 * p.rect.height as i64)
+            .collect()
+    }
+
+    fn assert_areas_within_one_cell(areas: &[i64]) {
+        let max = *areas.iter().max().expect("at least one leaf");
+        let min = *areas.iter().min().expect("at least one leaf");
+        assert!(
+            max - min <= 1,
+            "leaf areas should be equal within one cell of rounding: {areas:?}"
+        );
+    }
+
+    // --- remove_pane characterization (pins current collapse behavior) ---
+
+    #[test]
+    fn remove_pane_discards_parent_split_ratio_on_collapse() {
+        let sibling_subtree_ratio = 0.25;
+        let tree = Node::Split {
+            direction: Direction::Horizontal,
+            ratio: 0.7,
+            first: Box::new(Node::Split {
+                direction: Direction::Vertical,
+                ratio: sibling_subtree_ratio,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Pane(pane(2))),
+            }),
+            second: Box::new(Node::Pane(pane(3))),
+        };
+
+        let result = remove_pane(tree, pane(3)).expect("two panes should remain");
+
+        match result {
+            Node::Split { ratio, .. } => {
+                assert!(
+                    (ratio - sibling_subtree_ratio).abs() < f32::EPSILON,
+                    "sibling subtree's ratio must survive the parent collapse unchanged"
+                );
+            }
+            Node::Pane(_) => panic!("expected the sibling split subtree to be promoted"),
+        }
+    }
+
+    #[test]
+    fn remove_pane_of_last_child_promotes_sibling_ratio_unchanged() {
+        let tree = Node::Split {
+            direction: Direction::Horizontal,
+            ratio: 0.3,
+            first: Box::new(Node::Pane(pane(1))),
+            second: Box::new(Node::Pane(pane(2))),
+        };
+
+        let result = remove_pane(tree, pane(2)).expect("one pane should remain");
+        let layout = TileLayout::from_saved(result, pane(1));
+
+        assert_eq!(layout.pane_count(), 1);
+        assert_eq!(pane_rect(&layout, pane(1)), Rect::new(0, 0, 100, 40));
+    }
+
+    // --- path_to_pane ---
+
+    #[test]
+    fn path_to_pane_finds_leaf_at_each_depth() {
+        let layout = sample_layout();
+        assert_eq!(layout.path_to_pane(pane(1)), Some(vec![false]));
+        assert_eq!(layout.path_to_pane(pane(2)), Some(vec![true, false]));
+        assert_eq!(layout.path_to_pane(pane(3)), Some(vec![true, true, false]));
+        assert_eq!(layout.path_to_pane(pane(4)), Some(vec![true, true, true]));
+    }
+
+    #[test]
+    fn path_to_pane_missing_pane_returns_none() {
+        let layout = sample_layout();
+        assert_eq!(layout.path_to_pane(pane(99)), None);
+    }
+
+    // --- balance_areas ---
+
+    #[test]
+    fn balance_areas_equalizes_2x2_grid() {
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.3,
+                first: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.7,
+                    first: Box::new(Node::Pane(pane(1))),
+                    second: Box::new(Node::Pane(pane(2))),
+                }),
+                second: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.2,
+                    first: Box::new(Node::Pane(pane(3))),
+                    second: Box::new(Node::Pane(pane(4))),
+                }),
+            },
+            pane(1),
+        );
+
+        layout.balance_areas();
+
+        assert_areas_within_one_cell(&leaf_areas(&layout, Rect::new(0, 0, 100, 40)));
+    }
+
+    #[test]
+    fn balance_areas_equalizes_leaf_areas_at_depth_3() {
+        let ids: Vec<u32> = (1..=8).collect();
+        let mut layout = TileLayout::from_saved(
+            balanced_binary_tree(
+                &ids,
+                &[
+                    Direction::Horizontal,
+                    Direction::Vertical,
+                    Direction::Horizontal,
+                ],
+            ),
+            pane(1),
+        );
+
+        layout.balance_areas();
+
+        assert_areas_within_one_cell(&leaf_areas(&layout, Rect::new(0, 0, 128, 64)));
+    }
+
+    #[test]
+    fn balance_areas_equalizes_leaf_areas_at_depth_4() {
+        let ids: Vec<u32> = (1..=16).collect();
+        let mut layout = TileLayout::from_saved(
+            balanced_binary_tree(
+                &ids,
+                &[
+                    Direction::Horizontal,
+                    Direction::Vertical,
+                    Direction::Horizontal,
+                    Direction::Vertical,
+                ],
+            ),
+            pane(1),
+        );
+
+        layout.balance_areas();
+
+        assert_areas_within_one_cell(&leaf_areas(&layout, Rect::new(0, 0, 128, 64)));
+    }
+
+    #[test]
+    fn balance_areas_weights_by_leaf_count_not_split_position() {
+        // 2-leaf branch vs 1-leaf branch: equal-area ratio must be 2/3, not
+        // the position-based 0.5 a naive split-count balance would produce.
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.9,
+                first: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(Node::Pane(pane(1))),
+                    second: Box::new(Node::Pane(pane(2))),
+                }),
+                second: Box::new(Node::Pane(pane(3))),
+            },
+            pane(1),
+        );
+
+        layout.balance_areas();
+
+        let splits = split_snapshot(&layout);
+        assert!(
+            (splits[0].1 - (2.0 / 3.0)).abs() < 1e-5,
+            "root ratio should reflect 2 vs 1 leaves, not split position: {splits:?}"
+        );
+    }
+
+    #[test]
+    fn balance_areas_1v9_leaves_hits_exact_lower_clamp() {
+        // 1 leaf vs 9 leaves: true equal-area ratio is 1/10 = 0.1 exactly,
+        // which sits right at (and is representable within) the clamp floor.
+        let ids: Vec<u32> = (1..=10).collect();
+        let mut layout =
+            TileLayout::from_saved(skewed_chain(&ids, &[Direction::Horizontal]), pane(1));
+
+        layout.balance_areas();
+
+        let splits = split_snapshot(&layout);
+        assert!(
+            (splits[0].1 - 0.1).abs() < f32::EPSILON,
+            "1/10 is exactly representable and within the clamp range: {splits:?}"
+        );
+    }
+
+    #[test]
+    fn balance_areas_1v10_leaves_clamps_with_documented_error() {
+        // 1 leaf vs 10 leaves: true equal-area ratio is 1/11 ~= 0.0909, below
+        // the 0.1 minimum. This is the accepted degradation (see
+        // `equal_area_ratio`): the result clamps to 0.1 rather than write an
+        // unrepresentable ratio, so the "1" side ends up very slightly larger
+        // than a perfect equal split would give it.
+        let ids: Vec<u32> = (1..=11).collect();
+        let mut layout =
+            TileLayout::from_saved(skewed_chain(&ids, &[Direction::Horizontal]), pane(1));
+
+        layout.balance_areas();
+
+        let splits = split_snapshot(&layout);
+        assert!(
+            (splits[0].1 - 0.1).abs() < f32::EPSILON,
+            "ratio should clamp to 0.1, not the true 1/11: {splits:?}"
+        );
+    }
+
+    #[test]
+    fn balance_areas_single_pane_is_noop() {
+        let (mut layout, root) = TileLayout::new();
+
+        layout.balance_areas();
+
+        assert_eq!(layout.pane_count(), 1);
+        assert_eq!(pane_rect(&layout, root), Rect::new(0, 0, 100, 40));
+    }
+
+    #[test]
+    fn balance_areas_is_idempotent() {
+        let mut layout = sample_layout();
+
+        layout.balance_areas();
+        let once = split_snapshot(&layout);
+        layout.balance_areas();
+        let twice = split_snapshot(&layout);
+
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn balance_areas_handles_deeply_nested_chain_without_stack_issues() {
+        // 17 leaves = 16 nested split levels, matching MAX_LAYOUT_DEPTH.
+        let ids: Vec<u32> = (1..=17).collect();
+        let mut layout = TileLayout::from_saved(
+            skewed_chain(&ids, &[Direction::Horizontal, Direction::Vertical]),
+            pane(1),
+        );
+
+        layout.balance_areas();
+
+        assert_eq!(layout.pane_count(), 17);
+        assert_eq!(leaf_areas(&layout, Rect::new(0, 0, 100, 40)).len(), 17);
+    }
+
+    // --- balance_areas_along_path ---
+
+    #[test]
+    fn balance_areas_along_path_only_touches_path_nodes() {
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.5,
+                first: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.3,
+                    first: Box::new(Node::Pane(pane(1))),
+                    second: Box::new(Node::Pane(pane(2))),
+                }),
+                second: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.3,
+                    first: Box::new(Node::Pane(pane(3))),
+                    second: Box::new(Node::Pane(pane(4))),
+                }),
+            },
+            pane(1),
+        );
+
+        let path = layout.path_to_pane(pane(1)).expect("pane(1) exists");
+        let changed = layout.balance_areas_along_path(&path);
+
+        assert!(changed);
+        let splits = split_snapshot(&layout);
+        // splits[0] = root, splits[1] = subtree containing pane(1)
+        // (rebalanced 0.3 -> 0.5), splits[2] = unrelated sibling subtree.
+        assert!((splits[1].1 - 0.5).abs() < f32::EPSILON);
+        assert!(
+            (splits[2].1 - 0.3).abs() < f32::EPSILON,
+            "sibling subtree ratio must be untouched by an unrelated path: {splits:?}"
+        );
+    }
+
+    #[test]
+    fn balance_areas_along_path_tolerates_path_longer_than_tree() {
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.2,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Pane(pane(2))),
+            },
+            pane(1),
+        );
+
+        // Simulates a path captured before a `remove_pane` collapse
+        // shortened the tree: it addresses splits that no longer exist.
+        let stale_path = vec![false, true, false];
+        let changed = layout.balance_areas_along_path(&stale_path);
+
+        assert!(changed, "the root split itself should still rebalance");
+        let splits = split_snapshot(&layout);
+        assert_eq!(splits.len(), 1);
+        assert!((splits[0].1 - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn balance_areas_along_path_empty_path_balances_root_split() {
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.2,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(Node::Pane(pane(2))),
+                    second: Box::new(Node::Pane(pane(3))),
+                }),
+            },
+            pane(1),
+        );
+
+        let changed = layout.balance_areas_along_path(&[]);
+
+        assert!(changed);
+        let splits = split_snapshot(&layout);
+        // root: 1 leaf vs 2 leaves -> 1/3; the nested split below is
+        // untouched since an empty path stops after the root.
+        assert!((splits[0].1 - (1.0 / 3.0)).abs() < 1e-5);
+        assert!(
+            (splits[1].1 - 0.5).abs() < f32::EPSILON,
+            "unvisited nested split must be untouched: {splits:?}"
+        );
+    }
+
+    #[test]
+    fn balance_areas_along_path_single_pane_is_noop() {
+        let (mut layout, _root) = TileLayout::new();
+
+        let changed = layout.balance_areas_along_path(&[false, true]);
+
+        assert!(!changed);
+        assert_eq!(layout.pane_count(), 1);
     }
 }
