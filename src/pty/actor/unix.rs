@@ -772,10 +772,15 @@ impl PtyIoActorRunner {
         let Some(due) = self.nudge_restore_due else {
             return ACTOR_IDLE_POLL_MS;
         };
-        let remaining = due.saturating_duration_since(Instant::now()).as_millis();
+        // Rounded up: a truncated sub-millisecond remainder polls with a zero
+        // timeout, which spins the loop until the deadline actually passes.
+        let remaining = due
+            .saturating_duration_since(Instant::now())
+            .as_micros()
+            .div_ceil(1_000);
         i32::try_from(remaining)
             .unwrap_or(ACTOR_IDLE_POLL_MS)
-            .clamp(0, ACTOR_IDLE_POLL_MS)
+            .clamp(1, ACTOR_IDLE_POLL_MS)
     }
 
     fn log_resize_result(&self, result: std::io::Result<()>) {
