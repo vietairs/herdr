@@ -25,7 +25,11 @@ impl HostKey {
     /// discriminator. Neither component may contain `:`, since that is the
     /// separator used in the public id encoding.
     pub fn new(user_at_ip: impl Into<String>, session_discriminator: impl Into<String>) -> Self {
-        Self(format!("{}#{}", user_at_ip.into(), session_discriminator.into()))
+        Self(format!(
+            "{}#{}",
+            user_at_ip.into(),
+            session_discriminator.into()
+        ))
     }
 
     pub fn as_str(&self) -> &str {
@@ -103,7 +107,11 @@ impl FedRef {
     /// `r:<host>:` segment per hop instead of re-prefixing the same host
     /// twice (never produces `r:h:r:h:w1`).
     pub fn to_public_id(&self) -> String {
-        format!("{REMOTE_PREFIX}{}:{}", self.host_key.as_str(), self.remote_id)
+        format!(
+            "{REMOTE_PREFIX}{}:{}",
+            self.host_key.as_str(),
+            self.remote_id
+        )
     }
 }
 
@@ -273,7 +281,10 @@ mod tests {
         let fed_ref = map_in("w1", &mount);
 
         assert_eq!(classify("w1"), IdClass::Local);
-        assert_eq!(classify(&fed_ref.to_public_id()), IdClass::Remote(mount.host_key.clone()));
+        assert_eq!(
+            classify(&fed_ref.to_public_id()),
+            IdClass::Remote(mount.host_key.clone())
+        );
     }
 
     #[test]
@@ -285,7 +296,12 @@ mod tests {
         let b = ServerInstanceId::fresh();
         assert_ne!(a, b);
         // Shape: `<pid>-<nanos>-<seq>` — three dash-separated non-empty parts.
-        assert_eq!(a.0.split('-').filter(|s| !s.is_empty()).count(), 3, "id={}", a.0);
+        assert_eq!(
+            a.0.split('-').filter(|s| !s.is_empty()).count(),
+            3,
+            "id={}",
+            a.0
+        );
     }
 
     #[test]
@@ -295,11 +311,17 @@ mod tests {
         assert_eq!(fence(&mount, 5), FenceResult::Accept);
         assert_eq!(
             fence(&mount, 4),
-            FenceResult::RejectStale { live: 5, inbound: 4 }
+            FenceResult::RejectStale {
+                live: 5,
+                inbound: 4
+            }
         );
         assert_eq!(
             fence(&mount, 6),
-            FenceResult::RejectStale { live: 5, inbound: 6 }
+            FenceResult::RejectStale {
+                live: 5,
+                inbound: 6
+            }
         );
     }
 }

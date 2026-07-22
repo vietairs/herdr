@@ -651,16 +651,25 @@ impl App {
                     let split_terminal_id = split_terminal.id.clone();
                     self.terminal_runtimes
                         .insert(split_terminal_id.clone(), split_runtime);
-                    self.state.terminals.insert(split_terminal_id, split_terminal);
+                    self.state
+                        .terminals
+                        .insert(split_terminal_id, split_terminal);
                     let split_moved = MovedPane {
                         pane_id: split_pane_id,
                         pane_state: split_pane_state,
                     };
                     // Splits materialize as a simple horizontal chain (v1);
                     // this does not attempt to reproduce the remote's exact
-                    // split geometry (not carried by `PaneInfo`).
-                    if self.state.workspaces[this_ws_idx].tabs[tab_idx]
-                        .insert_existing_pane(
+                    // split geometry (not carried by `PaneInfo`). Goes
+                    // through `Workspace::insert_moved_pane_into_tab` (not
+                    // `Tab::insert_existing_pane` directly) so this
+                    // non-root remote pane also gets a `public_pane_numbers`
+                    // entry — otherwise it is unreachable through the public
+                    // pane-id API (list/focus/close) even though it is a
+                    // real live pane.
+                    if self.state.workspaces[this_ws_idx]
+                        .insert_moved_pane_into_tab(
+                            tab_idx,
                             prev_pane_id,
                             split_moved,
                             ratatui::layout::Direction::Horizontal,
@@ -710,7 +719,8 @@ impl App {
         clipboard_tx: &UnboundedSender<ClipboardMessage>,
     ) -> std::io::Result<(PaneId, TerminalState, TerminalRuntime, PaneState)> {
         let raw_terminal_id = strip_mount_namespace(mount, &pane_info.terminal_id);
-        let output_rx = router.open_terminal(raw_terminal_id.clone(), mount.mount_generation, out_tx);
+        let output_rx =
+            router.open_terminal(raw_terminal_id.clone(), mount.mount_generation, out_tx);
         let pane_id = PaneId::alloc();
         let terminal_id = TerminalId::alloc();
         let runtime = TerminalRuntime::spawn_remote(
@@ -796,12 +806,26 @@ impl App {
     ) {
         let crate::events::FederationSplitPaneReady {
             request_id,
+            origin,
             pane_id,
             terminal_id,
             terminal,
             runtime,
             pane_state,
         } = ready;
+
+        if let Some(pending) = self.pending_remote_splits.get(&request_id) {
+            if pending.origin != origin {
+                tracing::warn!(
+                    request_id,
+                    expected_origin = %pending.origin,
+                    got_origin = %origin,
+                    "dropping a split-pane response from a mount that did not \
+                     originate this request"
+                );
+                return;
+            }
+        }
 
         let Some(pending) = self.take_pending_remote_split(request_id) else {
             tracing::warn!(
@@ -832,9 +856,22 @@ impl App {
             return;
         };
 
-        let moved = crate::workspace::MovedPane { pane_id, pane_state };
-        if ws.tabs[tab_idx]
-            .insert_existing_pane(pending.target_pane_id, moved, pending.direction, pending.ratio)
+        let moved = crate::workspace::MovedPane {
+            pane_id,
+            pane_state,
+        };
+        // `Workspace::insert_moved_pane_into_tab` (not `Tab::
+        // insert_existing_pane` directly), so this non-root remote pane
+        // also gets a `public_pane_numbers` entry (same reasoning as
+        // `materialize_federation_mount`'s split-chain loop above).
+        if ws
+            .insert_moved_pane_into_tab(
+                tab_idx,
+                pending.target_pane_id,
+                moved,
+                pending.direction,
+                pending.ratio,
+            )
             .is_err()
         {
             tracing::warn!(
@@ -847,8 +884,7 @@ impl App {
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         self.state.terminals.insert(terminal_id, terminal);
-        self.state
-            .remove_alias_shadowed_by_new_pane(pane_id);
+        self.state.remove_alias_shadowed_by_new_pane(pane_id);
         self.schedule_session_save();
 
         if pending.focus {
@@ -867,7 +903,8 @@ impl App {
         }
         self.emit_layout_updated_event(ws_idx, tab_idx);
 
-        self.render_dirty.store(true, std::sync::atomic::Ordering::Release);
+        self.render_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
         self.render_notify.notify_one();
     }
 
@@ -877,7 +914,24 @@ impl App {
     /// split, via the same toast mechanism `handle_federation_mount_failed`
     /// uses.
     #[cfg(unix)]
-    pub(crate) fn handle_federation_split_pane_failed(&mut self, request_id: u64, reason: String) {
+    pub(crate) fn handle_federation_split_pane_failed(
+        &mut self,
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    ) {
+        if let Some(pending) = self.pending_remote_splits.get(&request_id) {
+            if pending.origin != origin {
+                tracing::warn!(
+                    request_id,
+                    expected_origin = %pending.origin,
+                    got_origin = %origin,
+                    "dropping a split-pane failure from a mount that did not \
+                     originate this request"
+                );
+                return;
+            }
+        }
         self.take_pending_remote_split(request_id);
         tracing::warn!(request_id, %reason, "remote split failed");
         match self.state.toast_config.delivery {
@@ -925,6 +979,14 @@ pub(crate) struct PendingRemoteSplit {
     pub(crate) direction: ratatui::layout::Direction,
     pub(crate) ratio: f32,
     pub(crate) focus: bool,
+    /// The mount this split request was actually sent to
+    /// (`App::federation_host_key_for_workspace` at mint time). A
+    /// `SplitPaneResponse`/`Failed` answering this `request_id` is only
+    /// honored if it arrives tagged with this same origin — otherwise a
+    /// second, differently-mounted host could splice a pane into this
+    /// workspace by predicting/observing the process-global `request_id`
+    /// counter.
+    pub(crate) origin: crate::remote::federation::id::HostKey,
 }
 
 fn terminal_agent_session_info(
@@ -1085,7 +1147,24 @@ mod federation_materialization_tests {
 
         assert_eq!(ws.tabs.len(), 1, "one remote tab materialized");
         let tab = &ws.tabs[0];
-        assert_eq!(tab.panes.len(), 2, "both remote panes materialized (root + split)");
+        assert_eq!(
+            tab.panes.len(),
+            2,
+            "both remote panes materialized (root + split)"
+        );
+
+        // Non-root remote panes must go through `Workspace::
+        // insert_moved_pane_into_tab` (not `Tab::insert_existing_pane`
+        // directly), so every live pane — including the split-materialized
+        // one — has a `public_pane_numbers` entry and is reachable through
+        // the public pane-id API (list/focus/close), not just internally.
+        ws.assert_invariants_for_test();
+        for pane_id in tab.panes.keys() {
+            assert!(
+                ws.public_pane_number(*pane_id).is_some(),
+                "every materialized remote pane must have a public pane number"
+            );
+        }
 
         // Every materialized pane's attached terminal is reachable in both
         // App-level maps a real pane needs (mirrors what
@@ -1104,8 +1183,9 @@ mod federation_materialization_tests {
         out_rx.close();
         let mut opened_raw_ids = Vec::new();
         while let Ok(msg) = out_rx.try_recv() {
-            if let FederationMessage::Terminal(TerminalChannelMessage::Open { terminal_id, .. }) =
-                msg
+            if let FederationMessage::Terminal(TerminalChannelMessage::Open {
+                terminal_id, ..
+            }) = msg
             {
                 opened_raw_ids.push(terminal_id);
             }
@@ -1130,5 +1210,168 @@ mod federation_materialization_tests {
 
         assert!(created.is_empty());
         assert!(app.state.workspaces.is_empty());
+    }
+
+    /// Regression for the public-pane-numbering bypass: before the fix,
+    /// `handle_federation_split_pane_ready` spliced the new pane in via
+    /// `Tab::insert_existing_pane` directly, never registering it in
+    /// `Workspace::public_pane_numbers` — so the pane existed and rendered,
+    /// but was unreachable through the public pane-id API (list/focus/
+    /// close). Routing through `Workspace::insert_moved_pane_into_tab`
+    /// fixes that; `assert_invariants_for_test` independently enforces
+    /// "every live pane has a public pane number".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn split_materialization_assigns_a_public_pane_number_to_the_new_pane() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("local")];
+        app.state.active = Some(0);
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let target_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        let request_id = 99u64;
+        app.register_pending_remote_split(
+            request_id,
+            PendingRemoteSplit {
+                workspace_id,
+                target_pane_id,
+                direction: ratatui::layout::Direction::Horizontal,
+                ratio: 0.5,
+                focus: false,
+                origin: crate::remote::federation::id::HostKey::new("remote-host", "s1"),
+            },
+        );
+
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel::<crate::events::AppEvent>(4);
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let pane_id = crate::layout::PaneId::alloc();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote(
+            pane_id,
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            terminal_id.to_string(),
+            1,
+            out_tx,
+            output_rx,
+            clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        )
+        .expect("spawn_remote must succeed for a fresh channel pair");
+        let terminal =
+            crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
+        let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+
+        app.handle_federation_split_pane_ready(crate::events::FederationSplitPaneReady {
+            request_id,
+            origin: crate::remote::federation::id::HostKey::new("remote-host", "s1"),
+            pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        let ws = &app.state.workspaces[0];
+        ws.assert_invariants_for_test();
+        assert!(
+            ws.public_pane_number(pane_id).is_some(),
+            "a split-materialized pane must get a public pane number, or it is unreachable \
+             through the public pane-id API"
+        );
+    }
+
+    /// Regression for the cross-mount response-spoofing finding: a
+    /// `SplitPaneResponse` (delivered here as `AppEvent::
+    /// FederationSplitPaneReady`) whose `request_id` matches a pending
+    /// split but whose `origin` `HostKey` does not match the mount the
+    /// request was actually sent to must be dropped — the pending entry
+    /// stays registered (so the real response can still land later) and no
+    /// pane is spliced into any workspace.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn split_pane_response_from_a_different_mount_than_the_request_is_ignored() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("local")];
+        app.state.active = Some(0);
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let target_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        let request_id = 100u64;
+        let real_origin = crate::remote::federation::id::HostKey::new("real-host", "s1");
+        app.register_pending_remote_split(
+            request_id,
+            PendingRemoteSplit {
+                workspace_id,
+                target_pane_id,
+                direction: ratatui::layout::Direction::Horizontal,
+                ratio: 0.5,
+                focus: false,
+                origin: real_origin,
+            },
+        );
+        assert!(app.pending_remote_splits.contains_key(&request_id));
+
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel::<crate::events::AppEvent>(4);
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let pane_id = crate::layout::PaneId::alloc();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote(
+            pane_id,
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            terminal_id.to_string(),
+            1,
+            out_tx,
+            output_rx,
+            clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        )
+        .expect("spawn_remote must succeed for a fresh channel pair");
+        let terminal =
+            crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
+        let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+
+        // A second, attacker/buggy mount answers with the same request_id
+        // but its own (different) origin.
+        let spoofed_origin = crate::remote::federation::id::HostKey::new("evil-host", "s1");
+        app.handle_federation_split_pane_ready(crate::events::FederationSplitPaneReady {
+            request_id,
+            origin: spoofed_origin,
+            pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        assert!(
+            app.pending_remote_splits.contains_key(&request_id),
+            "a response from the wrong origin must not consume the pending entry"
+        );
+        assert!(
+            app.state.workspaces[0].pane_state(pane_id).is_none(),
+            "a response from the wrong origin must not splice a pane into any workspace"
+        );
     }
 }

@@ -123,11 +123,17 @@ impl FirstCauseCell {
 
     /// The winning cause, if any.
     pub(crate) fn get(&self) -> Option<TunnelExit> {
-        self.cause.lock().expect("first-cause cell poisoned").clone()
+        self.cause
+            .lock()
+            .expect("first-cause cell poisoned")
+            .clone()
     }
 
     pub(crate) fn is_set(&self) -> bool {
-        self.cause.lock().expect("first-cause cell poisoned").is_some()
+        self.cause
+            .lock()
+            .expect("first-cause cell poisoned")
+            .is_some()
     }
 }
 

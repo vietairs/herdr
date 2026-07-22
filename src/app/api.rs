@@ -174,8 +174,13 @@ impl App {
         }
 
         #[cfg(unix)]
-        if let AppEvent::FederationSplitPaneFailed { request_id, reason } = ev {
-            self.handle_federation_split_pane_failed(request_id, reason);
+        if let AppEvent::FederationSplitPaneFailed {
+            request_id,
+            reason,
+            origin,
+        } = ev
+        {
+            self.handle_federation_split_pane_failed(request_id, reason, origin);
             return;
         }
 

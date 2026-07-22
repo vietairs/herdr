@@ -64,7 +64,13 @@ mod tests {
 
         let err = negotiate(&local, &remote).expect_err("version skew must be rejected");
 
-        assert_eq!(err, RejectReason::Version { local: 1, remote: 2 });
+        assert_eq!(
+            err,
+            RejectReason::Version {
+                local: 1,
+                remote: 2
+            }
+        );
     }
 
     #[test]

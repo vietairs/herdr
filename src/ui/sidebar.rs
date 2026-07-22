@@ -178,7 +178,11 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
     let (state, seen) = ws.aggregate_state(&app.terminals);
     let branch = workspace_branch_for_display(ws);
     let label = if indented {
-        grouped_child_display_label(&ws.display_name(), branch.as_deref(), ws.custom_name.is_some())
+        grouped_child_display_label(
+            &ws.display_name(),
+            branch.as_deref(),
+            ws.custom_name.is_some(),
+        )
     } else {
         ws.display_name()
     };
@@ -2029,7 +2033,10 @@ mod tests {
         let ws = Workspace::test_new("plain-local");
         assert!(federation_origin_badge(&ws).is_none());
         let label = ws.display_name();
-        assert_eq!(workspace_display_label_with_origin_badge(&ws, label.clone()), label);
+        assert_eq!(
+            workspace_display_label_with_origin_badge(&ws, label.clone()),
+            label
+        );
     }
 
     #[test]
@@ -2071,8 +2078,14 @@ mod tests {
         app.workspaces = vec![first, second];
 
         let entries = workspace_list_entries(&app);
-        assert_eq!(entries.len(), 2, "both federated workspaces render, one indented under the host group");
-        assert!(entries.iter().any(|WorkspaceListEntry::Workspace { indented, .. }| *indented));
+        assert_eq!(
+            entries.len(),
+            2,
+            "both federated workspaces render, one indented under the host group"
+        );
+        assert!(entries
+            .iter()
+            .any(|WorkspaceListEntry::Workspace { indented, .. }| *indented));
     }
 
     // Phase B test 9: sidebar grouping scales to N hosts — extends
@@ -2107,9 +2120,16 @@ mod tests {
         app.workspaces = vec![host_a, host_b];
 
         let entries = workspace_list_entries(&app);
-        assert_eq!(entries.len(), 2, "both distinct-host federated workspaces render");
+        assert_eq!(
+            entries.len(),
+            2,
+            "both distinct-host federated workspaces render"
+        );
 
-        assert_ne!(badge_a, badge_b, "distinct hosts must render distinct badges");
+        assert_ne!(
+            badge_a, badge_b,
+            "distinct hosts must render distinct badges"
+        );
         assert!(badge_a.contains("alice@10.0.0.1"));
         assert!(badge_b.contains("bob@10.0.0.2"));
     }

@@ -33,7 +33,10 @@ impl std::fmt::Display for CodecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CodecError::FrameTooLarge { claimed, max } => {
-                write!(f, "federation frame size {claimed} exceeds channel cap {max}")
+                write!(
+                    f,
+                    "federation frame size {claimed} exceeds channel cap {max}"
+                )
             }
             CodecError::Malformed(reason) => write!(f, "malformed federation frame: {reason}"),
             CodecError::VersionSkew { local, remote } => write!(
@@ -83,7 +86,11 @@ pub fn decode<M: DeserializeOwned>(buf: &[u8], max_len: usize) -> Result<(M, usi
         ));
     }
 
-    let remote_version = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+    let remote_version = u32::from_le_bytes(
+        buf[0..4]
+            .try_into()
+            .map_err(|_| CodecError::Malformed("truncated version field".to_string()))?,
+    );
     if remote_version != FEDERATION_PROTOCOL_VERSION {
         return Err(CodecError::VersionSkew {
             local: FEDERATION_PROTOCOL_VERSION,
@@ -91,7 +98,11 @@ pub fn decode<M: DeserializeOwned>(buf: &[u8], max_len: usize) -> Result<(M, usi
         });
     }
 
-    let claimed_len = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as usize;
+    let claimed_len = u32::from_le_bytes(
+        buf[4..8]
+            .try_into()
+            .map_err(|_| CodecError::Malformed("truncated length field".to_string()))?,
+    ) as usize;
     if claimed_len > max_len {
         // Header alone is enough to reject; the payload bytes are never
         // sliced or copied.
@@ -109,8 +120,7 @@ pub fn decode<M: DeserializeOwned>(buf: &[u8], max_len: usize) -> Result<(M, usi
     let payload = &buf[FRAME_HEADER_LEN..payload_end];
     // serde_json::from_slice consumes the whole payload or errors on trailing
     // non-whitespace, so an explicit trailing-bytes check is unnecessary.
-    let msg =
-        serde_json::from_slice(payload).map_err(|e| CodecError::Malformed(e.to_string()))?;
+    let msg = serde_json::from_slice(payload).map_err(|e| CodecError::Malformed(e.to_string()))?;
 
     Ok((msg, payload_end))
 }
@@ -160,7 +170,10 @@ mod tests {
                 agreed_capabilities: caps.clone(),
             }),
             FederationMessage::HandshakeResponse(HandshakeResponse::Reject {
-                reason: RejectReason::Version { local: 1, remote: 2 },
+                reason: RejectReason::Version {
+                    local: 1,
+                    remote: 2,
+                },
             }),
             FederationMessage::MountSnapshot(MountSnapshot {
                 server_instance_id: ServerInstanceId("inst-a".to_string()),

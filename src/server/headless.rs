@@ -38,12 +38,12 @@ use crate::api;
 use crate::app;
 use crate::config;
 use crate::events::AppEvent;
+#[cfg(unix)]
+use crate::ipc::remove_socket_file_if_owned_typed;
 use crate::ipc::{
     bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalListener,
     SocketFileIdentity,
 };
-#[cfg(unix)]
-use crate::ipc::remove_socket_file_if_owned_typed;
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
     MAX_GRAPHICS_FRAME_SIZE,
@@ -61,11 +61,11 @@ use crate::server::keybindings::{app_keybindings, apply_keybindings};
 use crate::server::notifications::{
     should_forward_toast_to_clients, toast_message_from_state_change, toast_notify_kind,
 };
+#[cfg(unix)]
+use crate::server::socket_paths::federation_socket_path;
 use crate::server::socket_paths::{
     client_socket_path, prepare_socket_path, restrict_socket_permissions,
 };
-#[cfg(unix)]
-use crate::server::socket_paths::federation_socket_path;
 use crate::server::terminal_attach::paste_payload_for_runtime;
 
 #[cfg(test)]
@@ -419,7 +419,11 @@ impl HeadlessServer {
             let federation_socket_identity = socket_file_identity(&federation_path)?;
             info!(path = %federation_path.display(), "federation socket listening");
             federation_listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
-            (federation_listener, federation_path, federation_socket_identity)
+            (
+                federation_listener,
+                federation_path,
+                federation_socket_identity,
+            )
         };
 
         let should_quit = Arc::new(AtomicBool::new(false));
@@ -466,8 +470,7 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
-            federation_server_instance_id:
-                crate::remote::federation::id::ServerInstanceId::fresh(),
+            federation_server_instance_id: crate::remote::federation::id::ServerInstanceId::fresh(),
             #[cfg(unix)]
             next_federation_id: 1,
             federation_lease: crate::server::federation_lease::FederationLease::new(),
@@ -4378,7 +4381,11 @@ mod tests {
             federation_listener
                 .set_nonblocking(ListenerNonblockingMode::Accept)
                 .expect("set federation listener nonblocking");
-            (federation_listener, federation_path, federation_socket_identity)
+            (
+                federation_listener,
+                federation_path,
+                federation_socket_identity,
+            )
         };
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
         #[cfg(windows)]
@@ -4425,8 +4432,7 @@ mod tests {
             // Replacement server after live-handoff mints a fresh identity so a
             // federation client fences stale traffic from the prior process
             // (P9.2b b0.1 rotation; v5 finding C4).
-            federation_server_instance_id:
-                crate::remote::federation::id::ServerInstanceId::fresh(),
+            federation_server_instance_id: crate::remote::federation::id::ServerInstanceId::fresh(),
             #[cfg(unix)]
             next_federation_id: 1,
             // Replacement server starts with a fresh, uncontrolled lease: no
@@ -8378,10 +8384,16 @@ next_tab = ""
                 .recv_timeout(Duration::from_millis(100))
                 .expect("system toast message"),
         ) {
-            ServerMessage::Notify { kind, message, body } => {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
                 assert_eq!(kind, protocol::NotifyKind::SystemToast);
                 assert!(message.contains("host1"));
-                assert!(body.as_deref().is_some_and(|body| body.contains("connection refused")));
+                assert!(body
+                    .as_deref()
+                    .is_some_and(|body| body.contains("connection refused")));
             }
             other => panic!("expected system toast notify, got {other:?}"),
         }
@@ -8420,10 +8432,16 @@ next_tab = ""
                 .recv_timeout(Duration::from_millis(100))
                 .expect("terminal toast message"),
         ) {
-            ServerMessage::Notify { kind, message, body } => {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
                 assert_eq!(kind, protocol::NotifyKind::Toast);
                 assert!(message.contains("host1"));
-                assert!(body.as_deref().is_some_and(|body| body.contains("connection refused")));
+                assert!(body
+                    .as_deref()
+                    .is_some_and(|body| body.contains("connection refused")));
             }
             other => panic!("expected terminal toast notify, got {other:?}"),
         }

@@ -364,8 +364,9 @@ impl TerminalRuntime {
     /// `PaneRuntime::remote_out_tx`); `None` for a locally-spawned pane.
     pub(crate) fn remote_out_tx(
         &self,
-    ) -> Option<tokio::sync::mpsc::UnboundedSender<crate::remote::federation::protocol::FederationMessage>>
-    {
+    ) -> Option<
+        tokio::sync::mpsc::UnboundedSender<crate::remote::federation::protocol::FederationMessage>,
+    > {
         self.0.remote_out_tx()
     }
 
