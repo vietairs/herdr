@@ -153,6 +153,11 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
     [
         Capability::new(Capability::SCROLLBACK_REPLAY),
         Capability::new(Capability::AGENT_STATUS),
+        // Advertised unconditionally on the mounting side: this side only
+        // sends bytes and reads back a path, it touches no filesystem, so it
+        // has nothing to gate on the local platform. Whether a stage request
+        // is ever sent is decided by what the *host* also advertised.
+        Capability::new(Capability::FILE_STAGING),
     ]
     .into_iter()
     .collect()

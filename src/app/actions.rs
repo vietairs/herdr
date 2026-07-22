@@ -2839,6 +2839,16 @@ impl AppState {
             AppEvent::FederationResyncPaneCreated(_) => Vec::new(),
             #[cfg(unix)]
             AppEvent::FederationResyncPaneRemoved { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationClipboardStageReady { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationClipboardStageFailed { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationClipboardStageTimedOut { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationClipboardStageStillRunning { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::RemoteClipboardImageCaptured { .. } => Vec::new(),
         }
     }
 

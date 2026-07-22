@@ -359,7 +359,7 @@
           "key": "keys.remote_image_paste",
           "type": "string",
           "default": "\"ctrl+v\"",
-          "description": "Local-client shortcut that sends a clipboard image to a remote Herdr session."
+          "description": "Shortcut that saves a clipboard image on the remote host and pastes the path it was written to. Applies to panes of a mounted remote workspace and to `herdr --remote` sessions; local panes keep the key. Empty disables it."
         },
         {
           "key": "keys.new_tab",

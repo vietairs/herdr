@@ -48,6 +48,18 @@ impl Capability {
     pub const CLIPBOARD: &'static str = "clipboard";
     pub const SCROLLBACK_REPLAY: &'static str = "scrollback_replay";
     pub const AGENT_STATUS: &'static str = "agent_status";
+    /// Gates the stage-then-inject file RPC (`ClipboardStageRequest` /
+    /// `ClipboardStageResponse`): the mounting client ships bytes over the
+    /// tunnel, the serving host writes them into its own staging directory
+    /// and answers with the remote path.
+    ///
+    /// Deliberately NOT `CLIPBOARD`. That const names a surface (an
+    /// OSC-52-style clipboard mirror) and has no call site; this one names an
+    /// operation, and both peers must advertise it before either side emits a
+    /// stage frame. A peer that never advertises it must degrade to a local
+    /// failure notice, never a torn-down mount.
+    ///
+    pub const FILE_STAGING: &'static str = "file_staging";
 
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
@@ -295,6 +307,85 @@ pub enum SplitPaneResponse {
     },
 }
 
+/// Request from a mounting client to write a file into the serving host's own
+/// staging directory, so a paste performed against a mirrored remote pane
+/// produces a path that resolves on the *remote* host rather than locally.
+/// `request_id` correlates the eventual `ClipboardStageResponse`, mirroring
+/// `SplitPaneRequest`'s bare-u64 pairing rather than introducing an RPC
+/// framework.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardStageRequest {
+    pub request_id: u64,
+    /// The file's bytes, base64-encoded.
+    ///
+    /// Base64 rather than `Vec<u8>` because this protocol's codec is
+    /// `serde_json` (see `codec::encode`), where a byte vector serialises as
+    /// a JSON array of decimal numbers — roughly 4x inflation, which would put
+    /// a max-size image far past any sane channel cap. Base64 costs 1.34x.
+    pub payload_base64: String,
+    /// The sender's proposed file name. **Wholly untrusted peer input**: it is
+    /// neither a path nor a validated name at this layer, and the receiving
+    /// host must run it through the staging module's sanitisation contract
+    /// before it reaches the filesystem. The extension is re-derived from the
+    /// sanitised name; there is deliberately no separate extension field,
+    /// because a second, independently attacker-controlled source of the same
+    /// fact can disagree with the first.
+    pub original_filename: String,
+}
+
+/// Why a `ClipboardStageRequest` could not be staged.
+///
+/// A closed enum with no free-form string: a remote-supplied message would be
+/// one more untrusted value to sanitise before display, so the user-facing
+/// copy is chosen locally from the variant instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardStageFailure {
+    /// The proposed file name failed the receiving host's sanitisation
+    /// contract (traversal, absolute path, control bytes, over-length, ...).
+    InvalidFilename,
+    /// The sanitised name's extension is not on the receiving host's
+    /// allowlist.
+    UnsupportedExtension,
+    /// `payload_base64` was frame-legal but is not decodable base64. Decided
+    /// before any filesystem access, so a malformed payload can never be
+    /// misreported as a disk failure and can never leave a partial file.
+    InvalidPayload,
+    /// The decoded payload exceeds the receiving host's per-file limit.
+    PayloadTooLarge,
+    /// Writing this file would push the staging directory past its total-bytes
+    /// quota.
+    QuotaExceeded,
+    /// The receiving host has no staging root this contract can use: not
+    /// absolute, not losslessly UTF-8, or containing a byte outside the shared
+    /// path allowlist. Decided before any write, so the host never creates a
+    /// file whose path the client would then have to reject.
+    StagingUnavailable,
+    /// The receiving host is already staging its maximum number of concurrent
+    /// requests on this connection. Transient backpressure, distinct from
+    /// `WriteFailed` so the user is not told a retryable queue limit was a
+    /// disk failure.
+    Busy,
+    /// The write itself failed (permissions, disk full, ...). The receiving
+    /// host removes any partially written file before answering.
+    WriteFailed,
+}
+
+/// Answer to a `ClipboardStageRequest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipboardStageResponse {
+    Staged {
+        request_id: u64,
+        /// Absolute path of the staged file **on the serving host**. Still
+        /// untrusted from the client's perspective: it is about to be injected
+        /// into a PTY, so the client re-validates it before use.
+        path: String,
+    },
+    Failed {
+        request_id: u64,
+        failure: ClipboardStageFailure,
+    },
+}
+
 /// Request from the mounting client for a fresh full `MountSnapshot`,
 /// carried in-band on the same tunnel rather than requiring a whole new
 /// connection. Sent when the client observes a structural `EventFrame`
@@ -308,8 +399,8 @@ pub enum SplitPaneResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotRequest;
 
-/// The six federation channel classes, used to select a per-channel frame
-/// cap in the codec.
+/// The federation channel classes, used to select a per-channel frame cap in
+/// the codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
     Handshake,
@@ -322,9 +413,27 @@ pub enum Channel {
     /// Kept tiny so a fault can never be mistaken for a bulk channel and its
     /// cap is trivially met.
     Control,
+    /// Stage-then-inject file transfer. Its own class rather than a reuse of
+    /// `Clipboard`: a different flow with a different cap, and `Control` is
+    /// several orders of magnitude too small.
+    FileStaging,
 }
 
 impl Channel {
+    /// Every channel class. A new enum arm must be added here too, or
+    /// `largest_max_len` will not see its cap; the channel-cap test names this
+    /// list as the place to update.
+    pub const ALL: [Channel; 8] = [
+        Channel::Handshake,
+        Channel::Mount,
+        Channel::Event,
+        Channel::Terminal,
+        Channel::AgentStatus,
+        Channel::Clipboard,
+        Channel::Control,
+        Channel::FileStaging,
+    ];
+
     /// Maximum payload length (bytes, post-header) accepted on this channel.
     /// Mirrors the spirit of `crate::protocol::wire::MAX_FRAME_SIZE` /
     /// `MAX_GRAPHICS_FRAME_SIZE` / `MAX_CLIPBOARD_IMAGE_PAYLOAD`, but these
@@ -338,7 +447,34 @@ impl Channel {
             Channel::AgentStatus => 64 * 1024,
             Channel::Clipboard => 16 * 1024 * 1024,
             Channel::Control => 4 * 1024,
+            // Derived from the 16 MiB per-image limit: base64 costs 1.34x
+            // (~21.4 MiB), and the rest is headroom for the file name and the
+            // JSON envelope around it.
+            Channel::FileStaging => 24 * 1024 * 1024,
         }
+    }
+
+    /// The largest `max_len()` across every channel.
+    ///
+    /// The tunnel readers must bound a frame before its true channel is known,
+    /// so they need one ceiling that no channel can exceed. Hardcoding a
+    /// particular channel's cap there silently rejects every frame on any
+    /// channel that later grows past it.
+    ///
+    /// Written as an explicit `if` ladder because `Ord::max` /
+    /// `core::cmp::max` are not `const` on stable and the sibling `max_len` is
+    /// a `const fn`.
+    pub const fn largest_max_len() -> usize {
+        let mut largest = 0usize;
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            let candidate = Self::ALL[i].max_len();
+            if candidate > largest {
+                largest = candidate;
+            }
+            i += 1;
+        }
+        largest
     }
 }
 
@@ -361,6 +497,8 @@ pub enum FederationMessage {
     /// receiver diffs it into the mirror via `RemoteMirror::reconcile_by_diff`
     /// rather than replacing it wholesale (S6.2).
     SnapshotResponse(MountSnapshot),
+    ClipboardStageRequest(ClipboardStageRequest),
+    ClipboardStageResponse(ClipboardStageResponse),
 }
 
 impl FederationMessage {
@@ -379,6 +517,12 @@ impl FederationMessage {
             // Carries a full `SessionSnapshot`, same payload shape/size as
             // the mount handshake's `MountSnapshot` — reuse its channel cap.
             Self::SnapshotResponse(_) => Channel::Mount,
+            // Both directions share the channel: the request carries the bulk
+            // payload, and pairing the response with it keeps the correlated
+            // exchange under one cap.
+            Self::ClipboardStageRequest(_) | Self::ClipboardStageResponse(_) => {
+                Channel::FileStaging
+            }
         }
     }
 }
@@ -466,6 +610,198 @@ mod tests {
             codec::decode::<FederationMessage>(&encoded, Channel::Mount.max_len())
                 .expect("decode must succeed");
         assert_eq!(decoded, response);
+    }
+
+    fn stage_request(payload_base64: String) -> FederationMessage {
+        FederationMessage::ClipboardStageRequest(ClipboardStageRequest {
+            request_id: 11,
+            payload_base64,
+            original_filename: "image.png".to_string(),
+        })
+    }
+
+    // The stage-then-inject RPC round-trips on its own channel, exactly like
+    // every other `FederationMessage` variant.
+    #[test]
+    fn clipboard_stage_request_response_roundtrip_through_the_wire_codec() {
+        let request = stage_request("aGVsbG8=".to_string());
+        assert_eq!(request.channel(), Channel::FileStaging);
+        let encoded = codec::encode(&request).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::FileStaging.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, request);
+
+        let staged = FederationMessage::ClipboardStageResponse(ClipboardStageResponse::Staged {
+            request_id: 11,
+            path: "/tmp/herdr/federation-clipboard-abc/image.png".to_string(),
+        });
+        assert_eq!(staged.channel(), Channel::FileStaging);
+        let encoded = codec::encode(&staged).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::FileStaging.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, staged);
+
+        // Every failure variant must survive the codec: the client picks its
+        // toast copy from the variant, so an undecodable one is a silent
+        // failure at the UI.
+        for failure in [
+            ClipboardStageFailure::InvalidFilename,
+            ClipboardStageFailure::UnsupportedExtension,
+            ClipboardStageFailure::InvalidPayload,
+            ClipboardStageFailure::PayloadTooLarge,
+            ClipboardStageFailure::QuotaExceeded,
+            ClipboardStageFailure::StagingUnavailable,
+            ClipboardStageFailure::Busy,
+            ClipboardStageFailure::WriteFailed,
+        ] {
+            let failed =
+                FederationMessage::ClipboardStageResponse(ClipboardStageResponse::Failed {
+                    request_id: 11,
+                    failure,
+                });
+            assert_eq!(failed.channel(), Channel::FileStaging);
+            let encoded = codec::encode(&failed).expect("encode must succeed");
+            let (decoded, _consumed) =
+                codec::decode::<FederationMessage>(&encoded, Channel::FileStaging.max_len())
+                    .expect("decode must succeed");
+            assert_eq!(decoded, failed);
+        }
+    }
+
+    // Transient backpressure must not be reportable as a disk failure: the
+    // two outcomes are distinct values, not aliases.
+    #[test]
+    fn clipboard_stage_busy_is_distinct_from_write_failed() {
+        assert_ne!(
+            ClipboardStageFailure::Busy,
+            ClipboardStageFailure::WriteFailed
+        );
+    }
+
+    #[test]
+    fn clipboard_stage_request_response_respect_their_channel_caps() {
+        let cap = Channel::FileStaging.max_len();
+
+        let just_under = stage_request("A".repeat(cap - 1024));
+        let encoded = codec::encode(&just_under).expect("encode must succeed");
+        assert!(
+            encoded.len() - 8 <= cap,
+            "a payload sized just under the cap must produce a frame within it"
+        );
+        let (decoded, _consumed) = codec::decode::<FederationMessage>(&encoded, cap)
+            .expect("a frame within the cap must decode");
+        assert_eq!(decoded, just_under);
+
+        let oversized = stage_request("A".repeat(cap + 1));
+        let encoded = codec::encode(&oversized).expect("encode must succeed");
+        let err = codec::decode::<FederationMessage>(&encoded, cap)
+            .expect_err("a frame past the cap must be rejected from the header alone");
+        assert!(
+            matches!(err, codec::CodecError::FrameTooLarge { .. }),
+            "expected FrameTooLarge, got {err:?}"
+        );
+    }
+
+    // The `file_staging` capability follows the same additive-evolution rule
+    // as every other capability: one-sided advertisement is dropped from the
+    // agreed set, never fatal to the handshake.
+    #[test]
+    fn clipboard_stage_capability_absent_on_one_side_is_dropped_not_fatal() {
+        let with = Handshake {
+            federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+            capabilities: [
+                Capability::new(Capability::AGENT_STATUS),
+                Capability::new(Capability::FILE_STAGING),
+            ]
+            .into(),
+            server_instance_id: ServerInstanceId("inst-a".to_string()),
+        };
+        let without = Handshake {
+            federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+            capabilities: [Capability::new(Capability::AGENT_STATUS)].into(),
+            server_instance_id: ServerInstanceId("inst-b".to_string()),
+        };
+
+        let agreed = negotiate::negotiate(&with, &without)
+            .expect("a one-sided capability must not reject the handshake");
+        assert!(!agreed
+            .0
+            .contains(&Capability::new(Capability::FILE_STAGING)));
+        assert!(agreed
+            .0
+            .contains(&Capability::new(Capability::AGENT_STATUS)));
+
+        // Symmetric: the same holds when the older peer is the local side.
+        let agreed = negotiate::negotiate(&without, &with)
+            .expect("a one-sided capability must not reject the handshake");
+        assert!(!agreed
+            .0
+            .contains(&Capability::new(Capability::FILE_STAGING)));
+    }
+
+    #[test]
+    fn clipboard_stage_capability_present_both_sides_is_agreed() {
+        let peer = |id: &str| Handshake {
+            federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+            capabilities: [Capability::new(Capability::FILE_STAGING)].into(),
+            server_instance_id: ServerInstanceId(id.to_string()),
+        };
+
+        let agreed =
+            negotiate::negotiate(&peer("inst-a"), &peer("inst-b")).expect("versions match");
+        assert!(agreed
+            .0
+            .contains(&Capability::new(Capability::FILE_STAGING)));
+    }
+
+    // `serve::global_max_frame` / `federation_accept::global_max_frame` read a
+    // single "largest cap" before a frame's true channel is known. This is the
+    // guard that keeps that helper honest when a future arm grows.
+    #[test]
+    fn file_staging_channel_cap_is_the_largest_channel_cap() {
+        let all = [
+            Channel::Handshake,
+            Channel::Mount,
+            Channel::Event,
+            Channel::Terminal,
+            Channel::AgentStatus,
+            Channel::Clipboard,
+            Channel::Control,
+            Channel::FileStaging,
+        ];
+        for channel in all {
+            assert!(
+                channel.max_len() <= Channel::largest_max_len(),
+                "{channel:?} cap exceeds largest_max_len()"
+            );
+        }
+        assert_eq!(Channel::largest_max_len(), Channel::FileStaging.max_len());
+    }
+
+    // The payload is base64 rather than `Vec<u8>` because the codec is
+    // serde_json, where a byte vector serialises as a JSON array of decimal
+    // numbers (~4x inflation). A max-size image must fit the channel cap.
+    #[test]
+    fn a_base64_encoded_max_size_image_fits_the_file_staging_cap() {
+        use base64::Engine;
+
+        const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+        let payload_base64 =
+            base64::engine::general_purpose::STANDARD.encode(vec![0xABu8; MAX_IMAGE_BYTES]);
+
+        let request = FederationMessage::ClipboardStageRequest(ClipboardStageRequest {
+            request_id: u64::MAX,
+            payload_base64,
+            original_filename: "i".repeat(255),
+        });
+        let encoded = codec::encode(&request).expect("encode must succeed");
+
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::FileStaging.max_len())
+                .expect("a max-size image must fit the FileStaging cap");
+        assert_eq!(decoded, request);
     }
 
     #[test]

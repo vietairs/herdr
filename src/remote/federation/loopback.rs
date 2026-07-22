@@ -50,9 +50,16 @@ impl FixtureHost {
     pub(crate) fn new() -> Self {
         Self {
             server_instance_id: ServerInstanceId(format!("fixture-{}", uuid_like())),
-            capabilities: [Capability::new(Capability::SCROLLBACK_REPLAY)]
-                .into_iter()
-                .collect(),
+            capabilities: [
+                Capability::new(Capability::SCROLLBACK_REPLAY),
+                // The staging module is Unix-only, so a Windows fixture host
+                // must not advertise a capability it could not honour; there
+                // it falls into the same drop path an older peer would.
+                #[cfg(unix)]
+                Capability::new(Capability::FILE_STAGING),
+            ]
+            .into_iter()
+            .collect(),
             event_hub: EventHub::default(),
             terminals: Mutex::new(HashMap::new()),
             agent_statuses: Mutex::new(HashMap::new()),
@@ -687,6 +694,249 @@ mod tests {
             )
         ));
 
+        drop(writer);
+        drop(reader);
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+    }
+
+    // ---- file staging -------------------------------------------------
+
+    /// `connect_and_mount` with the client's advertised capability set under
+    /// the test's control, so both sides of the staging gate are reachable.
+    #[cfg(unix)]
+    async fn connect_and_mount_advertising(
+        host: Arc<FixtureHost>,
+        caps: &[&str],
+    ) -> (
+        tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+        std::collections::BTreeSet<Capability>,
+    ) {
+        let (client, server_handle) = LoopbackFederationServer::spawn(host);
+        let (mut reader, mut writer) = tokio::io::split(client);
+        serve::write_frame(&mut writer, &FederationMessage::Handshake(handshake(caps)))
+            .await
+            .expect("handshake written");
+        let Some(FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+            agreed_capabilities,
+        })) = serve::read_frame(&mut reader).await.expect("accept read")
+        else {
+            panic!("expected HandshakeResponse::Accept");
+        };
+        let Some(FederationMessage::MountSnapshot(_)) =
+            serve::read_frame(&mut reader).await.expect("mount read")
+        else {
+            panic!("expected MountSnapshot");
+        };
+        (reader, writer, server_handle, agreed_capabilities)
+    }
+
+    #[cfg(unix)]
+    fn stage_request_frame(request_id: u64, name: &str, bytes: &[u8]) -> FederationMessage {
+        use base64::Engine as _;
+        FederationMessage::ClipboardStageRequest(
+            crate::remote::federation::protocol::ClipboardStageRequest {
+                request_id,
+                payload_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                original_filename: name.to_string(),
+            },
+        )
+    }
+
+    /// The whole exchange over a real server: negotiated capability, framed
+    /// request, the actual staging module, and a path that resolves on the
+    /// serving host's own filesystem.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clipboard_stage_request_end_to_end_through_loopback_server() {
+        const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nfake image payload";
+
+        let host = Arc::new(FixtureHost::new());
+        let (mut reader, mut writer, server_handle, agreed) = connect_and_mount_advertising(
+            host,
+            &[Capability::SCROLLBACK_REPLAY, Capability::FILE_STAGING],
+        )
+        .await;
+        assert!(
+            agreed.contains(&Capability::new(Capability::FILE_STAGING)),
+            "both sides advertised file staging, so it must be agreed"
+        );
+
+        serve::write_frame(
+            &mut writer,
+            &stage_request_frame(1, "diagram.png", PNG_BYTES),
+        )
+        .await
+        .expect("stage request written");
+
+        let path = loop {
+            match serve::read_frame(&mut reader).await.expect("frame read") {
+                Some(FederationMessage::ClipboardStageResponse(
+                    crate::remote::federation::protocol::ClipboardStageResponse::Staged {
+                        request_id,
+                        path,
+                    },
+                )) => {
+                    assert_eq!(request_id, 1);
+                    break path;
+                }
+                Some(FederationMessage::ClipboardStageResponse(other)) => {
+                    panic!("staging failed: {other:?}")
+                }
+                Some(_) => continue,
+                None => panic!("the link ended before the stage response arrived"),
+            }
+        };
+
+        let staged = std::path::PathBuf::from(&path);
+        assert!(staged.is_absolute(), "{path}");
+        let name = staged
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("staged name");
+        assert!(
+            name.starts_with(super::super::file_staging::FEDERATION_CLIPBOARD_PREFIX),
+            "{name}"
+        );
+        assert!(name.ends_with("-diagram.png"), "{name}");
+        assert_eq!(
+            std::fs::read(&staged).expect("the staged file is readable"),
+            PNG_BYTES
+        );
+        std::fs::remove_file(&staged).expect("clean up the staged file");
+
+        drop(writer);
+        drop(reader);
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+    }
+
+    /// The serving gate, proven against a real server rather than a unit
+    /// seam: a client that never advertised the capability gets no stage
+    /// frame at all — not even a failure — because one undecodable variant
+    /// would end its whole mount.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_client_that_never_advertised_file_staging_receives_no_stage_frame() {
+        let host = Arc::new(FixtureHost::new());
+        let (mut reader, mut writer, server_handle, agreed) =
+            connect_and_mount_advertising(host, &[Capability::SCROLLBACK_REPLAY]).await;
+        assert!(!agreed.contains(&Capability::new(Capability::FILE_STAGING)));
+
+        serve::write_frame(
+            &mut writer,
+            &stage_request_frame(1, "diagram.png", b"payload"),
+        )
+        .await
+        .expect("stage request written");
+
+        // The link must stay up and simply say nothing about staging.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(400);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, serve::read_frame(&mut reader)).await {
+                Ok(Ok(Some(FederationMessage::ClipboardStageResponse(response)))) => {
+                    panic!("an ungated host answered a stage request: {response:?}")
+                }
+                Ok(Ok(Some(_))) => continue,
+                Ok(Ok(None)) => panic!("the mount was torn down by an unnegotiated request"),
+                Ok(Err(err)) => panic!("the link failed: {err}"),
+                Err(_) => break,
+            }
+        }
+
+        drop(writer);
+        drop(reader);
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+    }
+
+    /// Documents accepted behaviour, does not fix it: the reader takes one
+    /// whole frame at a time, so a large paste delays every other frame on
+    /// that mount until the transfer finishes. The guarantee asserted here is
+    /// only that delivery resumes — the stall itself is the known cost of
+    /// shipping a payload unchunked.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_large_clipboard_frame_does_not_starve_terminal_output_delivery_forever() {
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let host = Arc::new(FixtureHost::new().with_terminal("term_1", runtime, Vec::new()));
+        let (mut reader, mut writer, server_handle, _agreed) = connect_and_mount_advertising(
+            host.clone(),
+            &[Capability::SCROLLBACK_REPLAY, Capability::FILE_STAGING],
+        )
+        .await;
+
+        serve::write_frame(
+            &mut writer,
+            &FederationMessage::Terminal(TerminalChannelMessage::Open {
+                terminal_id: "term_1".to_string(),
+                mount_generation: 1,
+                replay: ScrollbackReplay { bytes: Vec::new() },
+            }),
+        )
+        .await
+        .expect("open written");
+        let Some(FederationMessage::Terminal(TerminalChannelMessage::Open { .. })) =
+            serve::read_frame(&mut reader).await.expect("open ack")
+        else {
+            panic!("expected the server's Open acknowledgement");
+        };
+
+        // Sized to span several socket reads without approaching the image
+        // cap; the loopback duplex buffer is 1 MiB.
+        let payload = vec![0x41u8; 512 * 1024];
+        let large = stage_request_frame(9, "big.png", &payload);
+        let writer_task = tokio::spawn(async move {
+            serve::write_frame(&mut writer, &large)
+                .await
+                .expect("large stage request written");
+            writer
+        });
+
+        host.terminals
+            .lock()
+            .expect("fixture terminals")
+            .get("term_1")
+            .expect("term_1 exists")
+            .runtime
+            .test_process_pty_bytes_and_tee(b"output behind the big frame");
+
+        let mut staged_path = None;
+        let mut saw_output = false;
+        while staged_path.is_none() || !saw_output {
+            match tokio::time::timeout(Duration::from_secs(10), serve::read_frame(&mut reader))
+                .await
+                .expect("delivery resumed after the large frame")
+                .expect("frame read")
+            {
+                Some(FederationMessage::Terminal(TerminalChannelMessage::Output {
+                    bytes, ..
+                })) => {
+                    if bytes == b"output behind the big frame" {
+                        saw_output = true;
+                    }
+                }
+                Some(FederationMessage::ClipboardStageResponse(
+                    crate::remote::federation::protocol::ClipboardStageResponse::Staged {
+                        path,
+                        ..
+                    },
+                )) => staged_path = Some(path),
+                Some(FederationMessage::ClipboardStageResponse(other)) => {
+                    panic!("the large stage failed: {other:?}")
+                }
+                Some(_) => continue,
+                None => panic!("the link ended before both frames arrived"),
+            }
+        }
+
+        let staged = staged_path.expect("the large payload staged");
+        std::fs::remove_file(&staged).expect("clean up the staged file");
+
+        let writer = writer_task.await.expect("writer task");
         drop(writer);
         drop(reader);
         let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;

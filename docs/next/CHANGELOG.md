@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Pasting a clipboard image while a mounted remote workspace's pane is focused now saves the image on the remote host and pastes the path it was written to, so an agent running there can open it. The binding is `keys.remote_image_paste` (default `ctrl+v`), it applies only to remote panes, and an empty value disables it.
+
 ## [0.7.5] - 2026-07-21
 
 ### Breaking Changes

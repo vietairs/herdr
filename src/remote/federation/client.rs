@@ -37,10 +37,14 @@ use crate::pane::RelayedAgentStatus;
 
 use super::id::{HostKey, Mount, ServerInstanceId};
 use super::protocol::{
-    Capability, ClipboardMessage, FaultReason, FederationMessage, Handshake, HandshakeResponse,
-    MountSnapshot, RejectReason, ScrollbackReplay, TerminalChannelMessage,
+    Capability, ClipboardMessage, ClipboardStageRequest, FaultReason, FederationMessage, Handshake,
+    HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, TerminalChannelMessage,
     FEDERATION_PROTOCOL_VERSION,
 };
+// Only the stage-response arm names this type, and that arm is Unix-only
+// because the events it raises are.
+#[cfg(unix)]
+use super::protocol::ClipboardStageResponse;
 use super::reducer::{ReducerAction, RemoteMirror};
 use super::serve::{read_frame, write_frame};
 
@@ -90,6 +94,70 @@ impl From<std::io::Error> for MountError {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err)
     }
+}
+
+/// Identifies ONE successful mount attempt, locally and monotonically.
+///
+/// Neither value already on the wire can do this job. `mount_generation` is a
+/// compile-time constant on both hosts (always 1), so it is identical for
+/// every mount to a given remote. `server_instance_id` is minted once per
+/// remote *server process*, so a remount to a still-running remote reuses it.
+/// Either one therefore matches a superseded connection just as well as the
+/// live one, which is exactly the case a fence has to tell apart. This
+/// counter is minted here, on this host, once per successful
+/// `connect_and_mount`, so a stale answer from a replaced connection carries
+/// an epoch the live mount no longer holds.
+///
+/// Deliberately not `#[cfg(unix)]`: it is stored on `RemoteMirror` and passed
+/// through `app/api.rs`, both of which compile on every target. Only the
+/// `AppEvent` variants carrying it are Unix-gated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MountConnectionEpoch(u64);
+
+/// Process-global source of [`MountConnectionEpoch`] values. Starts at 1 so
+/// [`MountConnectionEpoch::UNMOUNTED`] can never collide with a real mount.
+static NEXT_MOUNT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+impl MountConnectionEpoch {
+    /// The epoch a mirror carries before any connection has been mounted
+    /// behind it. Never minted, so it never equals a live mount's epoch.
+    pub(crate) const UNMOUNTED: Self = Self(0);
+
+    /// Mints the next epoch. Called exactly once per successful mount.
+    pub(crate) fn mint() -> Self {
+        Self(NEXT_MOUNT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Why a gated stage request was not put on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StageSendError {
+    /// This mount's peer never advertised `file_staging`, so it has no
+    /// decoder for either stage frame.
+    CapabilityNotAgreed,
+    /// The mount's writer is gone; the link is already tearing down.
+    LinkClosed,
+}
+
+/// The ONE place a `ClipboardStageRequest` may reach the wire.
+///
+/// An ungated send is fatal, not merely useless: `FederationMessage` is an
+/// externally-tagged enum, so a peer built before this variant existed fails
+/// to decode the frame, its `read_frame` returns `Err`, and its whole mount
+/// tears down — every pane on that link dies because of one paste. Routing
+/// every send through this helper makes "the capability was agreed" a
+/// precondition the caller cannot forget.
+pub(crate) fn send_clipboard_stage_request(
+    mirror: &RemoteMirror,
+    out_tx: &mpsc::UnboundedSender<FederationMessage>,
+    request: ClipboardStageRequest,
+) -> Result<(), StageSendError> {
+    if !mirror.supports(&Capability::new(Capability::FILE_STAGING)) {
+        return Err(StageSendError::CapabilityNotAgreed);
+    }
+    out_tx
+        .send(FederationMessage::ClipboardStageRequest(request))
+        .map_err(|_| StageSendError::LinkClosed)
 }
 
 /// Successful outcome of `connect_and_mount`: a live [`RemoteMirror`]
@@ -212,6 +280,13 @@ impl FederationClient {
             mount_generation: generation,
         };
         let mut mirror = RemoteMirror::new(mount);
+        // Both travel with the mirror from here on: the mirror is what the
+        // caller hands to `App` and what moves into the drive task, so every
+        // later send site can gate on the agreed set and every event the
+        // drive task emits can carry this connection's own epoch without any
+        // further plumbing.
+        mirror.set_agreed_capabilities(agreed_capabilities.clone());
+        mirror.set_connection_epoch(MountConnectionEpoch::mint());
         mirror.apply_snapshot(&snapshot, cursor);
 
         Ok(MountedConnection {
@@ -726,6 +801,56 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                     }
                 }
             },
+            // Stage requests are client->server only; a host that sends one
+            // is misbehaving. Drop it and keep the link up — an unexpected
+            // optional-feature frame is never worth tearing a mount down for.
+            FederationMessage::ClipboardStageRequest(_) => {
+                tracing::debug!("federation client received a ClipboardStageRequest; ignoring");
+            }
+            // The remote already wrote (or refused to write) the file by the
+            // time this arrives. Hand the outcome to `App`, which owns the
+            // pending-request map and the pane the path is injected into.
+            // The path is NOT validated here: rejecting it belongs at the
+            // injection boundary, where the decision can be tested against
+            // the pane it would actually reach.
+            // The events this arm raises exist only on Unix (staging itself
+            // is), and no host that can stage is reachable from a target that
+            // cannot, so elsewhere the frame is simply dropped.
+            #[cfg(not(unix))]
+            FederationMessage::ClipboardStageResponse(_) => {
+                tracing::debug!("received a ClipboardStageResponse on a host without staging");
+            }
+            #[cfg(unix)]
+            FederationMessage::ClipboardStageResponse(response) => {
+                let Some(ctx) = split_materialization else {
+                    tracing::info!("remote staged a file; no live session to inject it into");
+                    continue;
+                };
+                let connection_epoch = mirror.connection_epoch();
+                let event = match response {
+                    ClipboardStageResponse::Staged { request_id, path } => {
+                        crate::events::AppEvent::FederationClipboardStageReady {
+                            request_id,
+                            remote_path: path,
+                            origin: ctx.origin.clone(),
+                            connection_epoch,
+                        }
+                    }
+                    ClipboardStageResponse::Failed {
+                        request_id,
+                        failure,
+                    } => {
+                        tracing::warn!(request_id, ?failure, "remote file staging failed");
+                        crate::events::AppEvent::FederationClipboardStageFailed {
+                            request_id,
+                            failure,
+                            origin: ctx.origin.clone(),
+                            connection_epoch,
+                        }
+                    }
+                };
+                let _ = ctx.events.send(event).await;
+            }
         }
     }
 }
@@ -2396,5 +2521,260 @@ mod tests {
             drive_outcome_ended_reason(&Ok(DriveOutcome::ResyncRequired)),
             None
         );
+    }
+
+    fn file_staging_cap() -> Capability {
+        Capability::new(Capability::FILE_STAGING)
+    }
+
+    fn stage_request() -> ClipboardStageRequest {
+        ClipboardStageRequest {
+            request_id: 7,
+            payload_base64: "aGVsbG8=".to_string(),
+            original_filename: "image.png".to_string(),
+        }
+    }
+
+    /// The mounting half of the capability gate. A peer built before this
+    /// variant existed cannot decode the frame, so its `read_frame` fails and
+    /// its whole mount tears down — one paste killing every pane on the link.
+    #[test]
+    fn stage_request_is_not_sent_when_capability_not_agreed() {
+        let mut mirror = RemoteMirror::new(Mount {
+            host_key: host_key(),
+            server_instance_id: ServerInstanceId("s1".to_string()),
+            mount_generation: 1,
+        });
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+
+        assert_eq!(
+            send_clipboard_stage_request(&mirror, &out_tx, stage_request()),
+            Err(StageSendError::CapabilityNotAgreed)
+        );
+        assert!(
+            out_rx.try_recv().is_err(),
+            "a refused send must not put anything on the wire"
+        );
+
+        // Positive control: the identical call on a mirror whose handshake did
+        // agree the capability does reach the wire, so this is a gate and not
+        // a helper that never sends.
+        mirror.set_agreed_capabilities([file_staging_cap()].into_iter().collect());
+        send_clipboard_stage_request(&mirror, &out_tx, stage_request())
+            .expect("an agreed capability sends");
+        assert!(matches!(
+            out_rx.try_recv(),
+            Ok(FederationMessage::ClipboardStageRequest(_))
+        ));
+    }
+
+    /// What the handshake negotiated has to reach every send site, and the
+    /// mirror is what reaches them; a peer that agrees to nothing optional
+    /// must still mount.
+    #[tokio::test]
+    async fn agreed_capabilities_survive_the_mount_into_the_mirror() {
+        for advertised in [true, false] {
+            let (client_side, server_side) = tokio::io::duplex(1 << 16);
+            let (client_reader, client_writer) = tokio::io::split(client_side);
+            let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+            let fake_server = tokio::spawn(async move {
+                let Some(FederationMessage::Handshake(_)) = read_frame(&mut server_reader)
+                    .await
+                    .expect("handshake read")
+                else {
+                    panic!("expected a Handshake");
+                };
+                let agreed_capabilities: BTreeSet<Capability> = if advertised {
+                    [Capability::new(Capability::FILE_STAGING)]
+                        .into_iter()
+                        .collect()
+                } else {
+                    BTreeSet::new()
+                };
+                write_frame(
+                    &mut server_writer,
+                    &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                        agreed_capabilities,
+                    }),
+                )
+                .await
+                .expect("accept written");
+                write_frame(
+                    &mut server_writer,
+                    &FederationMessage::MountSnapshot(MountSnapshot {
+                        server_instance_id: ServerInstanceId("fake-server".to_string()),
+                        snapshot: crate::remote::federation::serve::empty_snapshot(),
+                        cursor: crate::remote::federation::protocol::EventCursor(0),
+                    }),
+                )
+                .await
+                .expect("snapshot written");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            });
+
+            let client = FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new());
+            let mounted = client
+                .connect_and_mount(client_reader, client_writer)
+                .await
+                .expect("the mount succeeds whether or not the capability was agreed");
+            assert_eq!(
+                mounted.mirror.supports(&file_staging_cap()),
+                advertised,
+                "the mirror must report exactly what was negotiated"
+            );
+            assert_ne!(
+                mounted.mirror.connection_epoch(),
+                MountConnectionEpoch::UNMOUNTED,
+                "a successful mount mints its own connection epoch"
+            );
+            let _ = fake_server.await;
+        }
+    }
+
+    /// A stage answer has to name both the mount it came from and the
+    /// connection that produced it: a delayed answer from a connection a
+    /// remount has already replaced must be distinguishable from a live one.
+    #[tokio::test]
+    async fn clipboard_stage_response_emits_an_app_event_carrying_origin_and_connection_epoch() {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+        let fake_server = tokio::spawn(async move {
+            let Some(FederationMessage::Handshake(_)) = read_frame(&mut server_reader)
+                .await
+                .expect("handshake read")
+            else {
+                panic!("expected a Handshake");
+            };
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                    agreed_capabilities: [Capability::new(Capability::FILE_STAGING)]
+                        .into_iter()
+                        .collect(),
+                }),
+            )
+            .await
+            .expect("accept written");
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::MountSnapshot(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: crate::remote::federation::serve::empty_snapshot(),
+                    cursor: crate::remote::federation::protocol::EventCursor(0),
+                }),
+            )
+            .await
+            .expect("snapshot written");
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::ClipboardStageResponse(ClipboardStageResponse::Staged {
+                    request_id: 7,
+                    path: "/tmp/federation-clipboard-1-0-image.png".to_string(),
+                }),
+            )
+            .await
+            .expect("staged written");
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::ClipboardStageResponse(ClipboardStageResponse::Failed {
+                    request_id: 8,
+                    failure: crate::remote::federation::protocol::ClipboardStageFailure::Busy,
+                }),
+            )
+            .await
+            .expect("failure written");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        let client = FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new());
+        let mounted = client
+            .connect_and_mount(client_reader, client_writer)
+            .await
+            .expect("mount");
+        let generation = mounted.mirror.mount().mount_generation;
+        let epoch = mounted.mirror.connection_epoch();
+        let MountedConnection {
+            mut mirror,
+            mut reader,
+            ..
+        } = mounted;
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let (clipboard_tx, _clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+        let (outbound_clip_tx, _outbound_clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let (events_tx, mut events_rx) = mpsc::channel::<crate::events::AppEvent>(4);
+        let origin = crate::remote::federation::id::HostKey::new("test-host", "s1");
+        let ctx = SplitMaterializationContext {
+            rows: 24,
+            cols: 80,
+            scrollback_limit_bytes: 1 << 16,
+            host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            origin: origin.clone(),
+            events: events_tx,
+            render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let hub = EventHub::default();
+        let _ = tokio::time::timeout(
+            Duration::from_millis(300),
+            drive_mount_channel(
+                &mut reader,
+                &mut mirror,
+                generation,
+                &hub,
+                &mut router,
+                &clipboard_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                Some(&ctx),
+            ),
+        )
+        .await;
+
+        match tokio::time::timeout(Duration::from_millis(200), events_rx.recv())
+            .await
+            .expect("an event arrives")
+            .expect("the channel is open")
+        {
+            crate::events::AppEvent::FederationClipboardStageReady {
+                request_id,
+                remote_path,
+                origin: got_origin,
+                connection_epoch,
+            } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(remote_path, "/tmp/federation-clipboard-1-0-image.png");
+                assert_eq!(got_origin, origin);
+                assert_eq!(connection_epoch, epoch);
+            }
+            other => panic!("expected FederationClipboardStageReady, got {other:?}"),
+        }
+        match tokio::time::timeout(Duration::from_millis(200), events_rx.recv())
+            .await
+            .expect("an event arrives")
+            .expect("the channel is open")
+        {
+            crate::events::AppEvent::FederationClipboardStageFailed {
+                request_id,
+                failure,
+                origin: got_origin,
+                connection_epoch,
+            } => {
+                assert_eq!(request_id, 8);
+                assert_eq!(
+                    failure,
+                    crate::remote::federation::protocol::ClipboardStageFailure::Busy
+                );
+                assert_eq!(got_origin, origin);
+                assert_eq!(connection_epoch, epoch);
+            }
+            other => panic!("expected FederationClipboardStageFailed, got {other:?}"),
+        }
+        let _ = fake_server.await;
     }
 }

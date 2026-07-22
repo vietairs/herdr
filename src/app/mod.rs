@@ -15,6 +15,8 @@ mod creation;
 mod ids;
 mod input;
 mod popup;
+#[cfg(unix)]
+pub(crate) mod remote_clipboard_stage;
 mod runtime;
 mod runtime_mutations;
 mod session;
@@ -156,6 +158,15 @@ pub struct App {
     /// eventual `SplitPaneResponse`'s materialized pane into the right spot
     /// (`App::handle_federation_split_pane_ready`, `app/creation.rs`).
     pub(crate) pending_remote_splits: HashMap<u64, creation::PendingRemoteSplit>,
+    /// Correlates an in-flight `ClipboardStageRequest::request_id`
+    /// (`app/remote_clipboard_stage.rs::begin_remote_clipboard_stage`) to the
+    /// mount, connection, workspace and pane the request was minted for, so
+    /// the eventual `ClipboardStageResponse` can be fenced against a
+    /// superseded connection and injected into the pane that asked for it
+    /// rather than whatever happens to be focused when it lands.
+    #[cfg(unix)]
+    pub(crate) pending_remote_clipboard_stages:
+        HashMap<u64, remote_clipboard_stage::PendingClipboardStage>,
     /// Reverse index from a resync-revealed remote pane's namespaced
     /// (public) id to the local `PaneId` `App::
     /// handle_federation_resync_pane_created` materialized for it, so a
@@ -653,6 +664,10 @@ impl App {
             outer_terminal_focus: None,
             prefix_code,
             prefix_mods,
+            // An unparseable binding is already surfaced by
+            // `Config::collect_diagnostics`; here it simply disables the
+            // intercept rather than guessing at what the user meant.
+            remote_image_paste_key: config.remote_image_paste_key().ok().flatten(),
             default_sidebar_width: config.ui.sidebar_width,
             sidebar_width,
             sidebar_min_width,
@@ -818,6 +833,8 @@ impl App {
             full_redraw_pending: false,
             overlay_panes: HashMap::new(),
             pending_remote_splits: HashMap::new(),
+            #[cfg(unix)]
+            pending_remote_clipboard_stages: HashMap::new(),
             remote_resync_pane_index: HashMap::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
@@ -1462,6 +1479,10 @@ impl App {
                             .map(|diagnostic| format!("{diagnostic}; kept current keybinds")),
                     );
                 }
+            }
+            match config.remote_image_paste_key() {
+                Ok(binding) => self.state.remote_image_paste_key = binding,
+                Err(diagnostic) => diagnostics.push(diagnostic),
             }
         }
 
