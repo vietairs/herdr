@@ -1312,10 +1312,16 @@ impl App {
                 self.state.mode = Mode::Terminal;
             }
             (
-                ContextMenuKind::Pane { .. },
+                ContextMenuKind::Pane {
+                    auto_resize_enabled,
+                    ..
+                },
                 Some("Auto-resize splits: On" | "Auto-resize splits: Off"),
             ) => {
-                self.save_auto_resize_splits(!self.state.auto_resize_splits);
+                // Flip the value the visible label was rendered from, not the
+                // live one — a config hot-reload while the menu is open would
+                // otherwise make the click do the opposite of what it says.
+                self.save_auto_resize_splits(!auto_resize_enabled);
                 leave_modal(&mut self.state);
             }
             _ => leave_modal(&mut self.state),
