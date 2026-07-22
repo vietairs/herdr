@@ -757,7 +757,7 @@ fn ticker_loop(
     first_cause: &FirstCauseCell,
 ) {
     let mut cursor = initial_cursor.0;
-    let mut last_agent: HashMap<String, AgentStatus> = HashMap::new();
+    let mut last_agent: HashMap<String, (AgentStatus, Option<String>)> = HashMap::new();
     let mut tick: u32 = 0;
     while !shutdown.load(Ordering::SeqCst) {
         std::thread::sleep(OUTBOUND_POLL_INTERVAL);
@@ -830,12 +830,16 @@ fn poll_events(
     true
 }
 
-/// Fetch agent statuses from the actor and emit a frame for each one that
-/// changed since the last poll. Returns `false` if the actor or the writer is
+/// Fetch agent statuses from the actor and emit a frame for each one whose
+/// status OR identified agent changed since the last poll (a pane's agent
+/// identity can become known after its status was already sent once, e.g.
+/// screen-text detection resolving after the first `Working` poll — that
+/// must still reach the client so `AgentStatusMessage::agent` isn't
+/// permanently `None` for it). Returns `false` if the actor or the writer is
 /// gone. Mirrors `serve::poll_agent_statuses`.
 fn poll_agent_statuses(
     server_event_tx: &mpsc::Sender<ServerEvent>,
-    last: &mut HashMap<String, AgentStatus>,
+    last: &mut HashMap<String, (AgentStatus, Option<String>)>,
     out_tx: &std_mpsc::SyncSender<FederationMessage>,
     first_cause: &FirstCauseCell,
     shutdown: &AtomicBool,
@@ -843,19 +847,18 @@ fn poll_agent_statuses(
     let Some(statuses) = request_agent_statuses(server_event_tx) else {
         return false;
     };
-    for (terminal_id, status) in statuses {
-        if last.get(&terminal_id) == Some(&status) {
+    for (terminal_id, status, agent) in statuses {
+        if last.get(&terminal_id) == Some(&(status, agent.clone())) {
             continue;
         }
-        // `AgentStatus` is `Copy`, so the insert takes a copy and `status`
-        // remains usable for the outbound frame below.
-        last.insert(terminal_id.clone(), status);
+        last.insert(terminal_id.clone(), (status, agent.clone()));
         if !enqueue_outbound(
             out_tx,
             FederationMessage::AgentStatus(AgentStatusMessage {
                 terminal_id,
                 mount_generation: MOUNT_GENERATION,
                 status,
+                agent,
             }),
             first_cause,
             shutdown,
@@ -885,7 +888,7 @@ fn request_events_after(
 /// loop is gone.
 fn request_agent_statuses(
     server_event_tx: &mpsc::Sender<ServerEvent>,
-) -> Option<Vec<(String, AgentStatus)>> {
+) -> Option<Vec<(String, AgentStatus, Option<String>)>> {
     let (reply, rx) = oneshot::channel();
     server_event_tx
         .blocking_send(ServerEvent::Federation(FederationCommand::AgentStatuses(
