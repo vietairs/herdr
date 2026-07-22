@@ -16,6 +16,21 @@ pub struct WorkspaceCreateParams {
     pub env: HashMap<String, String>,
 }
 
+/// REVISED Phase A (multi-remote federated workspace launch); generalized to
+/// N targets in Phase B: mounts one or more federation targets as
+/// server-daemon-owned state, alongside the local workspace(s) already
+/// running in this session. `main.rs` sends this instead of running the
+/// federation driver itself (runtime/client boundary guardrail — mount =
+/// shared runtime/session fact). One request carries the full target list
+/// (Phase B requirement 9's "one request with a target list" option) so the
+/// server-side handler owns the concurrent-dial fan-out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceMountRemoteParams {
+    pub targets: Vec<String>,
+    #[serde(default)]
+    pub remote_keybindings: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceRenameParams {
     pub workspace_id: String,

@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>herdr: remote as a local workspace — approach brainstorm</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#0d1117; --panel:#151b23; --panel2:#1c2430; --border:#2a3441;
+    --text:#dbe2ea; --muted:#8b98a8; --accent:#5fb0ff; --accent2:#7ee0b0;
+    --warn:#f2b155; --bad:#f2795f; --good:#7ee0b0; --code:#0a0e14;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f7f8fa; --panel:#ffffff; --panel2:#eef1f5;
+      --border:#dde3ea; --text:#1c2430; --muted:#5a6572;
+      --accent:#1868c9; --accent2:#0e8f5b; --warn:#a15c00; --bad:#b3382c;
+      --good:#0e8f5b; --code:#f1f3f6;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--text);
+    font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    max-width:960px; margin:0 auto; padding:2.5rem 1.5rem 5rem;
+  }
+  h1{font-size:1.7rem; margin-bottom:.2rem}
+  h2{font-size:1.25rem; margin-top:2.6rem; border-top:1px solid var(--border); padding-top:1.6rem; color:var(--accent)}
+  h3{font-size:1.02rem; margin-top:1.4rem; color:var(--text)}
+  .subtitle{color:var(--muted); margin-top:0; font-size:.98rem}
+  .badge{display:inline-block; font-size:.72rem; letter-spacing:.04em; text-transform:uppercase;
+    padding:.15rem .5rem; border-radius:99px; border:1px solid var(--border); color:var(--muted); margin-right:.4rem}
+  code, .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.88em}
+  code{background:var(--code); padding:.1rem .35rem; border-radius:4px; color:var(--accent2)}
+  p{color:var(--text)}
+  .muted{color:var(--muted)}
+  .card{
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:1.2rem 1.4rem; margin:1rem 0;
+  }
+  .approach h3{color:var(--accent)}
+  .approach.b h3{color:var(--warn)}
+  .approach.c h3{color:var(--accent2)}
+  .touchpoints{background:var(--code); border-radius:8px; padding:.9rem 1.1rem; margin-top:.8rem; font-size:.85rem}
+  .touchpoints li{margin-bottom:.3rem}
+  ul{padding-left:1.3rem}
+  li{margin-bottom:.35rem}
+  table{width:100%; border-collapse:collapse; margin:1.2rem 0; font-size:.92rem}
+  th,td{border:1px solid var(--border); padding:.6rem .7rem; text-align:left; vertical-align:top}
+  th{background:var(--panel2); color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.03em}
+  tr:nth-child(even) td{background:var(--panel)}
+  td.rowlabel{font-weight:600; color:var(--accent)}
+  .pill{display:inline-block; padding:.1rem .5rem; border-radius:5px; font-size:.8rem; font-weight:600}
+  .pill.s{background:rgba(126,224,176,.15); color:var(--good)}
+  .pill.m{background:rgba(242,177,85,.15); color:var(--warn)}
+  .pill.l{background:rgba(242,121,95,.15); color:var(--bad)}
+  .pill.rw{background:rgba(242,121,95,.28); color:var(--bad)}
+  pre.sidebar{
+    background:var(--code); border:1px solid var(--border); border-radius:8px;
+    padding:1.1rem 1.3rem; overflow-x:auto; font-size:.82rem; line-height:1.45;
+    color:var(--accent2);
+  }
+  pre.sidebar .local{color:var(--accent)}
+  pre.sidebar .remote{color:var(--warn)}
+  pre.sidebar .dim{color:var(--muted)}
+  .recommend{
+    background:linear-gradient(135deg, rgba(126,224,176,.08), rgba(95,176,255,.06));
+    border:1px solid var(--accent2); border-radius:10px; padding:1.3rem 1.5rem; margin-top:1rem;
+  }
+  .recommend h3{margin-top:0; color:var(--accent2)}
+  .oq{background:var(--panel); border:1px dashed var(--border); border-radius:8px; padding:1rem 1.3rem}
+  .footer{margin-top:3rem; padding-top:1rem; border-top:1px solid var(--border); color:var(--muted); font-size:.82rem}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+
+<h1>Mounting <code>herdr --remote</code> as a local workspace</h1>
+<p class="subtitle">Decision doc — Stage 2 brainstorm · herdr fork · 2026-07-13</p>
+<span class="badge">discovery-only, no code changed</span>
+<span class="badge">4 scouts synthesized</span>
+
+<h2>The problem</h2>
+<div class="card">
+<p>
+Today, <code>herdr --remote ssh user@ip</code> connects out, ensures a compatible herdr server is
+installed and running on the remote host, then tunnels a local Unix socket through <code>ssh</code>
+stdio to the remote server's client socket and hands the <strong>entire local terminal</strong> to a
+freshly spawned <code>herdr client</code> child process attached to that tunnel
+(<code>run_remote()</code>, <code>src/remote/unix.rs:155-192</code>). This is <strong>session
+replacement</strong>, not federation, for two structural reasons: (1) the wire protocol only ever
+carries <strong>one composited full-screen frame</strong> per tick — <code>ServerMessage::Frame(FrameData)</code>
+/ <code>Terminal(TerminalFrame)</code> (<code>src/protocol/wire.rs:39-43,460,599</code>) render the
+server's <em>entire</em> ratatui UI (sidebar included), never a decomposed per-workspace/per-pane
+stream — and (2) the remote client is a <strong>standalone process</strong>
+(<code>run_client_process</code>, <code>unix.rs:1923</code>) that inherits raw stdin/stdout and enters
+alt-screen for its own lifetime, with zero awareness of any local server or session
+(<code>main.rs:453-464</code> even guards <code>--remote</code> to be mutually exclusive with other
+subcommands). There is no local <code>AppState</code> running concurrently to hand events to. The
+user's actual ask — local + remote workspaces coexisting in one sidebar — requires either bypassing
+this whole-screen swap (feed a remote pane through the existing local pane infrastructure instead) or
+building a genuinely new protocol capability to decompose a remote server's session into
+structured, embeddable pieces.
+</p>
+</div>
+
+<h2>Three approaches</h2>
+
+<div class="card approach">
+<h3>A — Tier‑1 "pane‑tunnel" (small/medium, no protocol change)</h3>
+<p>
+Keep the local herdr server as the only <code>AppState</code> in play. A new/changed CLI path
+(e.g. <code>herdr --remote ssh user@ip</code> without the current full-screen guard, or a new
+<code>herdr remote-pane</code>) opens a <strong>local workspace</strong> and spawns one or more
+ssh-fed <strong>panes</strong> inside it, reusing the already-decoupled install/ensure machinery.
+Each remote pane is just a local <code>Pane</code>/<code>TerminalRuntime</code> whose PTY command is
+<code>ssh -tt user@ip &lt;remote shell or remote-herdr-attach&gt;</code> — the existing
+<code>spawn_with_portable_pty</code> path accepts any <code>CommandBuilder</code>, zero PTY-layer
+change needed. Rendering, screen-based agent detection, and cold-snapshot persistence all already
+operate downstream of <code>process_pty_bytes</code> and are source-agnostic, so they work unmodified.
+Remote agent status is <strong>screen-scrape only</strong> (no process-table relay); no warm
+handoff for remote panes (SCM_RIGHTS fd passing is local-machine-only and architecturally can't
+cross a network).
+</p>
+<div class="touchpoints">
+<strong>Concrete touch-points:</strong>
+<ul>
+<li>Reuse <code>prepare_remote_herdr</code> (<code>src/remote/unix.rs:672</code>) + <code>ensure_remote_server_ready</code> (<code>unix.rs:1025</code>) — already self-contained, no attach side effects, headless-safe.</li>
+<li>New pane-spawn call using <code>spawn_with_portable_pty</code> (<code>src/pty/backend/unix.rs:12-42</code>) with a <code>CommandBuilder::new("ssh")</code> instead of local shell.</li>
+<li><code>on_read</code> closure / <code>process_pty_bytes</code> (<code>src/pane.rs:1722-1755</code>, <code>src/pane/terminal.rs:183,1034</code>) — untouched, feeds the ghostty grid regardless of byte source.</li>
+<li><code>Pane::render</code> (<code>src/pane.rs:2493</code>) — untouched, already reads only the grid.</li>
+<li>Screen-text detection: <code>terminal.detection_text()</code> (<code>src/pane/terminal.rs:1668-1674</code>) + <code>detect_agent_with_osc</code> (<code>src/detect/mod.rs:204-227</code>) — works unmodified. Process-table probe (<code>src/detect/mod.rs:266</code>, <code>src/pane.rs:620-692</code>) does <strong>not</strong> work for a remote PID — silently degrades or is disabled for remote panes.</li>
+<li><code>Workspace::new_with_tab</code> (<code>src/workspace.rs:344-417</code>) — used as-is to create the local workspace container; no id-namespacing needed because these are ordinary local workspace/pane ids (the "remote-ness" lives only in the pane's spawn command).</li>
+<li>Cold snapshot: <code>PaneSnapshot</code>/<code>launch_argv</code> (<code>src/persist/snapshot.rs:97-108</code>) already generalizes — store the <code>ssh</code> argv, restore respawns it.</li>
+</ul>
+</div>
+</div>
+
+<div class="card approach b">
+<h3>B — Tier‑2 "true federation" (large / new subsystem)</h3>
+<p>
+The local server becomes a live <strong>API client</strong> of the remote server: it opens the
+ssh-tunneled socket, issues <code>session.snapshot</code> (<code>src/api/schema/session.rs</code>,
+already a fully structured <code>{workspaces, tabs, panes, layouts, agents}</code> description) and
+<code>events.subscribe</code>, then mirrors the remote's <code>Workspace</code>/<code>Tab</code>/<code>Pane</code>
+objects live inside its own <code>AppState.workspaces</code> (<code>src/app/state.rs:1323</code>), so
+the remote workspace renders, resizes, and receives input exactly like a native one. This requires
+four genuinely new pieces of infrastructure, none of which exist today.
+</p>
+<div class="touchpoints">
+<strong>Concrete touch-points / new work:</strong>
+<ul>
+<li><strong>ID remapping layer</strong> — <code>generate_workspace_id</code> is a per-process <code>AtomicU64</code> starting at 1 (<code>src/workspace.rs:73-79,76-79</code>); two servers' <code>w1</code> collide the instant both appear in one sidebar. Needs prefixing/translation across every <code>*Target</code> in <code>Method</code>/<code>ResponseResult</code> (<code>src/api/schema/*.rs</code>) and <code>wire.rs::ClientMessage::AttachTerminal/ObserveTerminal/ControlTerminal</code> target strings.</li>
+<li><strong>Multi-source EventHub</strong> — <code>src/api/event_hub.rs</code> is a 46-line single in-process <code>Arc&lt;Mutex&lt;Vec&lt;(seq, EventEnvelope)&gt;&gt;&gt;</code>, <code>push()</code>-only from local mutation call sites (e.g. <code>src/app/creation.rs:306</code>); no "ingest external event" entry point exists. Needs a provenance/sequencing redesign or a parallel per-origin hub merged at <code>src/api/subscriptions.rs</code> (825 lines).</li>
+<li><strong>Remote-backed pane source abstraction</strong> — <code>PaneState</code> today is just <code>{attached_terminal_id: TerminalId, seen: bool}</code> (<code>src/pane/state.rs:6-11</code>), a bare 1:1 binding to a locally-spawned <code>TerminalRuntime</code>. No <code>enum PaneSource{Local,Remote}</code> exists anywhere. Needs a new I/O actor reading an SSH channel instead of <code>poll(2)</code> on a raw fd (today's actor, <code>src/pty/actor/unix.rs:66-231</code>, <code>src/pty/fd.rs:127-195</code>, is hard-wired to a local fd).</li>
+<li><strong>Cross-socket frame/input relay</strong> — nothing today proxies <code>ServerMessage</code>/<code>ClientMessage</code> frames between two live socket connections; <code>client_transport.rs</code> (1343 lines) assumes "one socket ↔ this server's own AppState." <code>ClientConnectionMode</code> (<code>src/server/clients.rs:9</code>: <code>App</code> / <code>TerminalAttach</code> / <code>TerminalObserve</code>) has no "proxy" mode.</li>
+<li><strong>Remote agent-status relay</strong> — process-table introspection (<code>src/detect/mod.rs:266</code>, platform-specific <code>/proc</code>/<code>sysctl</code>/Win32) needs to run <em>on the remote host</em> and be shipped back as a substitute return value; no such relay protocol exists.</li>
+<li><strong>Warm handoff exclusion</strong> — <code>SCM_RIGHTS</code> fd passing (<code>src/server/handoff.rs:377-450</code>, <code>src/handoff_runtime.rs:34-39</code>) cannot cross a network at all; remote-backed workspaces must be excluded from local self-update handoff and reconnected after restart instead.</li>
+<li>Sidebar grouping by host: <code>workspace_list_entries_inner</code> (<code>src/ui/sidebar.rs:318</code>) already groups by <code>worktree_space().key</code> — a parallel "remote origin" grouping key is the one genuinely cheap piece of this tier.</li>
+</ul>
+</div>
+</div>
+
+<div class="card approach c">
+<h3>C — Hybrid: ship A now, lay groundwork for B</h3>
+<p>
+Ship approach A as the user-visible feature. In parallel, make two small additive changes that don't
+change current behavior but remove future rework: (1) add an <code>id-origin</code>/namespace field
+(optional, <code>#[serde(default)]</code>) to workspace/pane id-bearing wire structs and to
+<code>WorkspaceSnapshot</code> (<code>src/persist/snapshot.rs</code>) so a future federated workspace
+can be tagged without a breaking schema change; (2) add a <code>session.snapshot</code> ingestion stub
+— a function shape that can take an external <code>SessionSnapshot</code> and construct local
+<code>Workspace</code> objects from it — even if nothing calls it yet, so Tier‑2's hardest design
+question (how does a foreign snapshot become local state) gets settled once, in isolation, instead of
+under feature-delivery pressure later.
+</p>
+</div>
+
+<h2>Comparison</h2>
+<table>
+<tr><th>Approach</th><th>Effort</th><th>Blast radius on existing <code>--remote</code></th><th>Status fidelity</th><th>Resume fidelity</th><th>Smallest shippable slice</th><th>Key risks</th></tr>
+<tr>
+<td class="rowlabel">A — pane-tunnel</td>
+<td><span class="pill s">S/M</span></td>
+<td>None if kept as a new opt-in path; low if <code>--remote</code>'s default behavior changes (existing users expect full-screen takeover today)</td>
+<td>Screen-scrape only — no process-table signal, best-effort</td>
+<td>Cold snapshot works (respawn <code>ssh</code> argv); no warm handoff</td>
+<td>One remote shell pane in a new local workspace via <code>ssh -tt</code>, no protocol change</td>
+<td>Double UI chrome if piping a full remote-herdr TUI instead of a plain shell; ssh reconnect/latency UX; screen-scrape detection false negatives</td>
+</tr>
+<tr>
+<td class="rowlabel">B — true federation</td>
+<td><span class="pill rw">L / near-rewrite</span></td>
+<td>High — new subsystem touching <code>AppState</code>, <code>EventHub</code>, wire protocol targets, id scheme; version-skew risk across protocol v16 deployments</td>
+<td>Native — real remote status once process-relay built</td>
+<td>Native cold resume; warm handoff structurally impossible for remote panes regardless</td>
+<td>Even the "smallest" slice needs id-namespacing + a remote API-client role + one relayed pane — no partial version is small</td>
+<td>ID collision correctness bugs; EventHub redesign risk to existing local behavior; ongoing protocol version-skew maintenance burden; scope creep into "rewrite the remote layer"</td>
+</tr>
+<tr>
+<td class="rowlabel">C — hybrid</td>
+<td><span class="pill m">S/M now + marginal</span></td>
+<td>Same as A for the shipped part; near-zero for the groundwork (additive, unused fields)</td>
+<td>Same as A today; upgrade path exists for later</td>
+<td>Same as A today; upgrade path exists for later</td>
+<td>Same as A, plus two additive schema/stub changes that don't block shipping</td>
+<td>Speculative groundwork could still guess wrong about B's eventual shape and need rework anyway; discipline required not to let "groundwork" scope-creep into B</td>
+</tr>
+</table>
+
+<h2>Target sidebar mock</h2>
+<p class="muted">Local and remote workspaces grouped by host, remote status shown as best-effort (screen-scrape) under approach A.</p>
+<pre class="sidebar">┌─ herdr ──────────────────────────────────────┐
+│ <span class="local">▸ LOCAL</span>                                        │
+│   <span class="local">● herdr-fork</span>            main  ↑2         │
+│   <span class="local">○ working_workflow</span>       feat/x           │
+│   <span class="local">○ scratch</span>                                │
+│                                                │
+│ <span class="remote">▸ REMOTE  user@10.0.0.4</span>                       │
+│   <span class="remote">● build-server</span>          <span class="dim">[ssh pane]</span>       │
+│      <span class="dim">└ claude-code · detecting…</span>              │
+│   <span class="remote">○ deploy-shell</span>          <span class="dim">[ssh pane]</span>       │
+│                                                │
+│ <span class="dim">+ new workspace         + connect remote</span>          │
+└────────────────────────────────────────────────┘</pre>
+
+<h2>Recommendation</h2>
+<div class="recommend">
+<h3>Ship A, defer B</h3>
+<p>
+The smallest change that satisfies "remote as a local workspace in one sidebar" is
+<strong>approach A</strong>: a local workspace whose pane(s) are spawned via
+<code>ssh -tt user@ip …</code> reusing <code>prepare_remote_herdr</code> +
+<code>ensure_remote_server_ready</code> for install/health-check, and the existing
+<code>spawn_with_portable_pty</code>/<code>CommandBuilder</code> path for the pane itself. Every layer
+below the pane boundary — terminal emulation, rendering, screen-based agent detection, cold-snapshot
+persistence — is <em>already</em> byte-source-agnostic by construction (confirmed across all four
+scouts), so this genuinely is a small/medium change, not a hidden large one.
+</p>
+<p>
+<strong>Explicitly defer:</strong> native remote process-table status (needs a remote-side relay
+protocol that doesn't exist), warm handoff for remote panes (architecturally blocked by
+<code>SCM_RIGHTS</code> being local-machine-only, not a sequencing problem — this stays deferred
+under B too, forever, unless the remote server handles its own handoff independently), and true
+per-pane structural federation (id-namespacing + multi-source EventHub + remote API-client role).
+Be honest with the user up front: Tier‑2 is not a "later phase" of Tier‑1's code, it's a different
+subsystem built next to it — expect it to cost multiple times what A costs, concentrated in
+<code>EventHub</code>, id generation, and a new proxy role for <code>ClientConnectionMode</code>, none
+of which A's implementation will reduce. If B is ever pursued, do it as its own project with its own
+plan, not as an "extend A" ticket.
+</p>
+<p>
+Decide up front whether A changes <code>--remote</code>'s default behavior (blast-radius risk to
+existing full-screen users) or ships as a new opt-in flag/subcommand — the scouts found no code
+reason it must replace the default, only that today's default happens to be full-screen.
+</p>
+</div>
+
+<h2>Open questions</h2>
+<div class="oq">
+<ul>
+<li>Does <code>TerminalRuntime</code> (<code>src/terminal/</code>) already abstract over I/O transport (PTY fd vs. arbitrary stream), or is it hard-wired to <code>portable-pty</code>? Not confirmed by any scout — determines whether a "socket-backed runtime" variant (avoiding the <code>ssh</code>-subprocess shortcut in A) is a medium change or requires a new actor from scratch.</li>
+<li>Remote agent-status relay without a full remote herdr server: is a full remote server always assumed running (as <code>--remote</code> requires today), or could a lighter SSH-exec'd <code>/proc</code> probe suffice for A's "upgrade status past screen-scrape" path?</li>
+<li>Version-skew handling across local↔remote herdr versions (wire <code>PROTOCOL_VERSION</code> currently 16) — <code>--remote</code> already has compat-checking machinery (<code>remote_server_restart_reason</code>, <code>parse_remote_server_status_json</code>); does approach A need any of it, or does spawning a plain <code>ssh</code> shell pane sidestep protocol compatibility entirely (yes for a bare shell pane, no if A's pane instead embeds a full remote-herdr TUI)?</li>
+<li>For approach A: should the remote pane be a bare remote shell, or the full remote-herdr <code>TerminalAnsi</code> stream nested inside one local pane (double UI chrome, but preserves the remote's own richer UI)? The scouts flag both as viable but did not pick one — this is a UX call, not an architecture constraint.</li>
+<li>Does the existing <code>SshStdioBridge</code>/<code>local_forward_socket_path</code> machinery need to move into the persistent local server process (workspace-lifetime-scoped) for A, or can it stay a one-shot CLI-invocation concern per pane spawn? Affects whether reconnect-after-disconnect is trivial or needs new lifecycle code.</li>
+</ul>
+</div>
+
+<div class="footer">
+Sources: <code>reports/scout-remote-lifecycle-transport.md</code>,
+<code>reports/scout-workspace-session-sidebar.md</code>,
+<code>reports/scout-wire-protocol-server-client.md</code>,
+<code>reports/scout-pty-render-detect-persist.md</code>,
+<code>reports/blindspot-synthesis-feasibility.md</code> — all in
+<code>plans/260713-1217-herdr-remote-workspace-federation/reports/</code>.
+</div>
+
+</body>
+</html>

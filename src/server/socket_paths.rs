@@ -65,6 +65,59 @@ pub(crate) fn derive_client_socket_from_api_socket(api_socket_path: &Path) -> Pa
     parent.join(format!("{stem}-client.sock"))
 }
 
+/// Conservative byte budget for a full unix-socket path. The kernel `sun_path`
+/// limit is 108 on Linux and 104 on macOS; stay well under both.
+const SUN_PATH_BUDGET: usize = 100;
+
+/// Derives the co-located federation socket path from the effective classic
+/// client socket path (P9.2b b0.4). The federation listener is a sibling of the
+/// classic socket in the same directory, so it inherits the same session/env
+/// override precedence for free — whatever chose the classic path chose this.
+///
+/// Two properties matter (codex v5 MAJ8):
+///
+///   * **Injective** — different classic sockets must never derive the same
+///     federation socket, or two servers would fight over one path. A trailing
+///     `-federation.sock` on the file *stem* is not injective (`x` and `x.sock`
+///     both stem to `x`), so the name embeds a deterministic hash of the whole
+///     classic path. Distinct classic paths therefore get distinct names.
+///   * **Length-safe** — appending to a near-limit classic name can overflow
+///     `sun_path`. The readable portion is truncated to fit the remaining budget
+///     after the fixed-width `-fed-<hash>.sock` suffix and the parent directory,
+///     so the result always fits even when the stem must shrink to nothing.
+#[allow(dead_code)] // dormant until the federation listener binds it (b0.4)
+pub(crate) fn federation_socket_path(classic_socket: &Path) -> PathBuf {
+    let parent = classic_socket.parent().unwrap_or_else(|| Path::new(""));
+    let classic_name = classic_socket
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("herdr");
+    let stem = classic_name.strip_suffix(".sock").unwrap_or(classic_name);
+
+    // Fixed-width, injective disambiguator over the *full* classic path.
+    let suffix = format!("-fed-{:016x}.sock", deterministic_path_hash(classic_socket));
+
+    // Budget for the file name = total budget - parent dir - path separator.
+    let name_budget = SUN_PATH_BUDGET.saturating_sub(parent.as_os_str().len() + 1);
+    let readable_budget = name_budget.saturating_sub(suffix.len());
+    let readable: String = stem.chars().take(readable_budget).collect();
+
+    parent.join(format!("{readable}{suffix}"))
+}
+
+/// A deterministic (fixed-seed) hash of a path, stable across processes of the
+/// same binary — which is all that is required, since the server that binds the
+/// federation socket and the proxy that connects to it are the same executable.
+#[allow(dead_code)] // dormant until the federation listener binds it (b0.4)
+fn deterministic_path_hash(path: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    // `DefaultHasher::new()` uses fixed keys (unlike `RandomState`), so this is
+    // reproducible run-to-run.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Prepares a socket path for binding: creates parent directories,
 /// removes stale socket files where no server is listening, and rejects live
 /// sockets that are already in use.
@@ -122,6 +175,49 @@ mod tests {
     fn derive_client_socket_from_api_socket_without_sock_extension() {
         let derived = derive_client_socket_from_api_socket(Path::new("/tmp/custom-api"));
         assert_eq!(derived, PathBuf::from("/tmp/custom-api-client.sock"));
+    }
+
+    #[test]
+    fn federation_socket_is_a_sibling_ending_in_sock() {
+        let fed = federation_socket_path(Path::new("/tmp/herdr-client.sock"));
+        assert_eq!(fed.parent(), Some(Path::new("/tmp")));
+        assert!(
+            fed.to_str().unwrap().ends_with(".sock"),
+            "fed socket = {fed:?}"
+        );
+        assert!(fed.file_name().unwrap().to_str().unwrap().contains("-fed-"));
+    }
+
+    #[test]
+    fn federation_socket_derivation_is_injective_over_stem_vs_sock() {
+        // `x` and `x.sock` must not collide (a plain `-federation.sock` on the
+        // file stem would).
+        let a = federation_socket_path(Path::new("/tmp/x"));
+        let b = federation_socket_path(Path::new("/tmp/x.sock"));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn federation_socket_derivation_is_deterministic() {
+        let p = Path::new("/run/user/1000/herdr/session-client.sock");
+        assert_eq!(federation_socket_path(p), federation_socket_path(p));
+    }
+
+    #[test]
+    fn federation_socket_truncates_a_long_name_to_fit_sun_path() {
+        // A pathologically long classic socket name in a normal directory: the
+        // readable portion must shrink so the whole path stays within budget,
+        // while the injective hash suffix and `.sock` are preserved.
+        let long = format!("/tmp/{}.sock", "s".repeat(200));
+        let fed = federation_socket_path(Path::new(&long));
+        assert!(
+            fed.as_os_str().len() <= SUN_PATH_BUDGET,
+            "len {} exceeds budget for {fed:?}",
+            fed.as_os_str().len()
+        );
+        assert_eq!(fed.parent(), Some(Path::new("/tmp")));
+        let name = fed.file_name().unwrap().to_str().unwrap();
+        assert!(name.ends_with(".sock") && name.contains("-fed-"));
     }
 
     #[test]

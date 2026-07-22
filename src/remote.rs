@@ -1,6 +1,8 @@
 #[cfg(unix)]
 mod unix;
 
+pub mod federation;
+
 #[cfg(unix)]
 pub(crate) use unix::*;
 
@@ -30,9 +32,18 @@ impl RemoteKeybindings {
 #[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteLaunch {
-    pub(crate) target: String,
+    /// Phase B requirement 7 (Windows parity): mirrors unix.rs's
+    /// `RemoteLaunch.target: Vec<String>` grammar change even though
+    /// federation itself is unix-only — this keeps CLI parsing identical
+    /// across platforms.
+    pub(crate) target: Vec<String>,
     pub(crate) keybindings: RemoteKeybindings,
     pub(crate) live_handoff: bool,
+}
+
+#[cfg(windows)]
+fn is_flag_like(value: &str) -> bool {
+    value.starts_with("--")
 }
 
 #[cfg(windows)]
@@ -44,7 +55,7 @@ pub(crate) fn extract_remote_args(
         cleaned.push(program.clone());
     }
 
-    let mut remote_target = None;
+    let mut remote_targets: Vec<String> = Vec::new();
     let mut keybindings = RemoteKeybindings::Local;
     let mut keybindings_seen = false;
     let mut live_handoff = false;
@@ -61,21 +72,22 @@ pub(crate) fn extract_remote_args(
             continue;
         }
         if arg == "--remote" {
-            if remote_target.is_some() {
-                return Err("--remote can only be specified once".to_string());
-            }
-            let Some(value) = args.get(index + 1) else {
+            let Some(first) = args.get(index + 1) else {
                 return Err("missing value for --remote".to_string());
             };
-            remote_target = Some(validate_remote_target(value)?.to_owned());
+            remote_targets.push(validate_remote_target(first)?.to_owned());
             index += 2;
+            while let Some(value) = args.get(index) {
+                if is_flag_like(value) {
+                    break;
+                }
+                remote_targets.push(validate_remote_target(value)?.to_owned());
+                index += 1;
+            }
             continue;
         }
         if let Some(value) = arg.strip_prefix("--remote=") {
-            if remote_target.is_some() {
-                return Err("--remote can only be specified once".to_string());
-            }
-            remote_target = Some(validate_remote_target(value)?.to_owned());
+            remote_targets.push(validate_remote_target(value)?.to_owned());
             index += 1;
             continue;
         }
@@ -105,8 +117,8 @@ pub(crate) fn extract_remote_args(
         index += 1;
     }
 
-    let remote = remote_target.map(|target| RemoteLaunch {
-        target,
+    let remote = (!remote_targets.is_empty()).then_some(RemoteLaunch {
+        target: remote_targets,
         keybindings,
         live_handoff,
     });

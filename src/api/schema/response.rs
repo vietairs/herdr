@@ -62,6 +62,14 @@ pub enum ResponseResult {
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
     },
+    /// Acknowledges a `workspace.mount_remote` request: the dial+mount task
+    /// was spawned inside the server daemon's own tokio runtime. Does not
+    /// imply the mount succeeded — success/failure lands later as a sidebar
+    /// notice (mount failure) or new remote-origin workspace group (mount
+    /// success), both delivered through the existing event/render path.
+    WorkspaceMountRemoteRequested {
+        targets: Vec<String>,
+    },
     WorktreeList {
         source: WorktreeSourceInfo,
         worktrees: Vec<WorktreeInfo>,

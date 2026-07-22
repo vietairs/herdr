@@ -346,6 +346,11 @@ pub(crate) enum ServerEvent {
     ClientWriterDrained { client_id: u64 },
     /// Ctrl+C or external shutdown signal received.
     QuitSignal,
+    /// A co-located federation connection requested an operation serviced
+    /// against the live `App` (P9.2b b0.1). Dormant until b0.4 exposes the
+    /// federation listener that constructs these.
+    #[allow(dead_code)]
+    Federation(crate::server::federation_actor::FederationCommand),
 }
 
 /// Clamp client-reported terminal dimensions to a minimum viable size.

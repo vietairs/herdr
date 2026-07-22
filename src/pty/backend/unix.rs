@@ -14,6 +14,14 @@ pub(crate) fn spawn_with_portable_pty(
     cols: u16,
     cmd: CommandBuilder,
 ) -> std::io::Result<SpawnedPty> {
+    // Last-resort backstop: no local PTY may spawn while a federated session is
+    // active. The API mutation allowlist blocks pane-creating methods, but any
+    // non-API local-pane path funnels through here too (defense-in-depth).
+    if crate::remote::federation::session::federated_session_active() {
+        return Err(std::io::Error::other(
+            "local pty spawn is forbidden during a federated session",
+        ));
+    }
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {

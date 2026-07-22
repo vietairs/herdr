@@ -1485,11 +1485,120 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+    /// Metadata-only mirrors of the currently mounted remote federation
+    /// workspaces, keyed by `HostKey` (Phase B: generalized from P4/P8's
+    /// single `Option<RemoteMirror>` to N concurrent mounts). Empty when no
+    /// mount is live. Additive, alongside `workspaces` — no render switch
+    /// here.
+    pub(crate) remote_mirrors: std::collections::HashMap<
+        crate::remote::federation::id::HostKey,
+        crate::remote::federation::reducer::RemoteMirror,
+    >,
+    /// The spawned drive task for each live federation mount, keyed by
+    /// `HostKey`. Lets `end_federation_mount` actively cancel a mount's
+    /// in-flight drive task (SSH link + reader loop) when a caller tears the
+    /// mount down proactively (e.g. closing the federated workspace),
+    /// instead of only reacting to a drive task that already ended itself.
+    /// Aborting an already-finished task is a safe no-op, so this is set
+    /// unconditionally on both the reactive (`handle_federation_mount_ended`)
+    /// and proactive (workspace close) teardown paths.
+    pub(crate) mount_drive_tasks: std::collections::HashMap<
+        crate::remote::federation::id::HostKey,
+        tokio::task::JoinHandle<()>,
+    >,
+}
+
+/// Outcome of [`AppState::begin_federation_mount`] (P8 requirement 5, S10.1;
+/// Phase B requirement 5: narrowed from "any second mount" to "same
+/// `HostKey` mount"). Dormant outside tests until a real call site
+/// materializes a mount into a running session (see
+/// `implementation-notes.md`'s P8/Phase B entries) —
+/// `#[allow(dead_code)]` at this scope, matching `remote_mirrors`'s and
+/// `client.rs`/`pane_source.rs`'s identical precedent for the same reason.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FederationMountConflict {
+    /// A federation mount for this exact `HostKey` is already live. Distinct
+    /// hosts are allowed to mount concurrently (Phase B); only a literal
+    /// duplicate `HostKey` is rejected. Carries the colliding host so
+    /// callers can name it in a notice.
+    AlreadyMounted(crate::remote::federation::id::HostKey),
 }
 
 impl AppState {
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    /// P8 requirement 5 (S10.1); Phase B requirement 5: registers a new
+    /// federation mount, rejecting only a literal duplicate `HostKey` —
+    /// distinct hosts mount concurrently into `remote_mirrors`.
+    pub(crate) fn begin_federation_mount(
+        &mut self,
+        mirror: crate::remote::federation::reducer::RemoteMirror,
+    ) -> Result<(), FederationMountConflict> {
+        let host_key = mirror.mount().host_key.clone();
+        if self.remote_mirrors.contains_key(&host_key) {
+            return Err(FederationMountConflict::AlreadyMounted(host_key));
+        }
+        self.remote_mirrors.insert(host_key, mirror);
+        Ok(())
+    }
+
+    /// Tears down the live federation mount for `host_key` (disconnect / P9
+    /// lifecycle), if any. A no-op when nothing is mounted for that host —
+    /// never touches sibling mounts (Phase B requirement 2).
+    pub(crate) fn end_federation_mount(
+        &mut self,
+        host_key: &crate::remote::federation::id::HostKey,
+    ) {
+        self.remote_mirrors.remove(host_key);
+        if let Some(handle) = self.mount_drive_tasks.remove(host_key) {
+            handle.abort();
+        }
+    }
+
+    /// P8 requirement 6 (RT-F11/S8.2); Phase B: whether a classic `--remote`
+    /// attach to `host_key` would collide with an already-mounted federated
+    /// host. Detection key is `HostKey` membership in the local mount
+    /// registry (`remote_mirrors`). This only answers the question for the
+    /// *local in-process* registry; wiring an actual classic-attach call
+    /// site to consult a *running* local server's registry over the JSON API
+    /// is not built (no API method exists for it) — downgraded to
+    /// documented-not-enforced across process boundaries for v1, per the
+    /// phase file's explicit allowance ("If detection proves costly,
+    /// downgrade to documented-not-enforced for v1 — state the choice").
+    pub(crate) fn double_attach_conflict(
+        &self,
+        host_key: &crate::remote::federation::id::HostKey,
+    ) -> bool {
+        self.remote_mirrors.contains_key(host_key)
+    }
+
+    /// Every workspace index that closing `index` should also close: the
+    /// full set of sibling workspaces sharing `index`'s non-linked worktree
+    /// space, or just `index` itself when it has no such shared space (or is
+    /// a linked worktree). Shared body with `close_selected_workspace`'s
+    /// inline grouping so any other close path (e.g. a federation mount
+    /// ending) closes the same sibling set the manual close flow does.
+    pub(crate) fn close_indices_for(&self, index: usize) -> Vec<usize> {
+        self.workspaces
+            .get(index)
+            .and_then(|ws| ws.worktree_space())
+            .filter(|space| !space.is_linked_worktree)
+            .map(|space| {
+                self.workspaces
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, ws)| {
+                        ws.worktree_space()
+                            .is_some_and(|member| member.key == space.key)
+                            .then_some(idx)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|indices| indices.len() >= 2)
+            .unwrap_or_else(|| vec![index])
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
@@ -1833,6 +1942,8 @@ impl AppState {
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            remote_mirrors: std::collections::HashMap::new(),
+            mount_drive_tasks: std::collections::HashMap::new(),
         }
     }
 
@@ -2172,6 +2283,270 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    fn test_mount(host: &str) -> crate::remote::federation::reducer::RemoteMirror {
+        use crate::remote::federation::id::{HostKey, Mount, ServerInstanceId};
+        crate::remote::federation::reducer::RemoteMirror::new(Mount {
+            host_key: HostKey::new(host, "s1"),
+            server_instance_id: ServerInstanceId("inst-1".to_string()),
+            mount_generation: 1,
+        })
+    }
+
+    // A duplicate `HostKey` mount is rejected with a typed error naming the
+    // colliding host; the first mount stays live (narrowed from P8's "any
+    // second mount" per Phase B requirement 5/6).
+    #[test]
+    fn a_duplicate_host_key_federation_mount_is_rejected() {
+        let mut state = AppState::test_new();
+        assert!(state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .is_ok());
+        assert!(state
+            .remote_mirrors
+            .contains_key(&crate::remote::federation::id::HostKey::new(
+                "alice@10.0.0.1",
+                "s1"
+            )));
+
+        let result = state.begin_federation_mount(test_mount("alice@10.0.0.1"));
+        assert_eq!(
+            result,
+            Err(FederationMountConflict::AlreadyMounted(
+                crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1")
+            ))
+        );
+        // The original mount must still be the live one.
+        assert_eq!(state.remote_mirrors.len(), 1);
+    }
+
+    // Phase B test 5: `begin_federation_mount` called twice with distinct
+    // `HostKey`s succeeds both times.
+    #[test]
+    fn mount_hashmap_allows_two_distinct_hosts() {
+        let mut state = AppState::test_new();
+        assert!(state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .is_ok());
+        assert!(state
+            .begin_federation_mount(test_mount("bob@10.0.0.2"))
+            .is_ok());
+        assert_eq!(state.remote_mirrors.len(), 2);
+    }
+
+    // Phase B test 6: the guard narrows to a per-`HostKey` duplicate, it
+    // doesn't disappear.
+    #[test]
+    fn mount_hashmap_rejects_duplicate_host_key() {
+        let mut state = AppState::test_new();
+        state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .unwrap();
+        let host_key = crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1");
+        assert_eq!(
+            state.begin_federation_mount(test_mount("alice@10.0.0.1")),
+            Err(FederationMountConflict::AlreadyMounted(host_key))
+        );
+    }
+
+    #[test]
+    fn ending_a_mount_allows_a_fresh_one() {
+        let mut state = AppState::test_new();
+        state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .unwrap();
+        let host_key = crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1");
+        state.end_federation_mount(&host_key);
+        assert!(state.remote_mirrors.is_empty());
+        assert!(state
+            .begin_federation_mount(test_mount("bob@10.0.0.2"))
+            .is_ok());
+    }
+
+    // Phase B requirement 2: per-mount teardown never touches siblings.
+    #[test]
+    fn ending_one_mount_does_not_touch_sibling_mounts() {
+        let mut state = AppState::test_new();
+        state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .unwrap();
+        state
+            .begin_federation_mount(test_mount("bob@10.0.0.2"))
+            .unwrap();
+
+        state.end_federation_mount(&crate::remote::federation::id::HostKey::new(
+            "alice@10.0.0.1",
+            "s1",
+        ));
+
+        assert_eq!(state.remote_mirrors.len(), 1);
+        assert!(state
+            .remote_mirrors
+            .contains_key(&crate::remote::federation::id::HostKey::new(
+                "bob@10.0.0.2",
+                "s1"
+            )));
+    }
+
+    // P8 TDD test 7 (RT-F11/S8.2): a classic `--remote` attach targeting an
+    // already-federated host's `HostKey` is detected as a collision; a
+    // different host is not.
+    #[test]
+    fn double_attach_conflict_is_keyed_on_host_key() {
+        let mut state = AppState::test_new();
+        state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .unwrap();
+
+        assert!(
+            state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
+                "alice@10.0.0.1",
+                "s1"
+            ))
+        );
+        assert!(
+            !state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
+                "bob@10.0.0.2",
+                "s1"
+            ))
+        );
+    }
+
+    #[test]
+    fn no_double_attach_conflict_when_nothing_is_mounted() {
+        let state = AppState::test_new();
+        assert!(
+            !state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
+                "alice@10.0.0.1",
+                "s1"
+            ))
+        );
+    }
+
+    #[test]
+    fn close_indices_for_groups_shared_worktree_space_key_else_falls_back_to_single() {
+        let mut state = AppState::test_new();
+        let mut ws0 = crate::workspace::Workspace::test_new("main");
+        let mut ws1 = crate::workspace::Workspace::test_new("issue");
+        ws0.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        ws1.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-issue".into(),
+            is_linked_worktree: true,
+        });
+        state.workspaces = vec![ws0, ws1];
+
+        assert_eq!(state.close_indices_for(0), vec![0, 1]);
+
+        let mut lone = AppState::test_new();
+        lone.workspaces = vec![crate::workspace::Workspace::test_new("solo")];
+        assert_eq!(lone.close_indices_for(0), vec![0]);
+    }
+
+    // P8 TDD test 4 (S4.1/S8.1 Blocker, focus barrier): input routing is
+    // keyed strictly on the (namespaced) pane id — never a shared/global
+    // buffer — so rapid alternation between two panes' input never lets a
+    // keystroke cross from the pane focused at send time to the other one.
+    // `RemoteTerminalSourceHandle` (P5) stands in for two independently
+    // constructed pane sources here; the property under test — each pane
+    // owns its own exclusive channel, selected explicitly by the caller's
+    // currently-focused id, with no shared mutable routing state in between
+    // — is identical regardless of whether either handle is local or
+    // remote-backed, and is exactly what a real keystroke dispatch (keyed on
+    // `PaneId`) relies on.
+    #[tokio::test]
+    async fn rapid_focus_switching_never_leaks_a_keystroke_across_panes() {
+        use crate::remote::federation::pane_source::{
+            RemoteTerminalSourceConfig, RemoteTerminalSourceHandle,
+        };
+        use crate::remote::federation::protocol::FederationMessage;
+        use crate::terminal::TerminalSource;
+        use tokio::sync::mpsc;
+
+        fn spawn_pane(
+            id: &str,
+        ) -> (
+            RemoteTerminalSourceHandle,
+            mpsc::UnboundedReceiver<FederationMessage>,
+        ) {
+            let (out_tx, out_rx) = mpsc::unbounded_channel();
+            let (_output_tx, output_rx) = mpsc::channel(4);
+            let handle = RemoteTerminalSourceHandle::spawn(RemoteTerminalSourceConfig {
+                terminal_id: id.to_string(),
+                mount_generation: 1,
+                out_tx,
+                output_rx,
+                on_read: Box::new(|_bytes: &[u8]| {}),
+            });
+            (handle, out_rx)
+        }
+
+        let (pane_a, mut a_rx) = spawn_pane("pane_a");
+        let (pane_b, mut b_rx) = spawn_pane("pane_b");
+
+        // Simulate a focus barrier: at each keystroke, the caller selects
+        // exactly one pane by id (never both) and writes only to it.
+        let keystrokes: [(&str, &[u8]); 6] = [
+            ("pane_a", b"a1"),
+            ("pane_b", b"b1"),
+            ("pane_a", b"a2"),
+            ("pane_a", b"a3"),
+            ("pane_b", b"b2"),
+            ("pane_b", b"b3"),
+        ];
+        for (focused_id, bytes) in keystrokes {
+            let handle = if focused_id == "pane_a" {
+                &pane_a
+            } else {
+                &pane_b
+            };
+            handle
+                .write_user_input(bytes::Bytes::copy_from_slice(bytes))
+                .await
+                .unwrap();
+        }
+
+        async fn recv_n(
+            rx: &mut mpsc::UnboundedReceiver<FederationMessage>,
+            n: usize,
+        ) -> Vec<Vec<u8>> {
+            let mut seen = Vec::new();
+            for _ in 0..n {
+                let msg = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+                    .await
+                    .expect("forward task must deliver every queued keystroke")
+                    .expect("channel must stay open");
+                let FederationMessage::Terminal(
+                    crate::remote::federation::protocol::TerminalChannelMessage::Input {
+                        bytes,
+                        ..
+                    },
+                ) = msg
+                else {
+                    panic!("expected an Input message");
+                };
+                seen.push(bytes);
+            }
+            seen
+        }
+
+        let a_seen = recv_n(&mut a_rx, 3).await;
+        let b_seen = recv_n(&mut b_rx, 3).await;
+
+        assert_eq!(a_seen, vec![b"a1".to_vec(), b"a2".to_vec(), b"a3".to_vec()]);
+        assert_eq!(b_seen, vec![b"b1".to_vec(), b"b2".to_vec(), b"b3".to_vec()]);
+        // No extra cross-leaked message waiting on either channel.
+        assert!(a_rx.try_recv().is_err());
+        assert!(b_rx.try_recv().is_err());
+    }
 
     #[test]
     fn agent_terminal_keeps_final_child_cursor_exposed() {
