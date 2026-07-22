@@ -96,6 +96,22 @@ impl App {
             // Note the absence of a `FallThrough` branch: this block sits
             // above `match self.state.mode`, so a default branch that
             // returned would swallow every key this intercept did not claim.
+
+            // Only a press starts a capture. Under the enhanced keyboard
+            // protocol the terminal also sends `Repeat` while the key is held,
+            // and each one would start another clipboard read: duplicate
+            // pastes, `Busy` refusals once the in-flight cap fills, and one
+            // blocking thread per repeat. A repeat this intercept claims is
+            // still consumed rather than passed on — the key belongs to the
+            // intercept, and falling through would leak the `0x16` to the
+            // remote PTY that the press deliberately withheld.
+            let claimed = matches!(
+                decision,
+                RemoteImagePasteDecision::Capture { .. } | RemoteImagePasteDecision::Unsupported
+            );
+            if claimed && key.kind != crossterm::event::KeyEventKind::Press {
+                return;
+            }
             if let RemoteImagePasteDecision::Unsupported = decision {
                 self.raise_clipboard_stage_toast(
                     crate::app::remote_clipboard_stage::TOAST_TITLE_FAILED,
@@ -1234,6 +1250,12 @@ mod remote_image_paste_tests {
         TerminalKey::new(KeyCode::Char('v'), KeyModifiers::CONTROL)
     }
 
+    fn ctrl_v_repeat() -> TerminalKey {
+        let mut key = ctrl_v();
+        key.kind = crossterm::event::KeyEventKind::Repeat;
+        key
+    }
+
     fn test_app() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -1473,6 +1495,48 @@ mod remote_image_paste_tests {
             app.state.selected, 1,
             "navigate mode's own key must still move the selection"
         );
+    }
+
+    // Under the enhanced keyboard protocol a held key repeats. Each repeat
+    // reaching the intercept would start another clipboard read, so a user
+    // leaning on ctrl+v gets duplicate pastes and `Busy` refusals. The repeat
+    // is still consumed — falling through would send the remote PTY the very
+    // byte the press withheld.
+    #[tokio::test]
+    async fn a_held_image_paste_key_captures_once_and_swallows_its_repeats() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+
+        // Each started capture answers with exactly one event, so counting
+        // them counts the clipboard reads this key path launched.
+        app.handle_key(ctrl_v()).await;
+        for _ in 0..5 {
+            app.handle_key(ctrl_v_repeat()).await;
+        }
+
+        let mut captures = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv())
+                .await
+            {
+                Ok(Some(crate::events::AppEvent::RemoteClipboardImageCaptured { .. })) => {
+                    captures += 1;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        assert_eq!(
+            captures, 1,
+            "the press starts one clipboard read and the five repeats start none"
+        );
+        assert_no_frame(
+            &mut out_rx,
+            "a repeat must not reach the peer as raw input either",
+        )
+        .await;
     }
 
     #[tokio::test]

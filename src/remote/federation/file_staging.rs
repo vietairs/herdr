@@ -154,6 +154,14 @@ fn stage_into_with(
         return Err(ClipboardStageFailure::PayloadTooLarge);
     }
 
+    // A zero-byte clipboard image is never a real paste, and it costs no quota
+    // while still consuming a name, an inode and a slot the 24h sweep has to
+    // walk. Refused so the byte quota below cannot be sidestepped by staging
+    // an unbounded number of empty files.
+    if bytes.is_empty() {
+        return Err(ClipboardStageFailure::InvalidPayload);
+    }
+
     // The staging root is `TMPDIR`-derived and therefore environment-chosen.
     // A root that is relative, not losslessly UTF-8, or not injection-safe can
     // never yield a usable path, so it is rejected before anything is created.
@@ -409,6 +417,12 @@ fn is_invisible_or_reordering(ch: char) -> bool {
             | 0x3000
             // The tag block, an invisible ASCII transport.
             | 0xE0000..=0xE007F
+            // Variation selectors and the combining grapheme joiner: zero-width
+            // and, like the tag block above, usable to carry bytes that no one
+            // reading the pane can see.
+            | 0x034F
+            | 0xFE00..=0xFE0F
+            | 0xE0100..=0xE01EF
     )
 }
 
@@ -671,6 +685,23 @@ mod tests {
             "generated name is {} bytes, over the {MAX_COMPONENT_BYTES} the filesystem accepts: {component}",
             component.len()
         );
+    }
+
+    // The quota counts bytes, so zero-byte files are free: without this guard
+    // a peer stages unlimited empty artifacts, each taking a name, an inode and
+    // a slot the 24h sweep has to walk on every subsequent request.
+    #[test]
+    fn stage_rejects_an_empty_payload_so_it_cannot_slip_past_the_byte_quota() {
+        let dir = TestDir::new("empty-payload");
+        assert_eq!(
+            stage_into(&dir.path, "image.png", b""),
+            Err(ClipboardStageFailure::InvalidPayload)
+        );
+        assert!(
+            dir.entries().is_empty(),
+            "a refused payload must not leave a file behind"
+        );
+        assert_benign_stage_succeeds(&dir);
     }
 
     #[test]
