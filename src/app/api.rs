@@ -43,6 +43,10 @@ impl App {
         id: &'static str,
         method: crate::api::schema::Method,
     ) -> Option<String> {
+        // The federated view-only guard for this deferred-worktree path lives at
+        // the deepest choke (`handle_deferred_worktree_api_request`), so it
+        // covers this interactive keyboard caller AND the `api_rx` message path
+        // with one check rather than being duplicated per dispatch entrance.
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         if !self.handle_deferred_worktree_api_request(
             crate::api::schema::Request {
@@ -136,6 +140,47 @@ impl App {
                     crate::api::schema::PluginCommandStatus::Failed
                 };
             }
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationMountReady(ready) = ev {
+            self.handle_federation_mount_ready(*ready);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationMountFailed { target, reason } = ev {
+            self.handle_federation_mount_failed(target, reason);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationMountEnded {
+            host_key,
+            generation,
+            target,
+            reason,
+        } = ev
+        {
+            self.handle_federation_mount_ended(host_key, generation, target, reason);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationSplitPaneReady(ready) = ev {
+            self.handle_federation_split_pane_ready(*ready);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationSplitPaneFailed {
+            request_id,
+            reason,
+            origin,
+        } = ev
+        {
+            self.handle_federation_split_pane_failed(request_id, reason, origin);
             return;
         }
 
@@ -840,6 +885,14 @@ impl App {
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
 
+        // Federated sessions are view-only: reject any method outside the
+        // allowlist before it reaches a mutating handler (default-forbidden).
+        // `federated_mode` is false on every classic construction, so this is
+        // inert until a federated App is live.
+        if self.federated_mode && !crate::api::federated_session_allows(&request.method) {
+            return crate::api::federated_forbidden_response(request.id);
+        }
+
         let response = match request.method {
             Method::ServerStop(_) => {
                 self.state.should_quit = true;
@@ -918,6 +971,9 @@ impl App {
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {
                 return self.handle_workspace_create(request.id, params);
+            }
+            Method::WorkspaceMountRemote(params) => {
+                return self.handle_workspace_mount_remote(request.id, params);
             }
             Method::WorkspaceFocus(target) => {
                 return self.handle_workspace_focus(request.id, target)

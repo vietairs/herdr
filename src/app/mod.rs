@@ -101,6 +101,15 @@ pub struct App {
     pub(crate) event_hub: crate::api::EventHub,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
     pub(crate) no_session: bool,
+    /// Immutable persistence contract (see `SessionPersistencePolicy`). `Enabled`
+    /// for every classic construction; a federated in-proc session sets `Disabled`.
+    pub(crate) persistence: SessionPersistencePolicy,
+    /// True only for an in-proc federated session (constructed via
+    /// `App::new_federated`). Suppresses the default-workspace auto-create
+    /// (`ensure_default_workspace`) — a federated App displays only the remote
+    /// mirror — and marks the App for the mutation allowlist gate at the API
+    /// dispatch entrances. Never mutated after construction.
+    pub(crate) federated_mode: bool,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
@@ -138,6 +147,12 @@ pub struct App {
     pub render_dirty: Arc<AtomicBool>,
     pub(crate) full_redraw_pending: bool,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
+    /// Correlates an in-flight `SplitPaneRequest::request_id`
+    /// (`app/api/panes.rs::dispatch_remote_pane_split`) to the local layout
+    /// context (target tab/pane/direction/ratio/focus) needed to splice the
+    /// eventual `SplitPaneResponse`'s materialized pane into the right spot
+    /// (`App::handle_federation_split_pane_ready`, `app/creation.rs`).
+    pub(crate) pending_remote_splits: HashMap<u64, creation::PendingRemoteSplit>,
     pub(crate) local_terminal_notifications: bool,
     /// Whether this process applies `AppEvent::PrefixInputSource` to the host input source.
     /// The headless server sets this to false: the switch belongs to the foreground client,
@@ -198,6 +213,36 @@ fn repeat_key_identity(
     key: &crate::input::TerminalKey,
 ) -> (crossterm::event::KeyCode, crossterm::event::KeyModifiers) {
     (key.code, key.modifiers)
+}
+
+/// Immutable per-session contract for whether this `App` may touch the classic
+/// on-disk session state (`session.json` / `session-history.json`). Set once at
+/// construction, never mutated at runtime. This is an INDEPENDENT axis from
+/// `no_session` (which also gates unrelated concerns — update checks, the plugin
+/// registry, `detach_exits` — and can be flipped on a live server). The effective
+/// "does this session persist" test at every write site is
+/// `!no_session && !persistence.is_disabled()`, so `Disabled` forces every
+/// persistence write off regardless of `no_session`, while `Enabled` preserves
+/// classic behavior byte-for-byte. A federated in-proc session, which displays a
+/// remote workspace and must never clobber the user's local session, uses
+/// `Disabled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionPersistencePolicy {
+    /// Classic session: on-disk persistence follows the usual `no_session` gate.
+    Enabled,
+    /// Persistence is fully and immutably off (restore/save/exit-save/history/
+    /// clear), independent of `no_session`.
+    // Constructed by the federated constructor (b2.3) and the b2.1 tests; the
+    // classic path only ever builds `Enabled`, so keep the variant until wired.
+    #[allow(dead_code)]
+    Disabled,
+}
+
+impl SessionPersistencePolicy {
+    /// True when this session must never read or write classic on-disk state.
+    pub(crate) fn is_disabled(self) -> bool {
+        matches!(self, SessionPersistencePolicy::Disabled)
+    }
 }
 
 fn auto_updates_enabled(no_session: bool) -> bool {
@@ -657,6 +702,8 @@ impl App {
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            remote_mirrors: std::collections::HashMap::new(),
+            mount_drive_tasks: std::collections::HashMap::new(),
         };
 
         state.terminals = restored_terminals;
@@ -734,17 +781,43 @@ impl App {
             event_hub,
             last_focus,
             no_session,
+            persistence: SessionPersistencePolicy::Enabled,
+            federated_mode: false,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),
             render_notify,
             render_dirty,
             full_redraw_pending: false,
             overlay_panes: HashMap::new(),
+            pending_remote_splits: HashMap::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
             config_reloaded_from_disk: false,
             prefix_input_source: Box::new(crate::platform::RealPrefixInputSource::default()),
         }
+    }
+
+    /// Constructs an App for an in-proc federated session: a view onto a remote
+    /// `RemoteMirror` that must never touch the local classic session. Wraps
+    /// `App::new(no_session = true)` — so the restore branch is already the
+    /// empty one (mod.rs restore gate) — then pins the immutable
+    /// `Disabled` persistence contract (forces save-schedule / exit-save /
+    /// history / clear all off regardless of `no_session`) and the
+    /// federated-mode marker (no default workspace, mutation allowlist).
+    /// Wired live from `run_remote`'s federated route (b3).
+    #[cfg(unix)]
+    pub(crate) fn new_federated(
+        config: &Config,
+        config_diagnostic: Option<String>,
+        api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
+        event_hub: crate::api::EventHub,
+    ) -> Self {
+        let mut app = Self::new(config, true, config_diagnostic, api_rx, event_hub);
+        // Immutable off: restore is already empty (no_session), and this gates
+        // every write path (save-schedule/background/now, exit-save, clear).
+        app.persistence = SessionPersistencePolicy::Disabled;
+        app.federated_mode = true;
+        app
     }
 
     #[cfg(unix)]
@@ -1103,8 +1176,9 @@ impl App {
             }
         }
 
-        // Save session on exit (skip in --no-session mode)
-        if !self.no_session {
+        // Save session on exit (skip in --no-session mode, or when this session's
+        // persistence policy forbids touching the classic on-disk state).
+        if !self.no_session && !self.persistence.is_disabled() {
             self.save_session_now();
         }
 
@@ -1129,6 +1203,12 @@ impl App {
     }
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
+        // A federated session shows only the remote mirror; never auto-create a
+        // local default workspace (covers every call site: runtime.rs api drain,
+        // headless startup, config reload).
+        if self.federated_mode {
+            return false;
+        }
         if !self.state.workspaces.is_empty() || self.state.mode == Mode::Onboarding {
             return false;
         }
@@ -1430,7 +1510,13 @@ impl App {
                 config.experimental.switch_ascii_input_source_in_prefix;
             self.persist_pane_history = config.experimental.pane_history;
             self.state.pane_history_persistence = config.experimental.pane_history;
-            if !self.persist_pane_history {
+            // Only touch the shared on-disk history for a session that actually
+            // persists. A no-session App (monolithic mode, or a federated mount
+            // displaying a remote workspace) must never mutate the classic saved
+            // snapshot — this was the one persistence write path not already
+            // gated by `no_session` (codex C3), so a config reload here could
+            // clear the local session history out from under a real session.
+            if !self.persist_pane_history && !self.no_session && !self.persistence.is_disabled() {
                 crate::persist::clear_history();
             }
         }
@@ -4128,6 +4214,39 @@ mod tests {
 
         assert!(!app.state.session_dirty);
         assert!(app.session_save_deadline.is_some());
+    }
+
+    #[test]
+    fn session_persistence_policy_is_disabled_reports_variant() {
+        assert!(SessionPersistencePolicy::Disabled.is_disabled());
+        assert!(!SessionPersistencePolicy::Enabled.is_disabled());
+    }
+
+    #[test]
+    fn disabled_persistence_policy_blocks_session_save_even_when_no_session_false() {
+        let mut app = test_app();
+        // Classic no_session gate is OFF (a real, persisting session), but the
+        // immutable persistence policy is Disabled (as a federated in-proc
+        // session would be) — no on-disk write may be scheduled or performed.
+        app.no_session = false;
+        app.persistence = SessionPersistencePolicy::Disabled;
+        app.state.session_dirty = true;
+
+        app.sync_session_save_schedule();
+        assert!(
+            app.session_save_deadline.is_none(),
+            "a Disabled persistence policy must not schedule a session save",
+        );
+
+        // The direct save entry points must early-return without spawning a save
+        // thread or reaching the disk-write choke point.
+        app.save_session_now();
+        assert!(app.session_save_thread.is_none());
+        assert!(app.session_save_deadline.is_none());
+
+        app.start_background_session_save();
+        assert!(app.session_save_thread.is_none());
+        assert!(app.session_save_deadline.is_none());
     }
 
     #[test]

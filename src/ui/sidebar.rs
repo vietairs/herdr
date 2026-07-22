@@ -176,21 +176,23 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
 
 fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indented: bool) -> u16 {
     let (state, seen) = ws.aggregate_state(&app.terminals);
+    let branch = workspace_branch_for_display(ws);
     let label = if indented {
         grouped_child_display_label(
             &ws.display_name(),
-            ws.branch().as_deref(),
+            branch.as_deref(),
             ws.custom_name.is_some(),
         )
     } else {
         ws.display_name()
     };
+    let label = workspace_display_label_with_origin_badge(ws, label);
     let token_values = ws.metadata_tokens.values();
     tokens::space_rows(
         &app.sidebar_spaces,
         SpaceTokenContext {
             workspace: &label,
-            branch: ws.branch().as_deref(),
+            branch: branch.as_deref(),
             state_text: state_label(state, seen),
             ahead_behind: ws.git_ahead_behind(),
             tokens: &token_values,
@@ -259,6 +261,56 @@ pub(crate) fn workspace_parent_group_state(
             app.collapsed_space_keys.contains(&space.key),
         )
     })
+}
+
+/// RT-F8 (S11.4, P8 requirement 3): the remote-origin group/badge is derived
+/// exclusively from the workspace's own `id`. A federated workspace's `id` is
+/// only ever set to a `FedRef::to_public_id()` value (`r:<host_key>:...`) by
+/// the federation mount code path (`remote::federation::id::map_in`, keyed
+/// off the *client's own* trusted `HostKey` — never anything the remote
+/// host sends). `custom_name` and every other remote-influenced string never
+/// feed this classification, so a crafted `custom_name` cannot suppress or
+/// spoof the badge (see `sidebar::tests::spoofed_custom_name_does_not_hide_the_remote_badge`).
+pub(crate) fn workspace_federation_origin(
+    ws: &crate::workspace::Workspace,
+) -> Option<crate::remote::federation::id::HostKey> {
+    match crate::remote::federation::id::classify(&ws.id) {
+        crate::remote::federation::id::IdClass::Remote(host_key) => Some(host_key),
+        crate::remote::federation::id::IdClass::Local => None,
+    }
+}
+
+/// Unspoofable remote-origin badge text for a federated workspace's sidebar
+/// row (RT-F8/S11.4); `None` for a local workspace.
+pub(crate) fn federation_origin_badge(ws: &crate::workspace::Workspace) -> Option<String> {
+    workspace_federation_origin(ws).map(|host_key| format!("\u{2601} {}", host_key.as_str()))
+}
+
+/// Prefixes `label` with the unspoofable remote-origin badge when `ws` is a
+/// federated workspace; returns `label` unchanged for a local one. Applied
+/// independent of `grouped_child_display_label`'s `custom_name` handling so a
+/// spoofed custom name never suppresses the badge (RT-F8).
+pub(crate) fn workspace_display_label_with_origin_badge(
+    ws: &crate::workspace::Workspace,
+    label: String,
+) -> String {
+    match federation_origin_badge(ws) {
+        Some(badge) => format!("{badge} {label}"),
+        None => label,
+    }
+}
+
+/// P8 requirement 3: a federated workspace has no local git repository to
+/// probe — `ws.branch()` reads locally-cached git metadata that nothing ever
+/// populates for a federated workspace's `identity_cwd` (which is meaningless
+/// remotely), but this guard makes the suppression explicit and independent
+/// of that absence, so a future local git-refresh pass can never accidentally
+/// start shelling out against a federated workspace's local `identity_cwd`.
+pub(crate) fn workspace_branch_for_display(ws: &crate::workspace::Workspace) -> Option<String> {
+    if workspace_federation_origin(ws).is_some() {
+        return None;
+    }
+    ws.branch()
 }
 
 pub(crate) fn grouped_child_display_label(
@@ -1117,12 +1169,14 @@ fn render_workspace_list(
             Style::default().fg(p.subtext0)
         };
 
+        let branch = workspace_branch_for_display(ws);
         let label = ws.display_name_from(&app.terminals, terminal_runtimes);
         let display_label = if card.indented {
-            grouped_child_display_label(&label, ws.branch().as_deref(), ws.custom_name.is_some())
+            grouped_child_display_label(&label, branch.as_deref(), ws.custom_name.is_some())
         } else {
             label
         };
+        let display_label = workspace_display_label_with_origin_badge(ws, display_label);
         let parent_group = (!card.indented)
             .then(|| workspace_parent_group_state(app, i))
             .flatten();
@@ -1145,7 +1199,7 @@ fn render_workspace_list(
             &app.sidebar_spaces,
             SpaceTokenContext {
                 workspace: &display_label,
-                branch: ws.branch().as_deref(),
+                branch: branch.as_deref(),
                 state_text: state_label(display_state, display_seen),
                 ahead_behind: ws.git_ahead_behind(),
                 tokens: &token_values,
@@ -1940,6 +1994,144 @@ mod tests {
             grouped_child_display_label("herdr-issue", Some("worktree/issue-137"), false),
             "issue-137"
         );
+    }
+
+    // P8 TDD test 5 (RT-F8/S11.4): a federated workspace renders under a
+    // remote-origin badge distinct from local workspaces, a spoofed
+    // `custom_name` cannot suppress it, grouping reuses `worktree_space`, and
+    // no local git branch is displayed for it.
+    #[test]
+    fn federated_workspace_id_is_classified_remote_and_local_ids_are_not() {
+        let local = Workspace::test_new("local-one");
+        assert!(workspace_federation_origin(&local).is_none());
+
+        let mut remote = Workspace::test_new("remote-one");
+        remote.id = "r:alice@10.0.0.1#s1:w1".to_string();
+        let origin = workspace_federation_origin(&remote).expect("must classify as remote");
+        assert_eq!(origin.as_str(), "alice@10.0.0.1#s1");
+    }
+
+    #[test]
+    fn spoofed_custom_name_does_not_hide_the_remote_badge() {
+        let mut ws = Workspace::test_new("looks totally local");
+        ws.id = "r:alice@10.0.0.1#s1:w1".to_string();
+        // Even a `custom_name` deliberately crafted to look like a trusted
+        // local workspace must not suppress the badge — the badge is derived
+        // from `id`, never from `custom_name`.
+        ws.custom_name = Some("definitely-local-workspace".to_string());
+
+        let badge = federation_origin_badge(&ws).expect("federated workspace must carry a badge");
+        assert!(badge.contains("alice@10.0.0.1#s1"));
+
+        let labeled = workspace_display_label_with_origin_badge(&ws, ws.display_name());
+        assert!(labeled.starts_with(&badge));
+        assert!(labeled.contains("definitely-local-workspace"));
+    }
+
+    #[test]
+    fn local_workspace_has_no_remote_badge() {
+        let ws = Workspace::test_new("plain-local");
+        assert!(federation_origin_badge(&ws).is_none());
+        let label = ws.display_name();
+        assert_eq!(
+            workspace_display_label_with_origin_badge(&ws, label.clone()),
+            label
+        );
+    }
+
+    #[test]
+    fn federated_workspace_suppresses_local_git_branch_display() {
+        let mut ws = Workspace::test_new("remote-repo");
+        ws.id = "r:bob@10.0.0.2#s1:w1".to_string();
+        // Even if something upstream populated a local git cache (it never
+        // should for a federated workspace, since `identity_cwd` is
+        // meaningless remotely), the display path must not surface it.
+        ws.cached_git_branch = Some("main".to_string());
+        assert_eq!(workspace_branch_for_display(&ws), None);
+    }
+
+    #[test]
+    fn federated_workspace_groups_under_its_host_via_worktree_space_reuse() {
+        // Two federated workspaces mounted under the SAME host share a
+        // `worktree_space.key` derived from the host — reusing the existing
+        // grouping mechanism (`workspace_list_entries`) rather than a
+        // parallel one, per requirement 3.
+        let mut app = crate::app::state::AppState::test_new();
+        let mut first = Workspace::test_new("remote-a");
+        first.id = "r:carol@10.0.0.3#s1:w1".to_string();
+        first.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "federation:carol@10.0.0.3#s1".to_string(),
+            label: "carol@10.0.0.3".to_string(),
+            repo_root: std::path::PathBuf::new(),
+            checkout_path: std::path::PathBuf::new(),
+            is_linked_worktree: false,
+        });
+        let mut second = Workspace::test_new("remote-b");
+        second.id = "r:carol@10.0.0.3#s1:w2".to_string();
+        second.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "federation:carol@10.0.0.3#s1".to_string(),
+            label: "carol@10.0.0.3".to_string(),
+            repo_root: std::path::PathBuf::new(),
+            checkout_path: std::path::PathBuf::new(),
+            is_linked_worktree: true,
+        });
+        app.workspaces = vec![first, second];
+
+        let entries = workspace_list_entries(&app);
+        assert_eq!(
+            entries.len(),
+            2,
+            "both federated workspaces render, one indented under the host group"
+        );
+        assert!(entries
+            .iter()
+            .any(|WorkspaceListEntry::Workspace { indented, .. }| *indented));
+    }
+
+    // Phase B test 9: sidebar grouping scales to N hosts — extends
+    // `federated_workspace_groups_under_its_host_via_worktree_space_reuse`'s
+    // single-host case to two distinct federated hosts, each rendering its
+    // own badge/group. Additive verification only, per requirement 8: this
+    // is the same `workspace_list_entries`/`worktree_space` grouping
+    // primitive, not new grouping logic.
+    #[test]
+    fn sidebar_groups_scale_to_n_hosts() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut host_a = Workspace::test_new("remote-a");
+        host_a.id = "r:alice@10.0.0.1#s1:w1".to_string();
+        host_a.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "federation:alice@10.0.0.1#s1".to_string(),
+            label: "alice@10.0.0.1".to_string(),
+            repo_root: std::path::PathBuf::new(),
+            checkout_path: std::path::PathBuf::new(),
+            is_linked_worktree: false,
+        });
+        let mut host_b = Workspace::test_new("remote-b");
+        host_b.id = "r:bob@10.0.0.2#s1:w1".to_string();
+        host_b.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "federation:bob@10.0.0.2#s1".to_string(),
+            label: "bob@10.0.0.2".to_string(),
+            repo_root: std::path::PathBuf::new(),
+            checkout_path: std::path::PathBuf::new(),
+            is_linked_worktree: false,
+        });
+        let badge_a = federation_origin_badge(&host_a).expect("host a must carry a badge");
+        let badge_b = federation_origin_badge(&host_b).expect("host b must carry a badge");
+        app.workspaces = vec![host_a, host_b];
+
+        let entries = workspace_list_entries(&app);
+        assert_eq!(
+            entries.len(),
+            2,
+            "both distinct-host federated workspaces render"
+        );
+
+        assert_ne!(
+            badge_a, badge_b,
+            "distinct hosts must render distinct badges"
+        );
+        assert!(badge_a.contains("alice@10.0.0.1"));
+        assert!(badge_b.contains("bob@10.0.0.2"));
     }
 
     #[test]

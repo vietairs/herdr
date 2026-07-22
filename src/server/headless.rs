@@ -38,6 +38,8 @@ use crate::api;
 use crate::app;
 use crate::config;
 use crate::events::AppEvent;
+#[cfg(unix)]
+use crate::ipc::remove_socket_file_if_owned_typed;
 use crate::ipc::{
     bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalListener,
     SocketFileIdentity,
@@ -59,6 +61,8 @@ use crate::server::keybindings::{app_keybindings, apply_keybindings};
 use crate::server::notifications::{
     should_forward_toast_to_clients, toast_message_from_state_change, toast_notify_kind,
 };
+#[cfg(unix)]
+use crate::server::socket_paths::federation_socket_path;
 use crate::server::socket_paths::{
     client_socket_path, prepare_socket_path, restrict_socket_permissions,
 };
@@ -200,9 +204,24 @@ pub struct HeadlessServer {
     client_listener: LocalListener,
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
+    /// Co-located federation listener (P9.2b b0.4). Bound and fully
+    /// lifecycle-managed here; the accept loop (sub-brick 2) drives each
+    /// connection through the handshake on its own thread.
+    #[cfg(unix)]
+    federation_listener: LocalListener,
+    #[cfg(unix)]
+    federation_socket_path: PathBuf,
+    #[cfg(unix)]
+    federation_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
     #[cfg(unix)]
     next_client_id: u64,
+    /// Monotonically-minted id for each accepted federation connection (P9.2b
+    /// b0.4 sub-brick 2). Together with the lease's accept-epoch it names an
+    /// exact connection; never reused within a process. Dormant until the accept
+    /// loop mints against it.
+    #[cfg(unix)]
+    next_federation_id: u64,
     /// The client currently driving the shared pane runtime size, theme, and input keybindings.
     foreground_client_id: Option<u64>,
     /// Server-owned keybindings, restored when foreground clients use server mode.
@@ -231,6 +250,19 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    /// Identity of this live server process for federation (P9.2b b0.1).
+    /// One fresh id per boot; a replacement server after live-handoff mints
+    /// its own, so a federation handshake/mount fences stale traffic from a
+    /// prior process. Replaces `AppFederationHost` as the owner (v5 finding
+    /// C4). Dormant until the federation listener is exposed (b0.4).
+    federation_server_instance_id: crate::remote::federation::id::ServerInstanceId,
+    /// Single-controller admission + linearized revocation for the co-located
+    /// federation listener (P9.2b b0.2). One per live server; a replacement
+    /// after live-handoff starts fresh (`Free`, epoch 0). Serviced only on this
+    /// event loop, alongside the `App`, so admission/mount/authorization stay
+    /// linearized with handoff revocation. Dormant until the accept loop mints
+    /// connections against it (b0.4 sub-brick 2).
+    federation_lease: crate::server::federation_lease::FederationLease,
 }
 
 fn apply_terminal_attach_scroll(
@@ -376,6 +408,24 @@ impl HeadlessServer {
         #[cfg(unix)]
         listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
+        // Co-located federation listener (P9.2b b0.4 sub-brick 1): bind + full
+        // lifecycle wiring now, but nothing accepts on it yet (sub-brick 2).
+        #[cfg(unix)]
+        let (federation_listener, federation_path, federation_socket_identity) = {
+            let federation_path = federation_socket_path(&client_path);
+            prepare_socket_path(&federation_path)?;
+            let federation_listener = bind_local_listener(&federation_path)?;
+            restrict_socket_permissions(&federation_path)?;
+            let federation_socket_identity = socket_file_identity(&federation_path)?;
+            info!(path = %federation_path.display(), "federation socket listening");
+            federation_listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+            (
+                federation_listener,
+                federation_path,
+                federation_socket_identity,
+            )
+        };
+
         let should_quit = Arc::new(AtomicBool::new(false));
 
         // Channel for server events from client threads.
@@ -397,6 +447,12 @@ impl HeadlessServer {
             client_listener: listener,
             client_socket_path: client_path,
             client_socket_identity,
+            #[cfg(unix)]
+            federation_listener,
+            #[cfg(unix)]
+            federation_socket_path: federation_path,
+            #[cfg(unix)]
+            federation_socket_identity,
             clients: HashMap::new(),
             #[cfg(unix)]
             next_client_id: 1,
@@ -414,7 +470,23 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
+            federation_server_instance_id: crate::remote::federation::id::ServerInstanceId::fresh(),
+            #[cfg(unix)]
+            next_federation_id: 1,
+            federation_lease: crate::server::federation_lease::FederationLease::new(),
         })
+    }
+
+    /// This live server's federation identity (P9.2b b0.1). Dormant until the
+    /// federation listener is exposed (b0.4); the handshake/mount path will
+    /// hand this to a connecting federation client so stale traffic from a
+    /// prior server process is fenced.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub(crate) fn federation_server_instance_id(
+        &self,
+    ) -> &crate::remote::federation::id::ServerInstanceId {
+        &self.federation_server_instance_id
     }
 
     /// Runs the headless server event loop until shutdown.
@@ -495,6 +567,7 @@ impl HeadlessServer {
 
             // 4. Accept new client connections.
             self.accept_client_connections()?;
+            self.accept_federation_connections()?;
 
             // 5. Drain server events from client threads.
             if self.drain_server_events() {
@@ -941,6 +1014,17 @@ impl HeadlessServer {
         self.handoff_in_progress = true;
         self.disconnect_all_clients_for_handoff();
         let _ = reject_pending_client_connections(&self.client_listener);
+        // Revoke the federation controller for the handoff: close admission, bump
+        // the accept-epoch, and free the single-controller slot. Any command still
+        // queued from the current controller now carries a stale epoch and is
+        // rejected, so it cannot mutate the App or reacquire authority if the
+        // handoff rolls back (federation_lease v5 finding #1). The revoked
+        // connection's own threads are reaped when this process is replaced on a
+        // successful handoff; on rollback, `rollback_handoff_before_commit`
+        // reopens admission. Active stream-close is deferred (no registry) — the
+        // client path likewise relies on shutdown + connection drop, not a forced
+        // socket close.
+        let _revoked = self.federation_lease.begin_revocation();
 
         let mut paused_terminal_ids = Vec::new();
         for terminal_id in pane_by_terminal.keys() {
@@ -1058,6 +1142,13 @@ impl HeadlessServer {
             let _ = std::fs::remove_file(crate::api::socket_path());
         }
         let _ = remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity);
+        // Unlink the federation socket alongside the client socket (P9.2b b0.4
+        // sub-brick 1). Typed so a future revocation sub-brick can build an
+        // accurate unlink record; the result is not yet consumed.
+        let _ = remove_socket_file_if_owned_typed(
+            &self.federation_socket_path,
+            &self.federation_socket_identity,
+        );
         if let Err(err) = crate::server::handoff::wait_ready(&mut stream) {
             crate::server::handoff::cleanup_failed_import_child(&mut import_child);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
@@ -1143,10 +1234,23 @@ impl HeadlessServer {
         let client_socket_identity = socket_file_identity(&client_path)?;
         listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
+        // The federation socket was unlinked alongside the client socket
+        // (perform_live_handoff, between send_fds and wait_ready); a failed
+        // handoff rolls back to the old server, so restore it the same way.
+        let federation_path = federation_socket_path(&client_path);
+        prepare_socket_path(&federation_path)?;
+        let federation_listener = bind_local_listener(&federation_path)?;
+        restrict_socket_permissions(&federation_path)?;
+        let federation_socket_identity = socket_file_identity(&federation_path)?;
+        federation_listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+
         self.api_server = Some(api_server);
         self.client_listener = listener;
         self.client_socket_path = client_path;
         self.client_socket_identity = client_socket_identity;
+        self.federation_listener = federation_listener;
+        self.federation_socket_path = federation_path;
+        self.federation_socket_identity = federation_socket_identity;
         Ok(())
     }
 
@@ -1168,6 +1272,10 @@ impl HeadlessServer {
                 runtime.set_handoff_reader_paused(false);
             }
         }
+        // Reopen federation admission (the epoch stays at its already-bumped
+        // value — never restored, so pre-revocation connections remain stale) so
+        // a rolled-back handoff does not permanently wedge federation.
+        self.federation_lease.reopen_admission();
         self.handoff_in_progress = false;
         let _ = std::fs::remove_file(socket_path);
     }
@@ -1378,6 +1486,38 @@ impl HeadlessServer {
     /// pending blocking accept. The dedicated accept thread handles that path.
     #[cfg(windows)]
     fn accept_client_connections(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Accepts pending co-located federation connections (P9.2b b0.4 sub-brick
+    /// 2). During live handoff pending peers are drained without a handshake,
+    /// mirroring the client path, so none waits on a mount the draining server
+    /// will never send.
+    #[cfg(unix)]
+    fn accept_federation_connections(&mut self) -> io::Result<()> {
+        if self.handoff_in_progress {
+            return crate::server::federation_accept::reject_pending_federation_connections(
+                &self.federation_listener,
+            );
+        }
+        // Read the lease's accept-epoch synchronously here, on the event loop
+        // that owns the lease, and stamp it onto every connection accepted this
+        // tick. A handoff revocation between ticks bumps the epoch, so a
+        // connection accepted before it carries a now-stale epoch and cannot
+        // acquire or mutate (federation_lease v5 finding #1).
+        let epoch = self.federation_lease.current_epoch();
+        crate::server::federation_accept::accept_pending_federation_connections(
+            &self.federation_listener,
+            &mut self.next_federation_id,
+            epoch,
+            &self.federation_server_instance_id,
+            &self.server_event_tx,
+        )
+    }
+
+    /// Federation is unix-only; no federation listener exists on Windows.
+    #[cfg(windows)]
+    fn accept_federation_connections(&mut self) -> io::Result<()> {
         Ok(())
     }
 
@@ -2111,6 +2251,19 @@ impl HeadlessServer {
 
                 true
             }
+            #[cfg(unix)]
+            AppEvent::FederationMountFailed { target, reason } => {
+                let (target, reason) = (target.clone(), reason.clone());
+                self.app.handle_internal_event(ev);
+                if should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
+                    self.send_flat_toast_to_foreground_client(
+                        toast_notify_kind(self.app.state.toast_config.delivery)
+                            .expect("toast forwarding requires a client notification kind"),
+                        format!("federated mount to {target} failed: {reason}"),
+                    );
+                }
+                true
+            }
             _ => {
                 self.app.handle_internal_event(ev);
                 true
@@ -2742,6 +2895,20 @@ impl HeadlessServer {
             ServerEvent::QuitSignal => {
                 // The quit check at the top of the loop handles this.
                 // No render needed — the next iteration will initiate shutdown.
+                false
+            }
+            ServerEvent::Federation(command) => {
+                // Service the request against the live App on this single
+                // &mut self dispatch point (P9.2b b0.1). Read-only queries and
+                // the remote-input forwards drive no local UI and drain no
+                // local events here — the loop's own event_rx arm owns the
+                // forwarding-aware drain — so no local render is needed (MIN10:
+                // these commands are render-causally inert).
+                crate::server::federation_actor::dispatch(
+                    &mut self.app,
+                    &mut self.federation_lease,
+                    command,
+                );
                 false
             }
         }
@@ -3814,6 +3981,19 @@ impl HeadlessServer {
                 );
             }
         }
+        #[cfg(unix)]
+        if let Err(err) = remove_socket_file_if_owned(
+            &self.federation_socket_path,
+            &self.federation_socket_identity,
+        ) {
+            if err.kind() != io::ErrorKind::NotFound {
+                warn!(
+                    path = %self.federation_socket_path.display(),
+                    err = %err,
+                    "failed to remove federation socket on shutdown"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -4190,6 +4370,23 @@ mod tests {
         listener
             .set_nonblocking(ListenerNonblockingMode::Accept)
             .expect("set listener nonblocking");
+        #[cfg(unix)]
+        let (federation_listener, federation_path, federation_socket_identity) = {
+            let federation_path = federation_socket_path(&socket_path);
+            let _ = fs::remove_file(&federation_path);
+            let federation_listener =
+                bind_local_listener(&federation_path).expect("bind test federation listener");
+            let federation_socket_identity = socket_file_identity(&federation_path)
+                .expect("test federation listener socket identity");
+            federation_listener
+                .set_nonblocking(ListenerNonblockingMode::Accept)
+                .expect("set federation listener nonblocking");
+            (
+                federation_listener,
+                federation_path,
+                federation_socket_identity,
+            )
+        };
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
         #[cfg(windows)]
         let should_quit = Arc::new(AtomicBool::new(false));
@@ -4206,6 +4403,12 @@ mod tests {
             client_listener: listener,
             client_socket_path: socket_path,
             client_socket_identity,
+            #[cfg(unix)]
+            federation_listener,
+            #[cfg(unix)]
+            federation_socket_path: federation_path,
+            #[cfg(unix)]
+            federation_socket_identity,
             clients: HashMap::new(),
             #[cfg(unix)]
             next_client_id: 1,
@@ -4226,7 +4429,36 @@ mod tests {
             should_quit,
             server_event_rx,
             server_event_tx,
+            // Replacement server after live-handoff mints a fresh identity so a
+            // federation client fences stale traffic from the prior process
+            // (P9.2b b0.1 rotation; v5 finding C4).
+            federation_server_instance_id: crate::remote::federation::id::ServerInstanceId::fresh(),
+            #[cfg(unix)]
+            next_federation_id: 1,
+            // Replacement server starts with a fresh, uncontrolled lease: no
+            // connection carries over a live-handoff, so none holds authority.
+            federation_lease: crate::server::federation_lease::FederationLease::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn federation_socket_is_bound_as_a_sibling_of_the_client_socket() {
+        let server = test_headless_server();
+        assert_eq!(
+            server.federation_socket_path.parent(),
+            server.client_socket_path.parent()
+        );
+        assert!(
+            server
+                .federation_socket_path
+                .to_str()
+                .unwrap()
+                .ends_with(".sock"),
+            "federation socket path = {:?}",
+            server.federation_socket_path
+        );
+        assert_ne!(server.federation_socket_path, server.client_socket_path);
     }
 
     fn shutdown_test_runtimes(server: &mut HeadlessServer) {
@@ -8116,6 +8348,102 @@ next_tab = ""
                 );
             }
             other => panic!("expected system toast notify, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn federation_mount_failed_system_toast_forwards_to_foreground_client() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+
+        let changed =
+            server.handle_internal_event_with_forwarding(AppEvent::FederationMountFailed {
+                target: "host1".into(),
+                reason: "connection refused".into(),
+            });
+
+        assert!(changed);
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("system toast message"),
+        ) {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::SystemToast);
+                assert!(message.contains("host1"));
+                assert!(body
+                    .as_deref()
+                    .is_some_and(|body| body.contains("connection refused")));
+            }
+            other => panic!("expected system toast notify, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn federation_mount_failed_terminal_toast_forwards_to_foreground_client() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
+
+        let changed =
+            server.handle_internal_event_with_forwarding(AppEvent::FederationMountFailed {
+                target: "host1".into(),
+                reason: "connection refused".into(),
+            });
+
+        assert!(changed);
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("terminal toast message"),
+        ) {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::Toast);
+                assert!(message.contains("host1"));
+                assert!(body
+                    .as_deref()
+                    .is_some_and(|body| body.contains("connection refused")));
+            }
+            other => panic!("expected terminal toast notify, got {other:?}"),
         }
     }
 

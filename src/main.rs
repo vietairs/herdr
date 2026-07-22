@@ -473,6 +473,16 @@ fn main() -> io::Result<()> {
         return remote::run_remote_client_bridge();
     }
 
+    // Headless remote-side federation server (P3 of the remote-workspace-
+    // federation plan): transparently bridges SSH stdin/stdout to the
+    // co-located federation socket the live `HeadlessServer` already accepts
+    // on (`server::federation_accept`), so it rides `SshStdioBridge` exactly
+    // like `remote-client-bridge` does. A distinct subcommand — the classic
+    // `server`/`remote-client-bridge` paths above are untouched.
+    if args.get(1).map(|s| s.as_str()) == Some("federation-serve") {
+        return remote::run_federation_serve_bridge();
+    }
+
     if args.get(1).map(|s| s.as_str()) == Some("server") {
         return server::headless::run_server();
     }
@@ -681,7 +691,38 @@ fn main() -> io::Result<()> {
     }
 
     if let Some(remote_launch) = remote_launch {
-        let remote_target = remote_launch.target.clone();
+        // REVISED Phase A (multi-remote federated workspace launch):
+        // `--remote-workspace`/`HERDR_REMOTE_FEDERATION=1` now route through
+        // the server-daemon-owned mount (local + remote coexist in one TUI)
+        // instead of the old federated-alone in-process path. Classic
+        // `--remote` (no federation opt-in) is untouched below.
+        #[cfg(unix)]
+        {
+            let route = remote::decide_launch_route(
+                Some(&remote_launch),
+                std::env::var(remote::REMOTE_FEDERATION_ENV_VAR)
+                    .ok()
+                    .as_deref(),
+            );
+            if route == remote::LaunchRoute::Coexistence {
+                if remote::coexistence_keybindings_conflict(&remote_launch) {
+                    eprintln!(
+                        "herdr: --remote-keybindings is not supported together with \
+                         --remote-workspace (federated coexistence mode) yet; drop \
+                         --remote-keybindings or run without --remote-workspace"
+                    );
+                    std::process::exit(1);
+                }
+                let targets = remote_launch.target.clone();
+                if let Err(err) = server::autodetect::auto_detect_launch_with_mount(targets) {
+                    eprintln!("herdr: {err}");
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+        }
+
+        let remote_target = remote_launch.target.first().cloned().unwrap_or_default();
         if let Err(err) = remote::run_remote(remote_launch) {
             eprintln!("error: {err}");
             remote::print_remote_error_hint(&err, &remote_target);

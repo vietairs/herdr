@@ -49,6 +49,31 @@ herdr
 
 run your agents, split panes, walk away. `ctrl+b q` detaches, `herdr` reattaches. [quick start →](https://herdr.dev/docs/quick-start/)
 
+## remote workspace federation
+
+mount a remote machine's herdr as a **new workspace in your local sidebar** — local and remote agents side by side, native status, cold-resume. the remote runs herdr headless as a federation server over the same ssh bridge; no extra ports, no daemon to babysit.
+
+```bash
+# mount a remote host as a federated workspace
+herdr --remote ssh://you@server --remote-workspace
+# equivalently, via env
+HERDR_REMOTE_FEDERATION=1 herdr --remote server        # `server` = any ssh config host
+```
+
+repeat per host to pull several machines into one sidebar — each mounts under its own per-host group:
+
+```bash
+herdr --remote appn-ltu-vm-100 --remote-workspace
+herdr --remote appn-ltu-vm-105 --remote-workspace
+```
+
+notes:
+
+- **herdr must be installed on both ends** — the remote is driven via `herdr federation-serve`. put it on the remote `PATH` or `~/.local/bin`; to push a local build, set `HERDR_REMOTE_BINARY=path/to/herdr`.
+- mount a **named** remote session with `--session <name>` (`herdr --remote server --remote-workspace --session agents`).
+- `--remote-workspace` requires `--remote`. if the remote's herdr lacks federation (old binary / version skew), herdr **falls back to the classic full-screen `--remote` attach** with a notice — never a hard failure.
+- plain thin-client attach (no sidebar merge, one host at a time) stays `herdr --remote <target>`. full details: [remote docs →](https://herdr.dev/docs/persistence-remote/).
+
 ## docs
 
 everything lives at [herdr.dev/docs](https://herdr.dev/docs/): [quick start](https://herdr.dev/docs/quick-start/) · [concepts](https://herdr.dev/docs/concepts/) · [supported agents](https://herdr.dev/docs/agents/) · [keyboard](https://herdr.dev/docs/keyboard/) · [configuration](https://herdr.dev/docs/configuration/) · [session state](https://herdr.dev/docs/session-state/) · [remote](https://herdr.dev/docs/persistence-remote/) · [integrations](https://herdr.dev/docs/integrations/) · [plugins](https://herdr.dev/docs/plugins/) · [socket api](https://herdr.dev/docs/socket-api/)
