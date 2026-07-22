@@ -390,6 +390,16 @@ fn poll_agent_statuses<H: FederationHost>(
                     terminal_id,
                     mount_generation: MOUNT_GENERATION,
                     status,
+                    // `agent: None` here is only correct because this path
+                    // is exercised solely by the test-only `FederationHost`
+                    // fixture (`loopback.rs`'s `FixtureHost`), whose
+                    // `agent_statuses()` never carries identity. Production
+                    // traffic goes through `federation_accept.rs`'s
+                    // `poll_agent_statuses`, which sources the real
+                    // identity. A future real `FederationHost` impl must not
+                    // copy this hardcoded `None` — wire the actual
+                    // identified agent through `agent_statuses()` first.
+                    agent: None,
                 },
             ))
             .is_err()

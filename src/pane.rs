@@ -550,6 +550,20 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
 /// reads the same as an idle prompt); `Unknown` passes through unchanged so
 /// an ambiguous remote probe never fabricates a stronger claim than the
 /// source itself made (S14.1).
+/// P6/P9: a relayed `AgentStatus` frame carries the serving host's own
+/// agent identity alongside status, so a remote-mirrored pane (no local
+/// process to probe, see `spawn_basic_detection_task`'s `pid > 0` gate) can
+/// still populate `agent_presence`/`terminal.agent_name` and pass
+/// `TerminalState::is_agent_terminal()`. `agent` carries the wire's
+/// canonical label string (`crate::detect::agent_label`) rather than
+/// `Agent` directly, matching `AgentStatusMessage::agent`'s wire shape;
+/// parsed to `Agent` at the one place that consumes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RelayedAgentStatus {
+    pub(crate) status: AgentStatus,
+    pub(crate) agent: Option<String>,
+}
+
 fn map_relayed_agent_status(status: AgentStatus) -> AgentState {
     match status {
         AgentStatus::Idle | AgentStatus::Done => AgentState::Idle,
@@ -611,7 +625,7 @@ fn spawn_basic_detection_task(
     // `AgentStatus` update is applied directly — never via
     // `probe_foreground_process`, which targets a local PID that simply
     // does not exist for a remote pane.
-    mut relayed_status_rx: Option<mpsc::Receiver<AgentStatus>>,
+    mut relayed_status_rx: Option<mpsc::Receiver<RelayedAgentStatus>>,
 ) -> (
     tokio::task::AbortHandle,
     Arc<Notify>,
@@ -681,11 +695,57 @@ fn spawn_basic_detection_task(
                     // P6 requirement 1/2: the remote's real foreground-
                     // process signal (P3), relayed through P4's reducer —
                     // applied directly, with zero involvement of
-                    // `probe_foreground_process`. Screen-text detection
-                    // (below, unmodified) still supplies agent *identity*;
-                    // this only refines the *state* dimension.
-                    let mapped = map_relayed_agent_status(relayed_status);
-                    if mapped != state {
+                    // `probe_foreground_process`.
+                    //
+                    // P9 identity fix: the relay also carries the serving
+                    // host's own agent identity (`AgentStatusMessage::
+                    // agent`) — a remote-mirrored pane has no local process
+                    // to probe (`pid` stays 0, `should_check_process` below
+                    // is always false), so screen-text detection can never
+                    // *identify* an agent for it (it only refines state for
+                    // an already-identified one). Apply the relayed
+                    // identity directly here, bypassing the process-probe
+                    // debounce entirely — the serving host already only
+                    // sends a frame on change.
+                    let mut identity_changed = false;
+                    if let Some(label) = relayed_status.agent.as_deref() {
+                        if let Some(identified) = crate::detect::parse_agent_label(label) {
+                            if agent_presence.current_agent() != Some(identified) {
+                                agent_presence.observe_process_probe(Some(identified));
+                                terminal.clear_agent_osc_state();
+                                identity_changed = true;
+                            }
+                        }
+                    } else if matches!(relayed_status.status, AgentStatus::Idle | AgentStatus::Done)
+                    {
+                        // No identified agent AND the remote reports idle/done
+                        // (not Working/Blocked, which necessarily implies an
+                        // agent is active): the remote agent has most likely
+                        // exited and its pane reverted to a plain shell.
+                        // A Working/Blocked status paired with `agent: None`
+                        // instead means an *old* peer that structurally never
+                        // populates this field — never clear on that
+                        // combination, or a stale identity would be wiped
+                        // out for a still-running remote agent. Route the
+                        // idle/done clear through the same debounced
+                        // `observe_process_probe(None)` path the local
+                        // process-probe loop uses, so a single stray
+                        // idle/done frame can't spuriously wipe a real
+                        // identity (see `AGENT_MISS_CONFIRMATION_ATTEMPTS`).
+                        if agent_presence.observe_process_probe(None) {
+                            terminal.clear_agent_osc_state();
+                            identity_changed = true;
+                        }
+                    }
+                    let mapped = map_relayed_agent_status(relayed_status.status);
+                    // Publish on a status transition OR a fresh identity —
+                    // otherwise an identity that arrives without a
+                    // simultaneous status change (e.g. the remote was
+                    // already `Working` before this pane mounted) would
+                    // never reach `terminal.detected_agent`
+                    // (`AppEvent::StateChanged` is the only path that sets
+                    // it), leaving `is_agent_terminal()` false forever.
+                    if mapped != state || identity_changed {
                         state = mapped;
                         last_visible_idle = mapped == AgentState::Idle;
                         last_visible_blocker = mapped == AgentState::Blocked;
@@ -1037,7 +1097,7 @@ pub struct PaneRuntime {
     // module's own tests, so it's dead code outside `#[cfg(test)]` until
     // then — same precedent as `PaneRuntimeIo::Remote`.
     #[allow(dead_code)]
-    relayed_agent_status_tx: Option<mpsc::Sender<AgentStatus>>,
+    relayed_agent_status_tx: Option<mpsc::Sender<RelayedAgentStatus>>,
 }
 
 /// Capacity (in messages, not bytes) of each pane's raw-output broadcast
@@ -1884,14 +1944,14 @@ impl PaneRuntime {
         };
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
-        // P6: dormant relayed-agent-status channel — `None` for every
-        // locally-spawned runtime, `Some` only here. Nothing in production
-        // code drives `relayed_agent_status_tx` yet (same "additive,
-        // dormant until a live call site" precedent as `pane_source.rs`);
-        // it exists so a future federation call site (P8/P9) has somewhere
-        // to feed `RemoteMirror::apply_agent_status`'s output.
+        // P6: relayed-agent-status channel — `None` for every
+        // locally-spawned runtime, `Some` only here. Actively driven in
+        // production by `drive_mount_channel` -> `router.route_agent_status`
+        // feeding this pane's `RemoteMirror::apply_agent_status`, whose
+        // output lands on `relayed_agent_status_tx` and is consumed by the
+        // detection loop's `relayed_status_recv` branch above.
         let (relayed_agent_status_tx, relayed_agent_status_rx) =
-            mpsc::channel::<AgentStatus>(RELAYED_AGENT_STATUS_CHANNEL_CAPACITY);
+            mpsc::channel::<RelayedAgentStatus>(RELAYED_AGENT_STATUS_CHANNEL_CAPACITY);
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
             pane_id,
             child_pid.clone(),
@@ -2849,7 +2909,7 @@ impl PaneRuntime {
     /// `remote::federation::client::drive_mount_channel`'s `AgentStatus`
     /// handling (which reads `remote::federation::reducer::RemoteMirror::
     /// apply_agent_status`'s companion status).
-    pub(crate) fn relayed_agent_status_sender(&self) -> Option<mpsc::Sender<AgentStatus>> {
+    pub(crate) fn relayed_agent_status_sender(&self) -> Option<mpsc::Sender<RelayedAgentStatus>> {
         self.relayed_agent_status_tx.clone()
     }
 
@@ -4536,7 +4596,13 @@ mod remote_spawn_tests {
         let sender = remote_runtime
             .relayed_agent_status_sender()
             .expect("spawn_remote runtimes must expose a relay sender");
-        sender.send(AgentStatus::Working).await.unwrap();
+        sender
+            .send(RelayedAgentStatus {
+                status: AgentStatus::Working,
+                agent: Some("claude".to_string()),
+            })
+            .await
+            .unwrap();
 
         let event = tokio::time::timeout(std::time::Duration::from_millis(200), events_rx.recv())
             .await
@@ -4548,6 +4614,7 @@ mod remote_spawn_tests {
                 state: AgentState::Working,
                 visible_working: true,
                 visible_blocker: false,
+                agent: Some(Agent::Claude),
                 ..
             }
         ));
@@ -4563,6 +4630,110 @@ mod remote_spawn_tests {
     async fn local_runtime_has_no_relayed_agent_status_sender() {
         let local = PaneRuntime::test_with_channel(80, 24).0;
         assert!(local.relayed_agent_status_sender().is_none());
+    }
+
+    // MAJOR fix regression: once a relayed identity is established, a
+    // subsequent run of idle/no-agent frames (the remote reporting its
+    // agent is gone) must clear that identity via the debounced
+    // `observe_process_probe(None)` path — mirroring how the local
+    // process-probe loop clears a vanished agent — so the pane stops
+    // reporting as an agent terminal. A single stray idle/None frame must
+    // NOT clear it (debounce), and a Working/Blocked+None frame (the shape
+    // an old peer that never populates `agent` would send) must never
+    // clear a known identity either.
+    #[tokio::test]
+    async fn relayed_idle_none_clears_identity_only_after_debounce() {
+        let (remote_runtime, _output_tx, _out_rx, mut events_rx) =
+            spawn_test_remote_pane("term_1", 1);
+        let sender = remote_runtime
+            .relayed_agent_status_sender()
+            .expect("spawn_remote runtimes must expose a relay sender");
+
+        // Establish identity.
+        sender
+            .send(RelayedAgentStatus {
+                status: AgentStatus::Working,
+                agent: Some("claude".to_string()),
+            })
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_millis(200), events_rx.recv())
+            .await
+            .expect("identity-establishing frame must publish")
+            .expect("sender still alive");
+        assert!(matches!(
+            event,
+            AppEvent::StateChanged {
+                agent: Some(Agent::Claude),
+                state: AgentState::Working,
+                ..
+            }
+        ));
+
+        // A Working+None frame (old-peer shape) must never clear identity,
+        // and must not even publish (no status/identity change).
+        sender
+            .send(RelayedAgentStatus {
+                status: AgentStatus::Working,
+                agent: None,
+            })
+            .await
+            .unwrap();
+        let no_event =
+            tokio::time::timeout(std::time::Duration::from_millis(150), events_rx.recv()).await;
+        assert!(
+            no_event.is_err(),
+            "Working+None must not publish or clear identity"
+        );
+
+        // First Idle+None frame: publishes the Working->Idle transition,
+        // but identity is still debounced, not yet cleared.
+        sender
+            .send(RelayedAgentStatus {
+                status: AgentStatus::Idle,
+                agent: None,
+            })
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_millis(200), events_rx.recv())
+            .await
+            .expect("idle transition must publish")
+            .expect("sender still alive");
+        assert!(matches!(
+            event,
+            AppEvent::StateChanged {
+                agent: Some(Agent::Claude),
+                state: AgentState::Idle,
+                ..
+            }
+        ));
+
+        // Repeat Idle+None frames until the debounce threshold is hit —
+        // total idle/None observations must equal
+        // `AGENT_MISS_CONFIRMATION_ATTEMPTS` for the clear to fire on the
+        // final one. One was already sent above.
+        for _ in 1..AGENT_MISS_CONFIRMATION_ATTEMPTS {
+            sender
+                .send(RelayedAgentStatus {
+                    status: AgentStatus::Idle,
+                    agent: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let cleared = tokio::time::timeout(std::time::Duration::from_millis(200), events_rx.recv())
+            .await
+            .expect("debounced clear must publish once threshold is reached")
+            .expect("sender still alive");
+        assert!(matches!(
+            cleared,
+            AppEvent::StateChanged {
+                agent: None,
+                state: AgentState::Idle,
+                ..
+            }
+        ));
     }
 }
 

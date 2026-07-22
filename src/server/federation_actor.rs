@@ -94,8 +94,12 @@ pub(crate) enum FederationCommand {
         cols: u16,
         rows: u16,
     },
-    /// Current per-terminal agent statuses.
-    AgentStatuses(oneshot::Sender<Vec<(String, AgentStatus)>>),
+    /// Current per-terminal agent statuses, paired with the identified
+    /// agent's canonical label (`AgentInfo.agent`, e.g. `"claude"`) so the
+    /// relay can populate `AgentStatusMessage::agent` for remote-mirrored
+    /// panes on the client end (`None` when this host has not identified an
+    /// agent for that terminal yet).
+    AgentStatuses(oneshot::Sender<Vec<(String, AgentStatus, Option<String>)>>),
     /// Performs a real split of `target_pane_id` (a raw, un-namespaced
     /// remote pane id) on this host's own live workspace, mirroring
     /// `AppFederationHost::split_pane`'s contract but going through the
@@ -254,7 +258,7 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
                     ResponseResult::AgentList { agents } => Some(
                         agents
                             .into_iter()
-                            .map(|agent| (agent.terminal_id, agent.agent_status))
+                            .map(|agent| (agent.terminal_id, agent.agent_status, agent.agent))
                             .collect(),
                     ),
                     _ => None,

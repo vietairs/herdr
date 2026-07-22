@@ -217,6 +217,7 @@ mod tests {
                 terminal_id: "term_1".to_string(),
                 mount_generation: 3,
                 status: AgentStatus::Working,
+                agent: Some("claude".to_string()),
             }),
             FederationMessage::Clipboard(ClipboardMessage {
                 origin_tag: "local".to_string(),
@@ -307,6 +308,33 @@ mod tests {
             CodecError::VersionSkew { local, remote }
                 if local == FEDERATION_PROTOCOL_VERSION && remote == FEDERATION_PROTOCOL_VERSION + 1
         ));
+    }
+
+    #[test]
+    fn agent_status_frame_without_agent_field_decodes_with_none() {
+        // Simulates a frame recorded before `AgentStatusMessage::agent`
+        // existed: hand-build the JSON payload without the field and confirm
+        // `#[serde(default)]` fills it in as `None` rather than failing.
+        let json = serde_json::json!({
+            "AgentStatus": {
+                "terminal_id": "term_1",
+                "mount_generation": 3,
+                "status": "working",
+            }
+        });
+        let payload = serde_json::to_vec(&json).expect("json encode should succeed");
+        let mut frame = Vec::with_capacity(8 + payload.len());
+        frame.extend_from_slice(&FEDERATION_PROTOCOL_VERSION.to_le_bytes());
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&payload);
+
+        let (decoded, _consumed): (FederationMessage, usize) =
+            decode(&frame, Channel::AgentStatus.max_len()).expect("decode should succeed");
+
+        match decoded {
+            FederationMessage::AgentStatus(msg) => assert_eq!(msg.agent, None),
+            other => panic!("expected AgentStatus, got {other:?}"),
+        }
     }
 
     #[test]

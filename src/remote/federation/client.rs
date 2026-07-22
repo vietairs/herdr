@@ -30,8 +30,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 
+#[cfg(test)]
 use crate::api::schema::common::AgentStatus;
 use crate::api::EventHub;
+use crate::pane::RelayedAgentStatus;
 
 use super::id::{HostKey, Mount, ServerInstanceId};
 use super::protocol::{
@@ -350,7 +352,7 @@ pub(crate) struct TerminalChannelRouter {
     /// `AgentStatusMessage::terminal_id` is the remote's raw id too, so no
     /// extra namespace mapping is needed to route it back to the pane that
     /// `build_remote_pane` registered it for.
-    agent_status_senders: HashMap<String, mpsc::Sender<AgentStatus>>,
+    agent_status_senders: HashMap<String, mpsc::Sender<RelayedAgentStatus>>,
 }
 
 impl TerminalChannelRouter {
@@ -365,18 +367,18 @@ impl TerminalChannelRouter {
     pub(crate) fn register_agent_status_sender(
         &mut self,
         terminal_id: String,
-        sender: mpsc::Sender<AgentStatus>,
+        sender: mpsc::Sender<RelayedAgentStatus>,
     ) {
         self.agent_status_senders.insert(terminal_id, sender);
     }
 
-    /// Routes one inbound `AgentStatus` value to the registered pane, if
-    /// any. `try_send` (never `.await`) so a slow/unfocused pane can never
-    /// stall this router's single read loop (same isolation shape as
-    /// `route_inbound`).
-    pub(crate) fn route_agent_status(&mut self, terminal_id: &str, status: AgentStatus) {
+    /// Routes one inbound `AgentStatus` (+ identity) value to the registered
+    /// pane, if any. `try_send` (never `.await`) so a slow/unfocused pane
+    /// can never stall this router's single read loop (same isolation shape
+    /// as `route_inbound`).
+    pub(crate) fn route_agent_status(&mut self, terminal_id: &str, relayed: RelayedAgentStatus) {
         if let Some(tx) = self.agent_status_senders.get(terminal_id) {
-            let _ = tx.try_send(status);
+            let _ = tx.try_send(relayed);
         }
     }
 
@@ -520,7 +522,13 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                     }
                     ReducerAction::Ignored | ReducerAction::Applied { .. } => {}
                 }
-                router.route_agent_status(&status_msg.terminal_id, status_msg.status);
+                router.route_agent_status(
+                    &status_msg.terminal_id,
+                    RelayedAgentStatus {
+                        status: status_msg.status,
+                        agent: status_msg.agent.clone(),
+                    },
+                );
             }
             // Handshake/HandshakeResponse/MountSnapshot are already
             // consumed during `connect_and_mount`.
@@ -1292,6 +1300,7 @@ mod tests {
                         terminal_id: "term_1".to_string(),
                         mount_generation: 1,
                         status: AgentStatus::Working,
+                        agent: Some("claude".to_string()),
                     },
                 ),
             )
@@ -1316,7 +1325,7 @@ mod tests {
         let mut router = TerminalChannelRouter::new();
         let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
         let _output_rx = router.open_terminal("term_1".to_string(), generation, &out_tx);
-        let (status_tx, mut status_rx) = mpsc::channel::<AgentStatus>(8);
+        let (status_tx, mut status_rx) = mpsc::channel::<RelayedAgentStatus>(8);
         router.register_agent_status_sender("term_1".to_string(), status_tx);
 
         let (clipboard_tx, _clipboard_rx) =
@@ -1343,7 +1352,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(relayed, AgentStatus::Working);
+        assert_eq!(relayed.status, AgentStatus::Working);
+        assert_eq!(relayed.agent.as_deref(), Some("claude"));
 
         fake_server.await.unwrap();
     }

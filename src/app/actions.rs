@@ -4324,6 +4324,56 @@ mod tests {
         ));
     }
 
+    // Regression: a relayed remote pane whose identity later resolves to
+    // "no agent, idle" (the P9 stale-identity-clear fix in `pane.rs`'s
+    // detection loop) must flip `is_agent_terminal()` back to `false`,
+    // mirroring what the local process-probe path already does when an
+    // agent process exits. `App::agent_info`/`collect_agent_infos` filter
+    // on exactly this flag (`src/app/agents.rs`), so this is what drops the
+    // pane out of the agent sidebar/`AgentList` API response.
+    // `AppEvent::StateChanged { agent: None, state: Idle, .. }` is exactly
+    // the event `pane.rs` publishes once its debounced
+    // `observe_process_probe(None)` clears a previously relayed identity.
+    #[test]
+    fn state_changed_agent_gone_clears_is_agent_terminal() {
+        let mut state = app_with_workspaces(&["test"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: true,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        let terminal_id = state.workspaces[0]
+            .panes
+            .get(&pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        assert!(state
+            .terminals
+            .get(&terminal_id)
+            .unwrap()
+            .is_agent_terminal());
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: None,
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        let terminal = state.terminals.get(&terminal_id).unwrap();
+        assert!(!terminal.is_agent_terminal());
+    }
+
     #[test]
     fn active_tab_completion_marks_pane_seen() {
         let mut state = app_with_workspaces(&["active"]);
