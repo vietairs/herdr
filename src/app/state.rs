@@ -617,12 +617,19 @@ impl RemoteMountState {
     /// file's existing precedent on `FederationMountConflict`.
     #[allow(dead_code)]
     pub(crate) fn resolve_pending_target(&mut self, target: &str) -> bool {
-        let before = self.pending.len();
-        self.pending
-            .retain(|pending_target| pending_target != target);
-        let resolved = self.pending.len() != before;
+        // Remove exactly ONE occurrence, not every match: the same target can
+        // legitimately be submitted twice in one request ("host-a host-a"),
+        // which dials twice, and each dial must resolve independently.
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|pending_target| pending_target == target)
+        else {
+            return false;
+        };
+        self.pending.remove(index);
         self.submitting = !self.pending.is_empty();
-        resolved
+        true
     }
 }
 
@@ -1423,6 +1430,13 @@ pub struct AppState {
     /// closed. The typed target list lives in `name_input` (shared with
     /// `WorktreeCreateState`'s pattern).
     pub remote_mount: Option<RemoteMountState>,
+    /// Targets whose dial was still in flight when the user dismissed the
+    /// dialog. The dial keeps running server-side, so its outcome still
+    /// arrives; without this, a later dialog submitting the same target string
+    /// would absorb the stale outcome as its own (targets are correlated by
+    /// string alone — the mount events carry no per-submission identity).
+    /// One entry per abandoned dial, so duplicates are tracked independently.
+    pub abandoned_remote_mounts: Vec<String>,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
     pub release_notes: Option<ReleaseNotesState>,
@@ -1889,6 +1903,7 @@ impl AppState {
             collapsed_space_keys: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             remote_mount: None,
+            abandoned_remote_mounts: Vec::new(),
             name_input: String::new(),
             name_input_replace_on_type: false,
             release_notes: None,
