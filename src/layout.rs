@@ -303,6 +303,27 @@ impl TileLayout {
     pub fn balance_areas_along_path(&mut self, path: &[bool]) -> bool {
         balance_split_ratios_along_path(&mut self.root, path)
     }
+
+    /// Rebalance the split ratios that outlive removing the pane addressed by
+    /// `removed_path`, which must have been captured BEFORE `remove_pane` ran.
+    ///
+    /// `remove_pane` collapses the removed pane's parent split and promotes
+    /// its sibling into that slot, so a pre-removal path no longer addresses
+    /// the same nodes. A path of length `L` addresses `L + 1` nodes and the
+    /// removed pane's parent sat at depth `L - 1`, so the ancestors that
+    /// survive the collapse are exactly the length `L - 2` prefix.
+    ///
+    /// When `L < 2` the parent WAS the root, so no ancestor survives and
+    /// nothing may be rebalanced. That case must not fall through to an empty
+    /// path: an empty path does not mean "nothing", it means "balance the
+    /// root" -- which after the collapse is the promoted sibling, a subtree
+    /// the removed pane was never under. Returns `true` if any ratio changed.
+    pub fn balance_areas_after_removal(&mut self, removed_path: &[bool]) -> bool {
+        let Some(surviving_len) = removed_path.len().checked_sub(2) else {
+            return false;
+        };
+        self.balance_areas_along_path(&removed_path[..surviving_len])
+    }
 }
 
 // --- Directional pane navigation ---
@@ -1471,5 +1492,213 @@ mod tests {
 
         assert!(!changed);
         assert_eq!(layout.pane_count(), 1);
+    }
+
+    // --- ancestor-chain-only invariant for post-removal rebalancing ---
+    //
+    // These sweep every tree shape rather than a hand-picked fixture. Two
+    // earlier hand-picked fixtures each missed a shape where the removed
+    // pane's ancestors and the promoted sibling overlap differently, so the
+    // shape space itself is the thing worth covering.
+
+    /// Structural skeleton used to enumerate tree shapes before pane IDs and
+    /// ratios are attached. `Node` is deliberately not `Clone`, so shapes are
+    /// generated in this cheap form and materialized once each.
+    #[derive(Clone)]
+    enum Shape {
+        Leaf,
+        Split(Box<Shape>, Box<Shape>),
+    }
+
+    /// Every binary tree shape with exactly `leaves` leaves.
+    fn all_shapes(leaves: usize) -> Vec<Shape> {
+        if leaves == 1 {
+            return vec![Shape::Leaf];
+        }
+        let mut out = Vec::new();
+        for split_at in 1..leaves {
+            for first in all_shapes(split_at) {
+                for second in all_shapes(leaves - split_at) {
+                    out.push(Shape::Split(
+                        Box::new(first.clone()),
+                        Box::new(second.clone()),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Ratios that are recognizable after the fact: none of them can be
+    /// produced by `equal_area_ratio` for the leaf counts these trees reach,
+    /// so a ratio surviving in the tree proves that split was left alone.
+    const MARKER_RATIOS: [f32; 6] = [0.11, 0.13, 0.17, 0.19, 0.23, 0.29];
+
+    fn materialize(shape: &Shape, next_pane: &mut u32, next_ratio: &mut usize) -> Node {
+        match shape {
+            Shape::Leaf => {
+                *next_pane += 1;
+                Node::Pane(pane(*next_pane))
+            }
+            Shape::Split(first, second) => {
+                let ratio = MARKER_RATIOS[*next_ratio];
+                *next_ratio += 1;
+                let first = materialize(first, next_pane, next_ratio);
+                let second = materialize(second, next_pane, next_ratio);
+                Node::Split {
+                    direction: Direction::Horizontal,
+                    ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }
+            }
+        }
+    }
+
+    fn collect_ratios(node: &Node, out: &mut Vec<f32>) {
+        if let Node::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = node
+        {
+            out.push(*ratio);
+            collect_ratios(first, out);
+            collect_ratios(second, out);
+        }
+    }
+
+    /// Marker ratios of every split that is NOT an ancestor of `path`.
+    /// A split at depth `d` is an ancestor iff the first `d` branch choices
+    /// match `path` and `d < path.len()`.
+    fn non_ancestor_markers(node: &Node, path: &[bool], depth: usize, out: &mut Vec<f32>) {
+        let Node::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = node
+        else {
+            return;
+        };
+        let on_ancestor_chain = depth < path.len();
+        if !on_ancestor_chain {
+            out.push(*ratio);
+        }
+        let next = path.get(depth).copied();
+        non_ancestor_markers(
+            first,
+            if next == Some(false) { path } else { &[] },
+            depth + 1,
+            out,
+        );
+        non_ancestor_markers(
+            second,
+            if next == Some(true) { path } else { &[] },
+            depth + 1,
+            out,
+        );
+    }
+
+    #[test]
+    fn balance_after_removal_never_touches_a_non_ancestor_split() {
+        for leaf_count in 2..=5 {
+            for (shape_idx, shape) in all_shapes(leaf_count).iter().enumerate() {
+                for removed in 1..=leaf_count as u32 {
+                    let mut next_pane = 0;
+                    let mut next_ratio = 0;
+                    let root = materialize(shape, &mut next_pane, &mut next_ratio);
+                    let mut layout = TileLayout::from_saved(root, pane(removed));
+                    let path = layout
+                        .path_to_pane(pane(removed))
+                        .expect("every materialized pane is in the tree");
+
+                    let mut expected_survivors = Vec::new();
+                    non_ancestor_markers(layout.root(), &path, 0, &mut expected_survivors);
+
+                    if !layout.close_focused() {
+                        continue; // last pane in the tab; nothing left to balance
+                    }
+                    layout.balance_areas_after_removal(&path);
+
+                    let mut remaining = Vec::new();
+                    collect_ratios(layout.root(), &mut remaining);
+                    for marker in expected_survivors {
+                        assert!(
+                            remaining.iter().any(|r| (r - marker).abs() < f32::EPSILON),
+                            "leaves={leaf_count} shape={shape_idx} removed=pane({removed}) \
+                             path={path:?}: split with marker ratio {marker} is not an \
+                             ancestor of the removed pane, so its ratio must survive; \
+                             remaining ratios were {remaining:?}"
+                        );
+                    }
+
+                    // Positive side: when an ancestor does survive the
+                    // collapse (path length >= 2) the root is one of them and
+                    // must actually have been rebalanced, so this test cannot
+                    // be satisfied by a no-op implementation.
+                    if path.len() >= 2 {
+                        let Node::Split {
+                            ratio,
+                            first,
+                            second,
+                            ..
+                        } = layout.root()
+                        else {
+                            panic!("a tree with a length>=2 path keeps a split root");
+                        };
+                        let expected = equal_area_ratio(count_panes(first), count_panes(second));
+                        assert!(
+                            (ratio - expected).abs() < f32::EPSILON,
+                            "leaves={leaf_count} shape={shape_idx} removed=pane({removed}): \
+                             surviving root ancestor should be rebalanced to {expected}, got {ratio}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn balance_after_removal_is_noop_when_no_ancestor_survives() {
+        // Root-level close: the removed pane's parent IS the root, so the
+        // promoted sibling keeps every ratio it had.
+        let mut layout = TileLayout::from_saved(
+            Node::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.2,
+                first: Box::new(Node::Pane(pane(1))),
+                second: Box::new(Node::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.75,
+                    first: Box::new(Node::Pane(pane(2))),
+                    second: Box::new(Node::Pane(pane(3))),
+                }),
+            },
+            pane(1),
+        );
+        let path = layout.path_to_pane(pane(1)).expect("pane 1 is in the tree");
+        assert_eq!(path.len(), 1);
+
+        assert!(layout.close_focused(), "two panes should remain");
+        let changed = layout.balance_areas_after_removal(&path);
+
+        assert!(
+            !changed,
+            "no ancestor survives, so nothing may be rebalanced"
+        );
+        let Node::Split { ratio, .. } = layout.root() else {
+            panic!("expected the promoted split to become the root");
+        };
+        assert!((ratio - 0.75).abs() < f32::EPSILON, "got {ratio}");
+    }
+
+    #[test]
+    fn balance_after_removal_ignores_a_path_that_cannot_have_ancestors() {
+        let (mut layout, _root) = TileLayout::new();
+
+        assert!(!layout.balance_areas_after_removal(&[]));
+        assert!(!layout.balance_areas_after_removal(&[true]));
     }
 }
