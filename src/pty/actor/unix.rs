@@ -19,6 +19,10 @@ const ACTOR_IDLE_POLL_MS: i32 = 1000;
 const ACTOR_WRITE_READY_POLL_MS: i32 = 50;
 const ACTOR_COMMAND_BUFFER: usize = 1024;
 const HANDOFF_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long the redraw nudge leaves the PTY at the jiggled size before
+/// restoring it: long enough for the child to notice `SIGWINCH` and repaint,
+/// short enough not to read as a resize.
+const NUDGE_RESTORE_DELAY: Duration = Duration::from_millis(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActorState {
@@ -375,6 +379,8 @@ impl PtyIoActor {
             on_read: config.on_read,
             on_reader_exit: config.on_reader_exit,
             poll_observer,
+            last_applied_size: None,
+            nudge_restore_due: None,
         };
         std::thread::Builder::new()
             .name(format!("herdr-pty-{}", config.pane_id))
@@ -406,6 +412,15 @@ struct PtyIoActorRunner {
     on_read: ReadCallback,
     on_reader_exit: Option<ReaderExitCallback>,
     poll_observer: Option<std_mpsc::Sender<()>>,
+    /// Size of the last real `TIOCSWINSZ` this actor applied — not counting a
+    /// nudge's transient jiggle. A nudge freezes its target size when it is
+    /// requested, so restoring that stale size would undo a newer resize that
+    /// landed in between; restore this instead.
+    last_applied_size: Option<PtyResize>,
+    /// When an in-flight nudge should be restored to `last_applied_size`. The
+    /// restore is deferred to the run loop rather than slept through, so a
+    /// nudge never stalls this pane's PTY reads and writes.
+    nudge_restore_due: Option<Instant>,
 }
 
 impl PtyIoActorRunner {
@@ -425,6 +440,13 @@ impl PtyIoActorRunner {
 
             self.apply_pending_controls();
 
+            if self
+                .nudge_restore_due
+                .is_some_and(|due| Instant::now() >= due)
+            {
+                self.finish_nudge();
+            }
+
             if !self.pending_writes.is_empty() {
                 self.flush_pending_writes_once();
             }
@@ -438,7 +460,7 @@ impl PtyIoActorRunner {
                 self.wake_read_fd.as_raw_fd(),
                 self.state == ActorState::Running,
                 !self.pending_writes.is_empty(),
-                ACTOR_IDLE_POLL_MS,
+                self.poll_timeout_ms(),
             ) {
                 Ok(readiness) => {
                     if readiness.wake_ready {
@@ -464,6 +486,10 @@ impl PtyIoActorRunner {
                 }
             }
         }
+
+        // Never leave the PTY at a jiggled size because the loop ended inside
+        // a nudge window.
+        self.finish_nudge();
 
         if let Some(on_reader_exit) = self.on_reader_exit.take() {
             on_reader_exit();
@@ -682,7 +708,12 @@ impl PtyIoActorRunner {
         let _ = self.file.flush();
     }
 
-    fn resize(&self, resize: PtyResize) {
+    fn resize(&mut self, resize: PtyResize) {
+        self.last_applied_size = Some(resize);
+        self.apply_winsize(resize);
+    }
+
+    fn apply_winsize(&self, resize: PtyResize) {
         self.log_resize_result(fd::resize_pty_fd(
             self.file.as_raw_fd(),
             resize.rows,
@@ -692,50 +723,64 @@ impl PtyIoActorRunner {
         ));
     }
 
-    fn nudge(&mut self, resize: PtyResize) {
+    fn nudge(&mut self, requested: PtyResize) {
         if self.state == ActorState::Released {
             return;
         }
+        // Jiggle away from whatever size is actually current, not the one this
+        // nudge froze when it was queued — a resize may have landed since.
+        let resize = self.last_applied_size.unwrap_or(requested);
         let nudge = if resize.rows > 2 {
-            (
-                resize.rows - 1,
-                resize.cols,
-                resize.cell_width_px,
-                resize.cell_height_px,
-            )
+            PtyResize {
+                rows: resize.rows - 1,
+                ..resize
+            }
         } else {
-            (
-                resize.rows,
-                resize.cols.saturating_sub(1).max(4),
-                resize.cell_width_px,
-                resize.cell_height_px,
-            )
+            PtyResize {
+                cols: resize.cols.saturating_sub(1).max(4),
+                ..resize
+            }
         };
-        if nudge
-            == (
-                resize.rows,
-                resize.cols,
-                resize.cell_width_px,
-                resize.cell_height_px,
-            )
-        {
+        if nudge == resize {
             return;
         }
-        self.log_resize_result(fd::resize_pty_fd(
-            self.file.as_raw_fd(),
-            nudge.0,
-            nudge.1,
-            nudge.2,
-            nudge.3,
-        ));
-        std::thread::sleep(Duration::from_millis(30));
-        self.log_resize_result(fd::resize_pty_fd(
-            self.file.as_raw_fd(),
-            resize.rows,
-            resize.cols,
-            resize.cell_width_px,
-            resize.cell_height_px,
-        ));
+        // The jiggle deliberately does not become `last_applied_size`: the
+        // restore reads that field when it fires, so a resize arriving during
+        // the window is what gets restored, and the restore can never revert it.
+        self.last_applied_size = Some(resize);
+        self.apply_winsize(nudge);
+        self.nudge_restore_due = Some(Instant::now() + NUDGE_RESTORE_DELAY);
+    }
+
+    /// Ends an in-flight nudge by restoring the current size. Idempotent.
+    fn finish_nudge(&mut self) {
+        if self.nudge_restore_due.take().is_none() {
+            return;
+        }
+        // A released fd belongs to the process we handed it to; it sets its own
+        // size and must not be resized from here.
+        if self.state == ActorState::Released {
+            return;
+        }
+        if let Some(resize) = self.last_applied_size {
+            self.apply_winsize(resize);
+        }
+    }
+
+    /// Milliseconds the run loop may block before an in-flight nudge is due.
+    fn poll_timeout_ms(&self) -> i32 {
+        let Some(due) = self.nudge_restore_due else {
+            return ACTOR_IDLE_POLL_MS;
+        };
+        // Rounded up: a truncated sub-millisecond remainder polls with a zero
+        // timeout, which spins the loop until the deadline actually passes.
+        let remaining = due
+            .saturating_duration_since(Instant::now())
+            .as_micros()
+            .div_ceil(1_000);
+        i32::try_from(remaining)
+            .unwrap_or(ACTOR_IDLE_POLL_MS)
+            .clamp(1, ACTOR_IDLE_POLL_MS)
     }
 
     fn log_resize_result(&self, result: std::io::Result<()>) {
@@ -820,6 +865,8 @@ mod tests {
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
             poll_observer: None,
+            last_applied_size: None,
+            nudge_restore_due: None,
         };
         (runner, peer)
     }
@@ -990,6 +1037,115 @@ mod tests {
             .expect("actor still reads after duplicate closes");
         assert_eq!(read, Bytes::from_static(b"still-live"));
         handle.shutdown();
+    }
+
+    /// A runner over a socket pair — enough to exercise control-flow and size
+    /// bookkeeping. The `TIOCSWINSZ` calls themselves fail harmlessly on a
+    /// socket and are only logged.
+    fn test_runner_with_controls() -> (PtyIoActorRunner, Arc<Mutex<SharedPtyControls>>) {
+        let (actor_socket, _peer) = UnixStream::pair().expect("socket pair");
+        actor_socket
+            .set_nonblocking(true)
+            .expect("actor socket nonblocking");
+        let (_data_tx, data_rx) = mpsc::channel(ACTOR_COMMAND_BUFFER);
+        let (_control_tx, control_rx) = std_mpsc::channel();
+        let controls = Arc::new(Mutex::new(SharedPtyControls::default()));
+        let runner = PtyIoActorRunner {
+            pane_id: 1,
+            file: std::fs::File::from(unsafe { OwnedFd::from_raw_fd(actor_socket.into_raw_fd()) }),
+            data_rx,
+            control_rx,
+            state: ActorState::Running,
+            pending_writes: VecDeque::new(),
+            current_write_offset: 0,
+            wake_read_fd: fd::create_wake_pipe().expect("wake pipe").read_fd,
+            controls: Arc::clone(&controls),
+            on_read: Box::new(|_| PtyReadResult::empty()),
+            on_reader_exit: None,
+            poll_observer: None,
+            last_applied_size: None,
+            nudge_restore_due: None,
+        };
+        (runner, controls)
+    }
+
+    fn test_runner() -> PtyIoActorRunner {
+        test_runner_with_controls().0
+    }
+
+    #[test]
+    fn a_nudge_restores_the_size_of_a_resize_that_overtook_it() {
+        let (mut runner, controls) = test_runner_with_controls();
+
+        // A nudge queued for the old size, then a newer resize from another
+        // owner (direct attach, terminal stream) landing in the same drain.
+        {
+            let mut controls = controls.lock().expect("controls lock");
+            controls.nudge = Some(PtyResize {
+                rows: 24,
+                cols: 80,
+                cell_width_px: 8,
+                cell_height_px: 16,
+            });
+            controls.resize = Some(PtyResizeRequest {
+                resize: PtyResize {
+                    rows: 40,
+                    cols: 120,
+                    cell_width_px: 9,
+                    cell_height_px: 18,
+                },
+                terminal_responses: Vec::new(),
+            });
+        }
+
+        runner.apply_pending_controls();
+
+        assert_eq!(
+            runner.last_applied_size,
+            Some(PtyResize {
+                rows: 40,
+                cols: 120,
+                cell_width_px: 9,
+                cell_height_px: 18,
+            }),
+            "the nudge must restore the newer size, not the one it froze"
+        );
+    }
+
+    // The nudge must not sleep on the actor thread: that thread also serves
+    // this pane's PTY reads and user-input writes, so a drag-resize storm would
+    // stall them in 30ms bursts.
+    #[test]
+    fn a_nudge_defers_its_restore_instead_of_blocking_the_actor() {
+        let mut runner = test_runner();
+        let size = PtyResize {
+            rows: 24,
+            cols: 80,
+            cell_width_px: 8,
+            cell_height_px: 16,
+        };
+        runner.resize(size);
+
+        let started = Instant::now();
+        runner.nudge(size);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < NUDGE_RESTORE_DELAY,
+            "nudge blocked the actor for {elapsed:?}"
+        );
+        assert!(
+            runner.nudge_restore_due.is_some(),
+            "the restore is queued for the run loop"
+        );
+        assert!(runner.poll_timeout_ms() <= NUDGE_RESTORE_DELAY.as_millis() as i32);
+
+        // A resize landing inside the nudge window is what gets restored.
+        let newer = PtyResize { rows: 40, ..size };
+        runner.resize(newer);
+        runner.finish_nudge();
+        assert_eq!(runner.last_applied_size, Some(newer));
+        assert!(runner.nudge_restore_due.is_none());
     }
 
     #[test]
@@ -1215,6 +1371,8 @@ mod tests {
             on_read: Box::new(|_| PtyReadResult::empty()),
             on_reader_exit: None,
             poll_observer: None,
+            last_applied_size: None,
+            nudge_restore_due: None,
         };
 
         runner.begin_handoff().expect("handoff drains queued write");

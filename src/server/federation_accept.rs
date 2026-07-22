@@ -644,6 +644,8 @@ fn handle_terminal_inbound(
         TerminalChannelMessage::Open { terminal_id, .. } => {
             open_terminal(
                 terminal_id,
+                epoch,
+                connid,
                 out_tx,
                 shutdown,
                 first_cause,
@@ -657,7 +659,17 @@ fn handle_terminal_inbound(
                 pump.stop.store(true, Ordering::SeqCst);
                 let _ = pump.handle.join();
             }
-            Ok(())
+            // The mount stopped mirroring this terminal, so it must not keep
+            // owning the size: otherwise the host stays locked out of resizing
+            // a terminal nobody drives until the whole mount goes away.
+            send_command(
+                server_event_tx,
+                FederationCommand::ReleaseTerminalSize {
+                    epoch,
+                    connid,
+                    terminal_id,
+                },
+            )
         }
         // The controller never streams Output upstream; ignore it defensively.
         TerminalChannelMessage::Output { .. } => Ok(()),
@@ -668,8 +680,16 @@ fn handle_terminal_inbound(
 /// carrying its scrollback, then spawn the pump that streams live bytes. A
 /// terminal the App does not know is silently skipped (no frame, no pump),
 /// matching `serve::handle_inbound`; a duplicate Open is a no-op.
+///
+/// Once the pump is live, ask the child to repaint. `Open{replay}` carries
+/// `handoff_history_ansi`, which is empty for an alternate-screen app, so an
+/// agent pane would otherwise mirror as a blank grid until the agent happened
+/// to write something on its own.
+#[allow(clippy::too_many_arguments)]
 fn open_terminal(
     terminal_id: String,
+    epoch: AcceptEpoch,
+    connid: ConnId,
     out_tx: &std_mpsc::SyncSender<FederationMessage>,
     shutdown: &Arc<AtomicBool>,
     first_cause: &Arc<FirstCauseCell>,
@@ -720,6 +740,18 @@ fn open_terminal(
             )
         })
     };
+    // After the pump, so the repaint bytes stream to the client instead of
+    // being produced while nothing is listening — and after the `Open` frame
+    // is enqueued, preserving replay-before-live ordering (RT-F6).
+    let _ = send_command(
+        server_event_tx,
+        FederationCommand::NudgeRedraw {
+            epoch,
+            connid,
+            terminal_id: terminal_id.clone(),
+        },
+    );
+
     pumps.insert(terminal_id, OutputPump { stop, handle });
 }
 
@@ -1481,6 +1513,98 @@ mod tests {
         }
     }
 
+    // Opening a terminal must also ask its child to repaint: `Open{replay}`
+    // carries `handoff_history_ansi`, which is empty for an alternate-screen
+    // app, so without the nudge an agent pane mirrors as a blank grid. The
+    // nudge is requested once per terminal — a duplicate `Open` stays a no-op.
+    #[test]
+    fn opening_a_terminal_requests_a_child_repaint_exactly_once() {
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let observed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let loop_handle = {
+            let observed = Arc::clone(&observed);
+            std::thread::spawn(move || {
+                // Kept alive for the whole loop so the subscriptions handed to
+                // `open_terminal` stay open.
+                let (bytes_tx, _) = broadcast::channel::<Bytes>(8);
+                while let Some(ServerEvent::Federation(command)) = rx.blocking_recv() {
+                    match command {
+                        FederationCommand::SubscribeOutput(id, reply) => {
+                            observed
+                                .lock()
+                                .expect("observed lock")
+                                .push(format!("subscribe:{id}"));
+                            let _ = reply.send(Some(bytes_tx.subscribe()));
+                        }
+                        FederationCommand::ScrollbackReplay(id, reply) => {
+                            observed
+                                .lock()
+                                .expect("observed lock")
+                                .push(format!("replay:{id}"));
+                            let _ = reply.send(Vec::new());
+                        }
+                        FederationCommand::NudgeRedraw { terminal_id, .. } => {
+                            observed
+                                .lock()
+                                .expect("observed lock")
+                                .push(format!("nudge:{terminal_id}"));
+                        }
+                        _ => {}
+                    }
+                }
+            })
+        };
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        for _ in 0..2 {
+            write_frame_blocking(
+                &mut client,
+                &FederationMessage::Terminal(TerminalChannelMessage::Open {
+                    terminal_id: "t1".to_string(),
+                    mount_generation: MOUNT_GENERATION,
+                    replay: ScrollbackReplay { bytes: Vec::new() },
+                }),
+            )
+            .expect("client writes open");
+        }
+        drop(client);
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, _out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+        )
+        .expect("reader loop drains to EOF");
+        for pump in pumps.into_values() {
+            pump.stop.store(true, Ordering::SeqCst);
+            let _ = pump.handle.join();
+        }
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let observed = observed.lock().expect("observed lock").clone();
+        assert_eq!(
+            observed,
+            vec![
+                "subscribe:t1".to_string(),
+                "replay:t1".to_string(),
+                "nudge:t1".to_string(),
+            ],
+            "an Open subscribes, fetches the replay, then nudges — and the \
+             duplicate Open adds nothing"
+        );
+    }
+
     #[test]
     fn writer_loop_drains_the_queue_and_stops_when_senders_drop() {
         // The writer thread serialises queued frames to the wire and exits
@@ -1560,6 +1684,8 @@ mod tests {
 
         open_terminal(
             "t1".to_string(),
+            0,
+            1,
             &out_tx,
             &shutdown,
             &first_cause,
