@@ -73,7 +73,9 @@ export default defineConfig({
       ],
       components: {
         Banner: './src/components/Banner.astro',
+        Head: './src/components/Head.astro',
         Header: './src/components/Header.astro',
+        Search: './src/components/Search.astro',
         Sidebar: './src/components/Sidebar.astro',
         SiteTitle: './src/components/SiteTitle.astro',
       },
