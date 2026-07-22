@@ -590,3 +590,27 @@ final wording at the merge gate for the user to overrule.
 - Why: the previous test only injected a failing `write`, so deleting the cleanup from the flush or sync branch still passed.
 - Evidence: dropping `remove_partial` from each branch in turn fails `every_step_after_the_file_exists_removes_it_when_it_fails` with that step named (`a failing flush left a file behind: [...]`).
 - Reversibility: production behaviour is unchanged; `FileWrite::production()` is the only value used outside tests.
+
+## Returned-path traversal rejected by component, not normalised
+What: `sanitize_returned_remote_path` now rejects any path containing a `.` or `..` component.
+Why: the staging-prefix check reads only the final component, so `/tmp/staging/../../home/me/.ssh/federation-clipboard-id_rsa` passed every other guard and was pasted verbatim.
+Evidence: mutation — deleting the check makes `returned_remote_path_that_walks_out_of_the_staging_directory_is_rejected` fail with "…federation-clipboard-id_rsa reached the pane".
+Reversibility: one self-contained `if` block; deleting it restores the previous behaviour exactly.
+
+## Clipboard read moved off the App event loop
+What: the image-paste key path now schedules the clipboard read on a blocking thread with a 5s bound and answers as `AppEvent::RemoteClipboardImageCaptured`; the key is still consumed synchronously.
+Why: `crate::platform::read_clipboard_image()` is unbounded synchronous OS work (osascript / a wl-paste+xclip chain) sitting on the hot terminal key path, so it froze rendering, every pane and the API loop; an unresponsive X11 selection owner froze them indefinitely.
+Evidence: mutation — reading inline fails `a_clipboard_read_runs_off_the_caller_and_answers_as_an_event` ("blocked the caller for 300ms"); dropping the timeout fails `a_clipboard_owner_that_never_answers_is_abandoned_and_reported`.
+Reversibility: revert the `handle_key` call site, the two `App` methods, `spawn_clipboard_image_capture`, and the event variant plus its two dispatch sites.
+
+## Deferred capture carries a workspace id, not the decision's index
+What: the capture event carries `Workspace::id`; the handler resolves it to an index on arrival and drops the press when the workspace is gone.
+Why: the read now outlives the press, and a `ws_idx` would name whichever workspace slid into the slot after a close.
+Evidence: mutation — adding an `.or(self.state.active)` fallback fails `a_captured_clipboard_image_is_staged_for_the_workspace_that_asked`.
+Reversibility: swap the field back to `usize` and drop the lookup.
+
+## Stage timer waits are injectable so the timers themselves are testable
+What: `begin_remote_clipboard_stage_with_timings` takes the slow-toast delay and the budget; the public wrapper supplies the shipped constants.
+Why: the previous timer tests injected their events by hand, so deleting either `tokio::spawn` left both green — a remote that never answers would have leaked pending entries until the in-flight cap refused every further paste. `tokio::time::advance` was unavailable because tokio's `test-util` feature is not enabled and Cargo.toml is out of scope.
+Evidence: mutation — deleting either spawn fails `a_stage_schedules_the_waits_that_announce_it_and_then_reap_it` ("no wait told the user…" / "no wait reaped…").
+Reversibility: inline the wrapper's two arguments back into the body.

@@ -156,7 +156,12 @@ pub(crate) fn sanitize_returned_remote_path(path: &str) -> Result<&str, PathReje
     // the remote never staged. Rejected rather than normalised: resolving the
     // traversal here would produce a path the remote did not write and hide the
     // fact that it answered a question it was not asked.
-
+    if path
+        .split('/')
+        .any(|component| component == "." || component == "..")
+    {
+        return Err(PathRejection::RelativeComponent);
+    }
     // Named ahead of the general control-byte check even though that check
     // subsumes it: this is the byte that means Enter on an unbracketed PTY,
     // and it deserves a guard that fails on its own if it is ever weakened.
@@ -964,8 +969,8 @@ mod tests {
         let mut reaped = false;
         let deadline = Instant::now() + Duration::from_secs(10);
         while !reaped && Instant::now() < deadline {
-            let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(5), app.event_rx.recv())
-                .await
+            let Ok(Some(ev)) =
+                tokio::time::timeout(Duration::from_secs(5), app.event_rx.recv()).await
             else {
                 break;
             };
