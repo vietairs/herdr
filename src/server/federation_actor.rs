@@ -101,6 +101,34 @@ pub(crate) enum FederationCommand {
         cols: u16,
         rows: u16,
     },
+    /// Force a live terminal's child to repaint its full screen, by briefly
+    /// jiggling the PTY window size so the child sees a `SIGWINCH` it must
+    /// answer. Dropped unless `(epoch, connid)` is the mounted controller
+    /// (it drives a real ioctl on the host's PTY). Fire-and-forget.
+    ///
+    /// A mounted client cannot repaint a remote pane by itself: its local
+    /// mirror deliberately skips the replay-recovery heuristic (see
+    /// `PaneTerminal::resize`'s `is_remote_backed` gate) because the serving
+    /// host's screen is the sole source of truth, and the only full-paint
+    /// frame in the protocol (`Open{replay}`) is emitted once per terminal
+    /// and is empty for alternate-screen apps. Making the child itself
+    /// repaint is therefore the only payload that works on every screen
+    /// mode, and it needs no protocol change: the bytes reach the client
+    /// through the ordinary output stream.
+    NudgeRedraw {
+        epoch: AcceptEpoch,
+        connid: ConnId,
+        terminal_id: String,
+    },
+    /// The mount stopped mirroring this terminal, so it no longer owns the
+    /// terminal's size and the host may drive it again. Paired with the claim
+    /// each `Resize`/`NudgeRedraw` takes; without it a terminal the mount
+    /// opened once stays frozen at the mount's geometry until it unmounts.
+    ReleaseTerminalSize {
+        epoch: AcceptEpoch,
+        connid: ConnId,
+        terminal_id: String,
+    },
     /// Current per-terminal agent statuses, paired with the identified
     /// agent's canonical label (`AgentInfo.agent`, e.g. `"claude"`) so the
     /// relay can populate `AgentStatusMessage::agent` for remote-mirrored
@@ -155,6 +183,12 @@ impl std::fmt::Debug for FederationCommand {
                 rows,
                 ..
             } => write!(f, "Resize({terminal_id}, {cols}x{rows})"),
+            FederationCommand::NudgeRedraw { terminal_id, .. } => {
+                write!(f, "NudgeRedraw({terminal_id})")
+            }
+            FederationCommand::ReleaseTerminalSize { terminal_id, .. } => {
+                write!(f, "ReleaseTerminalSize({terminal_id})")
+            }
             FederationCommand::AgentStatuses(_) => f.write_str("AgentStatuses"),
             FederationCommand::SplitPane { target_pane_id, .. } => {
                 write!(f, "SplitPane({target_pane_id})")
@@ -171,6 +205,50 @@ impl std::fmt::Debug for FederationCommand {
 /// `send` result is discarded.
 #[allow(dead_code)] // dormant until b0.4 wires the federation listener
 pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: FederationCommand) {
+    dispatch_command(app, lease, command);
+    sync_terminal_size_ownership(app, lease);
+}
+
+/// Drop every federation size claim once no controller is mounted. Called
+/// after every lease mutation — dispatch here and the handoff revoke/reopen
+/// pair in `headless.rs` — so the lease stays the single source of truth and
+/// ownership can never latch on past a revocation.
+pub(crate) fn sync_terminal_size_ownership(app: &mut App, lease: &FederationLease) {
+    if !lease.has_mounted_controller() {
+        app.state.federation_owned_terminal_sizes.clear();
+    }
+}
+
+/// Records that the mounted controller drives `terminal_id`'s size, so this
+/// host's render loop and any direct attach client stop resizing it.
+///
+/// Resolved through `resolve_terminal_target`, the same way the resize it
+/// accompanies is, so every target form that can be resized can also be
+/// claimed.
+fn claim_terminal_size(app: &mut App, terminal_id: &str) {
+    if let Some(claimed) = resolve_owned_terminal_id(app, terminal_id) {
+        app.state.federation_owned_terminal_sizes.insert(claimed);
+    }
+}
+
+/// Drops the mount's claim on `terminal_id` — it stopped driving that
+/// terminal, so the host may size it again. Reopening re-claims it.
+fn release_terminal_size(app: &mut App, terminal_id: &str) {
+    if let Some(released) = resolve_owned_terminal_id(app, terminal_id) {
+        app.state.federation_owned_terminal_sizes.remove(&released);
+    }
+}
+
+fn resolve_owned_terminal_id(app: &App, terminal_id: &str) -> Option<crate::terminal::TerminalId> {
+    let resolved = app.resolve_terminal_target(terminal_id).ok()?;
+    app.state
+        .terminals
+        .keys()
+        .find(|id| id.to_string() == resolved.terminal_id)
+        .cloned()
+}
+
+fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: FederationCommand) {
     match command {
         FederationCommand::AcquireController {
             epoch,
@@ -245,7 +323,36 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
             }
             if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
                 runtime.resize(rows, cols, 0, 0);
+                // Unconditional, including when `resize` deduped the call: a
+                // size that is already current here still leaves the mounted
+                // client's mirror freshly reflowed and unpainted, and that leg
+                // sends no `SIGWINCH` at all.
+                nudge_child_redraw(runtime);
+                claim_terminal_size(app, &terminal_id);
             }
+        }
+        FederationCommand::NudgeRedraw {
+            epoch,
+            connid,
+            terminal_id,
+        } => {
+            if !lease.is_mounted_controller(epoch, connid) {
+                return;
+            }
+            if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
+                nudge_child_redraw(runtime);
+                claim_terminal_size(app, &terminal_id);
+            }
+        }
+        FederationCommand::ReleaseTerminalSize {
+            epoch,
+            connid,
+            terminal_id,
+        } => {
+            if !lease.is_mounted_controller(epoch, connid) {
+                return;
+            }
+            release_terminal_size(app, &terminal_id);
         }
         FederationCommand::AgentStatuses(reply) => {
             let response = app.handle_api_request_after_internal_events_drained(Request {
@@ -315,6 +422,21 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
             let _ = reply.send(outcome);
         }
     }
+}
+
+/// Make a terminal's child process repaint its whole screen, by jiggling the
+/// PTY window size so the child receives a `SIGWINCH` it has to answer. The
+/// resulting bytes are ordinary PTY output, so they reach a mounted client
+/// through the existing output stream with no protocol involvement.
+///
+/// Unix-only, because the jiggle is a `TIOCSWINSZ` pair. A Windows serving
+/// host keeps the pre-existing behavior (mounted panes repaint only when the
+/// child volunteers it); ConPTY has no equivalent primitive today.
+fn nudge_child_redraw(runtime: &crate::terminal::TerminalRuntime) {
+    #[cfg(unix)]
+    runtime.nudge_child_redraw_after_handoff();
+    #[cfg(not(unix))]
+    let _ = runtime;
 }
 
 /// Produces the atomic (snapshot, cursor) pair `Mount` and `Snapshot` both
@@ -511,6 +633,177 @@ mod tests {
                 cols: 80,
                 rows: 24,
             },
+        );
+        // Same gate for the repaint nudge: it drives a real ioctl on this
+        // host's PTY, so a non-controller must not reach it either.
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::NudgeRedraw {
+                epoch,
+                connid: 999,
+                terminal_id: "no-such-terminal".to_string(),
+            },
+        );
+    }
+
+    /// Adds `count` single-pane workspaces to `app` and returns their terminal
+    /// ids as strings. Real panes, because size claims resolve their target the
+    /// same way a federated resize does — through the workspace layout.
+    fn seed_terminals(app: &mut App, count: usize) -> Vec<String> {
+        let ids: Vec<_> = (0..count)
+            .map(|i| {
+                let ws = crate::workspace::Workspace::test_new(&format!("seeded-{i}"));
+                let pane_id = ws.tabs[0].root_pane;
+                let terminal_id = ws.terminal_id(pane_id).expect("terminal id").clone();
+                app.state.workspaces.push(ws);
+                terminal_id.to_string()
+            })
+            .collect();
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        ids
+    }
+
+    // While a controller drives a terminal it owns that terminal's size, so the
+    // host's own render pass must stand down — otherwise it reverts the mount's
+    // geometry within one frame and every repaint lands at the wrong width.
+    // Ownership tracks the lease exactly, including across release.
+    #[test]
+    fn a_mounted_controller_owns_terminal_sizes_until_it_releases() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let terminals = seed_terminals(&mut app, 1);
+        assert!(
+            app.state.federation_owned_terminal_sizes.is_empty(),
+            "no mount, no lock"
+        );
+
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        claim_terminal_size(&mut app, &terminals[0]);
+        assert_eq!(
+            app.state.federation_owned_terminal_sizes.len(),
+            1,
+            "driving a terminal takes ownership of its size"
+        );
+
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::Release { epoch, connid: 1 },
+        );
+        assert!(
+            app.state.federation_owned_terminal_sizes.is_empty(),
+            "releasing hands size ownership back to the host"
+        );
+    }
+
+    // Revocation happens outside `dispatch` (the handoff path in headless.rs),
+    // so ownership must not latch on when the lease is torn down that way.
+    #[test]
+    fn revoking_a_mounted_lease_hands_terminal_sizes_back() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let terminals = seed_terminals(&mut app, 1);
+        acquire_and_mount(&mut app, &mut lease, 1);
+        claim_terminal_size(&mut app, &terminals[0]);
+        assert!(!app.state.federation_owned_terminal_sizes.is_empty());
+
+        lease.begin_revocation();
+        sync_terminal_size_ownership(&mut app, &lease);
+        assert!(
+            app.state.federation_owned_terminal_sizes.is_empty(),
+            "a revoked mount owns nothing"
+        );
+    }
+
+    /// An `App` with one real workspace, terminal and runtime — enough for
+    /// `dispatch` to resolve a federated command all the way to the runtime.
+    fn test_app_with_live_terminal() -> (App, String) {
+        let mut app = test_app();
+        let workspace = crate::workspace::Workspace::test_new("test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).expect("terminal id").clone();
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        let id_string = terminal_id.to_string();
+        (app, id_string)
+    }
+
+    // The claim must be taken by the real command path, not just by the helper:
+    // a federated resize is what tells this host the mount is driving that
+    // terminal, and a close is what hands it back.
+    #[test]
+    fn a_federated_resize_claims_the_terminal_and_a_close_releases_it() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+        let (mut app, terminal_id) = test_app_with_live_terminal();
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::Resize {
+                epoch,
+                connid: 1,
+                terminal_id: terminal_id.clone(),
+                cols: 100,
+                rows: 30,
+            },
+        );
+        assert!(
+            app.state
+                .federation_owned_terminal_sizes
+                .iter()
+                .any(|id| id.to_string() == terminal_id),
+            "a federated resize claims the terminal's size"
+        );
+
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::ReleaseTerminalSize {
+                epoch,
+                connid: 1,
+                terminal_id: terminal_id.clone(),
+            },
+        );
+        assert!(
+            app.state.federation_owned_terminal_sizes.is_empty(),
+            "closing the mirror hands the size back to the host"
+        );
+    }
+
+    // A mounting client opens terminals lazily, so ownership must stay scoped
+    // to the ones it actually drives. Session-wide ownership would freeze the
+    // size of every host terminal the mount never renders.
+    #[test]
+    fn a_mount_owns_only_the_terminals_it_drives() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let terminals = seed_terminals(&mut app, 2);
+        acquire_and_mount(&mut app, &mut lease, 1);
+
+        claim_terminal_size(&mut app, &terminals[0]);
+
+        let owned = &app.state.federation_owned_terminal_sizes;
+        assert!(
+            owned.iter().any(|id| id.to_string() == terminals[0]),
+            "the driven terminal is owned by the mount"
+        );
+        assert!(
+            !owned.iter().any(|id| id.to_string() == terminals[1]),
+            "a terminal the mount never opened stays host owned"
         );
     }
 

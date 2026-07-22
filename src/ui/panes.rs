@@ -161,6 +161,16 @@ fn stable_scrollbar_gutter(rt: &TerminalRuntime, pane_inner: Rect) -> (Rect, Opt
     (inner_rect, scrollbar_rect)
 }
 
+/// Whether this host's own render pass may resize `terminal_id` to its local
+/// geometry. It may not while an external client owns that size — a direct
+/// attach client or a mounted federation controller — because re-resizing
+/// behind either reverts their geometry within one frame, leaving every
+/// repaint laid out for the wrong width.
+fn host_owns_terminal_size(app: &AppState, terminal_id: &crate::terminal::TerminalId) -> bool {
+    !app.federation_owned_terminal_sizes.contains(terminal_id)
+        && !app.direct_attach_resize_locks.contains(terminal_id)
+}
+
 /// Resize every visible runtime in a tab to the geometry it would receive if the tab were selected.
 pub(super) fn resize_tab_panes(
     app: &AppState,
@@ -181,7 +191,7 @@ pub(super) fn resize_tab_panes(
             };
             let pane_inner = pane_inner_rect(area, borders);
             let inner_rect = stable_terminal_inner_rect(pane_inner);
-            if !app.direct_attach_resize_locks.contains(terminal_id) {
+            if host_owns_terminal_size(app, terminal_id) {
                 rt.resize(
                     inner_rect.height,
                     inner_rect.width,
@@ -198,7 +208,7 @@ pub(super) fn resize_tab_panes(
 
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, info.id) {
             let inner_rect = stable_terminal_inner_rect(pane_inner);
-            if !app.direct_attach_resize_locks.contains(terminal_id) {
+            if host_owns_terminal_size(app, terminal_id) {
                 rt.resize(
                     inner_rect.height,
                     inner_rect.width,
@@ -240,9 +250,9 @@ pub(super) fn compute_pane_infos(
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
             (inner_rect, scrollbar_rect) = stable_scrollbar_gutter(rt, pane_inner);
             if resize_panes
-                && ws.terminal_id(focused_id).is_some_and(|terminal_id| {
-                    !app.direct_attach_resize_locks.contains(terminal_id)
-                })
+                && ws
+                    .terminal_id(focused_id)
+                    .is_some_and(|terminal_id| host_owns_terminal_size(app, terminal_id))
             {
                 rt.resize(
                     inner_rect.height,
@@ -272,9 +282,9 @@ pub(super) fn compute_pane_infos(
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             (inner_rect, scrollbar_rect) = stable_scrollbar_gutter(rt, pane_inner);
             if resize_panes
-                && ws.terminal_id(info.id).is_some_and(|terminal_id| {
-                    !app.direct_attach_resize_locks.contains(terminal_id)
-                })
+                && ws
+                    .terminal_id(info.id)
+                    .is_some_and(|terminal_id| host_owns_terminal_size(app, terminal_id))
             {
                 rt.resize(
                     inner_rect.height,

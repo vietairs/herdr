@@ -1039,6 +1039,10 @@ impl HeadlessServer {
         // client path likewise relies on shutdown + connection drop, not a forced
         // socket close.
         let _revoked = self.federation_lease.begin_revocation();
+        crate::server::federation_actor::sync_terminal_size_ownership(
+            &mut self.app,
+            &self.federation_lease,
+        );
 
         let mut paused_terminal_ids = Vec::new();
         for terminal_id in pane_by_terminal.keys() {
@@ -1290,6 +1294,10 @@ impl HeadlessServer {
         // value — never restored, so pre-revocation connections remain stale) so
         // a rolled-back handoff does not permanently wedge federation.
         self.federation_lease.reopen_admission();
+        crate::server::federation_actor::sync_terminal_size_ownership(
+            &mut self.app,
+            &self.federation_lease,
+        );
         self.handoff_in_progress = false;
         let _ = std::fs::remove_file(socket_path);
     }
@@ -2562,8 +2570,19 @@ impl HeadlessServer {
             .insert(real_terminal_id.clone());
         self.app
             .start_pending_agent_resume_for_terminal(&real_terminal_id, rows, cols, true);
-        if let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) {
-            runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
+        // A mounted federation controller outranks a direct attach: it holds
+        // the single-controller lease, and resizing behind it would leave its
+        // mirror laid out for the wrong width with nothing to restore the size
+        // when this client detaches. Attach still works, at the mount's size.
+        if !self
+            .app
+            .state
+            .federation_owned_terminal_sizes
+            .contains(&real_terminal_id)
+        {
+            if let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) {
+                runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
+            }
         }
         true
     }
@@ -2852,8 +2871,16 @@ impl HeadlessServer {
                     None
                 };
                 if let Some(terminal_id) = direct_terminal_id {
-                    if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
-                        runtime.resize(rows, cols, cell_width_px, cell_height_px);
+                    // Yields to a mounted federation controller for the same
+                    // reason the attach path does: it owns this terminal's size.
+                    let federation_owned =
+                        self.terminal_id_by_string(&terminal_id).is_some_and(|id| {
+                            self.app.state.federation_owned_terminal_sizes.contains(&id)
+                        });
+                    if !federation_owned {
+                        if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
+                            runtime.resize(rows, cols, cell_width_px, cell_height_px);
+                        }
                     }
                     return true;
                 }
@@ -7135,6 +7162,96 @@ next_tab = ""
                 .expect("runtime")
                 .current_size(),
             expected_app_size
+        );
+        drop(server);
+        drop(_runtime_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    // A mounted federation controller holds the single-controller lease and
+    // owns its terminals' sizes. A direct attach must not resize behind it:
+    // the mount's mirror would be laid out for the wrong width, and nothing
+    // restores the size when the direct client detaches.
+    #[test]
+    fn terminal_attach_does_not_resize_a_terminal_a_mount_owns() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _runtime_guard = rt.enter();
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).expect("terminal id").clone();
+        let terminal_id_string = terminal_id.to_string();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (120, 40),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        // The mount is driving this terminal.
+        server
+            .app
+            .state
+            .federation_owned_terminal_sizes
+            .insert(terminal_id.clone());
+        let mount_size = server
+            .app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("runtime")
+            .current_size();
+        assert_ne!(mount_size, (24, 80));
+
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::TerminalAnsi,
+            keybindings: None,
+            direct_attach_requested: true,
+            writer,
+        }));
+        assert!(
+            server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                client_id: 2,
+                terminal_id: terminal_id_string,
+                takeover: false,
+            })
+        );
+
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .current_size(),
+            mount_size,
+            "the direct attach must leave the mount's size alone"
         );
         drop(server);
         drop(_runtime_guard);
