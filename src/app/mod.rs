@@ -15,6 +15,7 @@ mod creation;
 mod ids;
 mod input;
 mod popup;
+mod remote_mount;
 mod runtime;
 mod runtime_mutations;
 mod session;
@@ -586,6 +587,8 @@ impl App {
             request_submit_worktree_create: false,
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
+            request_open_remote_mount_dialog: false,
+            request_submit_remote_mount: false,
             request_reload_config: false,
             request_client_config_reload: false,
             request_clipboard_write: None,
@@ -599,6 +602,7 @@ impl App {
             worktree_directory,
             collapsed_space_keys,
             request_complete_onboarding: false,
+            remote_mount: None,
             name_input: String::new(),
             name_input_replace_on_type: false,
             release_notes: None,
@@ -1090,6 +1094,18 @@ impl App {
             if self.state.request_submit_worktree_remove {
                 self.state.request_submit_worktree_remove = false;
                 self.submit_worktree_remove_via_api();
+                needs_render = true;
+            }
+
+            if self.state.request_open_remote_mount_dialog {
+                self.state.request_open_remote_mount_dialog = false;
+                self.open_remote_mount_dialog();
+                needs_render = true;
+            }
+
+            if self.state.request_submit_remote_mount {
+                self.state.request_submit_remote_mount = false;
+                self.submit_remote_mount_via_api();
                 needs_render = true;
             }
 
@@ -1787,6 +1803,9 @@ impl App {
             Mode::ConfirmRemoveWorktree => {
                 self.handle_worktree_remove_key(key_event);
             }
+            Mode::MountRemoteWorkspace => {
+                self.handle_remote_mount_key(key_event);
+            }
             Mode::Resize => {
                 self.handle_resize_key_via_api(key);
             }
@@ -2002,6 +2021,7 @@ mod tests {
             Mode::RenamePane,
             Mode::NewLinkedWorktree,
             Mode::OpenExistingWorktree,
+            Mode::MountRemoteWorkspace,
             Mode::Settings,
             Mode::Onboarding,
             Mode::ReleaseNotes,

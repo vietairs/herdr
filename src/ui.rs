@@ -13,6 +13,7 @@ mod navigator;
 mod onboarding;
 mod panes;
 mod release_notes;
+mod remote_mount;
 mod scrollbar;
 mod settings;
 mod sidebar;
@@ -47,6 +48,7 @@ pub(crate) use self::release_notes::{
     RELEASE_NOTES_MODAL_SIZE,
 };
 use self::release_notes::{render_product_announcement_overlay, render_release_notes_overlay};
+use self::remote_mount::render_remote_mount_overlay;
 pub(crate) use self::scrollbar::{
     pane_scrollbar_rect, release_notes_scrollbar_rect, scrollbar_offset_from_drag_row,
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
@@ -69,6 +71,7 @@ pub(crate) use self::{
         open_existing_worktree_visible_start, remove_worktree_button_rects,
         remove_worktree_popup_rect, rename_button_rects,
     },
+    remote_mount::{remote_mount_button_rects, remote_mount_inner_rect},
     settings::{
         settings_button_rects, settings_popup_height, settings_show_primary_action,
         SETTINGS_POPUP_WIDTH,
@@ -450,6 +453,7 @@ pub fn render_with_runtime_registry(
             render_open_existing_worktree_overlay(app, frame, frame.area())
         }
         Mode::ConfirmRemoveWorktree => render_remove_worktree_overlay(app, frame, frame.area()),
+        Mode::MountRemoteWorkspace => render_remote_mount_overlay(app, frame, frame.area()),
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),

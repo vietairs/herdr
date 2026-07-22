@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added a `mount remote workspace` global menu entry so a running local Herdr session can mount a remote workspace over SSH without relaunching.
+
 ## [0.7.5] - 2026-07-21
 
 ### Breaking Changes

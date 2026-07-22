@@ -923,6 +923,20 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_worktree_submit");
         }
 
+        if self.app.state.request_open_remote_mount_dialog {
+            self.app.state.request_open_remote_mount_dialog = false;
+            self.app.open_remote_mount_dialog();
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_remote_mount_dialog");
+        }
+
+        if self.app.state.request_submit_remote_mount {
+            self.app.state.request_submit_remote_mount = false;
+            self.app.submit_remote_mount_via_api();
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_remote_mount_submit");
+        }
+
         if self.app.state.request_reload_config {
             self.app.state.request_reload_config = false;
             self.reload_server_config(true);
