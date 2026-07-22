@@ -2046,3 +2046,120 @@ take effect — the serve-side dispatch itself is unchanged by this fix.
     enum variants plus two guard checks in two existing handlers; no wire/
     protocol change (the `HostKey` never crosses the wire, it is local-
     process bookkeeping only), no persisted-state shape change.
+
+## Remote agent panes missing from the sidebar — agent identity never relayed (260722 follow-up)
+
+- Root cause (full evidence in `plans/260722-1240-remote-agents-sidebar-
+  still-missing/reports/debug-260722-1240-remote-agents-sidebar-root-cause-
+  report.md`): `AgentStatusMessage` carried only `status`, never identity,
+  and the client's only identity-setting path (`pane.rs`'s process probe)
+  is gated on `pid > 0`, which is always `0` for a remote-mirrored pane. So
+  `TerminalState::is_agent_terminal()` never went true and
+  `collect_agent_infos()` silently dropped the pane.
+- Fix, both ends:
+  - `AgentStatusMessage` (`src/remote/federation/protocol/mod.rs`) gained
+    an additive `agent: Option<String>` field
+    (`#[serde(default, skip_serializing_if)]`). No `FEDERATION_PROTOCOL_
+    VERSION` bump — the handshake already rejects any version skew before
+    a channel frame is ever decoded (v3, already bumped past the last
+    released tag by 6bbc829), so both peers that can reach this type
+    always agree on the field's presence; the serde default only keeps
+    hand-built old-shaped test frames decodable.
+  - Serve side: `FederationCommand::AgentStatuses`'s reply
+    (`src/server/federation_actor.rs`) now carries `AgentInfo.agent`
+    alongside status. `poll_agent_statuses`
+    (`src/server/federation_accept.rs`) diffs on `(status, agent)` instead
+    of `status` alone, so an identity that resolves *after* the first
+    status poll (e.g. screen-text detection catching up) still reaches the
+    client instead of being permanently stuck at `agent: None`.
+  - Client side: the wire router (`TerminalChannelRouter` in
+    `src/remote/federation/client.rs`) and the per-pane relay channel
+    (`PaneRuntime::relayed_agent_status_sender`, `src/pane.rs`) now carry a
+    new `pane::RelayedAgentStatus { status, agent: Option<String> }`
+    instead of a bare `AgentStatus`. `spawn_basic_detection_task`'s
+    relayed-status branch parses the label
+    (`crate::detect::parse_agent_label`) and calls
+    `agent_presence.observe_process_probe(Some(identified))` directly —
+    bypassing the `pid > 0`-gated process probe entirely, since a remote
+    pane never has one. The branch now publishes `StateChanged` on an
+    identity change alone (not just a status transition), since identity
+    is the only thing `AppEvent::StateChanged`'s handler
+    (`app/actions.rs`) writes into `TerminalState::detected_agent`.
+  - Deviation from the minimal fix shape in the debug report: identity is
+    only ever *set*, never cleared, from the relay (`relayed_status.agent
+    == None` is a no-op, not a reset). The report didn't need to resolve
+    this edge case (agent process exiting mid-mount) and clearing would
+    need a second relay-side "agent disappeared" contract that doesn't
+    exist yet; logged here rather than invented.
+- Tests added: `codec::tests::agent_status_frame_without_agent_field_
+  decodes_with_none` (old-shaped frame decodes with `agent: None`),
+  `codec`'s roundtrip fixture now carries `agent: Some("claude")`,
+  `client::tests::drive_mount_channel_relays_agent_status_to_the_
+  registered_pane_sink` now asserts both `status` and `agent` on the
+  relayed value, `pane::remote_spawn_tests::relayed_agent_status_updates_
+  detection_state_without_any_local_probe` now sends identity and asserts
+  the published `StateChanged` event carries `agent: Some(Agent::Claude)`
+  for a pane whose `child_pid` never leaves `0`.
+- Validation: `ZIG=... cargo test --bin herdr -- --test-threads=4` → 2715
+  passed, 0 failed (net +1 over the 2714 baseline). `cargo clippy` could
+  not be run this session — the vendored `libghostty-vt` `ReleaseFast`
+  build fails in this environment independent of this change (Zig
+  0.15.2's bundled libcxx vs. the macOS SDK; `cargo build`/`cargo test`
+  dev-profile builds are unaffected and compile clean with zero warnings
+  from the touched files). `cargo fmt` run; only the files this fix
+  touched were reformatted.
+- Files touched: `src/remote/federation/protocol/mod.rs`,
+  `src/remote/federation/protocol/codec.rs` (+ test fixtures),
+  `src/remote/federation/reducer.rs` (test fixtures only),
+  `src/remote/federation/serve.rs` (dead-code-path construction site kept
+  compiling), `src/server/federation_actor.rs`,
+  `src/server/federation_accept.rs`, `src/remote/federation/client.rs`,
+  `src/pane.rs`, `src/terminal/runtime.rs` (wrapper return type only).
+
+## Code-review remediation: stale relayed identity now clears (MAJOR + 2 MINOR)
+
+- What: `src/pane.rs`'s relayed-status branch (previously logged above as
+  "identity is only ever set, never cleared") now clears a previously
+  relayed identity when the remote reports `agent: None` **and**
+  `status` is `Idle`/`Done`. It routes through the existing
+  `agent_presence.observe_process_probe(None)` debounce (same path the
+  local process-probe loop already uses to clear a vanished agent,
+  `AGENT_MISS_CONFIRMATION_ATTEMPTS = 6`) rather than clearing on a
+  single frame. A `Working`/`Blocked` status paired with `agent: None`
+  is left untouched (not even debounce-counted) — that shape is what an
+  *old* peer that structurally never populates the `agent` field would
+  send, and treating it as a clear signal would wipe a real identity for
+  a remote agent that's still actively running. Also fixed the stale "P6:
+  dormant... nothing drives it yet" comment at the relay channel's
+  construction site (it's been actively driven since commit `6bbc829`)
+  and added a comment on `serve.rs`'s hardcoded `agent: None` marking it
+  fixture-only (`FixtureHost`) so a real `FederationHost` impl doesn't
+  copy it.
+- Why: code review (`plans/260722-1240-remote-agents-sidebar-still-
+  missing/reports/code-review-260722-remote-agent-identity-relay-
+  report.md`) flagged this as the one MAJOR gap — a remote agent exiting
+  left the mirrored pane permanently `is_agent_terminal() == true`,
+  showing a stale sidebar entry indefinitely.
+- Evidence: traced the actual server-side signal this depends on
+  (`src/app/agents.rs::agent_info` filters on `is_agent_terminal()`
+  before a terminal ever reaches `AgentList`/the federation status poll,
+  so a fully-exited agent terminal with no `launch_argv` disappears from
+  `agent_statuses()` entirely with no explicit frame — but a terminal
+  spawned via `herdr agent start` keeps `launch_argv` set and stays an
+  agent terminal with `agent_status: Idle/Done` and `agent: None` once
+  screen-text can no longer identify a specific agent; that's the real,
+  reachable "agent gone" signal this fix keys on). New tests: `pane::
+  remote_spawn_tests::relayed_idle_none_clears_identity_only_after_
+  debounce` (drives the full sequence — Working+Some establishes
+  identity, Working+None is a no-op, then 6 Idle+None frames are needed
+  before the clear publishes) and `app::actions::tests::
+  state_changed_agent_gone_clears_is_agent_terminal` (proves the
+  resulting `StateChanged{agent: None, state: Idle}` event flips
+  `TerminalState::is_agent_terminal()` to `false`, which is exactly what
+  `agent_info`/`collect_agent_infos` filter on for the sidebar/API).
+  `ZIG=/Users/hvnguyen/.local/zig-0.15.2/zig cargo test --bin herdr --
+  --test-threads=4` → 2717 passed, 0 failed (net +2 over the 2715
+  baseline this session started from). `cargo fmt` run clean.
+- Reversibility: fully reversible — isolated to the added `else if`
+  branch in `pane.rs`'s relayed-status match arm, the two comment
+  updates, and the two new tests; no wire/protocol shape change.

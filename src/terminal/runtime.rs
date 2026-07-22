@@ -350,7 +350,7 @@ impl TerminalRuntime {
 
     pub(crate) fn relayed_agent_status_sender(
         &self,
-    ) -> Option<tokio::sync::mpsc::Sender<crate::api::schema::common::AgentStatus>> {
+    ) -> Option<tokio::sync::mpsc::Sender<crate::pane::RelayedAgentStatus>> {
         self.0.relayed_agent_status_sender()
     }
 

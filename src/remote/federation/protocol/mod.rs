@@ -220,6 +220,17 @@ pub struct AgentStatusMessage {
     pub terminal_id: String,
     pub mount_generation: u64,
     pub status: AgentStatus,
+    /// Canonical agent label (e.g. `"claude"`, `"codex"`) identifying which
+    /// agent produced `status`, sourced from the serving host's own
+    /// `AgentInfo.agent`. `None` when the serving host has not identified an
+    /// agent for this terminal yet. Additive field within
+    /// `FEDERATION_PROTOCOL_VERSION` 3: the handshake already rejects any
+    /// version skew before either peer decodes a channel frame, so peers
+    /// that can reach this type always agree on this field's presence — the
+    /// `default`/`skip_serializing_if` below only keep old fixture frames
+    /// (recorded before this field existed) decodable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Clipboard-channel message. `origin_tag` identifies which side produced
