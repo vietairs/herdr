@@ -50,6 +50,17 @@ impl App {
     /// rejected immediately (before spawning any dial) with a per-host
     /// failure event, isolating it from the other targets in the same
     /// request (requirement 4).
+    ///
+    /// Phase 01 (server-side target validation): every target is validated
+    /// with `crate::remote::validate_remote_target` (the same rule the CLI's
+    /// `--remote` flag already enforces) and checked against
+    /// `crate::remote::is_local_target` before any `tokio::spawn`. This API
+    /// method is reachable by anything that can open `herdr.sock`, not just
+    /// the CLI parser, so a leading-`-` target (e.g.
+    /// `-oProxyCommand=<cmd>`) must be rejected here too — `ssh` parses a
+    /// leading-`-` argv element as an option, not a hostname. Rejections are
+    /// synchronous `invalid_request` errors returned before any dial is
+    /// spawned, so a caller (dialog or CLI) sees the failure immediately.
     #[cfg(unix)]
     pub(super) fn handle_workspace_mount_remote(
         &mut self,
@@ -70,13 +81,35 @@ impl App {
             );
         }
 
+        for target in &targets {
+            if let Err(err) = crate::remote::validate_remote_target(target) {
+                tracing::warn!(?target, %err, "rejected workspace.mount_remote target");
+                return encode_error(
+                    id,
+                    "invalid_request",
+                    format!("invalid remote target {target:?}: {err}"),
+                );
+            }
+            if crate::remote::is_local_target(target) {
+                tracing::warn!(?target, "rejected workspace.mount_remote target");
+                return encode_error(
+                    id,
+                    "invalid_request",
+                    "workspace.mount_remote requires a remote target; \"localhost\" is not a remote host",
+                );
+            }
+        }
+
         let session_name = crate::session::active_name()
             .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
 
         for target in &targets {
             let host_key = crate::remote::federation::id::HostKey::new(target, &session_name);
             if self.state.double_attach_conflict(&host_key) {
-                tracing::warn!(%target, "federation mount requested but this host is already mounted");
+                tracing::warn!(
+                    ?target,
+                    "federation mount requested but this host is already mounted"
+                );
                 let event_tx = self.event_tx.clone();
                 let target = target.clone();
                 tokio::spawn(async move {
@@ -148,6 +181,13 @@ impl App {
 
         if self.state.begin_federation_mount(mirror.clone()).is_err() {
             tracing::warn!(%target, "federation mount ready but this host is already mounted; dropping");
+            if !self.claim_abandoned_remote_mount(&target) {
+                if let Some(remote_mount) = self.state.remote_mount.as_mut() {
+                    if remote_mount.resolve_pending_target(&target) {
+                        remote_mount.error = Some(format!("{target}: already mounted"));
+                    }
+                }
+            }
             return;
         }
         let host_key = mirror.mount().host_key.clone();
@@ -171,6 +211,13 @@ impl App {
             Err(err) => {
                 tracing::warn!(%target, %err, "failed to materialize federation mount");
                 self.state.end_federation_mount(&host_key);
+                if !self.claim_abandoned_remote_mount(&target) {
+                    if let Some(remote_mount) = self.state.remote_mount.as_mut() {
+                        if remote_mount.resolve_pending_target(&target) {
+                            remote_mount.error = Some(format!("{target}: {err}"));
+                        }
+                    }
+                }
                 // Mirror the success path's teardown order below (drop
                 // `out_tx` first so the writer task drains and exits,
                 // bounded so a half-open peer can never hang this, then
@@ -262,6 +309,29 @@ impl App {
             }
         });
         self.state.mount_drive_tasks.insert(host_key, drive_handle);
+
+        // Correlate this outcome back to the mount dialog, if one is open and
+        // was waiting on this target. A target the user already walked away
+        // from is claimed first, so a dial abandoned by a dismissed dialog can
+        // never resolve — or close — a later submission that happens to use
+        // the same target string. An unknown target beyond that is ignored by
+        // `resolve_pending_target`.
+        //
+        // The two early-return failure branches above (already-mounted
+        // conflict, materialize failure) each resolve `target` and set
+        // `remote_mount.error` themselves before returning, so the dialog
+        // never reads a failed target as a silent success or hangs on
+        // "mounting…" forever.
+        if !self.claim_abandoned_remote_mount(&target) {
+            if let Some(remote_mount) = self.state.remote_mount.as_mut() {
+                if remote_mount.resolve_pending_target(&target)
+                    && remote_mount.pending.is_empty()
+                    && remote_mount.error.is_none()
+                {
+                    self.close_remote_mount_dialog();
+                }
+            }
+        }
     }
 
     /// `AppEvent::FederationMountFailed` handler: surfaces a sidebar notice
@@ -275,7 +345,7 @@ impl App {
                 self.state.toast = Some(crate::app::state::ToastNotification {
                     kind: ToastKind::NeedsAttention,
                     title: format!("federated mount to {target} failed"),
-                    context: reason,
+                    context: reason.clone(),
                     position: None,
                     target: None,
                 });
@@ -301,6 +371,23 @@ impl App {
         }
         self.render_dirty.store(true, Ordering::Release);
         self.render_notify.notify_one();
+
+        // Correlate this failure back to the mount dialog, if one is open and
+        // was waiting on this target. A target the user already walked away
+        // from is claimed first, so a dial abandoned by a dismissed dialog can
+        // never report its failure against a later submission reusing the same
+        // target string. An unknown target beyond that is ignored by
+        // `resolve_pending_target`. The dialog stays open showing the error
+        // even once every target has resolved (`submitting` alone gates
+        // re-submission) — only the ready path closes it, and only when
+        // nothing failed.
+        if !self.claim_abandoned_remote_mount(&target) {
+            if let Some(remote_mount) = self.state.remote_mount.as_mut() {
+                if remote_mount.resolve_pending_target(&target) {
+                    remote_mount.error = Some(format!("{target}: {reason}"));
+                }
+            }
+        }
     }
 
     /// `AppEvent::FederationMountEnded` handler: the mount's drive task
@@ -1248,6 +1335,294 @@ mod tests {
         assert!(app.state.toast.is_none());
     }
 
+    // `RemoteMountState::submitting`/`pending` correlation: the dialog stays
+    // open (not the success-ack-closes-immediately shape) until every
+    // submitted target has resolved via `FederationMountReady`/
+    // `FederationMountFailed`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ready_closes_dialog_when_last_pending_target_resolves() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        let mut remote_mount = crate::app::state::RemoteMountState::default();
+        remote_mount.begin_submission(vec!["remote-host".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+
+        let mirror = test_federation_mirror("remote-host");
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+
+        assert!(
+            app.state.remote_mount.is_none(),
+            "dialog should close once the only pending target succeeds"
+        );
+    }
+
+    // The already-mounted-conflict early return in `handle_federation_mount_ready`
+    // must not leave the dialog reading " mounting…" forever when this is the
+    // only pending target — it must resolve the target and surface a real
+    // error, exactly like the `handle_federation_mount_failed` path does.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ready_already_mounted_conflict_surfaces_an_error_instead_of_hanging()
+    {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        // Pre-mount the same host_key so `begin_federation_mount` inside the
+        // handler rejects this ready event as a duplicate.
+        app.state
+            .begin_federation_mount(test_federation_mirror("remote-host"))
+            .unwrap();
+        let mut remote_mount = crate::app::state::RemoteMountState::default();
+        remote_mount.begin_submission(vec!["remote-host".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+
+        let mirror = test_federation_mirror("remote-host");
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+
+        let remote_mount = app
+            .state
+            .remote_mount
+            .as_ref()
+            .expect("dialog stays open so the conflict error is visible, not silently hanging");
+        assert!(!remote_mount.submitting);
+        assert!(remote_mount.pending.is_empty());
+        assert!(remote_mount
+            .error
+            .as_ref()
+            .is_some_and(|error| error.contains("remote-host")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_failed_keeps_dialog_open_with_reason_and_clears_submitting() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        let mut remote_mount = crate::app::state::RemoteMountState::default();
+        remote_mount.begin_submission(vec!["remote-host".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+
+        app.handle_federation_mount_failed(
+            "remote-host".to_string(),
+            "connection refused".to_string(),
+        );
+
+        let remote_mount = app
+            .state
+            .remote_mount
+            .as_ref()
+            .expect("dialog stays open on failure so the reason is visible");
+        assert!(!remote_mount.submitting);
+        assert!(remote_mount.pending.is_empty());
+        let error = remote_mount.error.as_ref().expect("failure sets an error");
+        assert!(error.contains("remote-host"));
+        assert!(error.contains("connection refused"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_partial_outcome_one_ready_one_failed_stays_open_with_error() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        let mut remote_mount = crate::app::state::RemoteMountState::default();
+        remote_mount.begin_submission(vec!["host-a".to_string(), "host-b".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+
+        let mirror = test_federation_mirror("host-a");
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "host-a".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+        app.handle_federation_mount_failed("host-b".to_string(), "dial timed out".to_string());
+
+        let remote_mount = app
+            .state
+            .remote_mount
+            .as_ref()
+            .expect("dialog stays open while any target failed");
+        assert!(!remote_mount.submitting);
+        assert!(remote_mount.pending.is_empty());
+        assert!(remote_mount
+            .error
+            .as_ref()
+            .is_some_and(|error| error.contains("host-b")));
+    }
+
+    // A stale outcome for a target from a submission the user already
+    // dismissed (Esc) must not resurrect or mutate a *different*, still-open
+    // dialog for a later submission. `federation_mount_ready_after_dialog_dismissed_does_not_resurrect_it`
+    // previously asserted only `remote_mount.is_none()` after `remote_mount`
+    // was already seeded `None`, which stays green even if the entire
+    // correlation block in `handle_federation_mount_ready` is deleted (no
+    // code path creates a dialog from that handler). This scenario instead
+    // exercises what `resolve_pending_target`'s "unknown target is ignored"
+    // return value exists for: dismiss the dialog for target A, reopen it
+    // for a different target B, then let A's stale `FederationMountReady`
+    // arrive — B's dialog must be untouched (still open, still submitting,
+    // no error, `pending` still `[B]`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ready_for_a_dismissed_target_does_not_mutate_a_newer_dialog() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        // Dismiss host-a's dialog (Esc), then open a fresh dialog submitting
+        // a different target, host-b, that is still awaiting its outcome.
+        app.state.remote_mount = None;
+        let mut remote_mount = crate::app::state::RemoteMountState::default();
+        remote_mount.begin_submission(vec!["host-b".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+
+        // host-a's stale dial (spawned before the Esc) now reports ready.
+        let mirror = test_federation_mirror("host-a");
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "host-a".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+
+        let remote_mount = app
+            .state
+            .remote_mount
+            .as_ref()
+            .expect("host-a's stale outcome must not touch host-b's dialog");
+        assert!(remote_mount.submitting);
+        assert!(remote_mount.error.is_none());
+        assert_eq!(remote_mount.pending, vec!["host-b".to_string()]);
+    }
+
+    // The same-string case the test above does not cover: dismissing a dialog
+    // does not cancel its dial, so submitting the *same* target again later
+    // leaves two dials outstanding for one string. Correlation is by string
+    // alone, so without tracking what was abandoned the first dial's failure
+    // would land on the second dialog — showing a stale error and clearing
+    // `submitting` while the real dial is still running, after which the real
+    // outcome finds `pending` empty and is dropped entirely.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_failure_for_a_resubmitted_target_does_not_mutate_the_new_dialog() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+
+        // Submit host-a, then dismiss the dialog while its dial is in flight.
+        let mut remote_mount = crate::app::state::RemoteMountState::default();
+        remote_mount.begin_submission(vec!["host-a".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+        app.close_remote_mount_dialog();
+        assert_eq!(
+            app.state.abandoned_remote_mounts,
+            vec!["host-a".to_string()]
+        );
+
+        // Reopen and submit the very same target; a second dial is now live.
+        let mut remote_mount = crate::app::state::RemoteMountState::default();
+        remote_mount.begin_submission(vec!["host-a".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+
+        // The first, abandoned dial now fails.
+        app.handle_federation_mount_failed("host-a".to_string(), "connection refused".to_string());
+
+        let remote_mount = app
+            .state
+            .remote_mount
+            .as_ref()
+            .expect("the stale failure must not close the new dialog");
+        assert!(
+            remote_mount.submitting,
+            "the second dial is still in flight, so the dialog must stay in its submitting state"
+        );
+        assert!(
+            remote_mount.error.is_none(),
+            "the abandoned dial's failure must not be shown as this submission's error"
+        );
+        assert_eq!(remote_mount.pending, vec!["host-a".to_string()]);
+        assert!(
+            app.state.abandoned_remote_mounts.is_empty(),
+            "the abandoned entry is consumed once, so a later outcome cannot be swallowed too"
+        );
+
+        // The real dial's failure still reaches the dialog afterwards.
+        app.handle_federation_mount_failed("host-a".to_string(), "host key mismatch".to_string());
+        let remote_mount = app.state.remote_mount.as_ref().expect("dialog stays open");
+        assert!(!remote_mount.submitting);
+        assert!(remote_mount.pending.is_empty());
+        assert!(remote_mount
+            .error
+            .as_ref()
+            .is_some_and(|error| error.contains("host key mismatch")));
+    }
+
     // Phase-a TDD test 6: a mount task that produced an `Err` (the async
     // catch-unwind-free failure path `handle_workspace_mount_remote`
     // already routes through `AppEvent::FederationMountFailed`) never
@@ -1321,6 +1696,140 @@ mod tests {
             saw_failure,
             "expected a FederationMountFailed event naming the duplicate host"
         );
+    }
+
+    // Phase 01: server-side target validation. `handle_workspace_mount_remote`
+    // must reject option-like / empty / localhost targets synchronously,
+    // before any `tokio::spawn`, so the collector (dialog or CLI) sees the
+    // rejection immediately and no dial or mirror mutation ever happens for
+    // an invalid target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_remote_rejects_option_like_target_without_spawning_a_dial() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let response = app.handle_workspace_mount_remote(
+            "req".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec![
+                    "good-host".to_string(),
+                    "-oProxyCommand=touch /tmp/pwn".to_string(),
+                ],
+                remote_keybindings: false,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_request");
+        assert!(error
+            .error
+            .message
+            .contains("-oProxyCommand=touch /tmp/pwn"));
+
+        assert!(app.state.remote_mirrors.is_empty());
+        // No dial and no async event: nothing was spawned for this request.
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv()).await,
+            Err(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_remote_rejects_localhost_target() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let response = app.handle_workspace_mount_remote(
+            "req".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["localhost".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_request");
+
+        assert!(app.state.remote_mirrors.is_empty());
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv()).await,
+            Err(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_remote_rejects_blank_only_targets() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let response = app.handle_workspace_mount_remote(
+            "req".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["  ".to_string(), "".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_request");
+        assert!(app.state.remote_mirrors.is_empty());
+    }
+
+    // A pre-mounted host takes the "already mounted" early-return branch
+    // (`double_attach_conflict`), which never spawns a real ssh dial — safe
+    // to exercise end to end without any network I/O. That branch still
+    // fire-and-forget-spawns a `FederationMountFailed` notice
+    // (`src/app/api/workspaces.rs:82-89`), so this test asserts on the
+    // mirror count staying untouched and the ack being a success response,
+    // never on "no event at all".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_remote_accepts_plain_and_user_at_host_targets() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let session_name = crate::session::active_name()
+            .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+        let mirror = crate::remote::federation::reducer::RemoteMirror::new(
+            crate::remote::federation::id::Mount {
+                host_key: crate::remote::federation::id::HostKey::new(
+                    "already-mounted-host",
+                    &session_name,
+                ),
+                server_instance_id: crate::remote::federation::id::ServerInstanceId(
+                    "inst-1".to_string(),
+                ),
+                mount_generation: 1,
+            },
+        );
+        app.state.begin_federation_mount(mirror).unwrap();
+
+        let response = app.handle_workspace_mount_remote(
+            "req".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["  already-mounted-host  ".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        match success.result {
+            ResponseResult::WorkspaceMountRemoteRequested { targets } => {
+                assert_eq!(targets, vec!["already-mounted-host".to_string()]);
+            }
+            other => panic!("expected WorkspaceMountRemoteRequested, got {other:?}"),
+        }
+
+        // Mirror count is untouched by this request (no new mount, the
+        // pre-existing one stays exactly once) — no real ssh dial spawned.
+        assert_eq!(app.state.remote_mirrors.len(), 1);
     }
 
     #[test]

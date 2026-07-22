@@ -5,6 +5,7 @@
 ### Added
 - Copy mode now supports literal smart-case search with `/` and `?`, repeating with `n` and `N`, match highlighting, and tmux-style cross-line `w`/`b`/`e` word motions. (#1230)
 - Added maki detection with idle, working, and blocked screen states. (#1301, thanks @tontinton)
+- Added a `mount remote workspace` global menu entry so a running local Herdr session can mount a remote workspace over SSH without relaunching.
 
 ### Fixed
 - Native Windows servers now detach from the terminal console that launched them, so closing WezTerm, Windows Terminal, or another host terminal no longer stops persistent pane processes. (#1329)

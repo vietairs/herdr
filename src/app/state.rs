@@ -576,6 +576,63 @@ pub struct WorkspaceCardArea {
     pub indented: bool,
 }
 
+/// Collector state for the `Mode::MountRemoteWorkspace` dialog. The typed
+/// target list reuses the existing `AppState::name_input` field (same
+/// pattern as `WorktreeCreateState`'s branch input); this struct only holds
+/// what a free-text collector needs beyond that shared input.
+///
+/// `submitting`/`pending` track a real in-flight `workspace.mount_remote`
+/// dial+mount: the API ack only means "request accepted", the actual ssh
+/// dial runs as a server-owned task and reports back ~25s later via
+/// `AppEvent::FederationMountReady`/`FederationMountFailed`
+/// (`src/app/api/workspaces.rs`). `pending` exists only to correlate those
+/// per-target outcomes back to this submission — `begin_submission` and
+/// `resolve_pending_target` are the only two places that touch either field,
+/// so they cannot drift out of sync with each other.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteMountState {
+    pub error: Option<String>,
+    pub submitting: bool,
+    pub pending: Vec<String>,
+}
+
+impl RemoteMountState {
+    /// Starts tracking a freshly-submitted target list. Clears any prior
+    /// inline error so the dialog reflects only this submission's outcome.
+    pub(crate) fn begin_submission(&mut self, targets: Vec<String>) {
+        self.pending = targets;
+        self.submitting = !self.pending.is_empty();
+        self.error = None;
+    }
+
+    /// Removes `target` from `pending` and keeps `submitting` in sync (true
+    /// iff any target is still outstanding). Returns whether `target` was
+    /// actually pending — an unknown target (e.g. left over from a
+    /// dismissed-then-reopened dialog) is ignored by the caller.
+    ///
+    /// Both call sites (`src/app/api/workspaces.rs`'s
+    /// `handle_federation_mount_ready`/`handle_federation_mount_failed`) are
+    /// `#[cfg(unix)]`, so this has zero callers on
+    /// `x86_64-pc-windows-msvc` — `#[allow(dead_code)]` here, matching this
+    /// file's existing precedent on `FederationMountConflict`.
+    #[allow(dead_code)]
+    pub(crate) fn resolve_pending_target(&mut self, target: &str) -> bool {
+        // Remove exactly ONE occurrence, not every match: the same target can
+        // legitimately be submitted twice in one request ("host-a host-a"),
+        // which dials twice, and each dial must resolve independently.
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|pending_target| pending_target == target)
+        else {
+            return false;
+        };
+        self.pending.remove(index);
+        self.submitting = !self.pending.is_empty();
+        true
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeCreateState {
     pub source_workspace_id: String,
@@ -759,6 +816,12 @@ pub enum Mode {
     NewLinkedWorktree,
     OpenExistingWorktree,
     ConfirmRemoveWorktree,
+    /// Free-text collector for `workspace.mount_remote` (server/runtime fact,
+    /// `src/api/schema/workspaces.rs::WorkspaceMountRemoteParams`); the TUI
+    /// only owns the input dialog. Unreachable on non-unix (the global-menu
+    /// entry that opens it is `#[cfg(unix)]`), but the variant itself stays
+    /// cross-platform so exhaustive `match state.mode` still compiles there.
+    MountRemoteWorkspace,
     Resize,
     ConfirmClose,
     ContextMenu,
@@ -1340,6 +1403,13 @@ pub struct AppState {
     pub request_submit_worktree_create: bool,
     pub request_submit_worktree_open: bool,
     pub request_submit_worktree_remove: bool,
+    /// Set when the global menu's "mount remote" entry (unix only) was
+    /// activated; drained by `App`'s own event loop, which owns the
+    /// `&mut App` `open_remote_mount_dialog` needs.
+    pub request_open_remote_mount_dialog: bool,
+    /// Set when the remote-mount dialog's primary action (mouse click) was
+    /// activated; drained the same way as `request_open_remote_mount_dialog`.
+    pub request_submit_remote_mount: bool,
     pub request_reload_config: bool,
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
@@ -1356,6 +1426,17 @@ pub struct AppState {
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
+    /// `Mode::MountRemoteWorkspace` dialog state; `None` when the dialog is
+    /// closed. The typed target list lives in `name_input` (shared with
+    /// `WorktreeCreateState`'s pattern).
+    pub remote_mount: Option<RemoteMountState>,
+    /// Targets whose dial was still in flight when the user dismissed the
+    /// dialog. The dial keeps running server-side, so its outcome still
+    /// arrives; without this, a later dialog submitting the same target string
+    /// would absorb the stale outcome as its own (targets are correlated by
+    /// string alone — the mount events carry no per-submission identity).
+    /// One entry per abandoned dial, so duplicates are tracked independently.
+    pub abandoned_remote_mounts: Vec<String>,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
     pub release_notes: Option<ReleaseNotesState>,
@@ -1807,6 +1888,8 @@ impl AppState {
             request_submit_worktree_create: false,
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
+            request_open_remote_mount_dialog: false,
+            request_submit_remote_mount: false,
             request_reload_config: false,
             request_client_config_reload: false,
             request_clipboard_write: None,
@@ -1819,6 +1902,8 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             request_complete_onboarding: false,
+            remote_mount: None,
+            abandoned_remote_mounts: Vec::new(),
             name_input: String::new(),
             name_input_replace_on_type: false,
             release_notes: None,

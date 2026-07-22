@@ -79,6 +79,11 @@ pub(crate) enum GlobalMenuAction {
     Keybinds,
     ReloadConfig,
     Settings,
+    /// Opens `Mode::MountRemoteWorkspace` (`workspace.mount_remote` collector).
+    /// Unix-only: the API handler returns `unsupported_platform` on other
+    /// targets (`src/app/api/workspaces.rs:28-39`).
+    #[cfg(unix)]
+    MountRemoteWorkspace,
 }
 
 pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
@@ -87,6 +92,8 @@ pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
         GlobalMenuAction::Keybinds,
         GlobalMenuAction::ReloadConfig,
     ];
+    #[cfg(unix)]
+    actions.push(GlobalMenuAction::MountRemoteWorkspace);
     if state.update_available.is_some() || state.latest_release_notes_available {
         actions.push(GlobalMenuAction::WhatsNew);
     }
@@ -139,6 +146,11 @@ pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuA
             leave_modal(state);
         }
         GlobalMenuAction::Settings => super::settings::open_settings(state),
+        #[cfg(unix)]
+        GlobalMenuAction::MountRemoteWorkspace => {
+            state.request_open_remote_mount_dialog = true;
+            leave_modal(state);
+        }
     }
 }
 
@@ -1422,6 +1434,41 @@ mod tests {
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn global_menu_actions_and_labels_stay_index_aligned() {
+        // These two lists are parallel and index-addressed by
+        // `src/ui/menus.rs` and `src/ui/mobile.rs`; nothing else enforces
+        // alignment, so exercise all three badge states.
+        for (update_available, latest_release_notes_available) in [
+            (None, false),
+            (Some("0.3.2".to_string()), false),
+            (None, true),
+        ] {
+            let mut state = state_with_workspaces(&["test"]);
+            state.update_available = update_available;
+            state.latest_release_notes_available = latest_release_notes_available;
+
+            assert_eq!(
+                global_menu_actions(&state).len(),
+                state.global_menu_labels().len()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn global_menu_mount_remote_action_requests_the_dialog() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.mode = Mode::GlobalMenu;
+
+        assert!(global_menu_actions(&state).contains(&GlobalMenuAction::MountRemoteWorkspace));
+
+        apply_global_menu_action(&mut state, GlobalMenuAction::MountRemoteWorkspace);
+
+        assert!(state.request_open_remote_mount_dialog);
+        assert_ne!(state.mode, Mode::GlobalMenu);
     }
 
     #[test]
