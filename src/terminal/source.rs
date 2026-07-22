@@ -197,7 +197,13 @@ mod tests {
         source.write_user_input(input.clone()).await.unwrap();
         source.try_write_user_input(input).unwrap();
         let (rows, cols, cell_width_px, cell_height_px, terminal_responses) = resize_args;
-        source.resize(rows, cols, cell_width_px, cell_height_px, terminal_responses);
+        source.resize(
+            rows,
+            cols,
+            cell_width_px,
+            cell_height_px,
+            terminal_responses,
+        );
         source.shutdown();
     }
 
@@ -206,12 +212,7 @@ mod tests {
         let mock = MockSource::new();
         let input = Bytes::from_static(b"hello");
         let responses = vec![Bytes::from_static(b"\x1b[1;1R")];
-        delegate_through_trait(
-            &mock,
-            input.clone(),
-            (24, 80, 1600, 960, responses.clone()),
-        )
-        .await;
+        delegate_through_trait(&mock, input.clone(), (24, 80, 1600, 960, responses.clone())).await;
 
         let recorded = mock.0.lock().unwrap();
         assert_eq!(recorded.write_user_input, vec![input.clone()]);

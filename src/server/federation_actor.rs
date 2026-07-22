@@ -178,11 +178,10 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
                 let _ = reply.send(None);
                 return;
             }
-            let response =
-                app.handle_api_request_after_internal_events_drained(Request {
-                    id: "federation-mount".to_string(),
-                    method: Method::SessionSnapshot(EmptyParams::default()),
-                });
+            let response = app.handle_api_request_after_internal_events_drained(Request {
+                id: "federation-mount".to_string(),
+                method: Method::SessionSnapshot(EmptyParams::default()),
+            });
             let cursor = EventCursor(app.event_hub.current_sequence());
             let snapshot = serde_json::from_str::<SuccessResponse>(&response)
                 .ok()
@@ -245,11 +244,10 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
             }
         }
         FederationCommand::AgentStatuses(reply) => {
-            let response =
-                app.handle_api_request_after_internal_events_drained(Request {
-                    id: "federation-agent-list".to_string(),
-                    method: Method::AgentList(EmptyParams::default()),
-                });
+            let response = app.handle_api_request_after_internal_events_drained(Request {
+                id: "federation-agent-list".to_string(),
+                method: Method::AgentList(EmptyParams::default()),
+            });
             let statuses = serde_json::from_str::<SuccessResponse>(&response)
                 .ok()
                 .and_then(|success| match success.result {
@@ -294,9 +292,7 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
             let outcome = serde_json::from_str::<SuccessResponse>(&response)
                 .ok()
                 .and_then(|success| match success.result {
-                    ResponseResult::PaneInfo { pane } => {
-                        Some(Ok((pane.pane_id, pane.terminal_id)))
-                    }
+                    ResponseResult::PaneInfo { pane } => Some(Ok((pane.pane_id, pane.terminal_id))),
                     _ => None,
                 })
                 .unwrap_or_else(|| {
@@ -352,7 +348,11 @@ mod tests {
 
     /// Drive a connection through admission + mount, returning its `(epoch,
     /// connid)`. The lease is left `Mounted` for that connection.
-    fn acquire_and_mount(app: &mut App, lease: &mut FederationLease, connid: ConnId) -> AcceptEpoch {
+    fn acquire_and_mount(
+        app: &mut App,
+        lease: &mut FederationLease,
+        connid: ConnId,
+    ) -> AcceptEpoch {
         let epoch = lease.current_epoch();
         let (atx, mut arx) = oneshot::channel();
         dispatch(
@@ -364,7 +364,10 @@ mod tests {
                 reply: atx,
             },
         );
-        assert_eq!(arx.try_recv().expect("admission reply"), Admission::Accepted);
+        assert_eq!(
+            arx.try_recv().expect("admission reply"),
+            Admission::Accepted
+        );
         let (mtx, mut mrx) = oneshot::channel();
         dispatch(
             app,
@@ -574,6 +577,47 @@ mod tests {
         assert!(!new_terminal_id.is_empty());
     }
 
+    /// Root-cause regression for the client/server id-space mismatch: the
+    /// federation client only ever knows a pane's raw `terminal_id`
+    /// (`app/api/panes.rs::dispatch_remote_pane_split` sends
+    /// `runtime.remote_terminal_id()`, never a public `w…:p…` pane id), so
+    /// `SplitPane`'s `target_pane_id` here is always a raw terminal id in
+    /// production. Before the fix, `Method::PaneSplit`'s handler only
+    /// accepted public pane ids and this would reply `pane_not_found` for
+    /// every real remote split.
+    #[tokio::test]
+    async fn split_pane_resolves_a_raw_terminal_id_the_same_as_a_public_pane_id() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("metadata")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let mut lease = FederationLease::new();
+
+        let root_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let raw_terminal_id = app.state.workspaces[0]
+            .terminal_id(root_pane_id)
+            .expect("the seeded root pane has an attached terminal id")
+            .to_string();
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::SplitPane {
+                target_pane_id: raw_terminal_id,
+                direction: crate::remote::federation::protocol::SplitDirection::Right,
+                ratio: None,
+                focus: false,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        let (new_pane_id, new_terminal_id) =
+            outcome.expect("split resolved via the raw terminal id must succeed");
+        assert!(!new_pane_id.is_empty());
+        assert!(!new_terminal_id.is_empty());
+    }
+
     #[test]
     fn split_pane_against_an_unknown_target_pane_replies_with_a_reason() {
         let mut app = test_app();
@@ -591,6 +635,9 @@ mod tests {
             },
         );
         let outcome = rx.try_recv().expect("reply delivered");
-        assert!(outcome.is_err(), "an unknown target pane must fail, not misfile");
+        assert!(
+            outcome.is_err(),
+            "an unknown target pane must fail, not misfile"
+        );
     }
 }

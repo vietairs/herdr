@@ -62,6 +62,26 @@ impl App {
         } else {
             return encode_error(id, "workspace_not_found", "no active workspace");
         };
+        // Federation-mount awareness: a federated workspace's pane ids are
+        // namespaced `r:<host>:...` (`crate::remote::federation::id`). The
+        // local-spawn path below (`Workspace::create_tab`) always spawns a
+        // LOCAL PTY and stamps it with a public tab/pane id derived from the
+        // target workspace, which for a mounted workspace looks exactly like
+        // a real remote pane even though the backing shell actually runs on
+        // this machine. Refuse instead of silently misattributing a local
+        // shell to the remote host (mirrors the `remote_split_unsupported`
+        // refusal in `app/api/panes.rs::handle_pane_split`; remote tab
+        // creation over the federation link is not implemented yet).
+        if matches!(
+            crate::remote::federation::id::classify(&self.public_workspace_id(ws_idx)),
+            crate::remote::federation::id::IdClass::Remote(_)
+        ) {
+            return encode_error(
+                id,
+                "remote_tab_unsupported",
+                "remote workspace: new tab not supported yet",
+            );
+        }
         let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
             self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
         });
@@ -421,5 +441,41 @@ mod tests {
             crate::worktree::canonical_or_original(&cached_cwd)
         );
         shutdown_test_runtimes(&mut app);
+    }
+
+    // Regression: creating a tab in a federated remote workspace must not
+    // spawn a LOCAL shell stamped with a remote-looking pane id (mirrors
+    // `panes.rs::pane_split_in_a_federated_workspace_is_refused_not_misfiled_locally`).
+    #[test]
+    fn api_tab_create_in_a_federated_workspace_is_refused_not_misfiled_locally() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut workspace = Workspace::test_new("tabs");
+        let remote_workspace_id = "r:alice@10.0.0.1#s1:default".to_string();
+        workspace.id = remote_workspace_id.clone();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let tabs_before = app.state.workspaces[0].tabs.len();
+
+        let response = app.handle_tab_create(
+            "req".into(),
+            TabCreateParams {
+                workspace_id: Some(remote_workspace_id),
+                cwd: None,
+                focus: false,
+                label: None,
+                env: Default::default(),
+            },
+        );
+
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "remote_tab_unsupported");
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            tabs_before,
+            "a refused remote tab create must not create any local tab"
+        );
     }
 }

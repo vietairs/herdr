@@ -190,10 +190,21 @@ pub enum AppEvent {
     #[cfg(unix)]
     FederationSplitPaneReady(Box<FederationSplitPaneReady>),
     /// The remote host rejected (or the local mount could not honor) an
-    /// earlier `SplitPaneRequest`. Carries the same `request_id` so the
-    /// handler can drop the matching pending-split context.
+    /// earlier `SplitPaneRequest`, or this mount's own drive task failed to
+    /// spawn a local runtime for a `SplitPaneResponse::Created` (see the
+    /// `Err` arm in `client::drive_mount_channel`'s `SplitPaneResponse::
+    /// Created` handling — the latter case exists so a local spawn failure
+    /// still drops the matching `pending_remote_splits` entry instead of
+    /// leaking it). Carries the same `request_id` so the handler can drop
+    /// the matching pending-split context, plus the mount's own `origin`
+    /// `HostKey` so the handler can refuse to drop a *different* mount's
+    /// pending entry for a colliding/predicted `request_id`.
     #[cfg(unix)]
-    FederationSplitPaneFailed { request_id: u64, reason: String },
+    FederationSplitPaneFailed {
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    },
 }
 
 /// Payload for [`AppEvent::FederationSplitPaneReady`] — the fully-built local
@@ -204,6 +215,12 @@ pub enum AppEvent {
 #[cfg(unix)]
 pub struct FederationSplitPaneReady {
     pub request_id: u64,
+    /// The mount's own `HostKey` (`SplitMaterializationContext::origin`).
+    /// `App::handle_federation_split_pane_ready` compares this against the
+    /// originating `PendingRemoteSplit::origin` and refuses to splice the
+    /// pane in on a mismatch, so a differently-mounted host cannot answer
+    /// another mount's split request.
+    pub origin: crate::remote::federation::id::HostKey,
     pub pane_id: crate::layout::PaneId,
     pub terminal_id: crate::terminal::TerminalId,
     pub terminal: crate::terminal::TerminalState,

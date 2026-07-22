@@ -3009,7 +3009,11 @@ mod tests {
         let remote = remote.unwrap();
         assert_eq!(
             remote.target,
-            vec!["localhost".to_string(), "host1".to_string(), "host2".to_string()]
+            vec![
+                "localhost".to_string(),
+                "host1".to_string(),
+                "host2".to_string()
+            ]
         );
         assert!(remote.federation_flag);
     }
