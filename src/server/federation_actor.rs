@@ -70,6 +70,13 @@ pub(crate) enum FederationCommand {
     /// Release the lease on connection EOF (compare-and-clear; a late EOF from a
     /// superseded connection is inert).
     Release { epoch: AcceptEpoch, connid: ConnId },
+    /// Post-mount pane mirroring fix (plans/260722-1327): produce a fresh
+    /// (snapshot, cursor) pair on demand, answering an in-band
+    /// `SnapshotRequest` from an already-mounted client. Read-only (unlike
+    /// `Mount`, this never touches the lease) — any connection that can
+    /// reach the reader loop at all may ask for a resync, mirroring
+    /// `EventsAfter`'s no-lease-check precedent.
+    Snapshot(oneshot::Sender<(SessionSnapshot, EventCursor)>),
     /// Events strictly after the given sequence number.
     EventsAfter(u64, oneshot::Sender<Vec<(u64, EventKind)>>),
     /// A subscription to one live terminal's raw output bytes, or `None` if the
@@ -133,6 +140,7 @@ impl std::fmt::Debug for FederationCommand {
             FederationCommand::Release { epoch, connid } => {
                 write!(f, "Release(e{epoch}, c{connid})")
             }
+            FederationCommand::Snapshot(_) => f.write_str("Snapshot"),
             FederationCommand::EventsAfter(since, _) => write!(f, "EventsAfter({since})"),
             FederationCommand::SubscribeOutput(id, _) => write!(f, "SubscribeOutput({id})"),
             FederationCommand::ScrollbackReplay(id, _) => write!(f, "ScrollbackReplay({id})"),
@@ -182,22 +190,14 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
                 let _ = reply.send(None);
                 return;
             }
-            let response = app.handle_api_request_after_internal_events_drained(Request {
-                id: "federation-mount".to_string(),
-                method: Method::SessionSnapshot(EmptyParams::default()),
-            });
-            let cursor = EventCursor(app.event_hub.current_sequence());
-            let snapshot = serde_json::from_str::<SuccessResponse>(&response)
-                .ok()
-                .and_then(|success| match success.result {
-                    ResponseResult::SessionSnapshot { snapshot } => Some(*snapshot),
-                    _ => None,
-                })
-                .unwrap_or_else(empty_snapshot);
+            let (snapshot, cursor) = current_snapshot(app);
             let _ = reply.send(Some((snapshot, cursor)));
         }
         FederationCommand::Release { epoch, connid } => {
             lease.release(epoch, connid);
+        }
+        FederationCommand::Snapshot(reply) => {
+            let _ = reply.send(current_snapshot(app));
         }
         FederationCommand::EventsAfter(since, reply) => {
             let events = app
@@ -315,6 +315,29 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
             let _ = reply.send(outcome);
         }
     }
+}
+
+/// Produces the atomic (snapshot, cursor) pair `Mount` and `Snapshot` both
+/// answer with — extracted so a post-mount resync (`Snapshot`) reuses
+/// exactly the same `Method::SessionSnapshot` construction the initial mount
+/// does, rather than a second, divergent snapshot-building path. Atomic here
+/// because the actor holds `&mut App` exclusively for the call's duration,
+/// so no event can slip between the snapshot and the cursor read (same
+/// reasoning `Mount`'s original doc comment already gave).
+fn current_snapshot(app: &mut App) -> (SessionSnapshot, EventCursor) {
+    let response = app.handle_api_request_after_internal_events_drained(Request {
+        id: "federation-snapshot".to_string(),
+        method: Method::SessionSnapshot(EmptyParams::default()),
+    });
+    let cursor = EventCursor(app.event_hub.current_sequence());
+    let snapshot = serde_json::from_str::<SuccessResponse>(&response)
+        .ok()
+        .and_then(|success| match success.result {
+            ResponseResult::SessionSnapshot { snapshot } => Some(*snapshot),
+            _ => None,
+        })
+        .unwrap_or_else(empty_snapshot);
+    (snapshot, cursor)
 }
 
 /// The ANSI scrollback for one live terminal, empty if unknown. Unix-only:
@@ -535,6 +558,24 @@ mod tests {
         let (tx, mut rx) = oneshot::channel();
         dispatch(&mut app, &mut lease, FederationCommand::EventsAfter(0, tx));
         assert!(rx.try_recv().expect("reply delivered").is_empty());
+    }
+
+    // Post-mount pane mirroring fix (plans/260722-1327): `Snapshot` answers
+    // with the same (snapshot, cursor) shape `Mount` does, without touching
+    // the lease — proven here by calling it BEFORE any `AcquireController`/
+    // `Mount`, which `Mount` itself could never do.
+    #[test]
+    fn snapshot_produces_a_fresh_snapshot_and_cursor_without_touching_the_lease() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(&mut app, &mut lease, FederationCommand::Snapshot(tx));
+        let (_snapshot, cursor) = rx.try_recv().expect("reply delivered");
+        assert_eq!(cursor.0, app.event_hub.current_sequence());
+        assert!(
+            !lease.is_mounted_controller(0, 1),
+            "Snapshot must never acquire or mount the single-controller lease"
+        );
     }
 
     /// `SplitPane` performs a real split against the live `App` (via the

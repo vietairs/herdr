@@ -478,7 +478,17 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
     outbound_clipboard_tx: &mpsc::UnboundedSender<ClipboardMessage>,
     split_materialization: Option<&SplitMaterializationContext>,
 ) -> Result<DriveOutcome, std::io::Error> {
-    let _ = hub;
+    // Post-mount pane mirroring fix (plans/260722-1327): a structural
+    // `EventFrame` (pane/tab created/closed) carries no entity payload (see
+    // `reducer.rs`'s module docs), so it is applied purely for cursor
+    // bookkeeping above and cannot itself update the mirror. Instead, ask
+    // the server for a fresh full snapshot over this same tunnel
+    // (`SnapshotRequest`/`SnapshotResponse`, additive within
+    // `FEDERATION_PROTOCOL_VERSION` 3) and diff it in via
+    // `RemoteMirror::reconcile_by_diff` — the same resync primitive the
+    // `Gap`/`Reset` path already uses. Coalesced: a burst of structural
+    // frames while a request is already in flight sends only one.
+    let mut resync_in_flight = false;
     loop {
         let Some(msg) = read_frame(reader).await? else {
             return Ok(DriveOutcome::LinkClosed);
@@ -486,11 +496,64 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
         match msg {
             FederationMessage::Event(event_msg) => {
                 match mirror.apply_event_message(&event_msg, generation) {
-                    ReducerAction::RejectedStale
-                    | ReducerAction::Ignored
-                    | ReducerAction::Applied { .. } => continue,
+                    ReducerAction::RejectedStale | ReducerAction::Ignored => continue,
+                    ReducerAction::Applied { kind, .. } => {
+                        if !resync_in_flight && is_structural_event_kind(kind) {
+                            resync_in_flight = out_tx
+                                .send(FederationMessage::SnapshotRequest(
+                                    super::protocol::SnapshotRequest,
+                                ))
+                                .is_ok();
+                        }
+                        continue;
+                    }
                     ReducerAction::GapDetected { .. } | ReducerAction::ResetRequired => {
                         return Ok(DriveOutcome::ResyncRequired);
+                    }
+                }
+            }
+            FederationMessage::SnapshotResponse(MountSnapshot {
+                snapshot, cursor, ..
+            }) => {
+                resync_in_flight = false;
+                // `MountSnapshot` carries no per-message generation tag to
+                // fence against (only `TerminalChannelMessage`/
+                // `AgentStatusMessage` do); this drive task already only
+                // runs for the live generation it was spawned with (v1: no
+                // remount within one session, matching the rest of this
+                // module's fencing scope), so this is safe as-is.
+                let mount = mirror.mount().clone();
+                let diff = mirror.reconcile_by_diff(&snapshot, cursor, hub);
+                // Post-mount pane mirroring fix, part 2
+                // (plans/260722-1327): splice a newly-resynced remote pane
+                // into (or tear one out of) the already-live mounted `App`
+                // layout — `reconcile_by_diff` above only updated the
+                // mirror's own metadata and the sidebar-facing local
+                // `EventHub`. `split_materialization` is `None` for
+                // callers that never wire a live session behind this mount
+                // (e.g. tests), same convention as `SplitPaneResponse::
+                // Created` above.
+                if let Some(ctx) = split_materialization {
+                    for pane_info in diff.created_panes {
+                        materialize_resync_pane(
+                            &mount,
+                            generation,
+                            router,
+                            out_tx,
+                            outbound_clipboard_tx,
+                            ctx,
+                            pane_info,
+                        )
+                        .await;
+                    }
+                    for pane_id in diff.removed_pane_ids {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationResyncPaneRemoved {
+                                origin: ctx.origin.clone(),
+                                pane_id,
+                            })
+                            .await;
                     }
                 }
             }
@@ -535,10 +598,14 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
             FederationMessage::Handshake(_)
             | FederationMessage::HandshakeResponse(_)
             | FederationMessage::MountSnapshot(_) => continue,
-            // `SplitPaneRequest` is client->server only (this loop drives
-            // the client side of a mount); the peer should never send one.
+            // `SplitPaneRequest`/`SnapshotRequest` are client->server only
+            // (this loop drives the client side of a mount); the peer
+            // should never send either.
             FederationMessage::SplitPaneRequest(_) => {
                 tracing::debug!("federation client received a SplitPaneRequest; ignoring");
+            }
+            FederationMessage::SnapshotRequest(_) => {
+                tracing::debug!("federation client received a SnapshotRequest; ignoring");
             }
             // The remote host already performed the real split (see
             // `server::federation_actor::FederationCommand::SplitPane`) by
@@ -554,7 +621,7 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
             FederationMessage::SplitPaneResponse(response) => match response {
                 super::protocol::SplitPaneResponse::Created {
                     request_id,
-                    new_pane_id: _,
+                    new_pane_id,
                     new_terminal_id,
                 } => {
                     let Some(ctx) = split_materialization else {
@@ -590,6 +657,18 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                                 router
                                     .register_agent_status_sender(new_terminal_id.clone(), sender);
                             }
+                            // C1 fix (plans/260722-1327 review): register this
+                            // split-created pane in the mirror BEFORE it can
+                            // ever be seen again through a resync snapshot,
+                            // so `reconcile_by_diff` never re-classifies it
+                            // as newly created and double-materializes it.
+                            // The returned namespaced id also lets `App`
+                            // register the same pane in its own
+                            // `remote_resync_pane_index` reverse index, so a
+                            // later resync-driven removal of this pane can
+                            // find and tear it down too (M1).
+                            let remote_pane_id =
+                                mirror.register_split_pane(&new_pane_id, &new_terminal_id);
                             let terminal = crate::terminal::TerminalState::new(
                                 terminal_id.clone(),
                                 std::path::PathBuf::from("/"),
@@ -598,6 +677,7 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                             let ready = crate::events::FederationSplitPaneReady {
                                 request_id,
                                 origin: ctx.origin.clone(),
+                                remote_pane_id,
                                 pane_id,
                                 terminal_id,
                                 terminal,
@@ -648,6 +728,106 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
             },
         }
     }
+}
+
+/// Builds one resync-revealed remote pane's real local `TerminalRuntime`
+/// (mirrors the `SplitPaneResponse::Created` arm above and `App::
+/// build_remote_pane`'s mount-time counterpart) and hands it back to `App`
+/// via `AppEvent::FederationResyncPaneCreated` for layout insertion — this
+/// drive task owns `router`/`out_tx`, unavailable to `&mut App`. A spawn
+/// failure is logged and dropped rather than surfaced as a toast (unlike a
+/// user-initiated split, there is no pending local request/toast target to
+/// fail here — the remote pane simply stays mirror-only metadata until the
+/// next resync retries).
+async fn materialize_resync_pane(
+    mount: &super::id::Mount,
+    generation: u64,
+    router: &mut TerminalChannelRouter,
+    out_tx: &mpsc::UnboundedSender<FederationMessage>,
+    outbound_clipboard_tx: &mpsc::UnboundedSender<ClipboardMessage>,
+    ctx: &SplitMaterializationContext,
+    pane_info: crate::api::schema::panes::PaneInfo,
+) {
+    let raw_terminal_id = super::id::strip_mount_namespace(mount, &pane_info.terminal_id);
+    let output_rx = router.open_terminal(raw_terminal_id.clone(), generation, out_tx);
+    let pane_id = crate::layout::PaneId::alloc();
+    let terminal_id = crate::terminal::TerminalId::alloc();
+    match crate::terminal::TerminalRuntime::spawn_remote(
+        pane_id,
+        ctx.rows,
+        ctx.cols,
+        ctx.scrollback_limit_bytes,
+        ctx.host_terminal_theme,
+        None,
+        raw_terminal_id.clone(),
+        generation,
+        out_tx.clone(),
+        output_rx,
+        outbound_clipboard_tx.clone(),
+        ctx.events.clone(),
+        ctx.render_notify.clone(),
+        ctx.render_dirty.clone(),
+    ) {
+        Ok(runtime) => {
+            if let Some(sender) = runtime.relayed_agent_status_sender() {
+                router.register_agent_status_sender(raw_terminal_id, sender);
+            }
+            let mut terminal = crate::terminal::TerminalState::new(
+                terminal_id.clone(),
+                pane_info
+                    .cwd
+                    .clone()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::path::PathBuf::from("/")),
+            );
+            terminal.manual_label = pane_info.label.clone();
+            let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+            let ready = crate::events::FederationResyncPaneCreated {
+                origin: ctx.origin.clone(),
+                workspace_id: pane_info.workspace_id,
+                pane_id: pane_info.pane_id,
+                local_pane_id: pane_id,
+                terminal_id,
+                terminal,
+                runtime,
+                pane_state,
+            };
+            let _ = ctx
+                .events
+                .send(crate::events::AppEvent::FederationResyncPaneCreated(
+                    Box::new(ready),
+                ))
+                .await;
+        }
+        Err(err) => {
+            tracing::warn!(
+                pane_id = %pane_info.pane_id,
+                %err,
+                "failed to spawn a local runtime for a resync-revealed remote pane"
+            );
+        }
+    }
+}
+
+/// Whether `kind` is a structural mutation a bare `EventFrame` cannot itself
+/// apply to the mirror (see `reducer.rs`'s module docs) and therefore must
+/// trigger a `SnapshotRequest` resync (post-mount pane mirroring fix,
+/// plans/260722-1327). Deliberately narrow: `PaneUpdated`/`*Focused`/etc.
+/// change a field on an entity the mirror already has, which the relayed
+/// `AgentStatus` channel (or a future field-carrying event) can update
+/// in place — only entity create/close/move needs a full resync to learn
+/// about an id the mirror has never seen (or must forget).
+fn is_structural_event_kind(kind: crate::api::schema::events::EventKind) -> bool {
+    use crate::api::schema::events::EventKind;
+    matches!(
+        kind,
+        EventKind::PaneCreated
+            | EventKind::PaneClosed
+            | EventKind::PaneMoved
+            | EventKind::TabCreated
+            | EventKind::TabClosed
+            | EventKind::TabMoved
+    )
 }
 
 /// Spawns the client-side counterpart of `serve::run`'s `writer_task`:
@@ -1233,6 +1413,155 @@ mod tests {
         fake_server.await.unwrap();
     }
 
+    // Post-mount pane mirroring fix (plans/260722-1327): a burst of
+    // structural `EventFrame`s (pane created) sent while a resync is
+    // already in flight must coalesce into exactly ONE outbound
+    // `SnapshotRequest`, and the eventual `SnapshotResponse` must diff
+    // into the mirror via `reconcile_by_diff` so a pane the mount never
+    // saw at mount time (or in an earlier `Frame`'s bare payload) becomes
+    // visible.
+    #[tokio::test]
+    async fn a_burst_of_structural_frames_coalesces_into_one_snapshot_request_and_the_response_updates_the_mirror(
+    ) {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+        let fake_server = tokio::spawn(async move {
+            let Some(FederationMessage::Handshake(_)) =
+                read_frame(&mut server_reader).await.unwrap()
+            else {
+                panic!("expected a Handshake");
+            };
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                    agreed_capabilities: BTreeSet::new(),
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::MountSnapshot(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: crate::remote::federation::serve::empty_snapshot(),
+                    cursor: crate::remote::federation::protocol::EventCursor(0),
+                }),
+            )
+            .await
+            .unwrap();
+
+            // A burst of three structural frames (a new pane spawned on the
+            // serving side after mount, e.g. `agent.start`) — a bare
+            // `EventFrame` carries no payload, so the client cannot itself
+            // learn the new pane's identity from these alone.
+            for seq in 1..=3u64 {
+                write_frame(
+                    &mut server_writer,
+                    &FederationMessage::Event(
+                        crate::remote::federation::protocol::EventChannelMessage::Frame(
+                            crate::remote::federation::protocol::EventFrame {
+                                source_seq: seq,
+                                kind: crate::api::schema::events::EventKind::PaneCreated,
+                            },
+                        ),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+
+            let mut snapshot = crate::remote::federation::serve::empty_snapshot();
+            snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+                pane_id: "pane_new".to_string(),
+                terminal_id: "term_new".to_string(),
+                workspace_id: "w1".to_string(),
+                tab_id: "w1-tab".to_string(),
+                focused: false,
+                cwd: None,
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Idle,
+                state_labels: Default::default(),
+                tokens: Default::default(),
+                agent_session: None,
+                scroll: None,
+                revision: 0,
+            });
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::SnapshotResponse(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot,
+                    cursor: crate::remote::federation::protocol::EventCursor(3),
+                }),
+            )
+            .await
+            .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let client = FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new());
+        let mounted = client
+            .connect_and_mount(client_reader, client_writer)
+            .await
+            .unwrap();
+        let generation = mounted.mirror.mount().mount_generation;
+        let MountedConnection {
+            mut mirror,
+            mut reader,
+            ..
+        } = mounted;
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let (clipboard_tx, _clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+        let (outbound_clip_tx, _outbound_clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let hub = EventHub::default();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            drive_mount_channel(
+                &mut reader,
+                &mut mirror,
+                generation,
+                &hub,
+                &mut router,
+                &clipboard_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                None,
+            ),
+        )
+        .await;
+
+        let mut snapshot_requests = 0;
+        while let Ok(msg) = out_rx.try_recv() {
+            if matches!(msg, FederationMessage::SnapshotRequest(_)) {
+                snapshot_requests += 1;
+            }
+        }
+        assert_eq!(
+            snapshot_requests, 1,
+            "a burst of structural frames must coalesce into exactly one SnapshotRequest"
+        );
+
+        assert_eq!(mirror.panes().len(), 1, "the resync must add the new pane");
+        assert!(mirror
+            .panes()
+            .values()
+            .any(|pane| pane.terminal_id.ends_with(":term_new")));
+
+        fake_server.await.unwrap();
+    }
+
     // Root-cause fix regression (H3, plans/260721-2353-federation-agents-
     // sidebar-remote-detection): an inbound `AgentStatus` frame must both
     // update the mirror AND reach the pane's registered relayed-status sink
@@ -1463,6 +1792,500 @@ mod tests {
                 assert_eq!(ready.request_id, 42);
             }
             other => panic!("expected FederationSplitPaneReady, got {other:?}"),
+        }
+
+        fake_server.await.unwrap();
+    }
+
+    // C1 regression (code review, plans/260722-1327/post-mount-pane-mirroring):
+    // a locally-initiated split (`SplitPaneResponse::Created`) must register
+    // its new pane in the mirror BEFORE a subsequent resync (triggered by the
+    // server's own `PaneCreated` hub event for that same split) can ever see
+    // it — otherwise `reconcile_by_diff` classifies it as newly created and
+    // `App` would materialize a SECOND `TerminalRuntime`/pane for the same
+    // remote terminal. Proves: pane count stays 1 in the mirror after the
+    // resync, and no second `AppEvent` is emitted for the same pane.
+    #[tokio::test]
+    async fn a_split_created_pane_is_not_double_materialized_by_a_later_resync() {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+        let fake_server = tokio::spawn(async move {
+            let Some(FederationMessage::Handshake(_)) =
+                read_frame(&mut server_reader).await.unwrap()
+            else {
+                panic!("expected a Handshake");
+            };
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                    agreed_capabilities: BTreeSet::new(),
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::MountSnapshot(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: crate::remote::federation::serve::empty_snapshot(),
+                    cursor: crate::remote::federation::protocol::EventCursor(0),
+                }),
+            )
+            .await
+            .unwrap();
+
+            // The split completes first...
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::SplitPaneResponse(
+                    crate::remote::federation::protocol::SplitPaneResponse::Created {
+                        request_id: 42,
+                        new_pane_id: "pane_2".to_string(),
+                        new_terminal_id: "term_2".to_string(),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+
+            // ...then the server's own `PaneCreated` hub event for that same
+            // split arrives on the event channel (real-world ordering is not
+            // guaranteed between the two channel classes), triggering a
+            // resync.
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::Event(
+                    crate::remote::federation::protocol::EventChannelMessage::Frame(
+                        crate::remote::federation::protocol::EventFrame {
+                            source_seq: 1,
+                            kind: crate::api::schema::events::EventKind::PaneCreated,
+                        },
+                    ),
+                ),
+            )
+            .await
+            .unwrap();
+
+            // The resync snapshot reports the SAME pane the split already
+            // materialized.
+            let mut snapshot = crate::remote::federation::serve::empty_snapshot();
+            snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+                pane_id: "pane_2".to_string(),
+                terminal_id: "term_2".to_string(),
+                workspace_id: "w1".to_string(),
+                tab_id: "w1-tab".to_string(),
+                focused: false,
+                cwd: None,
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Idle,
+                state_labels: Default::default(),
+                tokens: Default::default(),
+                agent_session: None,
+                scroll: None,
+                revision: 0,
+            });
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::SnapshotResponse(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot,
+                    cursor: crate::remote::federation::protocol::EventCursor(1),
+                }),
+            )
+            .await
+            .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let this_host_key = crate::remote::federation::id::HostKey::new("test-host", "s1");
+        let client = FederationClient::new(this_host_key.clone(), BTreeSet::new(), BTreeSet::new());
+        let mounted = client
+            .connect_and_mount(client_reader, client_writer)
+            .await
+            .unwrap();
+        let generation = mounted.mirror.mount().mount_generation;
+        let MountedConnection {
+            mut mirror,
+            mut reader,
+            ..
+        } = mounted;
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let (clipboard_tx, _clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+        let (outbound_clip_tx, _outbound_clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let (events_tx, mut events_rx) = mpsc::channel::<crate::events::AppEvent>(8);
+        let ctx = SplitMaterializationContext {
+            rows: 24,
+            cols: 80,
+            scrollback_limit_bytes: 1 << 16,
+            host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            origin: this_host_key.clone(),
+            events: events_tx,
+            render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let hub = EventHub::default();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            drive_mount_channel(
+                &mut reader,
+                &mut mirror,
+                generation,
+                &hub,
+                &mut router,
+                &clipboard_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                Some(&ctx),
+            ),
+        )
+        .await;
+
+        // Exactly one materialization event for the split-created pane; the
+        // resync must not produce a second one.
+        let first = tokio::time::timeout(std::time::Duration::from_millis(200), events_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match first {
+            crate::events::AppEvent::FederationSplitPaneReady(ready) => {
+                assert_eq!(ready.request_id, 42);
+                assert_eq!(
+                    ready.remote_pane_id,
+                    format!("r:{}:pane_2", this_host_key.as_str())
+                );
+            }
+            other => panic!("expected FederationSplitPaneReady, got {other:?}"),
+        }
+        let second =
+            tokio::time::timeout(std::time::Duration::from_millis(150), events_rx.recv()).await;
+        assert!(
+            second.is_err() || second.unwrap().is_none(),
+            "the resync must not double-materialize the split-created pane with a second event"
+        );
+
+        // The mirror must contain exactly one pane entry for the split
+        // (registered at split time, not re-added as "created" by the diff).
+        assert_eq!(
+            mirror.panes().len(),
+            1,
+            "the resync must not add a duplicate mirror entry for the split-created pane"
+        );
+
+        fake_server.await.unwrap();
+    }
+
+    // Post-mount pane mirroring fix, part 2 (plans/260722-1327): a resync
+    // diff (`SnapshotResponse` -> `reconcile_by_diff`) revealing a pane the
+    // mirror never saw before must materialize a real local `TerminalRuntime`
+    // for it (same shape `SplitPaneResponse::Created` above already proves)
+    // and hand it back on `AppEvent::FederationResyncPaneCreated`, carrying
+    // the workspace id a live `App` needs to splice it into the already-
+    // mounted layout.
+    #[tokio::test]
+    async fn drive_mount_channel_materializes_a_runtime_on_resync_created_pane() {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+        let fake_server = tokio::spawn(async move {
+            let Some(FederationMessage::Handshake(_)) =
+                read_frame(&mut server_reader).await.unwrap()
+            else {
+                panic!("expected a Handshake");
+            };
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                    agreed_capabilities: BTreeSet::new(),
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::MountSnapshot(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: crate::remote::federation::serve::empty_snapshot(),
+                    cursor: crate::remote::federation::protocol::EventCursor(0),
+                }),
+            )
+            .await
+            .unwrap();
+
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::Event(
+                    crate::remote::federation::protocol::EventChannelMessage::Frame(
+                        crate::remote::federation::protocol::EventFrame {
+                            source_seq: 1,
+                            kind: crate::api::schema::events::EventKind::PaneCreated,
+                        },
+                    ),
+                ),
+            )
+            .await
+            .unwrap();
+
+            let mut snapshot = crate::remote::federation::serve::empty_snapshot();
+            snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+                pane_id: "w1:p2".to_string(),
+                terminal_id: "term_new".to_string(),
+                workspace_id: "w1".to_string(),
+                tab_id: "w1-tab".to_string(),
+                focused: false,
+                cwd: None,
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Idle,
+                state_labels: Default::default(),
+                tokens: Default::default(),
+                agent_session: None,
+                scroll: None,
+                revision: 0,
+            });
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::SnapshotResponse(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot,
+                    cursor: crate::remote::federation::protocol::EventCursor(1),
+                }),
+            )
+            .await
+            .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let this_host_key = crate::remote::federation::id::HostKey::new("test-host", "s1");
+        let client = FederationClient::new(this_host_key.clone(), BTreeSet::new(), BTreeSet::new());
+        let mounted = client
+            .connect_and_mount(client_reader, client_writer)
+            .await
+            .unwrap();
+        let generation = mounted.mirror.mount().mount_generation;
+        let MountedConnection {
+            mut mirror,
+            mut reader,
+            ..
+        } = mounted;
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let (clipboard_tx, _clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+        let (outbound_clip_tx, _outbound_clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let (events_tx, mut events_rx) = mpsc::channel::<crate::events::AppEvent>(4);
+        let ctx = SplitMaterializationContext {
+            rows: 24,
+            cols: 80,
+            scrollback_limit_bytes: 1 << 16,
+            host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            origin: this_host_key.clone(),
+            events: events_tx,
+            render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let hub = EventHub::default();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            drive_mount_channel(
+                &mut reader,
+                &mut mirror,
+                generation,
+                &hub,
+                &mut router,
+                &clipboard_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                Some(&ctx),
+            ),
+        )
+        .await;
+
+        let ready = tokio::time::timeout(std::time::Duration::from_millis(200), events_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ready {
+            crate::events::AppEvent::FederationResyncPaneCreated(ready) => {
+                assert_eq!(ready.origin, this_host_key);
+                assert_eq!(
+                    ready.workspace_id,
+                    format!("r:{}:w1", this_host_key.as_str())
+                );
+                assert_eq!(ready.pane_id, format!("r:{}:w1:p2", this_host_key.as_str()));
+            }
+            other => panic!("expected FederationResyncPaneCreated, got {other:?}"),
+        }
+
+        fake_server.await.unwrap();
+    }
+
+    // Post-mount pane mirroring fix, part 2 (plans/260722-1327): a resync
+    // diff revealing a pane the mirror previously mirrored but the remote no
+    // longer reports must surface `AppEvent::FederationResyncPaneRemoved`
+    // (namespaced pane id + this mount's origin) so `App` can tear down the
+    // matching local runtime/layout entry.
+    #[tokio::test]
+    async fn drive_mount_channel_emits_resync_pane_removed_for_a_pane_dropped_from_the_snapshot() {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+        let fake_server = tokio::spawn(async move {
+            let Some(FederationMessage::Handshake(_)) =
+                read_frame(&mut server_reader).await.unwrap()
+            else {
+                panic!("expected a Handshake");
+            };
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                    agreed_capabilities: BTreeSet::new(),
+                }),
+            )
+            .await
+            .unwrap();
+
+            let mut mount_snapshot = crate::remote::federation::serve::empty_snapshot();
+            mount_snapshot
+                .panes
+                .push(crate::api::schema::panes::PaneInfo {
+                    pane_id: "w1:p2".to_string(),
+                    terminal_id: "term_old".to_string(),
+                    workspace_id: "w1".to_string(),
+                    tab_id: "w1-tab".to_string(),
+                    focused: false,
+                    cwd: None,
+                    foreground_cwd: None,
+                    label: None,
+                    agent: None,
+                    title: None,
+                    terminal_title: None,
+                    terminal_title_stripped: None,
+                    display_agent: None,
+                    agent_status: AgentStatus::Idle,
+                    state_labels: Default::default(),
+                    tokens: Default::default(),
+                    agent_session: None,
+                    scroll: None,
+                    revision: 0,
+                });
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::MountSnapshot(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: mount_snapshot,
+                    cursor: crate::remote::federation::protocol::EventCursor(0),
+                }),
+            )
+            .await
+            .unwrap();
+
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::Event(
+                    crate::remote::federation::protocol::EventChannelMessage::Frame(
+                        crate::remote::federation::protocol::EventFrame {
+                            source_seq: 1,
+                            kind: crate::api::schema::events::EventKind::PaneClosed,
+                        },
+                    ),
+                ),
+            )
+            .await
+            .unwrap();
+
+            // The pane mounted above is gone from this resync snapshot.
+            let empty = crate::remote::federation::serve::empty_snapshot();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::SnapshotResponse(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: empty,
+                    cursor: crate::remote::federation::protocol::EventCursor(1),
+                }),
+            )
+            .await
+            .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let this_host_key = crate::remote::federation::id::HostKey::new("test-host", "s1");
+        let client = FederationClient::new(this_host_key.clone(), BTreeSet::new(), BTreeSet::new());
+        let mounted = client
+            .connect_and_mount(client_reader, client_writer)
+            .await
+            .unwrap();
+        let generation = mounted.mirror.mount().mount_generation;
+        let MountedConnection {
+            mut mirror,
+            mut reader,
+            ..
+        } = mounted;
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let (clipboard_tx, _clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+        let (outbound_clip_tx, _outbound_clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let (events_tx, mut events_rx) = mpsc::channel::<crate::events::AppEvent>(4);
+        let ctx = SplitMaterializationContext {
+            rows: 24,
+            cols: 80,
+            scrollback_limit_bytes: 1 << 16,
+            host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            origin: this_host_key.clone(),
+            events: events_tx,
+            render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let hub = EventHub::default();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            drive_mount_channel(
+                &mut reader,
+                &mut mirror,
+                generation,
+                &hub,
+                &mut router,
+                &clipboard_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                Some(&ctx),
+            ),
+        )
+        .await;
+
+        let ready = tokio::time::timeout(std::time::Duration::from_millis(200), events_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ready {
+            crate::events::AppEvent::FederationResyncPaneRemoved { origin, pane_id } => {
+                assert_eq!(origin, this_host_key);
+                assert_eq!(pane_id, format!("r:{}:w1:p2", this_host_key.as_str()));
+            }
+            other => panic!("expected FederationResyncPaneRemoved, got {other:?}"),
         }
 
         fake_server.await.unwrap();

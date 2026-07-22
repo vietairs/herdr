@@ -2163,3 +2163,252 @@ take effect — the serve-side dispatch itself is unchanged by this fix.
 - Reversibility: fully reversible — isolated to the added `else if`
   branch in `pane.rs`'s relayed-status match arm, the two comment
   updates, and the two new tests; no wire/protocol shape change.
+
+- 2026-07-22 fix (post-mount pane mirroring, plans/260722-1327-post-mount-
+  pane-mirroring): panes/tabs created or closed on the SERVING side after
+  a client mounted it were never mirrored to that client.
+- Root cause (two gaps, both closed):
+  1. `agent.start` (`src/app/agents.rs::start_agent`) never pushed
+     `PaneCreated`/`WorkspaceCreated` onto the shared `EventHub` (every
+     other creation path — local split, worktree open — already does).
+     A pane spawned this way was invisible to anything that only
+     observes the hub, including a mounted federation client.
+  2. Federation `Event` channel frames carry only `{source_seq, kind}` —
+     no entity id/payload (`reducer.rs`'s longstanding module-doc
+     limitation) — and nothing downstream turned a structural frame into
+     a mirror mutation outside the initial mount/`Gap`/`Reset` remount
+     path.
+- Fix (shape 1 from the root-cause report, resync-on-structural-event):
+  - `src/app/agents.rs`: `start_agent` now emits `WorkspaceCreated`
+    (new-workspace path, via the existing `emit_workspace_open_events`)
+    or `PaneCreated` + `LayoutUpdated` (split-into-existing-tab path,
+    matching `app/api/panes.rs`'s own split handler) after a successful
+    spawn.
+  - `src/remote/federation/protocol/mod.rs`: additive
+    `SnapshotRequest`/`SnapshotResponse` `FederationMessage` variants —
+    NOT a `FEDERATION_PROTOCOL_VERSION` bump, since v3 has never shipped
+    in a release (no tagged version has a `federation_accept.rs`/
+    `client.rs` production call site at all), so there is no deployed
+    peer that could observe the addition as a skew.
+  - `src/server/federation_actor.rs`: new `FederationCommand::Snapshot`
+    (read-only, no lease touch) + a `current_snapshot` helper extracted
+    out of `Mount`'s existing snapshot-production code so both commands
+    build the same way.
+  - `src/server/federation_accept.rs`: the reader loop answers an
+    inbound `SnapshotRequest` with a `SnapshotResponse`, mirroring the
+    existing `SplitPaneRequest`/`Response` handling shape exactly
+    (`handle_snapshot_request`). Threaded `server_instance_id` into
+    `run_connection`/`reader_loop` (previously only known to the
+    handshake step) so the response can be tagged correctly.
+  - `src/remote/federation/client.rs`: `drive_mount_channel` now tracks
+    one in-flight resync request; on an `Applied` structural `EventKind`
+    (`PaneCreated`/`PaneClosed`/`PaneMoved`/`TabCreated`/`TabClosed`/
+    `TabMoved`) it sends a `SnapshotRequest` if none is already pending
+    (coalescing a burst into exactly one), and on the matching
+    `SnapshotResponse` calls the existing (previously production-dead)
+    `RemoteMirror::reconcile_by_diff` — the same resync primitive the
+    `Gap`/`Reset` path already had but nothing ever drove in production.
+- Deviation / known residual gap (logged per the review-audit rule
+  rather than silently cut): `reconcile_by_diff` updates the
+  `RemoteMirror`'s own metadata (`workspaces()`/`tabs()`/`panes()`) and
+  pushes `PaneCreated`/`PaneClosed`/`TabCreated`/`TabClosed` onto the
+  local `EventHub` correctly, but this fix does **not** go the next
+  step of splicing a newly-resynced remote pane into the already-live
+  mounting `App`'s real `Tab`/`PaneRuntime` layout (spawning a
+  `TerminalRuntime::spawn_remote`, registering it with
+  `TerminalChannelRouter`, calling
+  `Workspace::insert_moved_pane_into_tab`) or tearing down a closed
+  one's local runtime. That materialization step needs `&mut App`
+  inside the mount's drive task, which — like the existing
+  `SplitPaneResponse::Created` path — would require a new
+  `AppEvent`/handler round-trip plus a stable remote-pane-id ->
+  local-`PaneId` reverse index this mirror-level fix does not yet
+  carry. Full scope was judged too large for one mid-tier implementer
+  pass; a full unmount/remount already shows the correct state (via
+  `materialize_federation_mount`), so this is a real but bounded
+  regression (a live-mounted session's sidebar/state metadata is
+  correct post-resync; the sidebar's live TUI pane layout for that
+  already-open mount is not auto-spliced until a remount). Follow-up
+  scope: an `AppEvent::FederationResyncApplied` carrying the built
+  runtime(s) for added panes + the namespaced ids to remove, handled
+  next to `handle_federation_split_pane_ready` in
+  `src/app/creation.rs`, is the natural next step.
+- Verified unresolved question from the root-cause report: yes,
+  `agent.start`-spawned panes did NOT push `PaneCreated` into the
+  server's local `EventHub` prior to this fix (see gap #1 above) — this
+  was the earlier, necessary-but-not-sufficient half of the bug; gap #2
+  (no resync mechanism at all) was the other half.
+- Evidence: `ZIG=/Users/hvnguyen/.local/zig-0.15.2/zig cargo test --bin
+  herdr -- --test-threads=4` → 2723 passed, 0 failed (net +6 over the
+  2717 baseline this session started from: two `agent.start` event
+  tests, one wire codec roundtrip test, one server actor `Snapshot`
+  test, one `federation_accept` reader-loop `SnapshotRequest` test, one
+  client-side burst-coalescing + resync-updates-the-mirror test).
+  `cargo fmt --check` clean. `cargo clippy` was not run — it fails
+  locally on the pre-existing vendored libghostty ReleaseFast/Zig build
+  issue unrelated to this change (see `herdr local build: Zig 0.15.2
+  workaround` memory note); this is an environment limitation, not a
+  new regression from this fix.
+- Reversibility: fully reversible — additive wire variants (no version
+  bump), an additive server command + one new reader-loop match arm, an
+  additive client-side resync request/apply path gated on structural
+  `EventKind`s only, and the two new `agent.start` event pushes. No
+  existing message shape, JSON API contract, or persisted state format
+  changed.
+
+- 2026-07-22 fix, part 2 (post-mount pane mirroring, plans/260722-1327):
+  closes the residual gap the part-1 fix above logged — a resync diff
+  updated `RemoteMirror`'s own metadata and the sidebar-facing local
+  `EventHub`, but never spliced a newly-revealed remote pane into (or
+  tore a removed one out of) the already-live mounted `App`'s real
+  `Tab`/`PaneRuntime` layout.
+- What:
+  - `src/remote/federation/reducer.rs`: `RemoteMirror::reconcile_by_diff`
+    now returns a `ReconcileDiff { created_panes, removed_pane_ids }`
+    (namespaced/public ids and `PaneInfo`s) alongside its existing hub
+    pushes — `reconcile_panes` already computed this internally, it just
+    never surfaced it to a caller.
+  - `src/remote/federation/client.rs`: `drive_mount_channel`'s
+    `SnapshotResponse` handling reads that diff. For each created pane
+    (when `split_materialization` is `Some`, same convention as
+    `SplitPaneResponse::Created`) it spawns a real local
+    `TerminalRuntime` (new `materialize_resync_pane` helper, mirrors the
+    `SplitPaneResponse::Created` arm) and sends `AppEvent::
+    FederationResyncPaneCreated`; for each removed id it sends
+    `AppEvent::FederationResyncPaneRemoved`.
+  - `src/events.rs`: new `AppEvent::FederationResyncPaneCreated(Box<..>)`
+    / `FederationResyncPaneRemoved { origin, pane_id }` variants
+    (`#[cfg(unix)]`, matching every other federation event).
+  - `src/app/creation.rs`: `App::handle_federation_resync_pane_created`
+    finds the target workspace by its namespaced id, checks the mount's
+    `HostKey` against the workspace's `federation:<host_key>`
+    `worktree_space` (same origin-binding discipline
+    `handle_federation_split_pane_ready` uses), and splices the pane into
+    the workspace's **active tab** via `insert_moved_pane_into_tab` (same
+    primitive mount-time materialization and split-materialization use,
+    so the pane gets a `public_pane_numbers` entry). `App::
+    handle_federation_resync_pane_removed` looks the local `PaneId` up in
+    a new reverse index, checks the same origin binding, then tears it
+    down via `Workspace::close_pane` + the same terminal-runtime-shutdown
+    sequence `panes.rs::close_pane` uses — deliberately skipping that
+    handler's interactive close-confirmation gate (e.g. "closing this
+    pane would close a worktree group"): the remote already made this
+    decision, there is nothing left to confirm locally.
+  - `src/app/mod.rs`: new `App::remote_resync_pane_index: HashMap<String,
+    PaneId>` field (remote namespaced pane id -> local `PaneId`) — no
+    existing map served this; `RemoteMirror::panes()`'s own namespaced
+    `pane_id` values are not, in general, the local
+    `<workspace_id>:p<N>` public form (local pane numbers are assigned
+    independently by `insert_moved_pane_into_tab`/
+    `create_tab_from_existing_pane` in materialization order, not
+    parsed from the remote's own numbering), so a dedicated reverse
+    index is the correct primitive rather than trying to derive the
+    local `PaneId` from the string itself.
+  - `src/app/actions.rs` (not in this task's owned-files list, touched
+    for compilation only): two mechanical no-op arms added to
+    `AppState::handle_app_event`'s exhaustive `match AppEvent` — matches
+    the pre-existing pattern already used for every other Federation*
+    event there (`App::handle_internal_event` intercepts and returns
+    before this fallback ever runs); required for the crate to compile
+    once the two new `AppEvent` variants exist.
+- Deviation (logged, conservative-minimal per the task's own explicit
+  allowance): a resync diff only reports created/removed *panes*, not a
+  tab-level diff (the wire's `SnapshotResponse` carries a full
+  snapshot, but `ReconcileDiff` deliberately mirrors only what
+  `reconcile_panes` already tracked rather than also diffing
+  `TabCreated`/`TabClosed` — that would need matching each new pane to
+  the *specific* new/existing remote tab it belongs to, which the
+  mirror's tab ids don't map onto a stable local tab index the way
+  workspace ids map onto `Workspace::id`). `handle_federation_resync_
+  pane_created` always targets the mounted workspace's current
+  `active_tab` rather than attempting to reconstruct the remote's tab
+  placement. Accepted rather than building a full tab-diff pass, per
+  the task's own guidance to keep new tabs in the active tab and log
+  the compromise.
+- Evidence: `ZIG=/Users/hvnguyen/.local/zig-0.15.2/zig cargo test --bin
+  herdr -- --test-threads=4` → 2728 passed, 0 failed (net +5 over the
+  2723 baseline this session started from: two `client.rs` tests
+  proving a resync diff materializes a runtime / emits a removal event,
+  three `creation.rs` App-level tests proving splice-with-public-pane-
+  number, wrong-origin-drop, and teardown-on-removal). `cargo fmt` run
+  clean.
+- Reversibility: fully reversible — `reconcile_by_diff`'s new return
+  value is additive (existing callers ignore it), the two new
+  `AppEvent` variants and their handlers are additive and gated on a
+  diff that previously silently updated metadata only, and the reverse-
+  index field is new state with no persisted/wire format change.
+
+## Code review remediation (post-mount pane mirroring, 260722)
+
+Remediated all findings from
+`plans/260722-1327-post-mount-pane-mirroring/reports/code-review-260722-post-mount-pane-mirroring-report.md`.
+
+- C1 (CRITICAL — split-created pane double-materialized on the next
+  resync): `SplitPaneResponse::Created`'s arm (`src/remote/federation/
+  client.rs`) never registered the split-created pane into
+  `RemoteMirror::panes`, so the server's own `PaneCreated` hub event for
+  that same split (delivered on a separate channel, ordering vs. the
+  `SplitPaneResponse` not guaranteed) could trigger a resync whose
+  snapshot re-reported the pane; `reconcile_panes`'s `None` arm then
+  classified it as newly created and `materialize_resync_pane` spawned
+  a SECOND `TerminalRuntime`/`PaneId` for the same remote terminal.
+  Fixed by adding `RemoteMirror::register_split_pane(remote_pane_id,
+  remote_terminal_id) -> String` (`src/remote/federation/reducer.rs`):
+  namespaces both ids and inserts a placeholder `PaneInfo` under the
+  namespaced pane id via `entry().or_insert_with` — deliberately does
+  NOT push onto `hub` (the caller already drives its own
+  `AppEvent::FederationSplitPaneReady`/`PaneCreated`, so pushing here
+  would double-emit on the local sidebar-facing bus). Placeholder field
+  values beyond `pane_id`/`terminal_id` don't matter: `reconcile_panes`
+  compares by full equality and, on a mismatch, emits `PaneUpdated`
+  (never a duplicate `PaneCreated`) once a real resync snapshot brings
+  the pane's true metadata in. Called from `SplitPaneResponse::Created`
+  in `client.rs` right after the runtime spawns successfully, before
+  the `AppEvent::FederationSplitPaneReady` send.
+  - Also closes the M1 (MAJOR) compounding gap: the returned namespaced
+    pane id is threaded through a new `FederationSplitPaneReady::
+    remote_pane_id: String` field (`src/events.rs`) into
+    `App::handle_federation_split_pane_ready`
+    (`src/app/creation.rs`), which now inserts it into
+    `remote_resync_pane_index` exactly like a resync-created pane
+    already does — previously a split-created pane was NEVER in that
+    reverse index at all (a pre-existing, separate gap from C1, noted
+    explicitly in the existing `handle_federation_resync_pane_removed`
+    comment), so a later remote-initiated close of that same pane could
+    never be torn down via the resync-removal path. Now it can.
+  - Regression test added:
+    `a_split_created_pane_is_not_double_materialized_by_a_later_resync`
+    (`src/remote/federation/client.rs`) — drives split-then-resync in
+    the exact server-side wire order the finding describes (split
+    response, then the structural event frame, then a `SnapshotResponse`
+    re-reporting the same pane id), and asserts (a) exactly one
+    `AppEvent` reaches the caller (no second `FederationResyncPaneCreated`),
+    (b) `mirror.panes().len() == 1` after the resync, and (c) the split's
+    `FederationSplitPaneReady.remote_pane_id` matches the namespaced form
+    `register_split_pane` produced.
+- N1 (MINOR — stale `#[allow(dead_code)]`): removed the attribute and
+  its "dormant until b0.4" comment from `current_snapshot`
+  (`src/server/federation_actor.rs`) — verified it has two live call
+  sites in the same `dispatch` (`Mount` and `Snapshot`), not dead.
+- N2 (MINOR — no rate limiting on `SnapshotRequest`): no code change.
+  The report itself concludes this is "consistent with the codebase's
+  existing trust model, not a new hole — noting for awareness only"
+  (same posture as the pre-existing `EventsAfter` precedent, handshake
+  already gates who can open a mount); adding throttling here would be
+  scope the review did not actually ask for.
+- Deviation: none — every fix matches the report's own stated fix
+  direction (register at split-materialization time in both the mirror
+  and the reverse index, "whichever layer owns each structure").
+- Evidence: `ZIG=/Users/hvnguyen/.local/zig-0.15.2/zig cargo test --bin
+  herdr -- --test-threads=4` → 2728 passed, 1 failed
+  (`server::autodetect::tests::is_server_listening_returns_false_for_stale_socket`,
+  confirmed pre-existing/flaky — passes in isolation, unrelated to this
+  diff, no federation/mirror/pane code touched). Narrower
+  `cargo test --bin herdr federation` → 140 passed, 0 failed (includes
+  the new regression test). `cargo fmt` run clean; `cargo build --bin
+  herdr` clean (two pre-existing unrelated warnings: `map_out`,
+  `Capability::CLIPBOARD`, neither touched by this change).
+- Reversibility: fully reversible — `register_split_pane` and the new
+  `remote_pane_id` field are additive; removing the stale `allow` on
+  `current_snapshot` has no behavioral effect (the function was already
+  compiling and running from two live call sites).

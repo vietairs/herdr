@@ -2733,6 +2733,10 @@ impl AppState {
             AppEvent::FederationSplitPaneReady(_) => Vec::new(),
             #[cfg(unix)]
             AppEvent::FederationSplitPaneFailed { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationResyncPaneCreated(_) => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationResyncPaneRemoved { .. } => Vec::new(),
         }
     }
 

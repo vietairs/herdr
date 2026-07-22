@@ -230,6 +230,58 @@ impl RemoteMirror {
         self.cursor = cursor.0;
     }
 
+    /// Registers a pane this mount just created via a live
+    /// `SplitPaneRequest`/`SplitPaneResponse::Created` round-trip (not
+    /// through a resync diff), so a later `reconcile_by_diff` snapshot that
+    /// includes it does not re-classify it as newly created and hand it
+    /// back to the caller a second time (C1 fix, plans/260722-1327 review:
+    /// the server's own `PaneCreated` hub event for this same split can
+    /// arrive first and drive a `SnapshotRequest`/`SnapshotResponse` resync
+    /// before this mount ever learns about its own split). The caller
+    /// (`SplitPaneResponse::Created`'s arm in `client.rs`) already drives
+    /// its own `AppEvent::FederationSplitPaneReady`/`PaneCreated` push, so
+    /// this intentionally does NOT also push onto `hub` — that would
+    /// double-emit the created event on the local sidebar-facing bus.
+    /// Placeholder field values beyond `pane_id`/`terminal_id` don't matter:
+    /// `reconcile_panes` compares by full equality and, on a mismatch,
+    /// emits a `PaneUpdated` (never a duplicate `PaneCreated`) the next
+    /// time a resync snapshot brings the pane's true metadata in.
+    /// Returns the namespaced pane id it registered, so the caller can also
+    /// key `App::remote_resync_pane_index` with the exact same public id
+    /// `handle_federation_resync_pane_removed` will later look up.
+    pub(crate) fn register_split_pane(
+        &mut self,
+        remote_pane_id: &str,
+        remote_terminal_id: &str,
+    ) -> String {
+        let pane_id = map_in(remote_pane_id.to_string(), &self.mount).to_public_id();
+        let terminal_id = map_in(remote_terminal_id.to_string(), &self.mount).to_public_id();
+        self.panes
+            .entry(pane_id.clone())
+            .or_insert_with(|| PaneInfo {
+                pane_id: pane_id.clone(),
+                terminal_id,
+                workspace_id: String::new(),
+                tab_id: String::new(),
+                focused: false,
+                cwd: None,
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Unknown,
+                state_labels: HashMap::new(),
+                tokens: HashMap::new(),
+                agent_session: None,
+                scroll: None,
+                revision: 0,
+            });
+        pane_id
+    }
+
     /// Applies one event-channel message purely for cursor/ordering
     /// purposes (see module docs). `generation` is the mount generation the
     /// delivering task observed when it read the message off the wire —
@@ -275,18 +327,39 @@ impl RemoteMirror {
     /// append/replace (S6.2). Every change is pushed onto `hub` as an
     /// ordinary local event, so local consumers see the mirror exactly like
     /// any local mutation — this is the reducer's only local-push path (see
-    /// module docs).
+    /// module docs). Returns the created/removed panes (post-mount pane
+    /// mirroring, plans/260722-1327, part 2) so a caller with `&mut App`
+    /// (`drive_mount_channel`'s `SnapshotResponse` handling) can splice a
+    /// newly-resynced remote pane into (or tear one out of) an
+    /// already-live mounted layout — the mirror-only hub pushes above are
+    /// not enough for that by themselves (they update `RemoteMirror`'s own
+    /// metadata and the sidebar-facing local `EventHub`, not the real
+    /// `Tab`/`PaneRuntime` layout already materialized at mount time).
     pub(crate) fn reconcile_by_diff(
         &mut self,
         snapshot: &SessionSnapshot,
         cursor: EventCursor,
         hub: &EventHub,
-    ) {
+    ) -> ReconcileDiff {
         reconcile_workspaces(&self.mount, &mut self.workspaces, &snapshot.workspaces, hub);
         reconcile_tabs(&self.mount, &mut self.tabs, &snapshot.tabs, hub);
-        reconcile_panes(&self.mount, &mut self.panes, &snapshot.panes, hub);
+        let (created_panes, removed_pane_ids) =
+            reconcile_panes(&self.mount, &mut self.panes, &snapshot.panes, hub);
         self.cursor = cursor.0;
+        ReconcileDiff {
+            created_panes,
+            removed_pane_ids,
+        }
     }
+}
+
+/// Panes created or removed by one [`RemoteMirror::reconcile_by_diff`] call.
+/// Every id is already namespaced (the same public form
+/// `RemoteMirror::panes()` exposes) — a caller never needs to re-derive a
+/// `FedRef` from this to place/tear down a pane.
+pub(crate) struct ReconcileDiff {
+    pub(crate) created_panes: Vec<PaneInfo>,
+    pub(crate) removed_pane_ids: Vec<String>,
 }
 
 /// Namespaces `workspace`'s ids and — the single P7 ingest choke point for
@@ -461,8 +534,9 @@ fn reconcile_panes(
     mirror: &mut HashMap<String, PaneInfo>,
     incoming: &[PaneInfo],
     hub: &EventHub,
-) {
+) -> (Vec<PaneInfo>, Vec<String>) {
     let mut seen: HashSet<String> = HashSet::new();
+    let mut created: Vec<PaneInfo> = Vec::new();
     for pane in incoming {
         let namespaced = namespace_pane(mount, pane);
         let id = namespaced.pane_id.clone();
@@ -478,6 +552,7 @@ fn reconcile_panes(
             }
             None => {
                 mirror.insert(id, namespaced.clone());
+                created.push(namespaced.clone());
                 hub.push(EventEnvelope {
                     event: EventKind::PaneCreated,
                     data: EventData::PaneCreated { pane: namespaced },
@@ -490,8 +565,10 @@ fn reconcile_panes(
         .filter(|pane| !seen.contains(&pane.pane_id))
         .cloned()
         .collect();
+    let mut removed_ids = Vec::with_capacity(retired.len());
     for pane in retired {
         mirror.remove(&pane.pane_id);
+        removed_ids.push(pane.pane_id.clone());
         hub.push(EventEnvelope {
             event: EventKind::PaneClosed,
             data: EventData::PaneClosed {
@@ -500,6 +577,7 @@ fn reconcile_panes(
             },
         });
     }
+    (created, removed_ids)
 }
 
 #[cfg(test)]

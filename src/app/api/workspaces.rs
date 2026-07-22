@@ -1552,6 +1552,7 @@ mod tests {
         app.handle_federation_split_pane_ready(crate::events::FederationSplitPaneReady {
             request_id,
             origin: crate::remote::federation::id::HostKey::new("remote-host", "s1"),
+            remote_pane_id: "remote-pane".to_string(),
             pane_id,
             terminal_id,
             terminal,

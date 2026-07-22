@@ -205,6 +205,64 @@ pub enum AppEvent {
         reason: String,
         origin: crate::remote::federation::id::HostKey,
     },
+    /// A live mount's drive task resynced (`SnapshotResponse` ->
+    /// `RemoteMirror::reconcile_by_diff`, post-mount pane mirroring part 2,
+    /// plans/260722-1327) and the diff revealed a pane the mirror had never
+    /// seen before. Carries a fully-built local `TerminalRuntime` for it,
+    /// same shape as [`FederationSplitPaneReady`] — the drive task owns the
+    /// `TerminalChannelRouter`/mount out-tx a `TerminalRuntime::spawn_remote`
+    /// call needs, `App::handle_federation_resync_pane_created`
+    /// (`app/creation.rs`) splices it into the mounted workspace's layout.
+    #[cfg(unix)]
+    FederationResyncPaneCreated(Box<FederationResyncPaneCreated>),
+    /// A live mount's resync diff revealed a pane the mirror had previously
+    /// mirrored, but the remote no longer reports. `pane_id` is the
+    /// namespaced (public) id `RemoteMirror::panes()` used for it — the
+    /// handler maps it back to the local `PaneId` it materialized via its
+    /// own reverse index (`App::remote_resync_pane_index`).
+    #[cfg(unix)]
+    FederationResyncPaneRemoved {
+        origin: crate::remote::federation::id::HostKey,
+        pane_id: String,
+    },
+}
+
+/// Payload for [`AppEvent::FederationResyncPaneCreated`] — the fully-built
+/// local counterpart of a pane a resync diff revealed for the first time,
+/// assembled by the mount's own drive task (see
+/// [`FederationSplitPaneReady`]'s identical precedent) and handed back to
+/// `App` for layout insertion.
+#[cfg(unix)]
+pub struct FederationResyncPaneCreated {
+    /// The mount's own `HostKey`. `App::handle_federation_resync_pane_created`
+    /// refuses to splice the pane into a workspace whose federation origin
+    /// does not match, so a differently-mounted host cannot inject a pane
+    /// into another mount's workspace.
+    pub origin: crate::remote::federation::id::HostKey,
+    /// Namespaced (public) workspace id (`RemoteMirror::workspaces()`'s
+    /// key), used to find the already-materialized local `Workspace` this
+    /// pane belongs to.
+    pub workspace_id: String,
+    /// Namespaced (public) pane id (`RemoteMirror::panes()`'s key) — the
+    /// reverse-index key `App::remote_resync_pane_index` stores this pane's
+    /// local `PaneId` under, so a later removal diff can find it again.
+    pub pane_id: String,
+    pub local_pane_id: crate::layout::PaneId,
+    pub terminal_id: crate::terminal::TerminalId,
+    pub terminal: crate::terminal::TerminalState,
+    pub runtime: crate::terminal::TerminalRuntime,
+    pub pane_state: crate::pane::PaneState,
+}
+
+#[cfg(unix)]
+impl std::fmt::Debug for FederationResyncPaneCreated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FederationResyncPaneCreated")
+            .field("workspace_id", &self.workspace_id)
+            .field("pane_id", &self.pane_id)
+            .field("local_pane_id", &self.local_pane_id)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Payload for [`AppEvent::FederationSplitPaneReady`] — the fully-built local
@@ -221,6 +279,13 @@ pub struct FederationSplitPaneReady {
     /// pane in on a mismatch, so a differently-mounted host cannot answer
     /// another mount's split request.
     pub origin: crate::remote::federation::id::HostKey,
+    /// The namespaced remote pane id `RemoteMirror::register_split_pane`
+    /// already registered under (C1 fix, plans/260722-1327 review) —
+    /// `App::handle_federation_split_pane_ready` reverse-indexes this
+    /// against `pane_id` in `remote_resync_pane_index`, the same table
+    /// resync-created panes register into, so a later resync-driven
+    /// removal of this pane can find and tear it down too.
+    pub remote_pane_id: String,
     pub pane_id: crate::layout::PaneId,
     pub terminal_id: crate::terminal::TerminalId,
     pub terminal: crate::terminal::TerminalState,

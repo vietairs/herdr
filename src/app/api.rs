@@ -184,6 +184,18 @@ impl App {
             return;
         }
 
+        #[cfg(unix)]
+        if let AppEvent::FederationResyncPaneCreated(ready) = ev {
+            self.handle_federation_resync_pane_created(*ready);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationResyncPaneRemoved { origin, pane_id } = ev {
+            self.handle_federation_resync_pane_removed(origin, pane_id);
+            return;
+        }
+
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_worktree_add_finished(*result);
             return;
