@@ -210,7 +210,10 @@ impl AppState {
 
         if matches!(
             self.mode,
-            Mode::NewLinkedWorktree | Mode::OpenExistingWorktree | Mode::ConfirmRemoveWorktree
+            Mode::NewLinkedWorktree
+                | Mode::OpenExistingWorktree
+                | Mode::ConfirmRemoveWorktree
+                | Mode::MountRemoteWorkspace
         ) && !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             return None;
@@ -271,6 +274,29 @@ impl AppState {
                                     .is_some_and(|create| create.creating) =>
                             {
                                 self.worktree_create = None;
+                                self.name_input.clear();
+                                self.name_input_replace_on_type = false;
+                                leave_modal(self);
+                            }
+                            _ => {}
+                        }
+                    }
+                    return None;
+                }
+
+                if self.mode == Mode::MountRemoteWorkspace {
+                    if let Some(inner) = crate::ui::remote_mount_inner_rect(self.screen_rect()) {
+                        let (mount, cancel) = crate::ui::remote_mount_button_rects(inner);
+                        match modal_action_from_buttons(
+                            mouse.column,
+                            mouse.row,
+                            &[(mount, ModalAction::Confirm), (cancel, ModalAction::Cancel)],
+                        ) {
+                            Some(ModalAction::Confirm) => {
+                                self.request_submit_remote_mount = true;
+                            }
+                            Some(ModalAction::Cancel) => {
+                                self.remote_mount = None;
                                 self.name_input.clear();
                                 self.name_input_replace_on_type = false;
                                 leave_modal(self);
