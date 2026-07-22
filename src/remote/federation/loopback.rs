@@ -67,10 +67,13 @@ impl FixtureHost {
         runtime: crate::terminal::TerminalRuntime,
         scrollback: Vec<u8>,
     ) -> Self {
-        self.terminals
-            .lock()
-            .unwrap()
-            .insert(terminal_id.into(), FixtureTerminal { runtime, scrollback });
+        self.terminals.lock().unwrap().insert(
+            terminal_id.into(),
+            FixtureTerminal {
+                runtime,
+                scrollback,
+            },
+        );
         self
     }
 
@@ -246,7 +249,8 @@ impl LoopbackFederationServer {
         // large) while keeping the loopback buffer allocation small.
         let (client, server) = tokio::io::duplex(1 << 20);
         let (server_reader, server_writer) = tokio::io::split(server);
-        let handle = tokio::spawn(async move { serve::run(host, server_reader, server_writer).await });
+        let handle =
+            tokio::spawn(async move { serve::run(host, server_reader, server_writer).await });
         (client, handle)
     }
 }
@@ -312,12 +316,9 @@ mod tests {
         let host_a = Arc::new(FixtureHost::new());
         let (client_a, _server_a) = LoopbackFederationServer::spawn(host_a);
         let (mut reader_a, mut writer_a) = tokio::io::split(client_a);
-        serve::write_frame(
-            &mut writer_a,
-            &FederationMessage::Handshake(handshake(&[])),
-        )
-        .await
-        .unwrap();
+        serve::write_frame(&mut writer_a, &FederationMessage::Handshake(handshake(&[])))
+            .await
+            .unwrap();
         let Some(FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
             agreed_capabilities,
         })) = serve::read_frame(&mut reader_a).await.unwrap()
@@ -340,12 +341,9 @@ mod tests {
         let host_b = Arc::new(FixtureHost::new());
         let (client_b, _server_b) = LoopbackFederationServer::spawn(host_b);
         let (mut reader_b, mut writer_b) = tokio::io::split(client_b);
-        serve::write_frame(
-            &mut writer_b,
-            &FederationMessage::Handshake(handshake(&[])),
-        )
-        .await
-        .unwrap();
+        serve::write_frame(&mut writer_b, &FederationMessage::Handshake(handshake(&[])))
+            .await
+            .unwrap();
         let _ = serve::read_frame(&mut reader_b).await.unwrap();
         let Some(FederationMessage::MountSnapshot(mount_b)) =
             serve::read_frame(&mut reader_b).await.unwrap()
@@ -364,7 +362,9 @@ mod tests {
 
         event_hub.push(crate::api::schema::EventEnvelope {
             event: EventKind::WorkspaceFocused,
-            data: crate::api::schema::EventData::WorkspaceFocused { workspace_id: "w1".to_string() },
+            data: crate::api::schema::EventData::WorkspaceFocused {
+                workspace_id: "w1".to_string(),
+            },
         });
 
         let frame = loop {
@@ -466,11 +466,8 @@ mod tests {
     async fn scrollback_replays_before_live_bytes_and_is_bounded_to_what_the_host_provides() {
         let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         let scrollback = b"earlier history".to_vec();
-        let host = Arc::new(FixtureHost::new().with_terminal(
-            "term_1",
-            runtime,
-            scrollback.clone(),
-        ));
+        let host =
+            Arc::new(FixtureHost::new().with_terminal("term_1", runtime, scrollback.clone()));
         let (mut reader, mut writer, _server_handle, _hs, _mount) =
             connect_and_mount(host.clone()).await;
 
@@ -518,7 +515,9 @@ mod tests {
         for _ in 0..600 {
             event_hub.push(crate::api::schema::EventEnvelope {
                 event: EventKind::WorkspaceFocused,
-                data: crate::api::schema::EventData::WorkspaceFocused { workspace_id: "w1".to_string() },
+                data: crate::api::schema::EventData::WorkspaceFocused {
+                    workspace_id: "w1".to_string(),
+                },
             });
         }
 
@@ -548,7 +547,9 @@ mod tests {
 
         event_hub.push(crate::api::schema::EventEnvelope {
             event: EventKind::WorkspaceFocused,
-            data: crate::api::schema::EventData::WorkspaceFocused { workspace_id: "w1".to_string() },
+            data: crate::api::schema::EventData::WorkspaceFocused {
+                workspace_id: "w1".to_string(),
+            },
         });
         let _ = serve::read_frame(&mut reader).await.unwrap();
 
@@ -624,11 +625,12 @@ mod tests {
         .await
         .unwrap();
 
-        let response = tokio::time::timeout(Duration::from_millis(500), serve::read_frame(&mut reader))
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let response =
+            tokio::time::timeout(Duration::from_millis(500), serve::read_frame(&mut reader))
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
         match response {
             FederationMessage::SplitPaneResponse(
                 crate::remote::federation::protocol::SplitPaneResponse::Created {
@@ -669,15 +671,19 @@ mod tests {
         .await
         .unwrap();
 
-        let response = tokio::time::timeout(Duration::from_millis(500), serve::read_frame(&mut reader))
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let response =
+            tokio::time::timeout(Duration::from_millis(500), serve::read_frame(&mut reader))
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
         assert!(matches!(
             response,
             FederationMessage::SplitPaneResponse(
-                crate::remote::federation::protocol::SplitPaneResponse::Failed { request_id: 2, .. }
+                crate::remote::federation::protocol::SplitPaneResponse::Failed {
+                    request_id: 2,
+                    ..
+                }
             )
         ));
 

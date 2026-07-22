@@ -193,14 +193,14 @@ impl TerminalSource for RemoteTerminalSourceHandle {
         // to its PTY master fd) has no destination; sending them onward as
         // `Input` would inject a reply for a resize the remote application
         // has not even observed applied yet — dropped by design.
-        let _ = self
-            .out_tx
-            .send(FederationMessage::Terminal(TerminalChannelMessage::Resize {
+        let _ = self.out_tx.send(FederationMessage::Terminal(
+            TerminalChannelMessage::Resize {
                 terminal_id: self.terminal_id.clone(),
                 mount_generation: self.mount_generation,
                 cols,
                 rows,
-            }));
+            },
+        ));
     }
 
     fn shutdown(&self) {
@@ -252,7 +252,11 @@ pub(crate) async fn apply_remote_clipboard_writes(
     mut clipboard_rx: mpsc::UnboundedReceiver<ClipboardMessage>,
     mut apply: impl FnMut(&str, &[u8]),
 ) {
-    while let Some(ClipboardMessage { origin_tag, payload }) = clipboard_rx.recv().await {
+    while let Some(ClipboardMessage {
+        origin_tag,
+        payload,
+    }) = clipboard_rx.recv().await
+    {
         apply(&origin_tag, &payload);
     }
 }
@@ -277,7 +281,10 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let captured_for_closure = captured.clone();
         let on_read = Box::new(move |bytes: &[u8]| {
-            captured_for_closure.lock().unwrap().extend_from_slice(bytes);
+            captured_for_closure
+                .lock()
+                .unwrap()
+                .extend_from_slice(bytes);
         });
         let handle = RemoteTerminalSourceHandle::spawn(RemoteTerminalSourceConfig {
             terminal_id: terminal_id.to_string(),
@@ -328,7 +335,14 @@ mod tests {
         assert_eq!(mount_generation, 7);
         assert_eq!(bytes, b"typed".to_vec());
 
-        TerminalSource::resize(&handle, 40, 100, 0, 0, vec![Bytes::from_static(b"\x1b[1;1R")]);
+        TerminalSource::resize(
+            &handle,
+            40,
+            100,
+            0,
+            0,
+            vec![Bytes::from_static(b"\x1b[1;1R")],
+        );
         let Some(FederationMessage::Terminal(TerminalChannelMessage::Resize {
             terminal_id,
             mount_generation,
@@ -432,9 +446,11 @@ mod tests {
         };
         assert_eq!(bytes, paste.to_vec());
         // No further message arrives for the same paste.
-        assert!(tokio::time::timeout(Duration::from_millis(20), out_rx.recv())
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), out_rx.recv())
+                .await
+                .is_err()
+        );
     }
 
     // Phase 07 test 4 (S11.3 OSC52 policy parity): a remote-origin clipboard
@@ -448,12 +464,15 @@ mod tests {
         let applied: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
         let applied_for_closure = applied.clone();
 
-        let drain = tokio::spawn(apply_remote_clipboard_writes(rx, move |origin_tag, payload| {
-            applied_for_closure
-                .lock()
-                .unwrap()
-                .push((origin_tag.to_string(), payload.to_vec()));
-        }));
+        let drain = tokio::spawn(apply_remote_clipboard_writes(
+            rx,
+            move |origin_tag, payload| {
+                applied_for_closure
+                    .lock()
+                    .unwrap()
+                    .push((origin_tag.to_string(), payload.to_vec()));
+            },
+        ));
 
         tx.send(ClipboardMessage {
             origin_tag: "remote".to_string(),
@@ -486,9 +505,12 @@ mod tests {
     #[tokio::test]
     async fn clipboard_drain_exits_cleanly_when_the_channel_closes_with_no_messages() {
         let (tx, rx) = mpsc::unbounded_channel::<ClipboardMessage>();
-        let drain = tokio::spawn(apply_remote_clipboard_writes(rx, |_origin_tag, _payload| {
-            panic!("apply must never be called when no message was ever sent");
-        }));
+        let drain = tokio::spawn(apply_remote_clipboard_writes(
+            rx,
+            |_origin_tag, _payload| {
+                panic!("apply must never be called when no message was ever sent");
+            },
+        ));
         drop(tx);
         drain.await.unwrap();
     }

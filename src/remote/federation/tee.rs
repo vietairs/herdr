@@ -57,10 +57,7 @@ mod tests {
         tx.send(Bytes::from_static(b" world")).unwrap();
 
         assert_eq!(render_rx.try_recv().unwrap(), Bytes::from_static(b"hello"));
-        assert_eq!(
-            render_rx.try_recv().unwrap(),
-            Bytes::from_static(b" world")
-        );
+        assert_eq!(render_rx.try_recv().unwrap(), Bytes::from_static(b" world"));
         assert_eq!(
             federation_rx.try_recv().unwrap(),
             Bytes::from_static(b"hello")

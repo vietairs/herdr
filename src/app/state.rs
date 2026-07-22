@@ -1494,6 +1494,18 @@ pub struct AppState {
         crate::remote::federation::id::HostKey,
         crate::remote::federation::reducer::RemoteMirror,
     >,
+    /// The spawned drive task for each live federation mount, keyed by
+    /// `HostKey`. Lets `end_federation_mount` actively cancel a mount's
+    /// in-flight drive task (SSH link + reader loop) when a caller tears the
+    /// mount down proactively (e.g. closing the federated workspace),
+    /// instead of only reacting to a drive task that already ended itself.
+    /// Aborting an already-finished task is a safe no-op, so this is set
+    /// unconditionally on both the reactive (`handle_federation_mount_ended`)
+    /// and proactive (workspace close) teardown paths.
+    pub(crate) mount_drive_tasks: std::collections::HashMap<
+        crate::remote::federation::id::HostKey,
+        tokio::task::JoinHandle<()>,
+    >,
 }
 
 /// Outcome of [`AppState::begin_federation_mount`] (P8 requirement 5, S10.1;
@@ -1541,6 +1553,9 @@ impl AppState {
         host_key: &crate::remote::federation::id::HostKey,
     ) {
         self.remote_mirrors.remove(host_key);
+        if let Some(handle) = self.mount_drive_tasks.remove(host_key) {
+            handle.abort();
+        }
     }
 
     /// P8 requirement 6 (RT-F11/S8.2); Phase B: whether a classic `--remote`
@@ -1928,6 +1943,7 @@ impl AppState {
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
             remote_mirrors: std::collections::HashMap::new(),
+            mount_drive_tasks: std::collections::HashMap::new(),
         }
     }
 
@@ -2283,11 +2299,15 @@ mod tests {
     #[test]
     fn a_duplicate_host_key_federation_mount_is_rejected() {
         let mut state = AppState::test_new();
-        assert!(state.begin_federation_mount(test_mount("alice@10.0.0.1")).is_ok());
-        assert!(state.remote_mirrors.contains_key(&crate::remote::federation::id::HostKey::new(
-            "alice@10.0.0.1",
-            "s1"
-        )));
+        assert!(state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .is_ok());
+        assert!(state
+            .remote_mirrors
+            .contains_key(&crate::remote::federation::id::HostKey::new(
+                "alice@10.0.0.1",
+                "s1"
+            )));
 
         let result = state.begin_federation_mount(test_mount("alice@10.0.0.1"));
         assert_eq!(
@@ -2305,8 +2325,12 @@ mod tests {
     #[test]
     fn mount_hashmap_allows_two_distinct_hosts() {
         let mut state = AppState::test_new();
-        assert!(state.begin_federation_mount(test_mount("alice@10.0.0.1")).is_ok());
-        assert!(state.begin_federation_mount(test_mount("bob@10.0.0.2")).is_ok());
+        assert!(state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .is_ok());
+        assert!(state
+            .begin_federation_mount(test_mount("bob@10.0.0.2"))
+            .is_ok());
         assert_eq!(state.remote_mirrors.len(), 2);
     }
 
@@ -2315,7 +2339,9 @@ mod tests {
     #[test]
     fn mount_hashmap_rejects_duplicate_host_key() {
         let mut state = AppState::test_new();
-        state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
+        state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .unwrap();
         let host_key = crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1");
         assert_eq!(
             state.begin_federation_mount(test_mount("alice@10.0.0.1")),
@@ -2326,19 +2352,27 @@ mod tests {
     #[test]
     fn ending_a_mount_allows_a_fresh_one() {
         let mut state = AppState::test_new();
-        state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
+        state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .unwrap();
         let host_key = crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1");
         state.end_federation_mount(&host_key);
         assert!(state.remote_mirrors.is_empty());
-        assert!(state.begin_federation_mount(test_mount("bob@10.0.0.2")).is_ok());
+        assert!(state
+            .begin_federation_mount(test_mount("bob@10.0.0.2"))
+            .is_ok());
     }
 
     // Phase B requirement 2: per-mount teardown never touches siblings.
     #[test]
     fn ending_one_mount_does_not_touch_sibling_mounts() {
         let mut state = AppState::test_new();
-        state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
-        state.begin_federation_mount(test_mount("bob@10.0.0.2")).unwrap();
+        state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .unwrap();
+        state
+            .begin_federation_mount(test_mount("bob@10.0.0.2"))
+            .unwrap();
 
         state.end_federation_mount(&crate::remote::federation::id::HostKey::new(
             "alice@10.0.0.1",
@@ -2346,10 +2380,12 @@ mod tests {
         ));
 
         assert_eq!(state.remote_mirrors.len(), 1);
-        assert!(state.remote_mirrors.contains_key(&crate::remote::federation::id::HostKey::new(
-            "bob@10.0.0.2",
-            "s1"
-        )));
+        assert!(state
+            .remote_mirrors
+            .contains_key(&crate::remote::federation::id::HostKey::new(
+                "bob@10.0.0.2",
+                "s1"
+            )));
     }
 
     // P8 TDD test 7 (RT-F11/S8.2): a classic `--remote` attach targeting an
@@ -2358,25 +2394,33 @@ mod tests {
     #[test]
     fn double_attach_conflict_is_keyed_on_host_key() {
         let mut state = AppState::test_new();
-        state.begin_federation_mount(test_mount("alice@10.0.0.1")).unwrap();
+        state
+            .begin_federation_mount(test_mount("alice@10.0.0.1"))
+            .unwrap();
 
-        assert!(state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
-            "alice@10.0.0.1",
-            "s1"
-        )));
-        assert!(!state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
-            "bob@10.0.0.2",
-            "s1"
-        )));
+        assert!(
+            state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
+                "alice@10.0.0.1",
+                "s1"
+            ))
+        );
+        assert!(
+            !state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
+                "bob@10.0.0.2",
+                "s1"
+            ))
+        );
     }
 
     #[test]
     fn no_double_attach_conflict_when_nothing_is_mounted() {
         let state = AppState::test_new();
-        assert!(!state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
-            "alice@10.0.0.1",
-            "s1"
-        )));
+        assert!(
+            !state.double_attach_conflict(&crate::remote::federation::id::HostKey::new(
+                "alice@10.0.0.1",
+                "s1"
+            ))
+        );
     }
 
     #[test]
@@ -2427,7 +2471,12 @@ mod tests {
         use crate::terminal::TerminalSource;
         use tokio::sync::mpsc;
 
-        fn spawn_pane(id: &str) -> (RemoteTerminalSourceHandle, mpsc::UnboundedReceiver<FederationMessage>) {
+        fn spawn_pane(
+            id: &str,
+        ) -> (
+            RemoteTerminalSourceHandle,
+            mpsc::UnboundedReceiver<FederationMessage>,
+        ) {
             let (out_tx, out_rx) = mpsc::unbounded_channel();
             let (_output_tx, output_rx) = mpsc::channel(4);
             let handle = RemoteTerminalSourceHandle::spawn(RemoteTerminalSourceConfig {
@@ -2454,7 +2503,11 @@ mod tests {
             ("pane_b", b"b3"),
         ];
         for (focused_id, bytes) in keystrokes {
-            let handle = if focused_id == "pane_a" { &pane_a } else { &pane_b };
+            let handle = if focused_id == "pane_a" {
+                &pane_a
+            } else {
+                &pane_b
+            };
             handle
                 .write_user_input(bytes::Bytes::copy_from_slice(bytes))
                 .await
@@ -2473,7 +2526,8 @@ mod tests {
                     .expect("channel must stay open");
                 let FederationMessage::Terminal(
                     crate::remote::federation::protocol::TerminalChannelMessage::Input {
-                        bytes, ..
+                        bytes,
+                        ..
                     },
                 ) = msg
                 else {

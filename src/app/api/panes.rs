@@ -40,7 +40,17 @@ fn next_remote_split_request_id() -> u64 {
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
         let target = if let Some(target_pane_id) = params.target_pane_id.as_deref() {
-            self.parse_pane_id(target_pane_id)
+            // Federation's `SplitPane` command (server::federation_actor)
+            // reuses this same handler with a raw terminal id (the id space
+            // a mount's client knows about — see `dispatch_remote_pane_split`
+            // below), not a public `w…:p…` pane id. Resolve terminal ids
+            // first so the server owns the terminal-id -> pane mapping
+            // instead of requiring the remote caller to guess the local
+            // public pane id; `resolve_terminal_target` already falls back
+            // to `parse_pane_id` for ordinary public-id callers.
+            self.resolve_terminal_target(target_pane_id)
+                .ok()
+                .map(|resolved| (resolved.ws_idx, resolved.pane_id))
         } else if let Some(workspace_id) = params.workspace_id.as_deref() {
             self.parse_workspace_id(workspace_id).and_then(|ws_idx| {
                 let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
@@ -199,6 +209,20 @@ impl App {
             );
         };
 
+        // The mount this request is actually being sent to — recorded on the
+        // `PendingRemoteSplit` as its `origin` so the eventual response
+        // handler can refuse a `SplitPaneResponse`/`Failed` that arrives
+        // tagged with a *different* mount's `HostKey` (see
+        // `App::handle_federation_split_pane_ready`/`_failed`).
+        let Some(origin) = self.federation_host_key_for_workspace(ws_idx) else {
+            return encode_error(
+                id,
+                "remote_split_unsupported",
+                "splitting a pane in a remote-federated workspace requires a live mount; \
+                 this workspace has no registered federation mount",
+            );
+        };
+
         let direction = match params.direction {
             crate::api::schema::SplitDirection::Right => {
                 crate::remote::federation::protocol::SplitDirection::Right
@@ -208,15 +232,17 @@ impl App {
             }
         };
         let request_id = next_remote_split_request_id();
-        let sent = out_tx.send(crate::remote::federation::protocol::FederationMessage::SplitPaneRequest(
-            crate::remote::federation::protocol::SplitPaneRequest {
-                request_id,
-                target_pane_id: raw_target_pane_id,
-                direction,
-                ratio: params.ratio,
-                focus: params.focus,
-            },
-        ));
+        let sent = out_tx.send(
+            crate::remote::federation::protocol::FederationMessage::SplitPaneRequest(
+                crate::remote::federation::protocol::SplitPaneRequest {
+                    request_id,
+                    target_pane_id: raw_target_pane_id,
+                    direction,
+                    ratio: params.ratio,
+                    focus: params.focus,
+                },
+            ),
+        );
         if sent.is_err() {
             return encode_error(
                 id,
@@ -241,6 +267,7 @@ impl App {
                 direction: local_direction,
                 ratio: params.ratio.unwrap_or(0.5),
                 focus: params.focus,
+                origin,
             },
         );
 
@@ -3921,9 +3948,10 @@ mod tests {
         let (mut app, _pane_id) = app_with_test_workspace();
         let remote_workspace_id = "r:alice@10.0.0.1#s1:default".to_string();
         app.state.workspaces[0].id = remote_workspace_id.clone();
-        let panes_before = app.state.workspaces[0].tabs[0].layout.panes(
-            ratatui::layout::Rect::new(0, 0, 80, 24),
-        ).len();
+        let panes_before = app.state.workspaces[0].tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 80, 24))
+            .len();
 
         let response = app.handle_pane_split(
             "req".into(),
@@ -3940,9 +3968,10 @@ mod tests {
 
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "remote_split_unsupported");
-        let panes_after = app.state.workspaces[0].tabs[0].layout.panes(
-            ratatui::layout::Rect::new(0, 0, 80, 24),
-        ).len();
+        let panes_after = app.state.workspaces[0].tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 80, 24))
+            .len();
         assert_eq!(
             panes_before, panes_after,
             "a refused remote split must not create any local pane"

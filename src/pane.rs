@@ -23,7 +23,9 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::pty::actor::{PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
-use crate::remote::federation::pane_source::{RemoteTerminalSourceConfig, RemoteTerminalSourceHandle};
+use crate::remote::federation::pane_source::{
+    RemoteTerminalSourceConfig, RemoteTerminalSourceHandle,
+};
 use crate::remote::federation::protocol::{ClipboardMessage, FederationMessage};
 use crate::terminal::{LocalChild, TerminalSource};
 
@@ -1870,13 +1872,15 @@ impl PaneRuntime {
                 // responses. The remote host's own real terminal already
                 // owns the responder role for its shell.
             });
-            PaneRuntimeIo::Remote(RemoteTerminalSourceHandle::spawn(RemoteTerminalSourceConfig {
-                terminal_id,
-                mount_generation,
-                out_tx,
-                output_rx,
-                on_read,
-            }))
+            PaneRuntimeIo::Remote(RemoteTerminalSourceHandle::spawn(
+                RemoteTerminalSourceConfig {
+                    terminal_id,
+                    mount_generation,
+                    out_tx,
+                    output_rx,
+                    on_read,
+                },
+            ))
         };
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
@@ -2724,9 +2728,13 @@ impl PaneRuntime {
         // trip over the federation link (pane_source.rs RT-F10), not a
         // same-machine SIGWINCH repaint, so the local replay-recovery
         // heuristic below must not run for them (see `PaneTerminal::resize`).
-        let terminal_responses =
-            self.terminal
-                .resize(rows, cols, cell_width_px, cell_height_px, self.io.is_remote());
+        let terminal_responses = self.terminal.resize(
+            rows,
+            cols,
+            cell_width_px,
+            cell_height_px,
+            self.io.is_remote(),
+        );
         mark_detection_content_changed(&self.detection_content_seq);
         self.io.resize(
             rows,
@@ -4418,12 +4426,17 @@ mod remote_spawn_tests {
         let local_reference = PaneRuntime::test_with_channel(80, 24).0;
         local_reference.test_process_pty_bytes(known_bytes);
 
-        let (remote_runtime, output_tx, _out_rx, _events_rx) =
-            spawn_test_remote_pane("term_1", 1);
-        output_tx.send(Bytes::copy_from_slice(known_bytes)).await.unwrap();
+        let (remote_runtime, output_tx, _out_rx, _events_rx) = spawn_test_remote_pane("term_1", 1);
+        output_tx
+            .send(Bytes::copy_from_slice(known_bytes))
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
-        assert_eq!(remote_runtime.visible_text(), local_reference.visible_text());
+        assert_eq!(
+            remote_runtime.visible_text(),
+            local_reference.visible_text()
+        );
     }
 
     // `remote_terminal_id`/`remote_out_tx` (P9 remote-split follow-up):
@@ -4449,8 +4462,7 @@ mod remote_spawn_tests {
     // produce a grid containing both, in that order.
     #[tokio::test]
     async fn scrollback_replay_bytes_pushed_before_live_bytes_both_land_on_the_grid() {
-        let (remote_runtime, output_tx, _out_rx, _events_rx) =
-            spawn_test_remote_pane("term_1", 1);
+        let (remote_runtime, output_tx, _out_rx, _events_rx) = spawn_test_remote_pane("term_1", 1);
 
         output_tx
             .send(Bytes::from_static(b"earlier history\r\n"))
@@ -4481,11 +4493,8 @@ mod remote_spawn_tests {
         drop(output_tx);
         drop(remote_runtime);
 
-        let saw_event = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            events_rx.recv(),
-        )
-        .await;
+        let saw_event =
+            tokio::time::timeout(std::time::Duration::from_millis(50), events_rx.recv()).await;
         if let Ok(Some(event)) = saw_event {
             assert!(
                 !matches!(event, AppEvent::PaneDied { .. }),
@@ -4501,11 +4510,12 @@ mod remote_spawn_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn handoff_methods_on_a_remote_pane_no_op_without_panicking() {
-        let (remote_runtime, _output_tx, _out_rx, _events_rx) =
-            spawn_test_remote_pane("term_1", 1);
+        let (remote_runtime, _output_tx, _out_rx, _events_rx) = spawn_test_remote_pane("term_1", 1);
 
         assert!(remote_runtime.duplicate_handoff_fd().is_err());
-        assert!(remote_runtime.pause_handoff_reader(std::time::Duration::from_millis(10)).is_ok());
+        assert!(remote_runtime
+            .pause_handoff_reader(std::time::Duration::from_millis(10))
+            .is_ok());
         remote_runtime.set_handoff_reader_paused(false);
     }
 
@@ -4568,11 +4578,26 @@ mod agent_status_relay_tests {
     // the source gave.
     #[test]
     fn relayed_status_maps_onto_local_agent_state() {
-        assert_eq!(map_relayed_agent_status(AgentStatus::Idle), AgentState::Idle);
-        assert_eq!(map_relayed_agent_status(AgentStatus::Done), AgentState::Idle);
-        assert_eq!(map_relayed_agent_status(AgentStatus::Working), AgentState::Working);
-        assert_eq!(map_relayed_agent_status(AgentStatus::Blocked), AgentState::Blocked);
-        assert_eq!(map_relayed_agent_status(AgentStatus::Unknown), AgentState::Unknown);
+        assert_eq!(
+            map_relayed_agent_status(AgentStatus::Idle),
+            AgentState::Idle
+        );
+        assert_eq!(
+            map_relayed_agent_status(AgentStatus::Done),
+            AgentState::Idle
+        );
+        assert_eq!(
+            map_relayed_agent_status(AgentStatus::Working),
+            AgentState::Working
+        );
+        assert_eq!(
+            map_relayed_agent_status(AgentStatus::Blocked),
+            AgentState::Blocked
+        );
+        assert_eq!(
+            map_relayed_agent_status(AgentStatus::Unknown),
+            AgentState::Unknown
+        );
     }
 
     // Phase 06 test 5 (S12.2 cadence): of N remote panes with only one

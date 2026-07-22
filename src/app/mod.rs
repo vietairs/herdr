@@ -703,6 +703,7 @@ impl App {
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
             remote_mirrors: std::collections::HashMap::new(),
+            mount_drive_tasks: std::collections::HashMap::new(),
         };
 
         state.terminals = restored_terminals;

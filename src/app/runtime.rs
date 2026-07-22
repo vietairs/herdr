@@ -71,7 +71,9 @@ impl App {
         if self.federated_mode && !crate::api::federated_session_allows(&msg.request.method) {
             let _ = msg
                 .respond_to
-                .send(crate::api::federated_forbidden_response(msg.request.id.clone()));
+                .send(crate::api::federated_forbidden_response(
+                    msg.request.id.clone(),
+                ));
             self.sync_prefix_input_source(previous_mode);
             return changed;
         }

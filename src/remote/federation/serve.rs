@@ -165,7 +165,11 @@ pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
         return Err(err);
     }
 
-    let claimed_len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+    let claimed_len = u32::from_le_bytes(
+        header[4..8]
+            .try_into()
+            .map_err(|_| std::io::Error::other("truncated federation frame length field"))?,
+    ) as usize;
     let max = global_max_frame();
     if claimed_len > max {
         return Err(std::io::Error::other(format!(
@@ -415,13 +419,11 @@ fn handle_inbound<H: FederationHost>(
             focus,
         }) => {
             let response = match host.split_pane(&target_pane_id, direction, ratio, focus) {
-                Ok((new_pane_id, new_terminal_id)) => {
-                    super::protocol::SplitPaneResponse::Created {
-                        request_id,
-                        new_pane_id,
-                        new_terminal_id,
-                    }
-                }
+                Ok((new_pane_id, new_terminal_id)) => super::protocol::SplitPaneResponse::Created {
+                    request_id,
+                    new_pane_id,
+                    new_terminal_id,
+                },
                 Err(reason) => super::protocol::SplitPaneResponse::Failed { request_id, reason },
             };
             let _ = out_tx.send(FederationMessage::SplitPaneResponse(response));
@@ -497,11 +499,13 @@ fn spawn_terminal_forward_task(
                     let (rest, _lagged) = tee::drain_available(&mut rx);
                     bytes.extend_from_slice(&rest);
                     if out_tx
-                        .send(FederationMessage::Terminal(TerminalChannelMessage::Output {
-                            terminal_id: terminal_id.clone(),
-                            mount_generation: MOUNT_GENERATION,
-                            bytes,
-                        }))
+                        .send(FederationMessage::Terminal(
+                            TerminalChannelMessage::Output {
+                                terminal_id: terminal_id.clone(),
+                                mount_generation: MOUNT_GENERATION,
+                                bytes,
+                            },
+                        ))
                         .is_err()
                     {
                         return;

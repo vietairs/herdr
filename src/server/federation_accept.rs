@@ -115,7 +115,11 @@ fn read_frame_blocking(reader: &mut impl Read) -> io::Result<Option<FederationMe
         Err(err) => return Err(err),
     }
 
-    let claimed_len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+    let claimed_len = u32::from_le_bytes(
+        header[4..8]
+            .try_into()
+            .map_err(|_| io::Error::other("truncated federation frame length field"))?,
+    ) as usize;
     let max = global_max_frame();
     if claimed_len > max {
         return Err(io::Error::other(format!(
@@ -501,15 +505,14 @@ fn handle_split_pane_request(
     } = request;
 
     let (reply, rx) = oneshot::channel();
-    let sent = server_event_tx.blocking_send(ServerEvent::Federation(
-        FederationCommand::SplitPane {
+    let sent =
+        server_event_tx.blocking_send(ServerEvent::Federation(FederationCommand::SplitPane {
             target_pane_id,
             direction,
             ratio,
             focus,
             reply,
-        },
-    ));
+        }));
     let outcome = if sent.is_err() {
         Err("server event loop is gone".to_string())
     } else {
@@ -766,7 +769,13 @@ fn ticker_loop(
         }
         tick = tick.wrapping_add(1);
         if tick.is_multiple_of(AGENT_STATUS_POLL_DIVISOR)
-            && !poll_agent_statuses(server_event_tx, &mut last_agent, out_tx, first_cause, shutdown)
+            && !poll_agent_statuses(
+                server_event_tx,
+                &mut last_agent,
+                out_tx,
+                first_cause,
+                shutdown,
+            )
         {
             break;
         }
@@ -910,10 +919,9 @@ fn request_scrollback_replay(
 ) -> Vec<u8> {
     let (reply, rx) = oneshot::channel();
     if server_event_tx
-        .blocking_send(ServerEvent::Federation(FederationCommand::ScrollbackReplay(
-            terminal_id.to_string(),
-            reply,
-        )))
+        .blocking_send(ServerEvent::Federation(
+            FederationCommand::ScrollbackReplay(terminal_id.to_string(), reply),
+        ))
         .is_err()
     {
         return Vec::new();
@@ -940,11 +948,13 @@ fn acquire_controller(
 ) -> io::Result<Admission> {
     let (reply, rx) = oneshot::channel();
     server_event_tx
-        .blocking_send(ServerEvent::Federation(FederationCommand::AcquireController {
-            epoch,
-            connid,
-            reply,
-        }))
+        .blocking_send(ServerEvent::Federation(
+            FederationCommand::AcquireController {
+                epoch,
+                connid,
+                reply,
+            },
+        ))
         .map_err(|_| io::Error::other("server event loop is gone"))?;
     rx.blocking_recv()
         .map_err(|_| io::Error::other("federation acquire reply dropped"))
@@ -995,12 +1005,12 @@ impl Drop for LeaseReleaseGuard {
         // `blocking_send` is legal here (a plain std::thread, never a tokio
         // runtime thread) and returns immediately if the loop is gone (the
         // server is shutting down — the lease dies with it), so Drop never hangs.
-        let _ = self
-            .server_event_tx
-            .blocking_send(ServerEvent::Federation(FederationCommand::Release {
+        let _ = self.server_event_tx.blocking_send(ServerEvent::Federation(
+            FederationCommand::Release {
                 epoch: self.epoch,
                 connid: self.connid,
-            }));
+            },
+        ));
     }
 }
 

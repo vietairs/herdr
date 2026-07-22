@@ -127,7 +127,10 @@ pub enum EventChannelMessage {
     Frame(EventFrame),
     /// The source detected (or the reducer detected, from a sequence hole)
     /// that events `from+1..=to` were not delivered.
-    Gap { from: u64, to: u64 },
+    Gap {
+        from: u64,
+        to: u64,
+    },
     /// The source is discarding cursor continuity; the receiver must
     /// re-mount (request a fresh `MountSnapshot`) rather than keep applying.
     Reset,
@@ -177,11 +180,21 @@ impl TerminalChannelMessage {
     /// The `mount_generation` tag carried by every variant, for fencing.
     pub fn mount_generation(&self) -> u64 {
         match self {
-            Self::Open { mount_generation, .. }
-            | Self::Output { mount_generation, .. }
-            | Self::Input { mount_generation, .. }
-            | Self::Resize { mount_generation, .. }
-            | Self::Close { mount_generation, .. } => *mount_generation,
+            Self::Open {
+                mount_generation, ..
+            }
+            | Self::Output {
+                mount_generation, ..
+            }
+            | Self::Input {
+                mount_generation, ..
+            }
+            | Self::Resize {
+                mount_generation, ..
+            }
+            | Self::Close {
+                mount_generation, ..
+            } => *mount_generation,
         }
     }
 

@@ -327,6 +327,14 @@ pub(crate) struct SplitMaterializationContext {
     pub(crate) events: mpsc::Sender<crate::events::AppEvent>,
     pub(crate) render_notify: std::sync::Arc<tokio::sync::Notify>,
     pub(crate) render_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// This mount's own `HostKey`, stamped onto every `FederationSplitPaneReady`/
+    /// `FederationSplitPaneFailed` this drive task emits. `App` compares it
+    /// against the originating `PendingRemoteSplit::origin` before splicing a
+    /// pane in, so a second, differently-mounted host cannot answer a split
+    /// request `dispatch_remote_pane_split` sent to a different mount (a
+    /// predicted/observed process-global `request_id` is not enough on its
+    /// own to splice a foreign host's pane into this mount's workspace).
+    pub(crate) origin: crate::remote::federation::id::HostKey,
 }
 
 /// Demultiplexes ONE mount's single `Terminal`-channel wire stream by
@@ -409,7 +417,9 @@ impl TerminalChannelRouter {
     pub(crate) fn route_inbound(&mut self, msg: TerminalChannelMessage) {
         match msg {
             TerminalChannelMessage::Open {
-                terminal_id, replay, ..
+                terminal_id,
+                replay,
+                ..
             } => {
                 if let Some(tx) = self.output_senders.get(&terminal_id) {
                     if !replay.bytes.is_empty() {
@@ -569,10 +579,8 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                     ) {
                         Ok(runtime) => {
                             if let Some(sender) = runtime.relayed_agent_status_sender() {
-                                router.register_agent_status_sender(
-                                    new_terminal_id.clone(),
-                                    sender,
-                                );
+                                router
+                                    .register_agent_status_sender(new_terminal_id.clone(), sender);
                             }
                             let terminal = crate::terminal::TerminalState::new(
                                 terminal_id.clone(),
@@ -581,6 +589,7 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                             let pane_state = crate::pane::PaneState::new(terminal_id.clone());
                             let ready = crate::events::FederationSplitPaneReady {
                                 request_id,
+                                origin: ctx.origin.clone(),
                                 pane_id,
                                 terminal_id,
                                 terminal,
@@ -589,17 +598,29 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                             };
                             let _ = ctx
                                 .events
-                                .send(crate::events::AppEvent::FederationSplitPaneReady(
-                                    Box::new(ready),
-                                ))
+                                .send(crate::events::AppEvent::FederationSplitPaneReady(Box::new(
+                                    ready,
+                                )))
                                 .await;
                         }
                         Err(err) => {
+                            // Tell `App` so it can drop the matching
+                            // `pending_remote_splits` entry (via
+                            // `handle_federation_split_pane_failed`) instead
+                            // of leaving it orphaned in the map forever.
                             tracing::warn!(
                                 request_id,
                                 %err,
                                 "failed to spawn a local runtime for the remote-split pane"
                             );
+                            let _ = ctx
+                                .events
+                                .send(crate::events::AppEvent::FederationSplitPaneFailed {
+                                    request_id,
+                                    reason: err.to_string(),
+                                    origin: ctx.origin.clone(),
+                                })
+                                .await;
                         }
                     }
                 }
@@ -611,6 +632,7 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                             .send(crate::events::AppEvent::FederationSplitPaneFailed {
                                 request_id,
                                 reason,
+                                origin: ctx.origin.clone(),
                             })
                             .await;
                     }
@@ -741,7 +763,8 @@ mod tests {
         let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
 
         let fake_server = tokio::spawn(async move {
-            let Some(FederationMessage::Handshake(_)) = read_frame(&mut server_reader).await.unwrap()
+            let Some(FederationMessage::Handshake(_)) =
+                read_frame(&mut server_reader).await.unwrap()
             else {
                 panic!("expected a Handshake");
             };
@@ -765,7 +788,10 @@ mod tests {
             Err(err) => err,
         };
 
-        assert!(matches!(err, MountError::Rejected(RejectReason::Version { .. })));
+        assert!(matches!(
+            err,
+            MountError::Rejected(RejectReason::Version { .. })
+        ));
         fake_server.await.unwrap();
     }
 
@@ -810,7 +836,12 @@ mod tests {
         // below inspect the mirror's post-burst state directly.
         let _ = tokio::time::timeout(
             Duration::from_millis(500),
-            drive_event_channel(&mut mounted.reader, &mut mounted.mirror, generation, &local_hub),
+            drive_event_channel(
+                &mut mounted.reader,
+                &mut mounted.mirror,
+                generation,
+                &local_hub,
+            ),
         )
         .await;
 
@@ -847,7 +878,11 @@ mod tests {
         let (client_side, _server_side_never_reads_or_writes) = tokio::io::duplex(1024);
         let (reader, writer) = tokio::io::split(client_side);
 
-        let client = Arc::new(FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new()));
+        let client = Arc::new(FederationClient::new(
+            host_key(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        ));
         let mount_task = spawn_non_interactive_mount(client, reader, writer);
 
         // The "event loop mock": ticks a fixed number of times regardless
@@ -919,9 +954,8 @@ mod tests {
     async fn open_terminal_delivers_replay_then_live_bytes_on_the_same_channel() {
         let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         let scrollback = b"earlier history".to_vec();
-        let host = Arc::new(
-            FixtureHost::new().with_terminal("term_1", runtime, scrollback.clone()),
-        );
+        let host =
+            Arc::new(FixtureHost::new().with_terminal("term_1", runtime, scrollback.clone()));
         let (mut reader, writer) = open_mount(host.clone()).await;
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
         let writer_task = tokio::spawn(async move {
@@ -1016,8 +1050,10 @@ mod tests {
 
         send_local_clipboard_to_remote(&out_tx, "local", b"pasted payload".to_vec());
 
-        let Some(FederationMessage::Clipboard(ClipboardMessage { origin_tag, payload })) =
-            read_frame(&mut server_reader).await.unwrap()
+        let Some(FederationMessage::Clipboard(ClipboardMessage {
+            origin_tag,
+            payload,
+        })) = read_frame(&mut server_reader).await.unwrap()
         else {
             panic!("expected a Clipboard message");
         };
@@ -1041,8 +1077,10 @@ mod tests {
         let (out_tx, handle) = spawn_mount_writer(client_writer);
         send_local_clipboard_to_remote(&out_tx, "local", b"via spawn_mount_writer".to_vec());
 
-        let Some(FederationMessage::Clipboard(ClipboardMessage { origin_tag, payload })) =
-            read_frame(&mut server_reader).await.unwrap()
+        let Some(FederationMessage::Clipboard(ClipboardMessage {
+            origin_tag,
+            payload,
+        })) = read_frame(&mut server_reader).await.unwrap()
         else {
             panic!("expected a Clipboard message");
         };
@@ -1384,6 +1422,7 @@ mod tests {
             cols: 80,
             scrollback_limit_bytes: 1 << 16,
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            origin: crate::remote::federation::id::HostKey::new("test-host", "s1"),
             events: events_tx,
             render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
             render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1502,16 +1541,19 @@ mod tests {
             drained <= CLIPBOARD_CHANNEL_CAPACITY,
             "drained {drained} messages, expected at most the configured budget of {CLIPBOARD_CHANNEL_CAPACITY}"
         );
-        assert!(drained > 0, "at least the first burst up to capacity must have been queued");
+        assert!(
+            drained > 0,
+            "at least the first burst up to capacity must have been queued"
+        );
     }
 
     #[test]
     fn drive_outcome_ended_reason_link_closed_faulted_err_return_some() {
         assert!(drive_outcome_ended_reason(&Ok(DriveOutcome::LinkClosed)).is_some());
-        assert!(drive_outcome_ended_reason(&Ok(DriveOutcome::Faulted(
-            FaultReason::PeerClosed
-        )))
-        .is_some());
+        assert!(
+            drive_outcome_ended_reason(&Ok(DriveOutcome::Faulted(FaultReason::PeerClosed)))
+                .is_some()
+        );
         assert!(drive_outcome_ended_reason(&Err(std::io::Error::other("boom"))).is_some());
     }
 
