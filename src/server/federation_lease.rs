@@ -156,6 +156,20 @@ impl FederationLease {
         )
     }
 
+    /// Whether any connection currently holds a mounted lease, regardless of
+    /// which. A mounted controller drives this host's terminal sizes, so the
+    /// host's own render loop must stop resizing them to its geometry while
+    /// this holds (see `AppState::federation_owns_terminal_sizes`).
+    pub(crate) fn has_mounted_controller(&self) -> bool {
+        matches!(
+            self.slot,
+            Slot::Held {
+                phase: Phase::Mounted,
+                ..
+            }
+        )
+    }
+
     /// Compare-and-clear release on connection EOF. Frees the slot only if the
     /// exact `(epoch, connid)` still holds it, so a late EOF from a superseded
     /// connection can never drop a newer lease. Returns whether it released.
