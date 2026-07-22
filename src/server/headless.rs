@@ -1025,6 +1025,10 @@ impl HeadlessServer {
         // client path likewise relies on shutdown + connection drop, not a forced
         // socket close.
         let _revoked = self.federation_lease.begin_revocation();
+        crate::server::federation_actor::sync_terminal_size_ownership(
+            &mut self.app,
+            &self.federation_lease,
+        );
 
         let mut paused_terminal_ids = Vec::new();
         for terminal_id in pane_by_terminal.keys() {
@@ -1276,6 +1280,10 @@ impl HeadlessServer {
         // value — never restored, so pre-revocation connections remain stale) so
         // a rolled-back handoff does not permanently wedge federation.
         self.federation_lease.reopen_admission();
+        crate::server::federation_actor::sync_terminal_size_ownership(
+            &mut self.app,
+            &self.federation_lease,
+        );
         self.handoff_in_progress = false;
         let _ = std::fs::remove_file(socket_path);
     }
