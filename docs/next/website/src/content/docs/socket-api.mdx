@@ -105,7 +105,7 @@ Raw socket method names use dot notation:
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
-| Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
+| Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
@@ -249,6 +249,22 @@ is `type: "layout_split_ratio_set"` with the updated portable `layout`.
 
 ```json
 {"id":"req_ratio","method":"layout.set_split_ratio","params":{"tab_id":"w1:t1","path":[],"ratio":0.6}}
+```
+
+`layout.balance` rebalances every split ratio in a tab so each leaf pane gets
+an equal area, weighted by leaf count rather than tree shape. It takes the
+same target params as `layout.export` (omit both to target the active tab).
+The response is `type: "layout_balance"` with the updated portable `layout`.
+It is a no-op (unchanged layout, still a success response) while the target
+tab is zoomed, since the real split ratios are inert until un-zoom.
+Ratio-only layout changes (`layout.balance`, `layout.set_split_ratio`, and
+the auto-resize-splits behavior) do not trigger a federation resync, so a
+mounted remote workspace's local mirror can show stale ratios until an
+unrelated structural event (a pane or tab created, closed, or moved) forces
+a resync.
+
+```json
+{"id":"req_balance","method":"layout.balance","params":{"tab_id":"w1:t1"}}
 ```
 
 Process-launching methods accept an `env` object. Herdr applies those key/value

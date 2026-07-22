@@ -1214,6 +1214,9 @@ pub enum ContextMenuKind {
         pane_id: PaneId,
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
+        /// Snapshot of `AppState.auto_resize_splits` at menu-open time, used to
+        /// render the toggle label.
+        auto_resize_enabled: bool,
     },
 }
 
@@ -1226,91 +1229,70 @@ pub struct ContextMenuState {
 }
 
 impl ContextMenuState {
-    pub fn items(&self) -> &'static [&'static str] {
+    pub fn items(&self) -> Vec<&'static str> {
         match self.kind {
-            ContextMenuKind::Workspace { .. } => &["Rename", "Close"],
+            ContextMenuKind::Workspace { .. } => ["Rename", "Close"].to_vec(),
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => &["Rename", "Close", "New worktree", "Open worktree..."],
+            } => ["Rename", "Close", "New worktree", "Open worktree..."].to_vec(),
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
-            } => &["Rename", "Close", "Delete worktree checkout..."],
+            } => ["Rename", "Close", "Delete worktree checkout..."].to_vec(),
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: true,
                 ..
-            } => &[
+            } => [
                 "Rename",
                 "Close group",
                 "New worktree",
                 "Open worktree...",
                 "Expand",
-            ],
+            ]
+            .to_vec(),
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
                 ..
-            } => &[
+            } => [
                 "Rename",
                 "Close group",
                 "New worktree",
                 "Open worktree...",
                 "Collapse",
-            ],
-            ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Close"],
+            ]
+            .to_vec(),
+            ContextMenuKind::Tab { .. } => ["New tab", "Rename", "Close"].to_vec(),
             ContextMenuKind::Pane {
-                has_manual_label: true,
-                source_pane_id: Some(_),
+                has_manual_label,
+                source_pane_id,
+                auto_resize_enabled,
                 ..
-            } => &[
-                "Rename pane",
-                "Clear pane name",
-                "Swap with focused pane",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
-            ContextMenuKind::Pane {
-                has_manual_label: false,
-                source_pane_id: Some(_),
-                ..
-            } => &[
-                "Rename pane",
-                "Swap with focused pane",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
-            ContextMenuKind::Pane {
-                has_manual_label: true,
-                source_pane_id: None,
-                ..
-            } => &[
-                "Rename pane",
-                "Clear pane name",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
-            ContextMenuKind::Pane {
-                has_manual_label: false,
-                source_pane_id: None,
-                ..
-            } => &[
-                "Rename pane",
-                "Split right",
-                "Split down",
-                "Zoom",
-                "Close pane",
-            ],
+            } => {
+                let mut items = vec!["Rename pane"];
+                if has_manual_label {
+                    items.push("Clear pane name");
+                }
+                if source_pane_id.is_some() {
+                    items.push("Swap with focused pane");
+                }
+                items.push("Split right");
+                items.push("Split down");
+                items.push("Zoom");
+                items.push("Balance splits");
+                items.push(if auto_resize_enabled {
+                    "Auto-resize splits: On"
+                } else {
+                    "Auto-resize splits: Off"
+                });
+                items.push("Close pane");
+                items
+            }
         }
     }
 }
@@ -1509,6 +1491,8 @@ pub struct AppState {
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
     pub pane_gaps: bool,
+    /// Automatically rebalance sibling split ratios on pane split/close.
+    pub auto_resize_splits: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub hide_tab_bar_when_single_tab: bool,
     pub pane_history_persistence: bool,
@@ -1994,6 +1978,7 @@ impl AppState {
             prompt_new_workspace_name: false,
             pane_borders: true,
             pane_gaps: false,
+            auto_resize_splits: false,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             pane_history_persistence: false,
@@ -2895,5 +2880,151 @@ mod tests {
                 "Collapse"
             ]
         );
+    }
+
+    fn pane_context_menu(
+        has_manual_label: bool,
+        source_pane_id: Option<PaneId>,
+        auto_resize_enabled: bool,
+    ) -> ContextMenuState {
+        ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: PaneId::alloc(),
+                source_pane_id,
+                has_manual_label,
+                auto_resize_enabled,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        }
+    }
+
+    #[test]
+    fn pane_context_menu_includes_balance_and_toggle_off_items() {
+        let menu = pane_context_menu(false, None, false);
+        let items = menu.items();
+
+        let balance_idx = items
+            .iter()
+            .position(|item| *item == "Balance splits")
+            .expect("balance splits item");
+        let toggle_idx = items
+            .iter()
+            .position(|item| *item == "Auto-resize splits: Off")
+            .expect("auto-resize off item");
+        assert!(balance_idx < toggle_idx);
+        assert!(items
+            .iter()
+            .position(|item| *item == "Auto-resize splits: On")
+            .is_none());
+    }
+
+    #[test]
+    fn pane_context_menu_toggle_on_shows_on_label() {
+        let menu = pane_context_menu(false, None, true);
+        let items = menu.items();
+
+        assert!(items
+            .iter()
+            .position(|item| *item == "Auto-resize splits: On")
+            .is_some());
+        assert!(items
+            .iter()
+            .position(|item| *item == "Auto-resize splits: Off")
+            .is_none());
+    }
+
+    #[test]
+    fn pane_context_menu_all_4_label_combinations_unchanged_besides_new_items() {
+        for has_manual_label in [false, true] {
+            for has_source in [false, true] {
+                let source_pane_id = has_source.then(PaneId::alloc);
+                let menu = pane_context_menu(has_manual_label, source_pane_id, false);
+                let items = menu.items();
+
+                let mut expected = vec!["Rename pane"];
+                if has_manual_label {
+                    expected.push("Clear pane name");
+                }
+                if has_source {
+                    expected.push("Swap with focused pane");
+                }
+                expected.push("Split right");
+                expected.push("Split down");
+                expected.push("Zoom");
+                expected.push("Close pane");
+
+                let mut positions = Vec::new();
+                for label in &expected {
+                    let idx = items
+                        .iter()
+                        .position(|item| item == label)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "missing item {label} for has_manual_label={has_manual_label} \
+                                 has_source={has_source}"
+                            )
+                        });
+                    positions.push(idx);
+                }
+                assert!(
+                    positions.windows(2).all(|w| w[0] < w[1]),
+                    "pre-existing items out of relative order for \
+                     has_manual_label={has_manual_label} has_source={has_source}: {items:?}"
+                );
+
+                assert!(items
+                    .iter()
+                    .position(|item| *item == "Balance splits")
+                    .is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn non_pane_menu_kinds_items_unchanged() {
+        let workspace_menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(workspace_menu.items(), vec!["Rename", "Close"]);
+
+        let tab_menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(tab_menu.items(), vec!["New tab", "Rename", "Close"]);
+
+        let git_menu = ContextMenuState {
+            kind: ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: false,
+                has_worktree_children: false,
+                collapsed: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(
+            git_menu.items(),
+            vec!["Rename", "Close", "New worktree", "Open worktree..."]
+        );
+    }
+
+    #[test]
+    fn app_state_default_has_auto_resize_splits_off() {
+        let state = AppState::test_new();
+        assert!(!state.auto_resize_splits);
     }
 }
