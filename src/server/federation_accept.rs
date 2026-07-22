@@ -312,7 +312,14 @@ fn drive_mount<S: FederationStream>(
     // bidirectionally: inbound commands on this thread, outbound frames on a
     // writer thread + ticker + per-terminal output pumps. The guard (above)
     // releases the lease when this returns.
-    run_connection(stream, epoch, connid, cursor, server_event_tx)
+    run_connection(
+        stream,
+        epoch,
+        connid,
+        cursor,
+        server_instance_id,
+        server_event_tx,
+    )
 }
 
 /// A federation connection stream: blocking `Read + Write` plus a `try_clone`
@@ -344,6 +351,7 @@ fn run_connection<S: FederationStream>(
     epoch: AcceptEpoch,
     connid: ConnId,
     initial_cursor: EventCursor,
+    server_instance_id: &ServerInstanceId,
     server_event_tx: &mpsc::Sender<ServerEvent>,
 ) -> io::Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -386,6 +394,7 @@ fn run_connection<S: FederationStream>(
         stream,
         epoch,
         connid,
+        server_instance_id,
         &out_tx,
         &shutdown,
         &first_cause,
@@ -436,6 +445,7 @@ fn reader_loop<S: Read>(
     reader: &mut S,
     epoch: AcceptEpoch,
     connid: ConnId,
+    server_instance_id: &ServerInstanceId,
     out_tx: &std_mpsc::SyncSender<FederationMessage>,
     shutdown: &Arc<AtomicBool>,
     first_cause: &Arc<FirstCauseCell>,
@@ -468,6 +478,15 @@ fn reader_loop<S: Read>(
             }
             Ok(Some(FederationMessage::SplitPaneRequest(request))) => {
                 handle_split_pane_request(request, out_tx, shutdown, first_cause, server_event_tx);
+            }
+            Ok(Some(FederationMessage::SnapshotRequest(_))) => {
+                handle_snapshot_request(
+                    server_instance_id,
+                    out_tx,
+                    shutdown,
+                    first_cause,
+                    server_event_tx,
+                );
             }
             Ok(Some(_other)) => {
                 // The controller drives only the terminal channel inbound;
@@ -531,6 +550,52 @@ fn handle_split_pane_request(
     let _ = enqueue_outbound(
         out_tx,
         FederationMessage::SplitPaneResponse(response),
+        first_cause,
+        shutdown,
+    );
+}
+
+/// Services one inbound `SnapshotRequest` (post-mount pane mirroring fix,
+/// plans/260722-1327): a blocking round-trip through
+/// `FederationCommand::Snapshot`, replying with a `SnapshotResponse`
+/// carrying the same atomic (snapshot, cursor) shape the mount handshake's
+/// own `MountSnapshot` does. A dropped/gone actor (server shutting down)
+/// replies with an empty snapshot at the connection's already-known cursor
+/// isn't available here, so this falls back to `EventCursor(0)` — matching
+/// `mount()`'s own `unwrap_or_else(empty_snapshot)` fallback shape; the
+/// client's reducer only advances its cursor on the reply it actually
+/// receives, so a best-effort empty answer here is inert, not corrupting.
+fn handle_snapshot_request(
+    server_instance_id: &ServerInstanceId,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) {
+    let (reply, rx) = oneshot::channel();
+    let sent =
+        server_event_tx.blocking_send(ServerEvent::Federation(FederationCommand::Snapshot(reply)));
+    let (snapshot, cursor) = if sent.is_err() {
+        (
+            crate::remote::federation::serve::empty_snapshot(),
+            EventCursor(0),
+        )
+    } else {
+        rx.blocking_recv().unwrap_or_else(|_| {
+            (
+                crate::remote::federation::serve::empty_snapshot(),
+                EventCursor(0),
+            )
+        })
+    };
+
+    let _ = enqueue_outbound(
+        out_tx,
+        FederationMessage::SnapshotResponse(MountSnapshot {
+            server_instance_id: server_instance_id.clone(),
+            snapshot,
+            cursor,
+        }),
         first_cause,
         shutdown,
     );
@@ -1259,6 +1324,7 @@ mod tests {
             &mut server,
             0,
             1,
+            &ServerInstanceId("test-inst".to_string()),
             &out_tx,
             &shutdown,
             &first_cause,
@@ -1323,6 +1389,7 @@ mod tests {
             &mut server,
             0,
             1,
+            &ServerInstanceId("test-inst".to_string()),
             &out_tx,
             &shutdown,
             &first_cause,
@@ -1347,6 +1414,70 @@ mod tests {
                 assert_eq!(new_terminal_id, "p1-split-term");
             }
             other => panic!("expected SplitPaneResponse::Created, got {other:?}"),
+        }
+    }
+
+    // Post-mount pane mirroring fix (plans/260722-1327): a `SnapshotRequest`
+    // routes to `FederationCommand::Snapshot` and the reply comes back as a
+    // `SnapshotResponse` carrying the mock actor's canned snapshot/cursor,
+    // tagged with this connection's `server_instance_id`.
+    #[test]
+    fn reader_loop_routes_a_snapshot_request_and_replies_with_a_snapshot() {
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::Snapshot(reply)) = ev {
+                    let _ = reply.send((
+                        crate::remote::federation::serve::empty_snapshot(),
+                        EventCursor(42),
+                    ));
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::SnapshotRequest(
+                crate::remote::federation::protocol::SnapshotRequest,
+            ),
+        )
+        .expect("client writes snapshot request");
+        drop(client); // EOF ends the reader after servicing the one frame
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let response = out_rx.try_recv().expect("a response was enqueued");
+        match response {
+            FederationMessage::SnapshotResponse(MountSnapshot {
+                server_instance_id,
+                cursor,
+                ..
+            }) => {
+                assert_eq!(
+                    server_instance_id,
+                    ServerInstanceId("test-inst".to_string())
+                );
+                assert_eq!(cursor.0, 42);
+            }
+            other => panic!("expected SnapshotResponse, got {other:?}"),
         }
     }
 

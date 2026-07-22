@@ -27,6 +27,13 @@ use super::id::ServerInstanceId;
 /// Bumped 2 -> 3 with the addition of `SplitPaneRequest`/`SplitPaneResponse`
 /// (remote-split protocol scaffolding): a peer on v2 cannot decode either
 /// variant.
+///
+/// `SnapshotRequest`/`SnapshotResponse` (post-mount pane mirroring resync,
+/// plans/260722-1327) were added WITHOUT a version bump: v3 has never
+/// shipped in a release (no `federation_accept.rs`/`client.rs` production
+/// call site existed in any tagged version — see
+/// `plans/260713-1217-herdr-remote-workspace-federation/implementation-notes.md`),
+/// so there is no deployed peer that could observe the addition as a skew.
 pub const FEDERATION_PROTOCOL_VERSION: u32 = 3;
 
 /// An optional feature two federation peers may support. Modeled as an
@@ -288,6 +295,19 @@ pub enum SplitPaneResponse {
     },
 }
 
+/// Request from the mounting client for a fresh full `MountSnapshot`,
+/// carried in-band on the same tunnel rather than requiring a whole new
+/// connection. Sent when the client observes a structural `EventFrame`
+/// (`PaneCreated`/`PaneClosed`/`TabCreated`/`TabClosed`) it cannot itself
+/// turn into a mirror mutation (`reducer.rs`'s module docs: a bare
+/// `EventFrame` carries no entity payload) — the response's `MountSnapshot`
+/// is diffed against the mirror exactly like a `Gap`/`Reset` remount
+/// (`RemoteMirror::reconcile_by_diff`). No fields: the single-controller
+/// lease means the server always answers with its own current, unambiguous
+/// state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotRequest;
+
 /// The six federation channel classes, used to select a per-channel frame
 /// cap in the codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,6 +355,12 @@ pub enum FederationMessage {
     Fault(FaultMessage),
     SplitPaneRequest(SplitPaneRequest),
     SplitPaneResponse(SplitPaneResponse),
+    SnapshotRequest(SnapshotRequest),
+    /// Answer to a `SnapshotRequest`: a fresh atomic (snapshot, cursor) pair,
+    /// same shape as the mount handshake's own `MountSnapshot` — the
+    /// receiver diffs it into the mirror via `RemoteMirror::reconcile_by_diff`
+    /// rather than replacing it wholesale (S6.2).
+    SnapshotResponse(MountSnapshot),
 }
 
 impl FederationMessage {
@@ -349,6 +375,10 @@ impl FederationMessage {
             Self::Clipboard(_) => Channel::Clipboard,
             Self::Fault(_) => Channel::Control,
             Self::SplitPaneRequest(_) | Self::SplitPaneResponse(_) => Channel::Control,
+            Self::SnapshotRequest(_) => Channel::Control,
+            // Carries a full `SessionSnapshot`, same payload shape/size as
+            // the mount handshake's `MountSnapshot` — reuse its channel cap.
+            Self::SnapshotResponse(_) => Channel::Mount,
         }
     }
 }
@@ -410,6 +440,32 @@ mod tests {
             codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
                 .expect("decode must succeed");
         assert_eq!(decoded, failed);
+    }
+
+    // Post-mount pane mirroring fix (plans/260722-1327): `SnapshotRequest`/
+    // `SnapshotResponse` round-trip through the wire codec like every other
+    // `FederationMessage` variant, on their assigned channels.
+    #[test]
+    fn snapshot_request_response_roundtrip_through_the_wire_codec() {
+        let request = FederationMessage::SnapshotRequest(SnapshotRequest);
+        assert_eq!(request.channel(), Channel::Control);
+        let encoded = codec::encode(&request).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, request);
+
+        let response = FederationMessage::SnapshotResponse(MountSnapshot {
+            server_instance_id: ServerInstanceId("inst-a".to_string()),
+            snapshot: sample_snapshot(),
+            cursor: EventCursor(9),
+        });
+        assert_eq!(response.channel(), Channel::Mount);
+        let encoded = codec::encode(&response).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Mount.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, response);
     }
 
     #[test]

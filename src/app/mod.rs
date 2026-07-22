@@ -153,6 +153,17 @@ pub struct App {
     /// eventual `SplitPaneResponse`'s materialized pane into the right spot
     /// (`App::handle_federation_split_pane_ready`, `app/creation.rs`).
     pub(crate) pending_remote_splits: HashMap<u64, creation::PendingRemoteSplit>,
+    /// Reverse index from a resync-revealed remote pane's namespaced
+    /// (public) id to the local `PaneId` `App::
+    /// handle_federation_resync_pane_created` materialized for it, so a
+    /// later `AppEvent::FederationResyncPaneRemoved` (post-mount pane
+    /// mirroring part 2, plans/260722-1327) can find the local pane to
+    /// tear down without walking every workspace's mirrored metadata.
+    /// Mount-time panes (`materialize_federation_mount`) and split-created
+    /// panes (`pending_remote_splits`) don't need an entry here — a resync
+    /// diff only ever reports panes *this* index or the mount-time pass
+    /// already knows about through `RemoteMirror::panes()` directly.
+    pub(crate) remote_resync_pane_index: HashMap<String, crate::layout::PaneId>,
     pub(crate) local_terminal_notifications: bool,
     /// Whether this process applies `AppEvent::PrefixInputSource` to the host input source.
     /// The headless server sets this to false: the switch belongs to the foreground client,
@@ -790,6 +801,7 @@ impl App {
             full_redraw_pending: false,
             overlay_panes: HashMap::new(),
             pending_remote_splits: HashMap::new(),
+            remote_resync_pane_index: HashMap::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
             config_reloaded_from_disk: false,
@@ -4104,6 +4116,91 @@ mod tests {
 
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
+    }
+
+    // Post-mount pane mirroring fix (plans/260722-1327): `agent.start`
+    // previously never pushed `PaneCreated`/`WorkspaceCreated` onto the
+    // shared `EventHub`, so a pane it spawned into an existing tab (or a
+    // brand-new workspace when none existed yet) was silently invisible to
+    // any consumer that only observes the hub — including a federation
+    // client mounted on this host. Proven for both split-into-existing-tab
+    // and new-workspace shapes.
+    #[tokio::test]
+    async fn agent_start_pushes_pane_created_into_an_existing_tab() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("agent-start-events");
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let before = app.event_hub.current_sequence();
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_agent_start_events".into(),
+            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                name: "worker".into(),
+                cwd: None,
+                workspace_id: None,
+                tab_id: None,
+                split: Some(crate::api::schema::SplitDirection::Right),
+                focus: false,
+                argv: vec![exiting_test_command().into()],
+                env: Default::default(),
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["type"], "agent_started");
+
+        let events = app.event_hub.events_after(before);
+        assert!(
+            events
+                .iter()
+                .any(|(_, envelope)| envelope.event == crate::api::schema::EventKind::PaneCreated),
+            "agent.start must push PaneCreated so a mounted federation client learns of it"
+        );
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_start_pushes_workspace_created_when_no_workspace_exists_yet() {
+        let mut app = test_app();
+        app.state.workspaces.clear();
+        app.state.active = None;
+
+        let before = app.event_hub.current_sequence();
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_agent_start_new_workspace".into(),
+            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                name: "worker".into(),
+                cwd: None,
+                workspace_id: None,
+                tab_id: None,
+                split: None,
+                focus: false,
+                argv: vec![exiting_test_command().into()],
+                env: Default::default(),
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["type"], "agent_started");
+
+        let events = app.event_hub.events_after(before);
+        assert!(
+            events
+                .iter()
+                .any(|(_, envelope)| envelope.event
+                    == crate::api::schema::EventKind::WorkspaceCreated),
+            "agent.start must push WorkspaceCreated when it spawns the first workspace"
+        );
 
         let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
         for (_terminal_id, runtime) in runtimes {
