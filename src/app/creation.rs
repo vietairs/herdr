@@ -807,6 +807,7 @@ impl App {
         let crate::events::FederationSplitPaneReady {
             request_id,
             origin,
+            remote_pane_id,
             pane_id,
             terminal_id,
             terminal,
@@ -885,6 +886,12 @@ impl App {
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         self.state.terminals.insert(terminal_id, terminal);
         self.state.remove_alias_shadowed_by_new_pane(pane_id);
+        // C1/M1 fix (plans/260722-1327 review): reverse-index this
+        // split-created pane the same way a resync-created pane is indexed,
+        // so a later resync-driven removal of it can find and tear it down
+        // (`handle_federation_resync_pane_removed`).
+        self.remote_resync_pane_index
+            .insert(remote_pane_id, pane_id);
         self.schedule_session_save();
 
         if pending.focus {
@@ -960,6 +967,202 @@ impl App {
             }
             _ => {}
         }
+        self.render_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationResyncPaneCreated` handler (post-mount pane
+    /// mirroring, part 2 — plans/260722-1327): the drive task already built
+    /// the new pane's real `TerminalRuntime`; splice it into the already-
+    /// mounted workspace's active tab. Conservative-minimal by design: a
+    /// resync diff only reports created/removed *panes*, not a tab-level
+    /// diff, so this always targets the workspace's current active tab
+    /// (`Workspace::active_tab`) rather than trying to reproduce the
+    /// remote's exact tab placement — logged as the accepted compromise in
+    /// `implementation-notes.md` rather than balloon this into a full
+    /// tab-diff pass.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_resync_pane_created(
+        &mut self,
+        ready: crate::events::FederationResyncPaneCreated,
+    ) {
+        let crate::events::FederationResyncPaneCreated {
+            origin,
+            workspace_id,
+            pane_id,
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        } = ready;
+
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == workspace_id)
+        else {
+            tracing::warn!(
+                %workspace_id,
+                "resync revealed a new remote pane but its workspace no longer exists"
+            );
+            return;
+        };
+
+        let space_key = format!("federation:{}", origin.as_str());
+        let origin_matches = self.state.workspaces[ws_idx]
+            .worktree_space()
+            .is_some_and(|space| space.key == space_key);
+        if !origin_matches {
+            tracing::warn!(
+                %workspace_id,
+                expected_origin = %origin,
+                "dropping a resync-created pane whose mount origin does not match its \
+                 workspace's federation origin"
+            );
+            return;
+        }
+
+        let ws = &mut self.state.workspaces[ws_idx];
+        let tab_idx = ws.active_tab;
+        let Some(target_pane_id) = ws.focused_pane_id() else {
+            tracing::warn!(
+                %workspace_id,
+                "resync revealed a new remote pane but its workspace's active tab has no \
+                 pane to split from"
+            );
+            return;
+        };
+
+        let moved = crate::workspace::MovedPane {
+            pane_id: local_pane_id,
+            pane_state,
+        };
+        if ws
+            .insert_moved_pane_into_tab(
+                tab_idx,
+                target_pane_id,
+                moved,
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+            )
+            .is_err()
+        {
+            tracing::warn!(
+                %workspace_id,
+                "resync revealed a new remote pane but it could not be inserted into its \
+                 workspace's active tab"
+            );
+            return;
+        }
+
+        self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        self.state.terminals.insert(terminal_id, terminal);
+        self.state.remove_alias_shadowed_by_new_pane(local_pane_id);
+        self.remote_resync_pane_index.insert(pane_id, local_pane_id);
+        self.schedule_session_save();
+
+        if let Some(pane) = self.pane_info(ws_idx, local_pane_id) {
+            self.emit_event(EventEnvelope {
+                event: EventKind::PaneCreated,
+                data: EventData::PaneCreated { pane },
+            });
+        }
+        self.emit_layout_updated_event(ws_idx, tab_idx);
+
+        self.render_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationResyncPaneRemoved` handler (post-mount pane
+    /// mirroring, part 2 — plans/260722-1327): the remote no longer reports
+    /// a pane this mount previously resync-materialized; tear the local
+    /// runtime down and remove it from its workspace. Unlike the interactive
+    /// `pane.close` API path, this never asks for close confirmation (e.g.
+    /// "closing this pane would close a worktree group") — the remote
+    /// already made this decision; there is nothing left here to confirm.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_resync_pane_removed(
+        &mut self,
+        origin: crate::remote::federation::id::HostKey,
+        pane_id: String,
+    ) {
+        let Some(local_pane_id) = self.remote_resync_pane_index.remove(&pane_id) else {
+            // Not every removed remote pane necessarily went through the
+            // resync-created path (e.g. it may have been materialized at
+            // mount time, or via a `SplitPaneResponse::Created` this
+            // App itself requested) — nothing to reverse-index here means
+            // nothing this handler owns to tear down.
+            return;
+        };
+        let Some((ws_idx, _)) = self.find_pane(local_pane_id) else {
+            return;
+        };
+
+        let space_key = format!("federation:{}", origin.as_str());
+        let origin_matches = self.state.workspaces[ws_idx]
+            .worktree_space()
+            .is_some_and(|space| space.key == space_key);
+        if !origin_matches {
+            tracing::warn!(
+                %pane_id,
+                expected_origin = %origin,
+                "dropping a resync pane removal whose mount origin does not match its \
+                 workspace's federation origin"
+            );
+            return;
+        }
+
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let public_pane_id = self.public_pane_id(ws_idx, local_pane_id);
+        let layout_update_target =
+            self.layout_update_target_after_pane_removal(ws_idx, local_pane_id);
+        let terminal_id = self.state.terminal_id_for_pane(ws_idx, local_pane_id);
+
+        let should_close_workspace = {
+            let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                return;
+            };
+            ws.close_pane(local_pane_id)
+        };
+        self.state.remove_plugin_pane_records([local_pane_id]);
+
+        if should_close_workspace {
+            self.state.selected = ws_idx;
+            self.state.close_selected_workspace();
+            self.shutdown_detached_terminal_runtimes();
+            if let Some(public_pane_id) = public_pane_id {
+                self.emit_event(EventEnvelope {
+                    event: EventKind::PaneClosed,
+                    data: EventData::PaneClosed {
+                        pane_id: public_pane_id,
+                        workspace_id,
+                    },
+                });
+            }
+        } else {
+            if let Some(terminal_id) = terminal_id {
+                self.state.remove_unattached_terminal_ids([terminal_id]);
+            }
+            self.shutdown_detached_terminal_runtimes();
+            self.schedule_session_save();
+            if let Some(public_pane_id) = public_pane_id {
+                self.emit_event(EventEnvelope {
+                    event: EventKind::PaneClosed,
+                    data: EventData::PaneClosed {
+                        pane_id: public_pane_id,
+                        workspace_id,
+                    },
+                });
+            }
+            if let Some((ws_idx, tab_idx)) = layout_update_target {
+                self.emit_layout_updated_event(ws_idx, tab_idx);
+            }
+        }
+
         self.render_dirty
             .store(true, std::sync::atomic::Ordering::Release);
         self.render_notify.notify_one();
@@ -1275,6 +1478,7 @@ mod federation_materialization_tests {
         app.handle_federation_split_pane_ready(crate::events::FederationSplitPaneReady {
             request_id,
             origin: crate::remote::federation::id::HostKey::new("remote-host", "s1"),
+            remote_pane_id: "remote-pane".to_string(),
             pane_id,
             terminal_id,
             terminal,
@@ -1358,6 +1562,7 @@ mod federation_materialization_tests {
         app.handle_federation_split_pane_ready(crate::events::FederationSplitPaneReady {
             request_id,
             origin: spoofed_origin,
+            remote_pane_id: "remote-pane".to_string(),
             pane_id,
             terminal_id,
             terminal,
@@ -1372,6 +1577,244 @@ mod federation_materialization_tests {
         assert!(
             app.state.workspaces[0].pane_state(pane_id).is_none(),
             "a response from the wrong origin must not splice a pane into any workspace"
+        );
+    }
+
+    /// Post-mount pane mirroring fix, part 2 (plans/260722-1327): a resync
+    /// diff's `AppEvent::FederationResyncPaneCreated` must splice the new
+    /// pane into the already-mounted workspace's active tab, register it in
+    /// `public_pane_numbers` (reachable through the public pane-id API), and
+    /// record the reverse index a later removal needs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_pane_created_splices_into_the_mounted_workspace_with_a_public_pane_number() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel::<crate::events::AppEvent>(4);
+        let (rt_out_tx, _rt_out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
+        let (rt_clipboard_tx, _rt_clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let local_pane_id = crate::layout::PaneId::alloc();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote(
+            local_pane_id,
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            terminal_id.to_string(),
+            1,
+            rt_out_tx,
+            output_rx,
+            rt_clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        )
+        .expect("spawn_remote must succeed for a fresh channel pair");
+        let terminal =
+            crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
+        let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+        let remote_pane_id = format!("{workspace_id}:p9");
+
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: workspace_id.clone(),
+            pane_id: remote_pane_id.clone(),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        let ws = &app.state.workspaces[ws_idx];
+        ws.assert_invariants_for_test();
+        assert!(
+            ws.pane_state(local_pane_id).is_some(),
+            "the resync-created pane must be spliced into the mounted workspace"
+        );
+        assert!(
+            ws.public_pane_number(local_pane_id).is_some(),
+            "a resync-created pane must get a public pane number, or it is unreachable \
+             through the public pane-id API"
+        );
+        assert_eq!(
+            app.remote_resync_pane_index.get(&remote_pane_id),
+            Some(&local_pane_id),
+            "the reverse index must record this pane so a later removal diff can find it"
+        );
+    }
+
+    /// Origin-check counterpart of `resync_pane_created_splices_into_the_
+    /// mounted_workspace_with_a_public_pane_number`: a resync-created pane
+    /// whose mount origin does not match the target workspace's federation
+    /// origin must be dropped, not spliced in.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_pane_created_from_the_wrong_origin_is_dropped() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel::<crate::events::AppEvent>(4);
+        let (rt_out_tx, _rt_out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
+        let (rt_clipboard_tx, _rt_clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let local_pane_id = crate::layout::PaneId::alloc();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote(
+            local_pane_id,
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            terminal_id.to_string(),
+            1,
+            rt_out_tx,
+            output_rx,
+            rt_clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        )
+        .expect("spawn_remote must succeed for a fresh channel pair");
+        let terminal =
+            crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
+        let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+        let remote_pane_id = format!("{workspace_id}:p9");
+        let spoofed_origin = crate::remote::federation::id::HostKey::new("evil-host", "s1");
+
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: spoofed_origin,
+            workspace_id: workspace_id.clone(),
+            pane_id: remote_pane_id.clone(),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        assert!(
+            app.state.workspaces[ws_idx]
+                .pane_state(local_pane_id)
+                .is_none(),
+            "a resync-created pane from the wrong origin must not be spliced into any workspace"
+        );
+        assert!(app.remote_resync_pane_index.is_empty());
+    }
+
+    /// Post-mount pane mirroring fix, part 2 (plans/260722-1327): a resync
+    /// diff's `AppEvent::FederationResyncPaneRemoved` must tear down the
+    /// matching local pane (via the reverse index recorded at pane-create
+    /// time) and its runtime.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_pane_removed_tears_down_the_local_pane_and_runtime() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel::<crate::events::AppEvent>(4);
+        let (rt_out_tx, _rt_out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
+        let (rt_clipboard_tx, _rt_clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let local_pane_id = crate::layout::PaneId::alloc();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote(
+            local_pane_id,
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            terminal_id.to_string(),
+            1,
+            rt_out_tx,
+            output_rx,
+            rt_clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        )
+        .expect("spawn_remote must succeed for a fresh channel pair");
+        let terminal =
+            crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
+        let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+        let remote_pane_id = format!("{workspace_id}:p9");
+
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: workspace_id.clone(),
+            pane_id: remote_pane_id.clone(),
+            local_pane_id,
+            terminal_id: terminal_id.clone(),
+            terminal,
+            runtime,
+            pane_state,
+        });
+        assert!(app.state.workspaces[ws_idx]
+            .pane_state(local_pane_id)
+            .is_some());
+        assert!(app.terminal_runtimes.get(&terminal_id).is_some());
+
+        app.handle_federation_resync_pane_removed(mount.host_key.clone(), remote_pane_id.clone());
+
+        assert!(
+            app.find_pane(local_pane_id).is_none(),
+            "the resync-removed pane must no longer exist in any workspace"
+        );
+        assert!(
+            app.terminal_runtimes.get(&terminal_id).is_none(),
+            "the resync-removed pane's runtime must be torn down"
+        );
+        assert!(
+            !app.remote_resync_pane_index.contains_key(&remote_pane_id),
+            "the reverse index entry must be consumed on removal"
         );
     }
 }

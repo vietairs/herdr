@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use super::{terminal_targets::TerminalTargetError, App, Mode};
-use crate::api::schema::{AgentStartParams, SplitDirection};
+use crate::api::schema::{AgentStartParams, EventData, EventEnvelope, EventKind, SplitDirection};
 
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
@@ -124,6 +124,7 @@ impl App {
         let focus = params.focus;
         let (rows, cols) = self.state.estimate_pane_size();
 
+        let mut created_workspace = false;
         let (ws_idx, tab_idx, pane_id) = if let Some(tab_id) = params.tab_id {
             let (ws_idx, tab_idx) =
                 self.parse_tab_id(&tab_id)
@@ -168,6 +169,7 @@ impl App {
                 focus,
             )?
         } else if self.state.workspaces.is_empty() {
+            created_workspace = true;
             self.spawn_agent_workspace(cwd, rows, cols, &argv, extra_env, focus)?
         } else {
             let ws_idx = self.state.active.unwrap_or(0);
@@ -183,6 +185,25 @@ impl App {
                 focus,
             )?
         };
+
+        // Bug fix (post-mount pane mirroring, plans/260722-1327): every other
+        // pane/workspace creation path (`app/api/panes.rs`'s split handler,
+        // `App::emit_workspace_open_events`) pushes its `PaneCreated`/
+        // `WorkspaceCreated` event onto the shared `EventHub` so a federation
+        // client mounted on this host learns about it (via the resync this
+        // fix wires in `remote/federation`). `agent.start` never did, so a
+        // pane spawned this way on a serving host was invisible to any
+        // mounted client even after this fix's resync request/response
+        // machinery landed.
+        if created_workspace {
+            self.emit_workspace_open_events(ws_idx);
+        } else if let Some(pane) = self.pane_info(ws_idx, pane_id) {
+            self.emit_event(EventEnvelope {
+                event: EventKind::PaneCreated,
+                data: EventData::PaneCreated { pane },
+            });
+            self.emit_layout_updated_event(ws_idx, tab_idx);
+        }
 
         let terminal_id = self
             .state
