@@ -257,11 +257,12 @@ same target params as `layout.export` (omit both to target the active tab).
 The response is `type: "layout_balance"` with the updated portable `layout`.
 It is a no-op (unchanged layout, still a success response) while the target
 tab is zoomed, since the real split ratios are inert until un-zoom.
-Ratio-only layout changes (`layout.balance`, `layout.set_split_ratio`, and
-the auto-resize-splits behavior) do not trigger a federation resync, so a
-mounted remote workspace's local mirror can show stale ratios until an
-unrelated structural event (a pane or tab created, closed, or moved) forces
-a resync.
+Split ratios are not federated. Ratio-only layout changes (`layout.balance`,
+`layout.set_split_ratio`, and the auto-resize-splits behavior) neither
+trigger a federation resync nor propagate through one — a resync reconciles
+workspaces, tabs, and panes, and does not apply layout ratios. A mounted
+remote workspace's local mirror can therefore show stale ratios for the life
+of the mount.
 
 ```json
 {"id":"req_balance","method":"layout.balance","params":{"tab_id":"w1:t1"}}
