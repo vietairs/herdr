@@ -101,6 +101,25 @@ pub(crate) enum FederationCommand {
         cols: u16,
         rows: u16,
     },
+    /// Force a live terminal's child to repaint its full screen, by briefly
+    /// jiggling the PTY window size so the child sees a `SIGWINCH` it must
+    /// answer. Dropped unless `(epoch, connid)` is the mounted controller
+    /// (it drives a real ioctl on the host's PTY). Fire-and-forget.
+    ///
+    /// A mounted client cannot repaint a remote pane by itself: its local
+    /// mirror deliberately skips the replay-recovery heuristic (see
+    /// `PaneTerminal::resize`'s `is_remote_backed` gate) because the serving
+    /// host's screen is the sole source of truth, and the only full-paint
+    /// frame in the protocol (`Open{replay}`) is emitted once per terminal
+    /// and is empty for alternate-screen apps. Making the child itself
+    /// repaint is therefore the only payload that works on every screen
+    /// mode, and it needs no protocol change: the bytes reach the client
+    /// through the ordinary output stream.
+    NudgeRedraw {
+        epoch: AcceptEpoch,
+        connid: ConnId,
+        terminal_id: String,
+    },
     /// Current per-terminal agent statuses, paired with the identified
     /// agent's canonical label (`AgentInfo.agent`, e.g. `"claude"`) so the
     /// relay can populate `AgentStatusMessage::agent` for remote-mirrored
@@ -155,6 +174,9 @@ impl std::fmt::Debug for FederationCommand {
                 rows,
                 ..
             } => write!(f, "Resize({terminal_id}, {cols}x{rows})"),
+            FederationCommand::NudgeRedraw { terminal_id, .. } => {
+                write!(f, "NudgeRedraw({terminal_id})")
+            }
             FederationCommand::AgentStatuses(_) => f.write_str("AgentStatuses"),
             FederationCommand::SplitPane { target_pane_id, .. } => {
                 write!(f, "SplitPane({target_pane_id})")
@@ -245,6 +267,23 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
             }
             if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
                 runtime.resize(rows, cols, 0, 0);
+                // Unconditional, including when `resize` deduped the call: a
+                // size that is already current here still leaves the mounted
+                // client's mirror freshly reflowed and unpainted, and that leg
+                // sends no `SIGWINCH` at all.
+                nudge_child_redraw(runtime);
+            }
+        }
+        FederationCommand::NudgeRedraw {
+            epoch,
+            connid,
+            terminal_id,
+        } => {
+            if !lease.is_mounted_controller(epoch, connid) {
+                return;
+            }
+            if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
+                nudge_child_redraw(runtime);
             }
         }
         FederationCommand::AgentStatuses(reply) => {
@@ -315,6 +354,21 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
             let _ = reply.send(outcome);
         }
     }
+}
+
+/// Make a terminal's child process repaint its whole screen, by jiggling the
+/// PTY window size so the child receives a `SIGWINCH` it has to answer. The
+/// resulting bytes are ordinary PTY output, so they reach a mounted client
+/// through the existing output stream with no protocol involvement.
+///
+/// Unix-only, because the jiggle is a `TIOCSWINSZ` pair. A Windows serving
+/// host keeps the pre-existing behavior (mounted panes repaint only when the
+/// child volunteers it); ConPTY has no equivalent primitive today.
+fn nudge_child_redraw(runtime: &crate::terminal::TerminalRuntime) {
+    #[cfg(unix)]
+    runtime.nudge_child_redraw_after_handoff();
+    #[cfg(not(unix))]
+    let _ = runtime;
 }
 
 /// Produces the atomic (snapshot, cursor) pair `Mount` and `Snapshot` both
@@ -510,6 +564,17 @@ mod tests {
                 terminal_id: "no-such-terminal".to_string(),
                 cols: 80,
                 rows: 24,
+            },
+        );
+        // Same gate for the repaint nudge: it drives a real ioctl on this
+        // host's PTY, so a non-controller must not reach it either.
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::NudgeRedraw {
+                epoch,
+                connid: 999,
+                terminal_id: "no-such-terminal".to_string(),
             },
         );
     }
