@@ -97,6 +97,18 @@ impl App {
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
         let previous_focus = self.state.current_pane_focus_target();
+        // Auto-rebalance zoom guard must be captured BEFORE the split
+        // call below: `split_focused_with_runtime` clears `Tab.zoomed` as a
+        // side effect of every split (a split always leaves the tab tiled
+        // again), so reading `tab.zoomed` after the split has already run
+        // would always observe `false` and the guard would never fire.
+        let target_was_zoomed = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.find_tab_index_for_pane(target_pane_id))
+            .and_then(|tab_idx| self.state.workspaces[ws_idx].tabs.get(tab_idx))
+            .is_some_and(|tab| tab.zoomed);
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
@@ -150,6 +162,29 @@ impl App {
         self.state
             .terminals
             .insert(new_pane.terminal.id.clone(), new_pane.terminal);
+        // Auto-rebalance hook: only the new pane's ancestor chain, so
+        // manual ratios in sibling subtrees survive. Zoom no-op: a
+        // zoomed tab's ratios are inert until un-zoom (see the identical
+        // guard in `handle_layout_balance`), so skip while zoomed. This
+        // hook is reached only via the local-spawn path above — a
+        // remote-federated workspace's pane returns earlier via
+        // `dispatch_remote_pane_split` — and ratio-only changes don't
+        // trigger federation resync (`src/remote/federation/client.rs:
+        // 824-829` gates on PaneCreated/PaneClosed/PaneMoved/TabCreated/
+        // TabClosed/TabMoved, not LayoutUpdated), so mounted remote clients
+        // show stale ratios in v1.
+        if self.state.auto_resize_splits && !target_was_zoomed {
+            if let Some(tab) = self
+                .state
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.tabs.get_mut(target_tab_idx))
+            {
+                if let Some(path) = tab.layout.path_to_pane(new_pane.pane_id) {
+                    tab.layout.balance_areas_along_path(&path);
+                }
+            }
+        }
         self.schedule_session_save();
         let pane = self.pane_info(ws_idx, new_pane.pane_id).unwrap();
         self.emit_event(EventEnvelope {
@@ -1702,6 +1737,34 @@ impl App {
         }
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
+        // Auto-rebalance hook: the path to the closing pane must be
+        // captured BEFORE `ws.close_pane` collapses the tree — afterward the
+        // pane and its former ancestor chain no longer address the same
+        // nodes. `remove_pane` also promotes the closing pane's sibling into
+        // its former parent's slot, so the path is truncated by 2 elements
+        // before replay below (see the comment at that call site for why).
+        // Zoom no-op: checked pre-close against the same `tab` (see the
+        // identical guard in `handle_layout_balance`). Federation gap:
+        // ratio-only changes here don't trigger federation resync
+        // (`src/remote/federation/client.rs:824-829`), so mounted remote
+        // clients show stale ratios in v1.
+        let auto_rebalance_path = if self.state.auto_resize_splits {
+            layout_update_target.and_then(|(target_ws_idx, target_tab_idx)| {
+                let tab = self
+                    .state
+                    .workspaces
+                    .get(target_ws_idx)?
+                    .tabs
+                    .get(target_tab_idx)?;
+                if tab.zoomed {
+                    None
+                } else {
+                    tab.layout.path_to_pane(pane_id)
+                }
+            })
+        } else {
+            None
+        };
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return Err(pane_not_found(id, &target.pane_id));
@@ -1730,6 +1793,21 @@ impl App {
         } else {
             self.state.remove_unattached_terminal_ids(terminal_id);
             self.shutdown_detached_terminal_runtimes();
+            if let Some(path) = auto_rebalance_path {
+                if let Some((target_ws_idx, target_tab_idx)) = layout_update_target {
+                    if let Some(tab) = self
+                        .state
+                        .workspaces
+                        .get_mut(target_ws_idx)
+                        .and_then(|ws| ws.tabs.get_mut(target_tab_idx))
+                    {
+                        // `path` still addresses the closing pane in the
+                        // PRE-close tree; the collapse rule for translating it
+                        // onto the post-close tree lives with the tree code.
+                        tab.layout.balance_areas_after_removal(&path);
+                    }
+                }
+            }
             self.schedule_session_save();
             self.emit_event(EventEnvelope {
                 event: EventKind::PaneClosed,
@@ -2031,6 +2109,7 @@ fn invalid_agent(id: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::shutdown_test_runtimes;
     use super::*;
     use crate::{
         api::schema::{ErrorResponse, SplitDirection, SuccessResponse},
@@ -3976,5 +4055,414 @@ mod tests {
             panes_before, panes_after,
             "a refused remote split must not create any local pane"
         );
+    }
+
+    // --- auto-rebalance hooks (pane.split / pane.close) ---
+
+    /// Builds a 4-leaf tab: `(root|a2)` under a vertical split, sibling
+    /// `(b|b2)` under a horizontal split, both hung off a horizontal root
+    /// split. Gives every level a distinguishable manual ratio so hook
+    /// tests can prove exactly which nodes changed.
+    fn app_with_four_leaf_tab() -> (App, PaneId, PaneId) {
+        let (mut app, _) = app_with_test_workspace();
+        app.state.default_shell = super::super::test_support::exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let b = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        let a2 = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(b);
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[], 0.3);
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[false], 0.75);
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[true], 0.9);
+        (app, root, a2)
+    }
+
+    fn split_ratios(app: &App) -> (f32, f32, f32) {
+        let crate::layout::Node::Split {
+            ratio: root_ratio,
+            first,
+            second,
+            ..
+        } = app.state.workspaces[0].tabs[0].layout.root()
+        else {
+            panic!("expected split root");
+        };
+        let inner1_ratio = match first.as_ref() {
+            crate::layout::Node::Split { ratio, .. } => *ratio,
+            crate::layout::Node::Pane(_) => f32::NAN,
+        };
+        let crate::layout::Node::Split {
+            ratio: inner2_ratio,
+            ..
+        } = second.as_ref()
+        else {
+            panic!("expected sibling split")
+        };
+        (*root_ratio, inner1_ratio, *inner2_ratio)
+    }
+
+    #[tokio::test]
+    async fn pane_split_auto_rebalance_touches_only_ancestor_chain() {
+        let (mut app, root, _a2) = app_with_four_leaf_tab();
+        app.state.auto_resize_splits = true;
+        let root_public = app.public_pane_id(0, root).unwrap();
+
+        let response = app.handle_pane_split(
+            "req".into(),
+            PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: Some(root_public),
+                direction: SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: false,
+                env: std::collections::HashMap::new(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::PaneInfo { .. }));
+        let (root_ratio, inner1_ratio, inner2_ratio) = split_ratios(&app);
+        assert!(
+            (inner2_ratio - 0.9).abs() < f32::EPSILON,
+            "sibling subtree ratio must be untouched: {inner2_ratio}"
+        );
+        assert!(
+            (root_ratio - 0.6).abs() < 1e-5,
+            "root split should rebalance to 3 leaves vs 2: {root_ratio}"
+        );
+        assert!(
+            (inner1_ratio - 2.0 / 3.0).abs() < 1e-5,
+            "ancestor split should rebalance to 2 leaves vs 1: {inner1_ratio}"
+        );
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn pane_split_without_auto_resize_leaves_existing_ratios_untouched() {
+        let (mut app, root, _a2) = app_with_four_leaf_tab();
+        let root_public = app.public_pane_id(0, root).unwrap();
+
+        let response = app.handle_pane_split(
+            "req".into(),
+            PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: Some(root_public),
+                direction: SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: false,
+                env: std::collections::HashMap::new(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::PaneInfo { .. }));
+        let (root_ratio, inner1_ratio, inner2_ratio) = split_ratios(&app);
+        assert!((root_ratio - 0.3).abs() < f32::EPSILON);
+        assert!((inner1_ratio - 0.75).abs() < f32::EPSILON);
+        assert!((inner2_ratio - 0.9).abs() < f32::EPSILON);
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn pane_split_auto_rebalance_is_noop_while_tab_zoomed() {
+        let (mut app, root, _a2) = app_with_four_leaf_tab();
+        app.state.auto_resize_splits = true;
+        app.state.workspaces[0].tabs[0].zoomed = true;
+        let root_public = app.public_pane_id(0, root).unwrap();
+
+        let response = app.handle_pane_split(
+            "req".into(),
+            PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: Some(root_public),
+                direction: SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: false,
+                env: std::collections::HashMap::new(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::PaneInfo { .. }));
+        let (root_ratio, inner1_ratio, inner2_ratio) = split_ratios(&app);
+        assert!(
+            (root_ratio - 0.3).abs() < f32::EPSILON,
+            "zoomed tab must not rebalance: {root_ratio}"
+        );
+        assert!((inner1_ratio - 0.75).abs() < f32::EPSILON);
+        assert!((inner2_ratio - 0.9).abs() < f32::EPSILON);
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn pane_close_auto_rebalance_touches_only_collapsed_ancestor_chain() {
+        let (mut app, _root, a2) = app_with_four_leaf_tab();
+        app.state.auto_resize_splits = true;
+        let a2_public = app.public_pane_id(0, a2).unwrap();
+
+        let response = app.handle_pane_close("req".into(), PaneTarget { pane_id: a2_public });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let crate::layout::Node::Split {
+            ratio: root_ratio,
+            first,
+            second,
+            ..
+        } = app.state.workspaces[0].tabs[0].layout.root()
+        else {
+            panic!("expected split root");
+        };
+        assert!(
+            matches!(first.as_ref(), crate::layout::Node::Pane(_)),
+            "collapsed branch should leave a single pane, not a split"
+        );
+        assert!(
+            (root_ratio - 1.0 / 3.0).abs() < 1e-5,
+            "root split should rebalance to 1 leaf vs 2: {root_ratio}"
+        );
+        let crate::layout::Node::Split {
+            ratio: inner2_ratio,
+            ..
+        } = second.as_ref()
+        else {
+            panic!("expected sibling split")
+        };
+        assert!(
+            (inner2_ratio - 0.9).abs() < f32::EPSILON,
+            "sibling subtree ratio must be untouched: {inner2_ratio}"
+        );
+    }
+
+    /// Builds `root H(0.7){ Pane1, V(0.6){ Pane2, H(0.25){ Pane3, Pane4 } } }`
+    /// — the closing pane's sibling (the inner `H(0.25)` split) is itself a
+    /// `Split`, not a leaf, so a stale-path over-descent after the collapse
+    /// lands on a real split node and rewrites its ratio instead of stopping
+    /// harmlessly at a `Node::Pane`.
+    fn app_with_split_sibling_of_closing_pane() -> (App, PaneId) {
+        let (mut app, _) = app_with_test_workspace();
+        app.state.default_shell = super::super::test_support::exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        // H{ first=root(Pane1), second=pane2 }, focus=pane2
+        let pane2 = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        // H{ first=Pane1, second=V{ first=pane2, second=pane3 } }, focus=pane3
+        let pane3 = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        // H{ first=Pane1, second=V{ first=pane2, second=H{first=pane3,second=pane4} } }
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[], 0.7);
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[true], 0.6);
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[true, true], 0.25);
+        let _ = root;
+        let _ = pane3;
+        (app, pane2)
+    }
+
+    #[test]
+    fn pane_close_auto_rebalance_preserves_manual_ratio_in_split_sibling_subtree() {
+        let (mut app, pane2) = app_with_split_sibling_of_closing_pane();
+        app.state.auto_resize_splits = true;
+        let pane2_public = app.public_pane_id(0, pane2).unwrap();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: pane2_public,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let crate::layout::Node::Split {
+            ratio: root_ratio,
+            second,
+            ..
+        } = app.state.workspaces[0].tabs[0].layout.root()
+        else {
+            panic!("expected split root");
+        };
+        assert!(
+            (root_ratio - 1.0 / 3.0).abs() < 1e-5,
+            "root split should rebalance to 1 leaf vs 2: {root_ratio}"
+        );
+        let crate::layout::Node::Split {
+            ratio: promoted_sibling_ratio,
+            ..
+        } = second.as_ref()
+        else {
+            panic!("expected the promoted H(0.25) split to survive the collapse");
+        };
+        assert!(
+            (promoted_sibling_ratio - 0.25).abs() < f32::EPSILON,
+            "manual ratio in the unrelated promoted-sibling subtree must survive \
+             the parent collapse: {promoted_sibling_ratio}"
+        );
+    }
+
+    #[test]
+    fn pane_close_auto_rebalance_preserves_promoted_sibling_ratio_at_root_depth() {
+        let (mut app, _) = app_with_test_workspace();
+        app.state.default_shell = super::super::test_support::exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        let first = app.state.workspaces[0].tabs[0].root_pane;
+        // H{ first=Pane1, second=V{ pane2, pane3 } } — closing Pane1 removes a
+        // direct child of the root, so its parent IS the root and no ancestor
+        // survives the collapse.
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[], 0.2);
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[true], 0.75);
+        app.state.auto_resize_splits = true;
+        let first_public = app.public_pane_id(0, first).unwrap();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: first_public,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let crate::layout::Node::Split {
+            ratio: promoted_ratio,
+            ..
+        } = app.state.workspaces[0].tabs[0].layout.root()
+        else {
+            panic!("expected the promoted V(0.75) split to become the root");
+        };
+        assert!(
+            (promoted_ratio - 0.75).abs() < f32::EPSILON,
+            "closing a root-level pane leaves no surviving ancestor, so the \
+             promoted sibling's manual ratio must not be rebalanced: {promoted_ratio}"
+        );
+    }
+
+    #[test]
+    fn pane_close_without_auto_resize_leaves_root_ratio_untouched() {
+        let (mut app, _root, a2) = app_with_four_leaf_tab();
+        let a2_public = app.public_pane_id(0, a2).unwrap();
+
+        let response = app.handle_pane_close("req".into(), PaneTarget { pane_id: a2_public });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let crate::layout::Node::Split {
+            ratio: root_ratio,
+            second,
+            ..
+        } = app.state.workspaces[0].tabs[0].layout.root()
+        else {
+            panic!("expected split root");
+        };
+        assert!(
+            (root_ratio - 0.3).abs() < f32::EPSILON,
+            "no auto-resize toggle: root ratio must stay exactly as set: {root_ratio}"
+        );
+        let crate::layout::Node::Split {
+            ratio: inner2_ratio,
+            ..
+        } = second.as_ref()
+        else {
+            panic!("expected sibling split")
+        };
+        assert!((inner2_ratio - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn pane_close_auto_rebalance_is_noop_while_tab_zoomed() {
+        let (mut app, _root, a2) = app_with_four_leaf_tab();
+        app.state.auto_resize_splits = true;
+        app.state.workspaces[0].tabs[0].zoomed = true;
+        let a2_public = app.public_pane_id(0, a2).unwrap();
+
+        let response = app.handle_pane_close("req".into(), PaneTarget { pane_id: a2_public });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let crate::layout::Node::Split {
+            ratio: root_ratio, ..
+        } = app.state.workspaces[0].tabs[0].layout.root()
+        else {
+            panic!("expected split root");
+        };
+        assert!(
+            (root_ratio - 0.3).abs() < f32::EPSILON,
+            "zoomed tab must not rebalance on close: {root_ratio}"
+        );
+    }
+
+    #[test]
+    fn pane_close_that_closes_the_workspace_never_rebalances() {
+        let (mut app, _pane_id) = app_with_test_workspace();
+        app.state.auto_resize_splits = true;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        let workspaces_before = app.state.workspaces.len();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(app.state.workspaces.len(), workspaces_before - 1);
+    }
+
+    #[test]
+    fn pane_resize_never_rebalances_regardless_of_toggle() {
+        for auto_resize_splits in [false, true] {
+            let (mut app, root, _a2) = app_with_four_leaf_tab();
+            app.state.auto_resize_splits = auto_resize_splits;
+            let root_public = app.public_pane_id(0, root).unwrap();
+
+            let response = app.handle_pane_resize(
+                "req".into(),
+                PaneResizeParams {
+                    pane_id: Some(root_public),
+                    direction: PaneDirection::Down,
+                    amount: Some(0.1),
+                },
+            );
+
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert!(matches!(success.result, ResponseResult::PaneResize { .. }));
+            let (root_ratio, _inner1_ratio, inner2_ratio) = split_ratios(&app);
+            assert!(
+                (root_ratio - 0.3).abs() < f32::EPSILON,
+                "pane.resize must never rebalance the root split (auto_resize_splits={auto_resize_splits}): {root_ratio}"
+            );
+            assert!(
+                (inner2_ratio - 0.9).abs() < f32::EPSILON,
+                "pane.resize must never touch unrelated splits (auto_resize_splits={auto_resize_splits}): {inner2_ratio}"
+            );
+        }
     }
 }

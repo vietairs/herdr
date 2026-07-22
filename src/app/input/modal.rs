@@ -676,6 +676,13 @@ pub(crate) fn handle_confirm_close_key(state: &mut AppState, key: KeyEvent) {
 }
 
 #[cfg(test)]
+// Test-only: reachable only from `handle_context_menu_key` below (itself
+// `#[cfg(test)]`) and from this module's test suite. Production input
+// dispatch always goes through `apply_context_menu_action_via_api`, which
+// persists the auto-resize toggle and emits `LayoutUpdated`; this free fn
+// does neither. Gated out of non-test builds so it cannot silently diverge
+// from the production path if something is ever rewired to call it.
+#[cfg(test)]
 pub(super) fn apply_context_menu_action(
     state: &mut AppState,
     terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
@@ -874,6 +881,31 @@ pub(super) fn apply_context_menu_action(
                     Mode::Navigate
                 };
             }
+        }
+        (
+            ContextMenuKind::Pane {
+                ws_idx, tab_idx, ..
+            },
+            Some("Balance splits"),
+        ) => {
+            if let Some(tab) = state
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.tabs.get_mut(tab_idx))
+            {
+                if !tab.zoomed {
+                    tab.layout.balance_areas();
+                    state.mark_session_dirty();
+                }
+            }
+            state.mode = Mode::Terminal;
+        }
+        (
+            ContextMenuKind::Pane { .. },
+            Some("Auto-resize splits: On" | "Auto-resize splits: Off"),
+        ) => {
+            state.auto_resize_splits = !state.auto_resize_splits;
+            leave_modal(state);
         }
         _ => leave_modal(state),
     }
@@ -1260,6 +1292,38 @@ impl App {
                     };
                 }
             }
+            (
+                ContextMenuKind::Pane {
+                    ws_idx, tab_idx, ..
+                },
+                Some("Balance splits"),
+            ) => {
+                if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
+                    self.dispatch_runtime_mutation(
+                        "tui.layout.balance",
+                        crate::api::schema::Method::LayoutBalance(
+                            crate::api::schema::LayoutExportParams {
+                                tab_id: Some(tab_id),
+                                pane_id: None,
+                            },
+                        ),
+                    );
+                }
+                self.state.mode = Mode::Terminal;
+            }
+            (
+                ContextMenuKind::Pane {
+                    auto_resize_enabled,
+                    ..
+                },
+                Some("Auto-resize splits: On" | "Auto-resize splits: Off"),
+            ) => {
+                // Flip the value the visible label was rendered from, not the
+                // live one — a config hot-reload while the menu is open would
+                // otherwise make the click do the opposite of what it says.
+                self.save_auto_resize_splits(!auto_resize_enabled);
+                leave_modal(&mut self.state);
+            }
             _ => leave_modal(&mut self.state),
         }
     }
@@ -1296,6 +1360,7 @@ mod tests {
 
     use super::super::{capture_snapshot, state_with_workspaces};
     use super::*;
+    use crate::layout::Node;
     use crate::workspace::Workspace;
 
     fn config_env_lock() -> &'static std::sync::Mutex<()> {
@@ -1327,6 +1392,47 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
+        app
+    }
+
+    /// Reads the split ratio at `path` (`false` = first child, `true` =
+    /// second child), mirroring `layout::set_ratio_at`'s path semantics.
+    fn ratio_at(node: &Node, path: &[bool]) -> f32 {
+        match node {
+            Node::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } => {
+                if path.is_empty() {
+                    *ratio
+                } else if path[0] {
+                    ratio_at(second, &path[1..])
+                } else {
+                    ratio_at(first, &path[1..])
+                }
+            }
+            Node::Pane(_) => panic!("path does not resolve to a split"),
+        }
+    }
+
+    /// 3-leaf tab (root|inner, inner split into two) with manually-skewed
+    /// ratios so a balance call has something to equalize. Leaf-weighted
+    /// targets: root 2/3 (2 leaves vs 1), inner 0.5 (1 vs 1).
+    fn app_with_unequal_three_leaf_tab() -> App {
+        let mut app = app_with_test_workspaces(&["test"]);
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.state.workspaces[0].test_split(Direction::Vertical);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[], 0.2);
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[false], 0.9);
         app
     }
 
@@ -2001,6 +2107,7 @@ mod tests {
                 pane_id,
                 source_pane_id: None,
                 has_manual_label: false,
+                auto_resize_enabled: false,
             },
             x: 0,
             y: 0,
@@ -2066,6 +2173,7 @@ mod tests {
                 pane_id,
                 source_pane_id: None,
                 has_manual_label: false,
+                auto_resize_enabled: false,
             },
             x: 0,
             y: 0,
@@ -2085,5 +2193,200 @@ mod tests {
         assert_eq!(app.state.mode, Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert!(app.state.context_menu.is_none());
+    }
+
+    fn pane_menu(
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> ContextMenuState {
+        pane_menu_with_auto_resize(ws_idx, tab_idx, pane_id, false)
+    }
+
+    fn pane_menu_with_auto_resize(
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+        auto_resize_enabled: bool,
+    ) -> ContextMenuState {
+        ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                ws_idx,
+                tab_idx,
+                pane_id,
+                source_pane_id: None,
+                has_manual_label: false,
+                auto_resize_enabled,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        }
+    }
+
+    #[test]
+    fn context_menu_balance_splits_equalizes_tab_via_api() {
+        let mut app = app_with_unequal_three_leaf_tab();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let menu = pane_menu(0, 0, pane_id);
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Balance splits")
+            .expect("balance splits item");
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        let root = app.state.workspaces[0].tabs[0].layout.root();
+        assert!((ratio_at(root, &[]) - 2.0 / 3.0).abs() < 1e-5);
+        assert!((ratio_at(root, &[false]) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn context_menu_balance_splits_noop_when_zoomed_via_api() {
+        let mut app = app_with_unequal_three_leaf_tab();
+        app.state.workspaces[0].tabs[0].zoomed = true;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let menu = pane_menu(0, 0, pane_id);
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Balance splits")
+            .expect("balance splits item");
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        let root = app.state.workspaces[0].tabs[0].layout.root();
+        assert!(
+            (ratio_at(root, &[]) - 0.2).abs() < 1e-5,
+            "zoomed tab must not be rebalanced"
+        );
+        assert!((ratio_at(root, &[false]) - 0.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn context_menu_toggle_auto_resize_flips_state_and_persists_via_api() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("context-menu-toggle-auto-resize");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = app_with_unequal_three_leaf_tab();
+        assert!(!app.state.auto_resize_splits);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        let menu_off = pane_menu_with_auto_resize(0, 0, pane_id, app.state.auto_resize_splits);
+        let off_idx = menu_off
+            .items()
+            .iter()
+            .position(|item| *item == "Auto-resize splits: Off")
+            .expect("toggle-off label shown while disabled");
+
+        app.apply_context_menu_action_via_api(menu_off, off_idx);
+
+        assert!(app.state.auto_resize_splits);
+        let root = app.state.workspaces[0].tabs[0].layout.root();
+        assert!(
+            (ratio_at(root, &[]) - 0.2).abs() < 1e-5,
+            "toggling must not itself rebalance ratios"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[ui]"));
+        assert!(content.contains("auto_resize_splits = true"));
+
+        let menu_on = pane_menu_with_auto_resize(0, 0, pane_id, app.state.auto_resize_splits);
+        let on_idx = menu_on
+            .items()
+            .iter()
+            .position(|item| *item == "Auto-resize splits: On")
+            .expect("toggle-on label shown while enabled");
+
+        app.apply_context_menu_action_via_api(menu_on, on_idx);
+
+        assert!(!app.state.auto_resize_splits);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("auto_resize_splits = false"));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn context_menu_balance_splits_equalizes_tab() {
+        let mut state = state_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].tabs[0].layout.focus_pane(root);
+        state.workspaces[0].test_split(Direction::Vertical);
+        state.workspaces[0].tabs[0].layout.set_ratio_at(&[], 0.2);
+        state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[false], 0.9);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let menu = pane_menu(0, 0, pane_id);
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Balance splits")
+            .expect("balance splits item");
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, idx);
+
+        assert_eq!(state.mode, Mode::Terminal);
+        let root_node = state.workspaces[0].tabs[0].layout.root();
+        assert!((ratio_at(root_node, &[]) - 2.0 / 3.0).abs() < 1e-5);
+        assert!((ratio_at(root_node, &[false]) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn context_menu_balance_splits_noop_when_zoomed() {
+        let mut state = state_with_workspaces(&["test"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.workspaces[0].test_split(Direction::Horizontal);
+        state.workspaces[0].tabs[0].layout.focus_pane(root);
+        state.workspaces[0].test_split(Direction::Vertical);
+        state.workspaces[0].tabs[0].layout.set_ratio_at(&[], 0.2);
+        state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[false], 0.9);
+        state.workspaces[0].tabs[0].zoomed = true;
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let menu = pane_menu(0, 0, pane_id);
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Balance splits")
+            .expect("balance splits item");
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, idx);
+
+        let root_node = state.workspaces[0].tabs[0].layout.root();
+        assert!(
+            (ratio_at(root_node, &[]) - 0.2).abs() < 1e-5,
+            "zoomed tab must not be rebalanced"
+        );
+        assert!((ratio_at(root_node, &[false]) - 0.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn context_menu_toggle_auto_resize_flips_state() {
+        let mut state = state_with_workspaces(&["test"]);
+        assert!(!state.auto_resize_splits);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let menu = pane_menu(0, 0, pane_id);
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Auto-resize splits: Off")
+            .expect("toggle-off label shown while disabled");
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, idx);
+
+        assert!(state.auto_resize_splits);
     }
 }
