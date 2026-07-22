@@ -1479,6 +1479,11 @@ pub struct AppState {
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
+    /// Parsed `keys.remote_image_paste`. `None` when the user cleared the
+    /// binding or wrote something unparseable, in which case the remote
+    /// image-paste intercept never claims a key. It lives beside the prefix
+    /// because that intercept's decision must be a pure function of state.
+    pub remote_image_paste_key: Option<(KeyCode, KeyModifiers)>,
     pub default_sidebar_width: u16,
     pub sidebar_width: u16,
     pub sidebar_min_width: u16,
@@ -1968,6 +1973,7 @@ impl AppState {
             outer_terminal_focus: None,
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
+            remote_image_paste_key: Some((KeyCode::Char('v'), KeyModifiers::CONTROL)),
             default_sidebar_width: 26,
             sidebar_width: 26,
             sidebar_min_width: 18,

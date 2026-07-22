@@ -193,6 +193,10 @@ impl App {
 
         let event_hub = self.event_hub.clone();
         let event_tx = self.event_tx.clone();
+        // Read before the mirror moves into the drive task: this is the value
+        // that tells an end-notice from *this* connection apart from one a
+        // later remount to the same host has already superseded.
+        let connection_epoch = mirror.connection_epoch();
         let mut mirror_task = mirror;
         let drive_host_key = host_key.clone();
         let drive_target = target.clone();
@@ -255,6 +259,7 @@ impl App {
                     .send(crate::events::AppEvent::FederationMountEnded {
                         host_key: drive_host_key,
                         generation,
+                        connection_epoch,
                         target: drive_target,
                         reason,
                     })
@@ -306,17 +311,41 @@ impl App {
     /// `AppEvent::FederationMountEnded` handler: the mount's drive task
     /// exited for a session-ending reason (link closed, faulted, or an I/O
     /// error) — tear down the registry entry and the workspaces it
-    /// materialized. Fenced on `generation` so a stale ended-notice from a
-    /// drive task superseded by a fresh remount can never nuke the newer
-    /// mount (the race the generation field exists to prevent).
+    /// materialized.
+    ///
+    /// `generation` cannot actually fence this: both hosts mint a constant
+    /// `mount_generation` of 1, so a stale ended-notice from a superseded
+    /// drive task matches a fresh remount to the same host just as well as
+    /// the live one. `connection_epoch` is minted locally, once per
+    /// successful mount, and is the value that tells the two apart.
     #[cfg(unix)]
     pub(crate) fn handle_federation_mount_ended(
         &mut self,
         host_key: crate::remote::federation::id::HostKey,
         generation: u64,
+        connection_epoch: crate::remote::federation::client::MountConnectionEpoch,
         target: String,
         reason: String,
     ) {
+        // Fence on the locally minted epoch first, and refuse to act at all on
+        // a mismatch. A delayed end-notice from a connection that has already
+        // been replaced carries the same host key and the same (constant)
+        // generation as the live one, so without this it would tear down a
+        // healthy remount and destroy the work in flight on it.
+        if self
+            .state
+            .remote_mirrors
+            .get(&host_key)
+            .map(|mirror| mirror.connection_epoch())
+            != Some(connection_epoch)
+        {
+            tracing::debug!(
+                %target,
+                ?connection_epoch,
+                "federation mount ended notice from a superseded connection; ignoring"
+            );
+            return;
+        }
         if self
             .state
             .remote_mirrors
@@ -331,6 +360,12 @@ impl App {
             );
             return;
         }
+
+        // Above the "no workspaces to remove" early return below: a mount that
+        // dies on that path would otherwise leak its in-flight stages until
+        // each one's budget expires. Keyed by connection as well as host, so it
+        // can only ever reach the work of the connection that actually ended.
+        self.purge_pending_remote_clipboard_stages_for_origin(&host_key, connection_epoch);
 
         self.state.end_federation_mount(&host_key);
 
@@ -648,6 +683,7 @@ impl App {
                 .filter_map(|&i| self.state.workspaces.get(i).map(|ws| ws.id.clone()))
                 .collect();
             self.purge_pending_remote_splits_for_workspaces(&closing_ids);
+            self.purge_pending_remote_clipboard_stages_for_workspaces(&closing_ids);
             self.state.end_federation_mount(&host_key);
         }
 
@@ -1433,6 +1469,7 @@ mod tests {
         app.handle_federation_mount_ended(
             host_key.clone(),
             1,
+            crate::remote::federation::client::MountConnectionEpoch::UNMOUNTED,
             "remote-host".to_string(),
             "link closed".to_string(),
         );
@@ -1505,6 +1542,7 @@ mod tests {
         app.handle_federation_mount_ended(
             host_key,
             1,
+            crate::remote::federation::client::MountConnectionEpoch::UNMOUNTED,
             "remote-host".to_string(),
             "link closed".to_string(),
         );
@@ -1685,6 +1723,7 @@ mod tests {
         app.handle_federation_mount_ended(
             host_key.clone(),
             1,
+            crate::remote::federation::client::MountConnectionEpoch::UNMOUNTED,
             "remote-host".to_string(),
             "stale link closed".to_string(),
         );
@@ -1730,6 +1769,7 @@ mod tests {
         app.handle_federation_mount_ended(
             host_key,
             1,
+            crate::remote::federation::client::MountConnectionEpoch::UNMOUNTED,
             "remote-host".to_string(),
             "link closed".to_string(),
         );
@@ -1778,6 +1818,7 @@ mod tests {
         app.handle_federation_mount_ended(
             host_key,
             1,
+            crate::remote::federation::client::MountConnectionEpoch::UNMOUNTED,
             "remote-host".to_string(),
             "link closed".to_string(),
         );

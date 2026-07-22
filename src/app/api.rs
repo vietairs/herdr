@@ -161,11 +161,18 @@ impl App {
         if let AppEvent::FederationMountEnded {
             host_key,
             generation,
+            connection_epoch,
             target,
             reason,
         } = ev
         {
-            self.handle_federation_mount_ended(host_key, generation, target, reason);
+            self.handle_federation_mount_ended(
+                host_key,
+                generation,
+                connection_epoch,
+                target,
+                reason,
+            );
             return;
         }
 
@@ -195,6 +202,68 @@ impl App {
         #[cfg(unix)]
         if let AppEvent::FederationResyncPaneRemoved { origin, pane_id } = ev {
             self.handle_federation_resync_pane_removed(origin, pane_id);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationClipboardStageReady {
+            request_id,
+            remote_path,
+            origin,
+            connection_epoch,
+        } = ev
+        {
+            self.handle_federation_clipboard_stage_ready(
+                request_id,
+                remote_path,
+                origin,
+                connection_epoch,
+            );
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationClipboardStageFailed {
+            request_id,
+            failure,
+            origin,
+            connection_epoch,
+        } = ev
+        {
+            self.handle_federation_clipboard_stage_failed(
+                request_id,
+                failure,
+                origin,
+                connection_epoch,
+            );
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationClipboardStageTimedOut {
+            request_id,
+            origin,
+            connection_epoch,
+        } = ev
+        {
+            self.handle_federation_clipboard_stage_timed_out(request_id, origin, connection_epoch);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationClipboardStageStillRunning { request_id } = ev {
+            self.raise_slow_stage_toast_if_pending(request_id);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::RemoteClipboardImageCaptured {
+            workspace_id,
+            target_pane_id,
+            capture,
+        } = ev
+        {
+            self.handle_remote_clipboard_image_captured(workspace_id, target_pane_id, capture);
             return;
         }
 

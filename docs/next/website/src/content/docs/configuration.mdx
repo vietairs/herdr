@@ -143,6 +143,22 @@ Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`
 
 If you have old custom keybindings and want the new defaults, run `herdr config reset-keys`. Herdr backs up `config.toml`, removes `[keys]` and `[[keys.command]]`, and uses built-in v2 defaults after restart or `herdr server reload-config`.
 
+`keys.remote_image_paste` defaults to `ctrl+v` and is the one binding that reads the clipboard for you. When the focused pane belongs to a mounted remote workspace, or you are connected with `herdr --remote`, it copies the clipboard image to the remote host and pastes the path the remote wrote it to, so an agent running there can open the file. Images up to 16MB are accepted; other clipboard contents are refused with a notification. On a local pane the key is not intercepted at all and reaches the pane app unchanged.
+
+`ctrl+v` is also readline's quoted-insert and vim's visual-block, so on remote panes those shortcuts are taken. Rebind it if you need them:
+
+```toml
+[keys]
+remote_image_paste = "ctrl+alt+v"
+```
+
+Set it to an empty string to turn the binding off entirely:
+
+```toml
+[keys]
+remote_image_paste = ""
+```
+
 ## Indexed jumps
 
 Indexed keybindings use `1..9` in normal keybinding fields:
