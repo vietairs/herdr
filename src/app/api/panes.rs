@@ -1802,21 +1802,9 @@ impl App {
                         .and_then(|ws| ws.tabs.get_mut(target_tab_idx))
                     {
                         // `path` still addresses the closing pane in the
-                        // PRE-close tree. `remove_pane` collapses that
-                        // pane's parent split and promotes the sibling into
-                        // its slot, so replaying the full path would descend
-                        // one node too far and land on the promoted
-                        // sibling, rewriting an unrelated subtree's ratio. A
-                        // path of length L addresses L+1 nodes; the removed
-                        // pane's parent sat at depth L-1, so its surviving
-                        // ancestors are exactly the length L-2 prefix. When
-                        // L < 2 the parent WAS the root, so no ancestor
-                        // survives and nothing may be balanced — an empty
-                        // path is not a no-op, it balances the root, which
-                        // after the collapse is the promoted sibling.
-                        if let Some(ancestor_len) = path.len().checked_sub(2) {
-                            tab.layout.balance_areas_along_path(&path[..ancestor_len]);
-                        }
+                        // PRE-close tree; the collapse rule for translating it
+                        // onto the post-close tree lives with the tree code.
+                        tab.layout.balance_areas_after_removal(&path);
                     }
                 }
             }
