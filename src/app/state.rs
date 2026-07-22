@@ -1405,6 +1405,17 @@ pub struct AppState {
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
+    /// Whether a mounted federation controller currently owns this host's
+    /// terminal sizes. The same ownership semantic
+    /// `direct_attach_resize_locks` expresses per terminal, but session-wide:
+    /// a mount mirrors the whole session, so it drives every terminal's size.
+    ///
+    /// While set, this host's own render loop must not resize panes to its
+    /// local geometry — otherwise it reverts the mount's size within one
+    /// frame and every repaint arrives laid out for the wrong width. Mirrored
+    /// from `FederationLease::has_mounted_controller()` on each federation
+    /// command, so the lease stays the single source of truth.
+    pub federation_owns_terminal_sizes: bool,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -1891,6 +1902,7 @@ impl AppState {
         Self {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
+            federation_owns_terminal_sizes: false,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),
