@@ -147,12 +147,14 @@ Constraints:
 - Authentication is key-based SSH only. The dial does not run in batch mode, so an interactive
   password or passphrase prompt is not surfaced anywhere in Herdr; load the key into `ssh-agent`
   first if it needs a passphrase.
-- The dialog closes as soon as the request is accepted, not when the mount finishes. Preparing and
-  connecting to the remote host runs in the background with no progress indicator and no cancel. A
-  successful mount appears as new workspaces in the sidebar; targets that fail validation (empty
-  input, an option-like token, `localhost`) are rejected immediately and shown inline in the
-  dialog, while a target that dials and fails later reports through your configured notification
-  channel (`ui.toast.delivery`).
+- The dialog stays open while the mount runs, showing that it is in progress, and closes on its own
+  once every target has succeeded. A successful mount appears as new workspaces in the sidebar.
+  Targets that fail validation (empty input, an option-like token, `localhost`) are rejected
+  immediately and shown inline. A target that dials and then fails leaves the dialog open with the
+  reason shown inline, and also reports through your configured notification channel
+  (`ui.toast.delivery`).
+- Dismissing the dialog with `Esc` does not cancel a mount that is already dialing. It continues in
+  the background and, if it succeeds, still appears in the sidebar.
 
 If `ui.toast.delivery` is `terminal` or `system` and local terminal notifications are disabled, a
 later mount failure is only written to the log, with no visible notification. Check

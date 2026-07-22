@@ -594,6 +594,7 @@ impl App {
             collapsed_space_keys,
             request_complete_onboarding: false,
             remote_mount: None,
+            abandoned_remote_mounts: Vec::new(),
             name_input: String::new(),
             name_input_replace_on_type: false,
             release_notes: None,

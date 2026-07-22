@@ -49,7 +49,15 @@ impl App {
     }
 
     pub(crate) fn close_remote_mount_dialog(&mut self) {
-        self.state.remote_mount = None;
+        // Dismissing the dialog does not cancel an in-flight dial, so remember
+        // the targets we walked away from. Their outcomes still arrive later
+        // and must not be mistaken for a later submission's — targets are
+        // correlated by string alone, with no per-submission identity.
+        if let Some(remote_mount) = self.state.remote_mount.take() {
+            self.state
+                .abandoned_remote_mounts
+                .extend(remote_mount.pending);
+        }
         self.state.name_input.clear();
         self.state.name_input_replace_on_type = false;
         self.state.mode = if self.state.active.is_some() {
@@ -57,6 +65,24 @@ impl App {
         } else {
             Mode::Navigate
         };
+    }
+
+    /// Claims `target` for a dial the user already walked away from, removing
+    /// exactly one entry. Returns whether it was abandoned — when true the
+    /// caller must leave the current dialog untouched, because this outcome
+    /// belongs to a dismissed submission, not the visible one.
+    #[allow(dead_code)] // callers in api/workspaces.rs are all #[cfg(unix)]
+    pub(crate) fn claim_abandoned_remote_mount(&mut self, target: &str) -> bool {
+        let Some(index) = self
+            .state
+            .abandoned_remote_mounts
+            .iter()
+            .position(|abandoned| abandoned == target)
+        else {
+            return false;
+        };
+        self.state.abandoned_remote_mounts.remove(index);
+        true
     }
 
     pub(crate) fn handle_remote_mount_key(&mut self, key: KeyEvent) {
@@ -340,6 +366,39 @@ mod tests {
 
         assert!(app.state.remote_mount.is_none());
         assert_ne!(app.state.mode, Mode::MountRemoteWorkspace);
+        // The dial outlives the dialog, so its target must be remembered as
+        // abandoned rather than silently forgotten.
+        assert_eq!(
+            app.state.abandoned_remote_mounts,
+            vec!["already-mounted-host".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_duplicated_target_resolves_once_per_dial() {
+        // "host-a host-a" is not deduplicated anywhere on the way to the
+        // server, so it dials twice. Each dial must resolve independently —
+        // removing every matching entry at once would report the submission
+        // finished while the second dial is still running, and then drop that
+        // dial's real outcome because nothing is left pending to match it.
+        let mut remote_mount = RemoteMountState::default();
+        remote_mount.begin_submission(vec!["host-a".to_string(), "host-a".to_string()]);
+
+        assert!(remote_mount.resolve_pending_target("host-a"));
+        assert_eq!(remote_mount.pending, vec!["host-a".to_string()]);
+        assert!(
+            remote_mount.submitting,
+            "one dial is still outstanding, so the dialog is still submitting"
+        );
+
+        assert!(remote_mount.resolve_pending_target("host-a"));
+        assert!(remote_mount.pending.is_empty());
+        assert!(!remote_mount.submitting);
+
+        assert!(
+            !remote_mount.resolve_pending_target("host-a"),
+            "a third outcome for a target that had only two dials is unknown"
+        );
     }
 
     #[test]

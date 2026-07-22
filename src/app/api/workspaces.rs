@@ -181,9 +181,11 @@ impl App {
 
         if self.state.begin_federation_mount(mirror.clone()).is_err() {
             tracing::warn!(%target, "federation mount ready but this host is already mounted; dropping");
-            if let Some(remote_mount) = self.state.remote_mount.as_mut() {
-                if remote_mount.resolve_pending_target(&target) {
-                    remote_mount.error = Some(format!("{target}: already mounted"));
+            if !self.claim_abandoned_remote_mount(&target) {
+                if let Some(remote_mount) = self.state.remote_mount.as_mut() {
+                    if remote_mount.resolve_pending_target(&target) {
+                        remote_mount.error = Some(format!("{target}: already mounted"));
+                    }
                 }
             }
             return;
@@ -209,9 +211,11 @@ impl App {
             Err(err) => {
                 tracing::warn!(%target, %err, "failed to materialize federation mount");
                 self.state.end_federation_mount(&host_key);
-                if let Some(remote_mount) = self.state.remote_mount.as_mut() {
-                    if remote_mount.resolve_pending_target(&target) {
-                        remote_mount.error = Some(format!("{target}: {err}"));
+                if !self.claim_abandoned_remote_mount(&target) {
+                    if let Some(remote_mount) = self.state.remote_mount.as_mut() {
+                        if remote_mount.resolve_pending_target(&target) {
+                            remote_mount.error = Some(format!("{target}: {err}"));
+                        }
                     }
                 }
                 // Mirror the success path's teardown order below (drop
@@ -306,23 +310,26 @@ impl App {
         });
         self.state.mount_drive_tasks.insert(host_key, drive_handle);
 
-        // Correlate this outcome back to the mount dialog, if one is open
-        // and was waiting on this target. An unknown target (the dialog was
-        // dismissed and possibly reopened for a different submission since
-        // this dial was spawned) is ignored by `resolve_pending_target`, so
-        // a stale outcome can never resurrect or mutate an unrelated dialog.
+        // Correlate this outcome back to the mount dialog, if one is open and
+        // was waiting on this target. A target the user already walked away
+        // from is claimed first, so a dial abandoned by a dismissed dialog can
+        // never resolve — or close — a later submission that happens to use
+        // the same target string. An unknown target beyond that is ignored by
+        // `resolve_pending_target`.
         //
         // The two early-return failure branches above (already-mounted
         // conflict, materialize failure) each resolve `target` and set
         // `remote_mount.error` themselves before returning, so the dialog
         // never reads a failed target as a silent success or hangs on
         // "mounting…" forever.
-        if let Some(remote_mount) = self.state.remote_mount.as_mut() {
-            if remote_mount.resolve_pending_target(&target)
-                && remote_mount.pending.is_empty()
-                && remote_mount.error.is_none()
-            {
-                self.close_remote_mount_dialog();
+        if !self.claim_abandoned_remote_mount(&target) {
+            if let Some(remote_mount) = self.state.remote_mount.as_mut() {
+                if remote_mount.resolve_pending_target(&target)
+                    && remote_mount.pending.is_empty()
+                    && remote_mount.error.is_none()
+                {
+                    self.close_remote_mount_dialog();
+                }
             }
         }
     }
@@ -365,17 +372,20 @@ impl App {
         self.render_dirty.store(true, Ordering::Release);
         self.render_notify.notify_one();
 
-        // Correlate this failure back to the mount dialog, if one is open
-        // and was waiting on this target. An unknown target (dialog
-        // dismissed, possibly reopened for a different submission since this
-        // dial was spawned) is ignored by `resolve_pending_target`, so a
-        // stale failure can never resurrect or mutate an unrelated dialog.
-        // The dialog stays open showing the error even once every target has
-        // resolved (`submitting` alone gates re-submission) — only the ready
-        // path closes it, and only when nothing failed.
-        if let Some(remote_mount) = self.state.remote_mount.as_mut() {
-            if remote_mount.resolve_pending_target(&target) {
-                remote_mount.error = Some(format!("{target}: {reason}"));
+        // Correlate this failure back to the mount dialog, if one is open and
+        // was waiting on this target. A target the user already walked away
+        // from is claimed first, so a dial abandoned by a dismissed dialog can
+        // never report its failure against a later submission reusing the same
+        // target string. An unknown target beyond that is ignored by
+        // `resolve_pending_target`. The dialog stays open showing the error
+        // even once every target has resolved (`submitting` alone gates
+        // re-submission) — only the ready path closes it, and only when
+        // nothing failed.
+        if !self.claim_abandoned_remote_mount(&target) {
+            if let Some(remote_mount) = self.state.remote_mount.as_mut() {
+                if remote_mount.resolve_pending_target(&target) {
+                    remote_mount.error = Some(format!("{target}: {reason}"));
+                }
             }
         }
     }
@@ -1542,6 +1552,75 @@ mod tests {
         assert!(remote_mount.submitting);
         assert!(remote_mount.error.is_none());
         assert_eq!(remote_mount.pending, vec!["host-b".to_string()]);
+    }
+
+    // The same-string case the test above does not cover: dismissing a dialog
+    // does not cancel its dial, so submitting the *same* target again later
+    // leaves two dials outstanding for one string. Correlation is by string
+    // alone, so without tracking what was abandoned the first dial's failure
+    // would land on the second dialog — showing a stale error and clearing
+    // `submitting` while the real dial is still running, after which the real
+    // outcome finds `pending` empty and is dropped entirely.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_failure_for_a_resubmitted_target_does_not_mutate_the_new_dialog() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+
+        // Submit host-a, then dismiss the dialog while its dial is in flight.
+        let mut remote_mount = crate::app::state::RemoteMountState::default();
+        remote_mount.begin_submission(vec!["host-a".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+        app.close_remote_mount_dialog();
+        assert_eq!(
+            app.state.abandoned_remote_mounts,
+            vec!["host-a".to_string()]
+        );
+
+        // Reopen and submit the very same target; a second dial is now live.
+        let mut remote_mount = crate::app::state::RemoteMountState::default();
+        remote_mount.begin_submission(vec!["host-a".to_string()]);
+        app.state.remote_mount = Some(remote_mount);
+
+        // The first, abandoned dial now fails.
+        app.handle_federation_mount_failed("host-a".to_string(), "connection refused".to_string());
+
+        let remote_mount = app
+            .state
+            .remote_mount
+            .as_ref()
+            .expect("the stale failure must not close the new dialog");
+        assert!(
+            remote_mount.submitting,
+            "the second dial is still in flight, so the dialog must stay in its submitting state"
+        );
+        assert!(
+            remote_mount.error.is_none(),
+            "the abandoned dial's failure must not be shown as this submission's error"
+        );
+        assert_eq!(remote_mount.pending, vec!["host-a".to_string()]);
+        assert!(
+            app.state.abandoned_remote_mounts.is_empty(),
+            "the abandoned entry is consumed once, so a later outcome cannot be swallowed too"
+        );
+
+        // The real dial's failure still reaches the dialog afterwards.
+        app.handle_federation_mount_failed("host-a".to_string(), "host key mismatch".to_string());
+        let remote_mount = app.state.remote_mount.as_ref().expect("dialog stays open");
+        assert!(!remote_mount.submitting);
+        assert!(remote_mount.pending.is_empty());
+        assert!(remote_mount
+            .error
+            .as_ref()
+            .is_some_and(|error| error.contains("host key mismatch")));
     }
 
     // Phase-a TDD test 6: a mount task that produced an `Err` (the async
