@@ -1795,9 +1795,14 @@ impl App {
                         // sibling, rewriting an unrelated subtree's ratio. A
                         // path of length L addresses L+1 nodes; the removed
                         // pane's parent sat at depth L-1, so its surviving
-                        // ancestors are exactly the length L-2 prefix.
-                        let ancestor_path = &path[..path.len().saturating_sub(2)];
-                        tab.layout.balance_areas_along_path(ancestor_path);
+                        // ancestors are exactly the length L-2 prefix. When
+                        // L < 2 the parent WAS the root, so no ancestor
+                        // survives and nothing may be balanced — an empty
+                        // path is not a no-op, it balances the root, which
+                        // after the collapse is the promoted sibling.
+                        if let Some(ancestor_len) = path.len().checked_sub(2) {
+                            tab.layout.balance_areas_along_path(&path[..ancestor_len]);
+                        }
                     }
                 }
             }
@@ -4344,6 +4349,50 @@ mod tests {
             (promoted_sibling_ratio - 0.25).abs() < f32::EPSILON,
             "manual ratio in the unrelated promoted-sibling subtree must survive \
              the parent collapse: {promoted_sibling_ratio}"
+        );
+    }
+
+    #[test]
+    fn pane_close_auto_rebalance_preserves_promoted_sibling_ratio_at_root_depth() {
+        let (mut app, _) = app_with_test_workspace();
+        app.state.default_shell = super::super::test_support::exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        let first = app.state.workspaces[0].tabs[0].root_pane;
+        // H{ first=Pane1, second=V{ pane2, pane3 } } — closing Pane1 removes a
+        // direct child of the root, so its parent IS the root and no ancestor
+        // survives the collapse.
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[], 0.2);
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[true], 0.75);
+        app.state.auto_resize_splits = true;
+        let first_public = app.public_pane_id(0, first).unwrap();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: first_public,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let crate::layout::Node::Split {
+            ratio: promoted_ratio,
+            ..
+        } = app.state.workspaces[0].tabs[0].layout.root()
+        else {
+            panic!("expected the promoted V(0.75) split to become the root");
+        };
+        assert!(
+            (promoted_ratio - 0.75).abs() < f32::EPSILON,
+            "closing a root-level pane leaves no surviving ancestor, so the \
+             promoted sibling's manual ratio must not be rebalanced: {promoted_ratio}"
         );
     }
 
