@@ -163,13 +163,13 @@ fn stable_scrollbar_gutter(rt: &TerminalRuntime, pane_inner: Rect) -> (Rect, Opt
 }
 
 /// Whether this host's own render pass may resize `terminal_id` to its local
-/// geometry. It may not while an external client owns that size: a direct
-/// attach client (per terminal) or a mounted federation controller (session
-/// wide — a mount mirrors the whole session, and re-resizing behind it reverts
-/// the mount's geometry within one frame, leaving every repaint laid out for
-/// the wrong width).
+/// geometry. It may not while an external client owns that size — a direct
+/// attach client or a mounted federation controller — because re-resizing
+/// behind either reverts their geometry within one frame, leaving every
+/// repaint laid out for the wrong width.
 fn host_owns_terminal_size(app: &AppState, terminal_id: &crate::terminal::TerminalId) -> bool {
-    !app.federation_owns_terminal_sizes && !app.direct_attach_resize_locks.contains(terminal_id)
+    !app.federation_owned_terminal_sizes.contains(terminal_id)
+        && !app.direct_attach_resize_locks.contains(terminal_id)
 }
 
 /// Resize every visible runtime in a tab to the geometry it would receive if the tab were selected.
