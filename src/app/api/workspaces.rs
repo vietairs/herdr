@@ -50,6 +50,17 @@ impl App {
     /// rejected immediately (before spawning any dial) with a per-host
     /// failure event, isolating it from the other targets in the same
     /// request (requirement 4).
+    ///
+    /// Phase 01 (server-side target validation): every target is validated
+    /// with `crate::remote::validate_remote_target` (the same rule the CLI's
+    /// `--remote` flag already enforces) and checked against
+    /// `crate::remote::is_local_target` before any `tokio::spawn`. This API
+    /// method is reachable by anything that can open `herdr.sock`, not just
+    /// the CLI parser, so a leading-`-` target (e.g.
+    /// `-oProxyCommand=<cmd>`) must be rejected here too — `ssh` parses a
+    /// leading-`-` argv element as an option, not a hostname. Rejections are
+    /// synchronous `invalid_request` errors returned before any dial is
+    /// spawned, so a caller (dialog or CLI) sees the failure immediately.
     #[cfg(unix)]
     pub(super) fn handle_workspace_mount_remote(
         &mut self,
@@ -70,13 +81,35 @@ impl App {
             );
         }
 
+        for target in &targets {
+            if let Err(err) = crate::remote::validate_remote_target(target) {
+                tracing::warn!(?target, %err, "rejected workspace.mount_remote target");
+                return encode_error(
+                    id,
+                    "invalid_request",
+                    format!("invalid remote target {target:?}: {err}"),
+                );
+            }
+            if crate::remote::is_local_target(target) {
+                tracing::warn!(?target, "rejected workspace.mount_remote target");
+                return encode_error(
+                    id,
+                    "invalid_request",
+                    "workspace.mount_remote requires a remote target; \"localhost\" is not a remote host",
+                );
+            }
+        }
+
         let session_name = crate::session::active_name()
             .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
 
         for target in &targets {
             let host_key = crate::remote::federation::id::HostKey::new(target, &session_name);
             if self.state.double_attach_conflict(&host_key) {
-                tracing::warn!(%target, "federation mount requested but this host is already mounted");
+                tracing::warn!(
+                    ?target,
+                    "federation mount requested but this host is already mounted"
+                );
                 let event_tx = self.event_tx.clone();
                 let target = target.clone();
                 tokio::spawn(async move {
@@ -1321,6 +1354,140 @@ mod tests {
             saw_failure,
             "expected a FederationMountFailed event naming the duplicate host"
         );
+    }
+
+    // Phase 01: server-side target validation. `handle_workspace_mount_remote`
+    // must reject option-like / empty / localhost targets synchronously,
+    // before any `tokio::spawn`, so the collector (dialog or CLI) sees the
+    // rejection immediately and no dial or mirror mutation ever happens for
+    // an invalid target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_remote_rejects_option_like_target_without_spawning_a_dial() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let response = app.handle_workspace_mount_remote(
+            "req".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec![
+                    "good-host".to_string(),
+                    "-oProxyCommand=touch /tmp/pwn".to_string(),
+                ],
+                remote_keybindings: false,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_request");
+        assert!(error
+            .error
+            .message
+            .contains("-oProxyCommand=touch /tmp/pwn"));
+
+        assert!(app.state.remote_mirrors.is_empty());
+        // No dial and no async event: nothing was spawned for this request.
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv()).await,
+            Err(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_remote_rejects_localhost_target() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let response = app.handle_workspace_mount_remote(
+            "req".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["localhost".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_request");
+
+        assert!(app.state.remote_mirrors.is_empty());
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv()).await,
+            Err(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_remote_rejects_blank_only_targets() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let response = app.handle_workspace_mount_remote(
+            "req".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["  ".to_string(), "".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_request");
+        assert!(app.state.remote_mirrors.is_empty());
+    }
+
+    // A pre-mounted host takes the "already mounted" early-return branch
+    // (`double_attach_conflict`), which never spawns a real ssh dial — safe
+    // to exercise end to end without any network I/O. That branch still
+    // fire-and-forget-spawns a `FederationMountFailed` notice
+    // (`src/app/api/workspaces.rs:82-89`), so this test asserts on the
+    // mirror count staying untouched and the ack being a success response,
+    // never on "no event at all".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_remote_accepts_plain_and_user_at_host_targets() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let session_name = crate::session::active_name()
+            .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+        let mirror = crate::remote::federation::reducer::RemoteMirror::new(
+            crate::remote::federation::id::Mount {
+                host_key: crate::remote::federation::id::HostKey::new(
+                    "already-mounted-host",
+                    &session_name,
+                ),
+                server_instance_id: crate::remote::federation::id::ServerInstanceId(
+                    "inst-1".to_string(),
+                ),
+                mount_generation: 1,
+            },
+        );
+        app.state.begin_federation_mount(mirror).unwrap();
+
+        let response = app.handle_workspace_mount_remote(
+            "req".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["  already-mounted-host  ".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        match success.result {
+            ResponseResult::WorkspaceMountRemoteRequested { targets } => {
+                assert_eq!(targets, vec!["already-mounted-host".to_string()]);
+            }
+            other => panic!("expected WorkspaceMountRemoteRequested, got {other:?}"),
+        }
+
+        // Mirror count is untouched by this request (no new mount, the
+        // pre-existing one stays exactly once) — no real ssh dial spawned.
+        assert_eq!(app.state.remote_mirrors.len(), 1);
     }
 
     #[test]

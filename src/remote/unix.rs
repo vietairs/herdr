@@ -282,7 +282,7 @@ fn is_flag_like(value: &str) -> bool {
     value.starts_with("--")
 }
 
-fn validate_remote_target(target: &str) -> Result<&str, String> {
+pub(crate) fn validate_remote_target(target: &str) -> Result<&str, String> {
     if target.is_empty() {
         return Err("missing value for --remote".to_string());
     }
@@ -3072,6 +3072,22 @@ mod tests {
         let args = vec!["herdr".into(), "--remote".into(), "-oProxyCommand=x".into()];
         let err = extract_remote_args(&args).unwrap_err();
         assert_eq!(err, "--remote target must not start with '-'");
+    }
+
+    // Server-side guard (`handle_workspace_mount_remote`) reuses this CLI
+    // validator directly rather than re-implementing the same option-like
+    // rejection rule — this is the unit-level proof it rejects the values
+    // the API handler test suite (`app::api::workspaces::tests`) exercises
+    // end to end.
+    #[test]
+    fn validate_remote_target_rejects_empty_and_option_like_values() {
+        assert!(validate_remote_target("").is_err());
+        assert!(validate_remote_target("-oProxyCommand=x").is_err());
+        assert!(validate_remote_target("-").is_err());
+        assert_eq!(
+            validate_remote_target("alice@host:22").unwrap(),
+            "alice@host:22"
+        );
     }
 
     #[test]
