@@ -59,8 +59,21 @@ pub(crate) const FEDERATION_CLIPBOARD_PREFIX: &str = "federation-clipboard-";
 /// the staging directory. Checked after the 24h sweep, before any write.
 const STAGING_DIR_QUOTA_BYTES: u64 = 500 * 1024 * 1024;
 
-/// Longest accepted proposed file name, in bytes.
-const MAX_ORIGINAL_FILENAME_BYTES: usize = 255;
+/// Longest single component any target filesystem accepts.
+const MAX_COMPONENT_BYTES: usize = 255;
+
+/// Bytes the generated name wraps around the proposed one: the prefix, a
+/// nanosecond stamp, the attempt counter, and their separators. Budgeted
+/// generously so the derived name stays bounded well past the current epoch.
+const DERIVED_NAME_OVERHEAD_BYTES: usize = FEDERATION_CLIPBOARD_PREFIX.len() + 24 + 1 + 10 + 1 + 1;
+
+/// Longest accepted proposed file name, in bytes. Deliberately smaller than
+/// the filesystem limit: the proposal is never used as-is, it is embedded in a
+/// generated name, so a proposal that would only fit on its own pushes that
+/// name past the limit. Without this budget such a name fails at `open` with
+/// `ENAMETOOLONG`, which the caller reports as "could not write the file"
+/// rather than naming the real cause.
+const MAX_ORIGINAL_FILENAME_BYTES: usize = MAX_COMPONENT_BYTES - DERIVED_NAME_OVERHEAD_BYTES;
 
 /// Attempts to find an unused candidate path before giving up.
 const CREATE_ATTEMPTS: u32 = 100;
@@ -304,8 +317,8 @@ fn sanitize_original_filename(filename: &str) -> Result<SanitizedFilename, Clipb
     let Some(extension) = derive_extension(suffix) else {
         return Err(ClipboardStageFailure::UnsupportedExtension);
     };
-    // A name that is nothing but an extension (`.png`) has no stem to preserve;
-    // the phase contract does not cover it, so take the conservative branch.
+    // A name that is nothing but an extension (`.png`) has no stem to preserve,
+    // so there is nothing to carry across; reject it rather than inventing one.
     if stem.is_empty() {
         return Err(reject_filename("has no stem"));
     }
@@ -633,6 +646,31 @@ mod tests {
         );
         assert!(dir.entries().is_empty());
         assert_benign_stage_succeeds(&dir);
+    }
+
+    // The accepted name is embedded in a longer generated one, so the limit has
+    // to leave room for what wraps it. Without that budget the longest accepted
+    // proposal produces a path the filesystem refuses, and the caller reports a
+    // write failure instead of naming the real cause.
+    #[test]
+    fn the_longest_accepted_filename_still_fits_on_disk() {
+        let dir = TestDir::new("longest-accepted");
+        let stem = "a".repeat(MAX_ORIGINAL_FILENAME_BYTES - ".png".len());
+        let longest = format!("{stem}.png");
+        assert_eq!(longest.len(), MAX_ORIGINAL_FILENAME_BYTES);
+
+        let staged = stage_into(&dir.path, &longest, PNG_BYTES).expect("longest name is accepted");
+
+        let component = std::path::Path::new(&staged)
+            .file_name()
+            .expect("staged path has a file name")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            component.len() <= MAX_COMPONENT_BYTES,
+            "generated name is {} bytes, over the {MAX_COMPONENT_BYTES} the filesystem accepts: {component}",
+            component.len()
+        );
     }
 
     #[test]
