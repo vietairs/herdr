@@ -810,6 +810,8 @@ pub struct UiConfig {
     pub pane_gaps: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
+    /// Auto-rebalance split areas after each pane split/close. Default: false.
+    pub auto_resize_splits: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
@@ -1009,6 +1011,7 @@ impl Default for UiConfig {
             pane_borders: true,
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
+            auto_resize_splits: false,
             hide_tab_bar_when_single_tab: false,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             sidebar: SidebarConfig::default(),
@@ -1254,6 +1257,22 @@ hide_tab_bar_when_single_tab = true
         assert!(config.ui.pane_gaps);
         assert!(config.ui.show_agent_labels_on_pane_borders);
         assert!(config.ui.hide_tab_bar_when_single_tab);
+    }
+
+    #[test]
+    fn default_config_has_auto_resize_splits_off() {
+        let default_config = Config::default();
+        assert!(!default_config.ui.auto_resize_splits);
+    }
+
+    #[test]
+    fn toml_round_trip_reads_auto_resize_splits_true() {
+        let toml = r#"
+[ui]
+auto_resize_splits = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.auto_resize_splits);
     }
 
     #[test]
