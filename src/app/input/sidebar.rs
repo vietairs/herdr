@@ -198,6 +198,8 @@ impl AppState {
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
         let mut labels = vec!["settings", "keybinds", "reload config"];
+        #[cfg(unix)]
+        labels.push("mount remote");
         if self.update_available.is_some() {
             labels.push("update ready");
         } else if self.latest_release_notes_available {
@@ -587,16 +589,12 @@ mod tests {
             launcher.y,
         ));
 
-        assert_eq!(
-            app.state.global_menu_labels(),
-            vec![
-                "settings",
-                "keybinds",
-                "reload config",
-                "update ready",
-                "detach"
-            ]
-        );
+        let mut expected = vec!["settings", "keybinds", "reload config"];
+        #[cfg(unix)]
+        expected.push("mount remote");
+        expected.push("update ready");
+        expected.push("detach");
+        assert_eq!(app.state.global_menu_labels(), expected);
         assert!(!app.state.should_quit);
     }
 
@@ -612,16 +610,18 @@ mod tests {
             launcher.y,
         ));
 
-        assert_eq!(
-            app.state.global_menu_labels(),
-            vec!["settings", "keybinds", "reload config", "detach"]
-        );
+        let mut expected = vec!["settings", "keybinds", "reload config"];
+        #[cfg(unix)]
+        expected.push("mount remote");
+        expected.push("detach");
+        assert_eq!(app.state.global_menu_labels(), expected);
 
         let menu = app.state.global_menu_rect();
+        let detach_row_offset = expected.len() as u16;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 4,
+            menu.y + detach_row_offset,
         ));
 
         assert!(app.state.detach_requested);
@@ -634,16 +634,12 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state.latest_release_notes_available = true;
 
-        assert_eq!(
-            app.state.global_menu_labels(),
-            vec![
-                "settings",
-                "keybinds",
-                "reload config",
-                "what's new",
-                "detach"
-            ]
-        );
+        let mut expected = vec!["settings", "keybinds", "reload config"];
+        #[cfg(unix)]
+        expected.push("mount remote");
+        expected.push("what's new");
+        expected.push("detach");
+        assert_eq!(app.state.global_menu_labels(), expected);
     }
 
     #[test]
