@@ -131,6 +131,33 @@ Notes:
 - **Capability fallback:** if the remote's Herdr does not support federation (older binary or version skew), Herdr falls back to the classic full-screen `--remote` attach with a notice rather than failing. Attaching classically to a host already federated locally is guarded against double-attach.
 - Federated workspaces are labeled by remote host and never run local git shellouts, so a remote workspace cannot masquerade as a trusted local one.
 
+### Mount a remote workspace from inside a running session
+
+You do not need to relaunch Herdr to add a remote workspace. From a running local Herdr, open the
+global menu and choose `mount remote workspace` (unix only). Type one or more targets separated by
+spaces, then press enter or click the primary button. Each target is passed straight through to
+`ssh`, so use a form `ssh` itself accepts: a plain `host`, `user@host`, an `ssh_config` `Host`
+alias, or the `ssh://user@host:port` URI form for a non-default port. A bare `host:port` (without
+`ssh://`) is not parsed as a port and will fail.
+
+Constraints:
+
+- `localhost` is not accepted; use a local workspace instead.
+- Targets cannot start with `-`.
+- Authentication is key-based SSH only. The dial does not run in batch mode, so an interactive
+  password or passphrase prompt is not surfaced anywhere in Herdr; load the key into `ssh-agent`
+  first if it needs a passphrase.
+- The dialog closes as soon as the request is accepted, not when the mount finishes. Preparing and
+  connecting to the remote host runs in the background with no progress indicator and no cancel. A
+  successful mount appears as new workspaces in the sidebar; targets that fail validation (empty
+  input, an option-like token, `localhost`) are rejected immediately and shown inline in the
+  dialog, while a target that dials and fails later reports through your configured notification
+  channel (`ui.toast.delivery`).
+
+If `ui.toast.delivery` is `terminal` or `system` and local terminal notifications are disabled, a
+later mount failure is only written to the log, with no visible notification. Check
+`herdr-server.log` for `federation mount failed`. See [Find diagnostic logs](/docs/troubleshooting/#find-diagnostic-logs).
+
 ## Direct terminal attach
 
 Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.
