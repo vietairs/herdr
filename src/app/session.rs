@@ -12,7 +12,7 @@ enum SessionSaveJob {
 
 impl App {
     pub(super) fn schedule_session_save(&mut self) {
-        if !self.no_session {
+        if !self.no_session && !self.persistence.is_disabled() {
             self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_DEBOUNCE);
         }
     }
@@ -58,7 +58,7 @@ impl App {
     }
 
     pub(crate) fn start_background_session_save(&mut self) {
-        if self.no_session {
+        if self.no_session || self.persistence.is_disabled() {
             self.session_save_deadline = None;
             return;
         }
@@ -88,7 +88,7 @@ impl App {
             let _ = thread.join();
         }
 
-        if self.no_session {
+        if self.no_session || self.persistence.is_disabled() {
             self.session_save_deadline = None;
             return;
         }

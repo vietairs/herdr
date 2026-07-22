@@ -139,6 +139,47 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    // P5: additive wrapper mirroring pane runtime construction arguments —
+    // a remote-backed pane fed by the federation raw terminal channel
+    // instead of a local PTY. Dormant until a live mount (P8) constructs
+    // one; every existing `spawn_*` site is untouched. Dead outside tests
+    // until then (no CLI switch yet, per the phase's shippability note).
+    #[allow(clippy::too_many_arguments, dead_code)]
+    pub(crate) fn spawn_remote(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        initial_history_ansi: Option<&str>,
+        terminal_id: String,
+        mount_generation: u64,
+        out_tx: mpsc::UnboundedSender<crate::remote::federation::protocol::FederationMessage>,
+        output_rx: mpsc::Receiver<Bytes>,
+        clipboard_tx: mpsc::UnboundedSender<crate::remote::federation::protocol::ClipboardMessage>,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        crate::pane::PaneRuntime::spawn_remote(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            initial_history_ansi,
+            terminal_id,
+            mount_generation,
+            out_tx,
+            output_rx,
+            clipboard_tx,
+            events,
+            render_notify,
+            render_dirty,
+        )
+        .map(Self)
+    }
+
     // Wrapper mirrors pane runtime construction arguments.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_shell_command(
@@ -307,6 +348,28 @@ impl TerminalRuntime {
         self.0.detection_text()
     }
 
+    pub(crate) fn relayed_agent_status_sender(
+        &self,
+    ) -> Option<tokio::sync::mpsc::Sender<crate::api::schema::common::AgentStatus>> {
+        self.0.relayed_agent_status_sender()
+    }
+
+    /// This pane's raw remote terminal id (delegates to
+    /// `PaneRuntime::remote_terminal_id`); `None` for a locally-spawned pane.
+    pub(crate) fn remote_terminal_id(&self) -> Option<&str> {
+        self.0.remote_terminal_id()
+    }
+
+    /// A clone of this pane's shared mount out-tx (delegates to
+    /// `PaneRuntime::remote_out_tx`); `None` for a locally-spawned pane.
+    pub(crate) fn remote_out_tx(
+        &self,
+    ) -> Option<
+        tokio::sync::mpsc::UnboundedSender<crate::remote::federation::protocol::FederationMessage>,
+    > {
+        self.0.remote_out_tx()
+    }
+
     pub fn terminal_title(&self) -> Option<String> {
         self.0.terminal_title()
     }
@@ -449,6 +512,13 @@ impl TerminalRuntime {
     pub(crate) fn current_size(&self) -> (u16, u16) {
         self.0.current_size()
     }
+
+    /// Raw-byte tee at the `on_read` source (see `pane::PaneRuntime::subscribe_output_bytes`).
+    /// Consumed by `remote::federation::serve`; additive, no-op for every
+    /// other caller.
+    pub(crate) fn subscribe_output_bytes(&self) -> tokio::sync::broadcast::Receiver<Bytes> {
+        self.0.subscribe_output_bytes()
+    }
 }
 
 #[cfg(test)]
@@ -476,6 +546,10 @@ impl TerminalRuntime {
 
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
         self.0.test_process_pty_bytes(bytes);
+    }
+
+    pub(crate) fn test_process_pty_bytes_and_tee(&self, bytes: &[u8]) {
+        self.0.test_process_pty_bytes_and_tee(bytes);
     }
 
     pub(crate) fn test_with_scrollback_bytes(
@@ -507,5 +581,43 @@ impl TerminalRuntime {
             channel_capacity,
         );
         (Self(runtime), rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // P5: exercises `spawn_remote` through this wrapper layer (not just
+    // `PaneRuntime::spawn_remote` directly, which `pane.rs`'s own tests
+    // cover) — dormant until a live mount (P8) constructs one in
+    // production, so this is also what keeps the wrapper from being flagged
+    // dead code.
+    #[tokio::test]
+    async fn spawn_remote_wrapper_delegates_to_the_pane_runtime() {
+        let (events_tx, _events_rx) = mpsc::channel::<AppEvent>(4);
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = mpsc::channel::<Bytes>(4);
+        let (clipboard_tx, _clipboard_rx) = mpsc::unbounded_channel();
+        let render_notify = Arc::new(Notify::new());
+        let render_dirty = Arc::new(AtomicBool::new(false));
+
+        let runtime = TerminalRuntime::spawn_remote(
+            PaneId::from_raw(1),
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            "term_1".to_string(),
+            1,
+            out_tx,
+            output_rx,
+            clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        );
+        assert!(runtime.is_ok());
     }
 }

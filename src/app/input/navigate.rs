@@ -292,7 +292,28 @@ impl App {
                 }
             }
             NavigateAction::NewTab => {
-                if self.state.active.is_some() {
+                if let Some(ws_idx) = self.state.active {
+                    if matches!(
+                        crate::remote::federation::id::classify(&self.public_workspace_id(ws_idx)),
+                        crate::remote::federation::id::IdClass::Remote(_)
+                    ) {
+                        // Mirrors `app/api/tabs.rs::handle_tab_create`'s
+                        // `remote_tab_unsupported` refusal: a federated
+                        // workspace's new-tab shell would spawn locally but
+                        // be stamped with a remote-looking id, so refuse
+                        // here before ever reaching the dialog/API call.
+                        let previous_toast = self.state.toast.clone();
+                        self.state.toast = Some(crate::app::state::ToastNotification {
+                            kind: crate::app::state::ToastKind::NeedsAttention,
+                            title: "remote workspace".to_string(),
+                            context: "new tab not supported yet".to_string(),
+                            position: None,
+                            target: None,
+                        });
+                        self.sync_toast_deadline(previous_toast);
+                        leave_navigate_mode(&mut self.state);
+                        return;
+                    }
                     if self.state.prompt_new_tab_name {
                         super::modal::open_new_tab_dialog(&mut self.state);
                     } else {
@@ -2924,6 +2945,34 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.mode, Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
+    }
+
+    // Regression: pressing the new-tab keybind while focused on a federated
+    // remote workspace must refuse instead of spawning a LOCAL shell that
+    // gets stamped with a remote-looking (`r:`) tab id (mirrors
+    // `api/tabs.rs::api_tab_create_in_a_federated_workspace_is_refused_not_misfiled_locally`).
+    #[test]
+    fn tui_new_tab_keybind_in_a_federated_workspace_is_refused_with_toast() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1#s1:default".to_string();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Navigate;
+        let tabs_before = app.state.workspaces[0].tabs.len();
+
+        app.execute_tui_navigate_action(NavigateAction::NewTab, ActionContext::Navigate);
+
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            tabs_before,
+            "a refused remote new-tab keybind must not create any local tab"
+        );
+        assert!(
+            !app.state.creating_new_tab,
+            "must not open the new-tab rename dialog for a remote workspace"
+        );
+        let toast = app.state.toast.expect("expected a refusal toast");
+        assert_eq!(toast.title, "remote workspace");
     }
 
     #[cfg(unix)]

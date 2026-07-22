@@ -1,0 +1,17 @@
+[Unit]
+Description=Orca runtime server
+After=network-online.target orca-xvfb.service
+Wants=network-online.target orca-xvfb.service
+
+[Service]
+Type=simple
+User=hvnguyen
+WorkingDirectory=/home/hvnguyen
+Environment=DISPLAY=:99
+Environment=LIBGL_ALWAYS_SOFTWARE=1
+ExecStart=/opt/orca/orca-linux.AppImage serve --port 6768 --no-sandbox --disable-gpu --disable-gpu-sandbox --pairing-address 131.172.248.161
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

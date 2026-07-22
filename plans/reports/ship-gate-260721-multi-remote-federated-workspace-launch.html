@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ship Gate — Multi-Remote Federated Workspace Launch</title>
+<style>
+  :root{--bg:#fbfaf8;--fg:#23211d;--muted:#6b675f;--accent:#2f6f5e;--warn:#a2571b;--card:#f2efe9;--border:#ddd8cf}
+  @media (prefers-color-scheme:dark){:root{--bg:#191817;--fg:#e8e5df;--muted:#9b968c;--accent:#5fae97;--warn:#e09a5a;--card:#211f1d;--border:#3a3733}}
+  body{margin:0 auto;max-width:62rem;padding:2rem 1.25rem;background:var(--bg);color:var(--fg);font:16px/1.55 -apple-system,"Segoe UI",sans-serif}
+  h1{font-size:1.6rem;margin:.2rem 0}h2{font-size:1.15rem;margin-top:2rem;border-bottom:1px solid var(--border);padding-bottom:.3rem}
+  .meta{color:var(--muted);font-size:.9rem}
+  table{border-collapse:collapse;width:100%;font-size:.85rem;margin:.75rem 0}
+  th,td{border:1px solid var(--border);padding:.4rem .55rem;text-align:left;vertical-align:top}
+  th{background:var(--card)}
+  .wrap{overflow-x:auto}
+  .ok{color:var(--accent);font-weight:600}.warn{color:var(--warn);font-weight:600}
+  code{background:var(--card);padding:.05rem .3rem;border-radius:3px;font-size:.85em}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.9rem 1.1rem;margin:.8rem 0}
+</style>
+</head>
+<body>
+<h1>Ship Gate — Multi-Remote Federated Workspace Launch</h1>
+<p class="meta">2026-07-21 · branch <code>feat/remote-workspace-federation</code> (uncommitted diff, 2286 lines) · plan <code>plans/260721-1403-multi-remote-federated-workspace-launch/</code></p>
+
+<h2>TL;DR</h2>
+<p>One command now launches the local workspace plus N remote federated workspaces in one TUI: <code>herdr --remote localhost 131.172.248.163 131.172.248.161 --remote-workspace</code>. The federation mount moved server-side — the herdr daemon owns dial/mount via a new JSON API command <code>workspace.mount_remote</code>, and the launching process stays a thin client. <code>--remote</code> accepts multiple targets; <code>localhost</code> means the local workspace (no SSH); mounts live in a <code>HashMap&lt;HostKey, RemoteMirror&gt;</code>; each target dials concurrently and fails independently with a per-host sidebar notice. Tests: 2682/2682, clippy zero new findings, PROTOCOL_VERSION unbumped (JSON-API-only change).</p>
+
+<h2>Context</h2>
+<p>Requested feature: "1 command to connect/start 3 or more herdr workspaces (1 local + 2 remotes)". This reverses the earlier P9.2b decision (federated session renders alone) and lifts the S10.1 single-mount restriction. The original in-process plan was BLOCKED (the local launch path spawns the server as a separate OS process — no in-process AppState); the user chose server-side mounts, which also matches the project's server-owned-runtime guardrail.</p>
+
+<h2>Intuition</h2>
+<p>The CLI parses N <code>--remote</code> targets, filters out <code>localhost</code>, ensures a local server via the existing autodetect machinery, sends one <code>workspace.mount_remote</code> request listing the SSH targets, and attaches as a normal thin client. Inside the daemon, the handler spawns one fire-and-forget tokio task per target (SSH provision + dial + mount, ~25s budget each, concurrent). Results come back into <code>App::run</code>'s tick through the existing AppEvent channel (worktree-add precedent): success materializes the mount and starts the drive task; failure raises a per-host toast and leaves everything else running.</p>
+
+<h2>Blast Radius</h2>
+<ul>
+<li>Classic single-target <code>--remote</code> (no <code>--remote-workspace</code>) routes through the untouched <code>run_remote</code>/<code>run_federated_session</code> path; explicit acceptance test guards this.</li>
+<li><code>--remote-keybindings server</code> combined with <code>--remote-workspace</code> now <b>fails loudly at launch</b> instead of being silently ignored — the federation wire carries raw resolved bytes with no keybindings handshake, so honoring it server-side would need new wire semantics. This is the one user-visible behavior gate.</li>
+<li>Windows: multi-value parse parity mirrored in <code>src/remote.rs</code> but <b>not compiler-verified locally</b> (no cross-compile). Remote mode still errors on Windows as before.</li>
+<li>No wire-protocol change; attached clients see mounts through the normal render/event push. No suspicious embedded content found in the diff.</li>
+</ul>
+
+<h2>Predicted-vs-Actual (14 predicted risks)</h2>
+<div class="card">12 <span class="ok">handled</span> · 2 <span class="warn">partial</span> — both partials are <b>test gaps</b>, not behavior gaps: (1) focus-barrier at N not re-tested live (mechanism untouched, P8 test covers it); (2) three planned tests unwritable for lack of seams (fake-clock dial budget, standalone teardown, live dual-mount focus). All architecture/isolation/contract risks (coexistence inversion, HashMap keying, ownership model, concurrent dials, partial-failure isolation, teardown order, localhost semantics, CLI contract, per-host attribution, double-attach naming) verified handled with diff evidence.</div>
+
+<h2>Plan-vs-Shipped (full audit, both phases + review fixes)</h2>
+<div class="card">43 items <span class="ok">shipped-as-planned or deviated-logged</span> · 6 <span class="warn">⚠</span>:
+<ol>
+<li><span class="warn">NOT ADDRESSED</span> — focus-barrier test 4 (no live dual-mount harness; mechanism unchanged, logged).</li>
+<li><span class="warn">NOT ADDRESSED</span> — teardown test 5 (drive-task JoinHandle not exposed; teardown code is a verified copy of session.rs order, logged).</li>
+<li><span class="warn">NOT ADDRESSED</span> — concurrent-dial fake-clock test 7 (no SSH-dial mock seam; concurrency is structural via per-target spawn, logged).</li>
+<li><span class="warn">flagged SILENTLY DIVERGENT</span> — auditor saw the HashMap (Phase B) already present against Phase A's plan text. Controller annotation: both phases shipped into one uncommitted diff, so this is a phase-sequencing artifact of auditing the combined diff, and the HashMap change IS logged in the Phase B impl-notes entry — effectively deviated-logged, kept visible for attestation.</li>
+<li><span class="warn">PARTIAL</span> — panic-isolation test 6 asserts Tokio's task boundary generically rather than a real panic inside the actual spawn (logged, matches session.rs precedent).</li>
+<li><span class="warn">PARTIAL</span> — focus-barrier-at-N relies on the unchanged P8 test rather than a new N-host one.</li>
+</ol>
+Review findings (1 high / 2 medium) all closed: keybindings drop → fail-loud rejection (logged deviation: no server-side seam exists); stale <code>dead_code</code> allows removed; teardown-order asymmetry fixed.</div>
+
+<h2>Out-of-env acceptance items (recorded, not CI-gated)</h2>
+<ul>
+<li>Manual two-machine smoke on 131.172.248.163 / 131.172.248.161.</li>
+<li>Windows compile check of <code>src/remote.rs</code> parity (CI).</li>
+<li><code>cargo nextest</code> confirmation (CI; local run used <code>cargo test --test-threads=4</code>, 2682/2682).</li>
+</ul>
+
+<p class="meta">Evidence: reports/ship-gate-diff-multi-remote-launch.txt · implementation-notes.md (deviations) · predict-260721-….md · from-code-reviewer-full-diff-multi-remote-launch.md</p>
+</body>
+</html>

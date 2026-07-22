@@ -65,6 +65,8 @@ pub enum Method {
     SessionSnapshot(EmptyParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
+    #[serde(rename = "workspace.mount_remote")]
+    WorkspaceMountRemote(WorkspaceMountRemoteParams),
     #[serde(rename = "workspace.list")]
     WorkspaceList(EmptyParams),
     #[serde(rename = "workspace.get")]
