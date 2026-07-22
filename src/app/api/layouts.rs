@@ -248,6 +248,52 @@ impl App {
         encode_success(id, ResponseResult::LayoutSplitRatioSet { layout })
     }
 
+    /// One-shot equal-area rebalance of the whole tab root. Reuses
+    /// `LayoutExportParams` for target resolution instead of a dedicated
+    /// params struct.
+    pub(super) fn handle_layout_balance(
+        &mut self,
+        id: String,
+        params: LayoutExportParams,
+    ) -> String {
+        let Some((ws_idx, tab_idx)) = self.resolve_layout_export_target(&params) else {
+            return encode_error(id, "layout_not_found", "layout target not found");
+        };
+        let Some(zoomed) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.get(tab_idx))
+            .map(|tab| tab.zoomed)
+        else {
+            return encode_error(id, "layout_not_found", "layout unavailable");
+        };
+        // Zoom no-op: a zoomed tab's `compute_pane_infos`/
+        // `resize_tab_panes` path special-cases the focused pane to the full
+        // view area, so the real split ratios are invisible while zoomed.
+        // Rebalancing them now would corrupt values that reappear after
+        // un-zoom. Zoom is a normal transient state, not a failure, so this
+        // returns success with the layout unchanged rather than an error.
+        if !zoomed {
+            let Some(tab) = self
+                .state
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.tabs.get_mut(tab_idx))
+            else {
+                return encode_error(id, "layout_not_found", "layout unavailable");
+            };
+            tab.layout.balance_areas();
+            self.schedule_session_save();
+            self.emit_layout_updated_event(ws_idx, tab_idx);
+        }
+
+        let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
+            return encode_error(id, "layout_not_found", "layout unavailable");
+        };
+        encode_success(id, ResponseResult::LayoutBalance { layout })
+    }
+
     fn resolve_layout_export_target(&self, params: &LayoutExportParams) -> Option<(usize, usize)> {
         match (params.tab_id.as_deref(), params.pane_id.as_deref()) {
             (Some(_), Some(_)) => None,
@@ -894,6 +940,110 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_layout");
         assert_eq!(app.state.workspaces[0].tabs.len(), original_tab_count);
+    }
+
+    /// Builds a 3-leaf tab (root|a2 nested under a vertical split, sibling
+    /// `b` off the root horizontal split) with manually-skewed ratios so a
+    /// balance call has something to equalize.
+    fn app_with_unequal_three_leaf_tab() -> App {
+        let mut app = app_with_workspace();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.state.workspaces[0].test_split(Direction::Vertical);
+        app.state.ensure_test_terminals();
+        // Skew away from the leaf-weighted targets (root split: 2 leaves vs
+        // 1 leaf => 2/3; inner split: 1 vs 1 => 0.5).
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[], 0.2);
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[false], 0.9);
+        app
+    }
+
+    #[test]
+    fn layout_balance_equalizes_leaf_weighted_ratios() {
+        let mut app = app_with_unequal_three_leaf_tab();
+
+        let response = app.handle_layout_balance(
+            "req".into(),
+            LayoutExportParams {
+                tab_id: None,
+                pane_id: None,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutBalance { layout } = success.result else {
+            panic!("expected layout balance response");
+        };
+        let LayoutNode::Split {
+            ratio: root_ratio,
+            first,
+            ..
+        } = layout.root
+        else {
+            panic!("expected split layout root");
+        };
+        assert!((root_ratio - 2.0 / 3.0).abs() < 1e-5);
+        let LayoutNode::Split {
+            ratio: inner_ratio, ..
+        } = *first
+        else {
+            panic!("expected nested split");
+        };
+        assert!((inner_ratio - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn layout_balance_is_noop_while_tab_zoomed() {
+        let mut app = app_with_unequal_three_leaf_tab();
+        app.state.workspaces[0].tabs[0].zoomed = true;
+        let before = app.layout_description(0, 0).unwrap();
+
+        let response = app.handle_layout_balance(
+            "req".into(),
+            LayoutExportParams {
+                tab_id: None,
+                pane_id: None,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutBalance { layout } = success.result else {
+            panic!("expected layout balance response");
+        };
+        assert_eq!(layout, before, "zoomed tab must not be rebalanced");
+    }
+
+    #[test]
+    fn layout_balance_emits_layout_updated_event_and_schedules_session_save() {
+        let mut app = app_with_unequal_three_leaf_tab();
+        app.no_session = false;
+        let events_before = app.event_hub.events_after(0).len();
+
+        let response = app.handle_layout_balance(
+            "req".into(),
+            LayoutExportParams {
+                tab_id: None,
+                pane_id: None,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::LayoutBalance { .. }
+        ));
+        assert!(app.session_save_deadline.is_some());
+        assert!(matches!(
+            &app.event_hub.events_after(0).last().expect("layout event").1.data,
+            EventData::LayoutUpdated { layout }
+                if layout.tab_id == app.public_tab_id(0, 0).unwrap()
+        ));
+        assert!(app.event_hub.events_after(0).len() > events_before);
     }
 
     #[test]
