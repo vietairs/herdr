@@ -159,7 +159,7 @@ impl FederationLease {
     /// Whether any connection currently holds a mounted lease, regardless of
     /// which. A mounted controller drives this host's terminal sizes, so the
     /// host's own render loop must stop resizing them to its geometry while
-    /// this holds (see `AppState::federation_owns_terminal_sizes`).
+    /// this holds (see `AppState::federation_owned_terminal_sizes`).
     pub(crate) fn has_mounted_controller(&self) -> bool {
         matches!(
             self.slot,
