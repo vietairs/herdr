@@ -580,9 +580,50 @@ pub struct WorkspaceCardArea {
 /// target list reuses the existing `AppState::name_input` field (same
 /// pattern as `WorktreeCreateState`'s branch input); this struct only holds
 /// what a free-text collector needs beyond that shared input.
+///
+/// `submitting`/`pending` track a real in-flight `workspace.mount_remote`
+/// dial+mount: the API ack only means "request accepted", the actual ssh
+/// dial runs as a server-owned task and reports back ~25s later via
+/// `AppEvent::FederationMountReady`/`FederationMountFailed`
+/// (`src/app/api/workspaces.rs`). `pending` exists only to correlate those
+/// per-target outcomes back to this submission — `begin_submission` and
+/// `resolve_pending_target` are the only two places that touch either field,
+/// so they cannot drift out of sync with each other.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteMountState {
     pub error: Option<String>,
+    pub submitting: bool,
+    pub pending: Vec<String>,
+}
+
+impl RemoteMountState {
+    /// Starts tracking a freshly-submitted target list. Clears any prior
+    /// inline error so the dialog reflects only this submission's outcome.
+    pub(crate) fn begin_submission(&mut self, targets: Vec<String>) {
+        self.pending = targets;
+        self.submitting = !self.pending.is_empty();
+        self.error = None;
+    }
+
+    /// Removes `target` from `pending` and keeps `submitting` in sync (true
+    /// iff any target is still outstanding). Returns whether `target` was
+    /// actually pending — an unknown target (e.g. left over from a
+    /// dismissed-then-reopened dialog) is ignored by the caller.
+    ///
+    /// Both call sites (`src/app/api/workspaces.rs`'s
+    /// `handle_federation_mount_ready`/`handle_federation_mount_failed`) are
+    /// `#[cfg(unix)]`, so this has zero callers on
+    /// `x86_64-pc-windows-msvc` — `#[allow(dead_code)]` here, matching this
+    /// file's existing precedent on `FederationMountConflict`.
+    #[allow(dead_code)]
+    pub(crate) fn resolve_pending_target(&mut self, target: &str) -> bool {
+        let before = self.pending.len();
+        self.pending
+            .retain(|pending_target| pending_target != target);
+        let resolved = self.pending.len() != before;
+        self.submitting = !self.pending.is_empty();
+        resolved
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

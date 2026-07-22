@@ -103,11 +103,20 @@ pub(super) fn render_remote_mount_overlay(app: &AppState, frame: &mut Frame, are
         rows[3],
     );
 
+    // A failed target's error must stay visible even while sibling targets
+    // are still resolving (2+ target submission) — render it whenever it is
+    // set, instead of an `else if` that lets `submitting` shadow it away
+    // until the last target resolves.
     if let Some(error) = &remote_mount.error {
         frame.render_widget(
             Paragraph::new(format!(" {error}"))
                 .style(Style::default().fg(app.palette.red))
                 .wrap(Wrap { trim: false }),
+            rows[4],
+        );
+    } else if remote_mount.submitting {
+        frame.render_widget(
+            Paragraph::new(" mounting…").style(Style::default().fg(app.palette.overlay0)),
             rows[4],
         );
     }
