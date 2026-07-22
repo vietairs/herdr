@@ -112,7 +112,19 @@ pub(crate) enum PathRejection {
     DisallowedCharacter,
     /// A `.` or `..` component anywhere in the path.
     RelativeComponent,
+    /// Longer than any path a staging host could legitimately have written.
+    TooLong,
 }
+
+/// Longest returned path accepted, in bytes. Well past `PATH_MAX` on every
+/// target and far past anything a staging host can produce (a bounded root
+/// plus a bounded generated name), so no legitimate answer is refused.
+///
+/// Without it a multi-megabyte allowlist-clean path is queued as one
+/// un-chunked pane input, overruns the terminal channel's own frame cap, and
+/// tears the whole mount down — instead of failing as this module's designed
+/// reject-with-toast.
+const MAX_RETURNED_PATH_BYTES: usize = 4096;
 
 /// Why a stage request never reached the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +156,11 @@ pub(crate) fn sanitize_returned_remote_path(path: &str) -> Result<&str, PathReje
     // Both facts are about a well-behaved peer; the checks below are not.
     if path.is_empty() {
         return Err(PathRejection::Empty);
+    }
+    // Bounded first: every check below scans the whole string, and the accepted
+    // path is later queued as a single pane input.
+    if path.len() > MAX_RETURNED_PATH_BYTES {
+        return Err(PathRejection::TooLong);
     }
     if !path.starts_with('/') {
         return Err(PathRejection::NotAbsolute);
@@ -779,6 +796,44 @@ mod tests {
             app.pending_remote_clipboard_stages.is_empty(),
             "{remote_path} left its pending entry behind"
         );
+    }
+
+    // An accepted path is queued as one un-chunked pane input, so an unbounded
+    // one overruns the terminal channel's frame cap and tears the whole mount
+    // down — losing every pane on it — instead of failing as a rejected answer.
+    #[tokio::test]
+    async fn an_unbounded_returned_path_is_rejected_rather_than_queued_as_input() {
+        let root = "/tmp/herdr-clipboard-images-501";
+        let huge = format!(
+            "{root}/{FEDERATION_CLIPBOARD_PREFIX}1-0-{}.png",
+            "a".repeat(MAX_RETURNED_PATH_BYTES)
+        );
+        assert!(huge.len() > MAX_RETURNED_PATH_BYTES);
+        assert_eq!(
+            sanitize_returned_remote_path(&huge),
+            Err(PathRejection::TooLong)
+        );
+        assert_rejected(&huge);
+
+        // Positive control: the same shape at a legitimate length is accepted,
+        // so the rejection above is about the length and not the fixture.
+        assert!(sanitize_returned_remote_path(&staged_path()).is_ok());
+    }
+
+    // Invisible characters carry bytes nobody reading the pane can see. The
+    // denylist already covers the tag block for exactly this reason; variation
+    // selectors and the combining grapheme joiner are the same trick.
+    #[tokio::test]
+    async fn a_returned_path_carrying_invisible_characters_is_rejected() {
+        for hidden in ['\u{034F}', '\u{FE0F}', '\u{E0101}'] {
+            let path = format!("{}{hidden}", staged_path());
+            assert_eq!(
+                sanitize_returned_remote_path(&path),
+                Err(PathRejection::DisallowedCharacter),
+                "U+{:04X} passed the invisible-character gate",
+                hidden as u32
+            );
+        }
     }
 
     // Positive control for every rejection test below: the identical fixture,
