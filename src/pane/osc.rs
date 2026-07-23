@@ -36,6 +36,26 @@ pub(super) enum DefaultColorEvent {
 pub(super) struct DefaultColorTrackedEvent {
     pub(super) end_offset: usize,
     pub(super) event: DefaultColorEvent,
+    pub(super) terminator: OscTerminator,
+}
+
+/// Which string terminator ended the OSC sequence that produced a tracked
+/// default-color event. A live child-owned default color reply mirrors the
+/// terminator the query itself used (as a real terminal would); our own
+/// host-theme-derived replies always use ST regardless of this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OscTerminator {
+    Bel,
+    St,
+}
+
+impl OscTerminator {
+    pub(super) fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::Bel => b"\x07",
+            Self::St => b"\x1b\\",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -144,10 +164,9 @@ impl DefaultColorOscTracker {
 }
 
 fn is_default_color_set_osc(body: &[u8]) -> bool {
-    matches!(
-        parse_default_color_event(body),
-        Some(DefaultColorEvent::Set(_))
-    )
+    parse_default_color_events(body)
+        .iter()
+        .any(|event| matches!(event, DefaultColorEvent::Set(_)))
 }
 
 #[derive(Debug, Default)]
@@ -181,7 +200,7 @@ impl DefaultColorEventTracker {
                 }
                 DefaultColorOscTrackerState::OscBody => match byte {
                     0x07 => {
-                        self.finalize(index + 1);
+                        self.finalize(index + 1, OscTerminator::Bel);
                         self.state = DefaultColorOscTrackerState::Ground;
                     }
                     0x1b => self.state = DefaultColorOscTrackerState::OscEscape,
@@ -189,7 +208,7 @@ impl DefaultColorEventTracker {
                 },
                 DefaultColorOscTrackerState::OscEscape => {
                     if byte == b'\\' {
-                        self.finalize(index + 1);
+                        self.finalize(index + 1, OscTerminator::St);
                         self.state = DefaultColorOscTrackerState::Ground;
                     } else {
                         self.body.push(0x1b);
@@ -232,12 +251,28 @@ impl DefaultColorEventTracker {
         }
     }
 
-    fn finalize(&mut self, end_offset: usize) {
-        if let Some(event) = parse_default_color_event(&self.body) {
-            self.pending
-                .push(DefaultColorTrackedEvent { end_offset, event });
-        }
+    fn finalize(&mut self, end_offset: usize, terminator: OscTerminator) {
+        self.pending.extend(
+            parse_default_color_events(&self.body)
+                .into_iter()
+                .map(|event| DefaultColorTrackedEvent {
+                    end_offset,
+                    event,
+                    terminator,
+                }),
+        );
         self.body.clear();
+    }
+
+    pub(super) fn in_progress_event(&self) -> Option<DefaultColorEvent> {
+        if !matches!(
+            self.state,
+            DefaultColorOscTrackerState::OscBody | DefaultColorOscTrackerState::OscEscape
+        ) {
+            return None;
+        }
+        let mut events = parse_default_color_events(&self.body);
+        (events.len() == 1).then(|| events.remove(0))
     }
 
     pub(super) fn drain_pending(&mut self) -> Vec<DefaultColorTrackedEvent> {
@@ -245,40 +280,101 @@ impl DefaultColorEventTracker {
     }
 }
 
-fn parse_default_color_event(body: &[u8]) -> Option<DefaultColorEvent> {
-    match body {
+fn parse_default_color_events(body: &[u8]) -> Vec<DefaultColorEvent> {
+    let single = match body {
         b"10;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Foreground)),
         b"11;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Background)),
         b"12;?" => Some(DefaultColorEvent::Query(DefaultColorQuery::Cursor)),
         b"110" | b"110;" => Some(DefaultColorEvent::Reset(DefaultColorQuery::Foreground)),
         b"111" | b"111;" => Some(DefaultColorEvent::Reset(DefaultColorQuery::Background)),
-        _ => parse_palette_color_query(body).or_else(|| parse_default_color_set_event(body)),
+        _ => None,
+    };
+    if let Some(event) = single {
+        return vec![event];
     }
+    if let Some(events) = parse_palette_color_queries(body) {
+        return events;
+    }
+    parse_default_color_multi_events(body)
 }
 
-fn parse_palette_color_query(body: &[u8]) -> Option<DefaultColorEvent> {
-    let index = body.strip_prefix(b"4;")?.strip_suffix(b";?")?;
-    if index.is_empty() || index.len() > 3 || !index.iter().all(|byte| byte.is_ascii_digit()) {
+/// Parses an OSC 4 body with one or more `index;?` pairs (e.g. `4;0;?;1;?`),
+/// as emitted by shells/tools that query several palette entries in a single
+/// escape sequence. Returns `None` (rather than a partial result) if any
+/// pair fails to parse, so malformed input falls through to other parsers
+/// instead of silently generating a wrong subset of replies.
+fn parse_palette_color_queries(body: &[u8]) -> Option<Vec<DefaultColorEvent>> {
+    let rest = body.strip_prefix(b"4;")?;
+    let parts: Vec<&[u8]> = rest.split(|byte| *byte == b';').collect();
+    if parts.is_empty() || parts.len() % 2 != 0 {
         return None;
     }
-    let mut value: u16 = 0;
-    for &digit in index {
-        value = value * 10 + u16::from(digit - b'0');
+    let mut events = Vec::with_capacity(parts.len() / 2);
+    for pair in parts.chunks_exact(2) {
+        let index = pair[0];
+        let spec = pair[1];
+        if spec != b"?" {
+            return None;
+        }
+        if index.is_empty() || index.len() > 3 || !index.iter().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let mut value: u16 = 0;
+        for &digit in index {
+            value = value * 10 + u16::from(digit - b'0');
+        }
+        let index = u8::try_from(value).ok()?;
+        events.push(DefaultColorEvent::PaletteQuery(index));
     }
-    u8::try_from(value)
-        .ok()
-        .map(DefaultColorEvent::PaletteQuery)
+    Some(events)
 }
 
-fn parse_default_color_set_event(body: &[u8]) -> Option<DefaultColorEvent> {
-    let separator = body.iter().position(|byte| *byte == b';')?;
-    let query = match &body[..separator] {
-        b"10" => DefaultColorQuery::Foreground,
-        b"11" => DefaultColorQuery::Background,
-        _ => return None,
+/// Parses an OSC 10/11/12 body with one or more `;`-separated values (e.g.
+/// `10;?;rgb:44/55/66` or `10;?;?;?`), where each position maps to a
+/// consecutive dynamic-color number starting at the leading command (10 =
+/// foreground, 11 = background, 12 = cursor). A `?` value is a query for
+/// that color; any other value is a set.
+fn parse_default_color_multi_events(body: &[u8]) -> Vec<DefaultColorEvent> {
+    let Some(separator) = body.iter().position(|byte| *byte == b';') else {
+        return Vec::new();
     };
-    let value = &body[separator + 1..];
-    (!value.is_empty() && value != b"?").then_some(DefaultColorEvent::Set(query))
+    let start = match &body[..separator] {
+        b"10" => 10,
+        b"11" => 11,
+        b"12" => 12,
+        _ => return Vec::new(),
+    };
+    let values: Vec<&[u8]> = body[separator + 1..]
+        .split(|byte| *byte == b';')
+        .filter(|value| !value.is_empty())
+        .collect();
+    if values.is_empty() {
+        return Vec::new();
+    }
+    // A body made entirely of `?` placeholders (e.g. `10;?;?;?`) is a pure
+    // multi-value query and every position gets a Query event. A body that
+    // mixes `?` with a real value (e.g. `10;?;rgb:44/55/66`) is a set
+    // command with some positions left unspecified; those `?` positions are
+    // skipped rather than treated as queries, matching how a plain set-only
+    // OSC 10/11/12 command is interpreted.
+    let all_queries = values.iter().all(|value| *value == b"?");
+    values
+        .into_iter()
+        .enumerate()
+        .filter_map(|(offset, value)| {
+            let query = match start + offset {
+                10 => DefaultColorQuery::Foreground,
+                11 => DefaultColorQuery::Background,
+                12 => DefaultColorQuery::Cursor,
+                _ => return None,
+            };
+            if value == b"?" {
+                all_queries.then_some(DefaultColorEvent::Query(query))
+            } else {
+                Some(DefaultColorEvent::Set(query))
+            }
+        })
+        .collect()
 }
 
 /// 256 KiB of base64 ≈ 192 KiB of text — enough for real source-file copies
@@ -440,7 +536,20 @@ fn parse_cwd_osc(body: &[u8]) -> Option<PathBuf> {
         let path = path.trim().trim_matches('"');
         return (!path.is_empty()).then(|| PathBuf::from(path));
     }
+    if let Some(path) = body.strip_prefix("1337;CurrentDir=") {
+        let path = path.trim().trim_matches('"');
+        return (!path.is_empty()).then(|| PathBuf::from(path));
+    }
     None
+}
+
+pub(super) fn parse_reported_cwd(value: &[u8]) -> Option<PathBuf> {
+    let value = std::str::from_utf8(value).ok()?.trim();
+    if value.starts_with("file://") {
+        return parse_file_uri_cwd(value);
+    }
+    let path = value.trim_matches('"');
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 /// Maximum retained string length for agent OSC title and progress payloads.
@@ -1084,6 +1193,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reported_cwd_parses_file_uri_and_bare_paths() {
+        assert_eq!(
+            parse_reported_cwd(b"file:///tmp/herdr%20repo"),
+            Some(std::path::PathBuf::from("/tmp/herdr repo"))
+        );
+        assert_eq!(
+            parse_reported_cwd(b"C:\\Users\\herdr\\src\\herdr"),
+            Some(std::path::PathBuf::from("C:\\Users\\herdr\\src\\herdr"))
+        );
+        assert_eq!(
+            parse_reported_cwd(b"\"C:\\my proj\""),
+            Some(std::path::PathBuf::from("C:\\my proj"))
+        );
+    }
+
+    #[test]
+    fn reported_cwd_rejects_invalid_or_empty_values() {
+        assert_eq!(parse_reported_cwd(b""), None);
+        assert_eq!(parse_reported_cwd(b"\xff"), None);
+        assert_eq!(parse_reported_cwd(b"file://remote/tmp"), None);
+    }
+
     // -----------------------------------------------------------------------
     // AgentOscStateTracker tests
     // -----------------------------------------------------------------------
@@ -1359,6 +1491,25 @@ mod tests {
     }
 
     #[test]
+    fn default_color_event_tracker_tracks_each_multi_value_set() {
+        let mut tracker = DefaultColorEventTracker::default();
+
+        tracker.observe(
+            b"\x1b]10;rgb:11/22/33;rgb:44/55/66\x1b\\\x1b]10;?;rgb:77/88/99\x1b\\\x1b]10;;rgb:aa/bb/cc\x1b\\",
+        );
+
+        assert_eq!(
+            tracked_default_color_events(tracker.drain_pending()),
+            vec![
+                DefaultColorEvent::Set(DefaultColorQuery::Foreground),
+                DefaultColorEvent::Set(DefaultColorQuery::Background),
+                DefaultColorEvent::Set(DefaultColorQuery::Background),
+                DefaultColorEvent::Set(DefaultColorQuery::Foreground),
+            ]
+        );
+    }
+
+    #[test]
     fn default_color_event_tracker_handles_split_default_color_queries() {
         let mut tracker = DefaultColorEventTracker::default();
 
@@ -1403,7 +1554,11 @@ mod tests {
 
         assert_eq!(
             tracked_default_color_events(tracker.drain_pending()),
-            vec![DefaultColorEvent::PaletteQuery(0)]
+            vec![
+                DefaultColorEvent::PaletteQuery(0),
+                DefaultColorEvent::PaletteQuery(1),
+                DefaultColorEvent::PaletteQuery(0),
+            ]
         );
     }
 

@@ -9,6 +9,20 @@ use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
 use crate::workspace::{GitStatusCacheEntry, WorkspaceGitStatus};
 
+/// What an off-loop clipboard read produced.
+///
+/// Three outcomes rather than an `Option`, because "the clipboard holds no
+/// image" and "the clipboard owner never answered" call for different words to
+/// the user: the first is a mistake they can correct, the second is a hung
+/// process on their machine.
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum ClipboardImageCapture {
+    Image(crate::platform::ClipboardImage),
+    NoImage,
+    ReadTimedOut,
+}
+
 #[derive(Debug)]
 pub struct ApiWorktreeAddRequest {
     pub id: String,
@@ -169,16 +183,81 @@ pub enum AppEvent {
     /// server daemon itself are unaffected; surfaces as a sidebar notice.
     #[cfg(unix)]
     FederationMountFailed { target: String, reason: String },
-    /// A federation link's drive task ended (closed, faulted, or errored)
-    /// for a specific mount generation. The handler fences on `generation`
-    /// so a stale ended-notice from a superseded drive task cannot tear
-    /// down a mount that has since been remounted.
+    /// A federation link's drive task ended (closed, faulted, or errored).
+    ///
+    /// `generation` cannot actually fence this: both hosts mint a constant
+    /// `mount_generation` of 1, so every mount to a given host reports the
+    /// same value and a delayed end-notice from a superseded connection
+    /// still matches a fresh remount. `connection_epoch` is minted locally,
+    /// once per successful mount, and is therefore the value that
+    /// distinguishes this connection from one that has already been replaced.
     #[cfg(unix)]
     FederationMountEnded {
         host_key: crate::remote::federation::id::HostKey,
         generation: u64,
+        connection_epoch: crate::remote::federation::client::MountConnectionEpoch,
         target: String,
         reason: String,
+    },
+    /// A mounted remote host staged a pushed file and answered with the
+    /// absolute path it wrote on its own filesystem. The path is still
+    /// untrusted here — it is about to be injected into a PTY — so the
+    /// handler re-validates it before use.
+    ///
+    /// `origin` identifies the mount that answered, and `connection_epoch`
+    /// identifies which connection to that mount answered: neither
+    /// `mount_generation` (a constant) nor `server_instance_id` (minted per
+    /// remote *process*, so a remount to a still-running remote reuses it)
+    /// can tell a fresh mount from a superseded one.
+    #[cfg(unix)]
+    FederationClipboardStageReady {
+        request_id: u64,
+        remote_path: String,
+        origin: crate::remote::federation::id::HostKey,
+        connection_epoch: crate::remote::federation::client::MountConnectionEpoch,
+    },
+    /// A mounted remote host refused or failed a stage request. The failure
+    /// is a closed enum, not a remote-supplied string, so the user-facing
+    /// copy is chosen locally. Fenced by `origin` + `connection_epoch` for
+    /// the same reason [`AppEvent::FederationClipboardStageReady`] is.
+    #[cfg(unix)]
+    FederationClipboardStageFailed {
+        request_id: u64,
+        failure: crate::remote::federation::protocol::ClipboardStageFailure,
+        origin: crate::remote::federation::id::HostKey,
+        connection_epoch: crate::remote::federation::client::MountConnectionEpoch,
+    },
+    /// A stage request outlived its budget with no answer from the remote.
+    /// Raised locally, never by the peer, so the pending entry always
+    /// resolves. Fenced by `origin` + `connection_epoch` for the same reason
+    /// [`AppEvent::FederationClipboardStageReady`] is.
+    #[cfg(unix)]
+    FederationClipboardStageTimedOut {
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+        connection_epoch: crate::remote::federation::client::MountConnectionEpoch,
+    },
+    /// A file-staging request has been in flight long enough that the user
+    /// deserves to know it is still working. Raised locally on a timer, never
+    /// by the peer, and deliberately unfenced: it carries no remote data and
+    /// its handler does nothing but look the request up, so an id belonging
+    /// to a request that already resolved is simply a no-op.
+    #[cfg(unix)]
+    FederationClipboardStageStillRunning { request_id: u64 },
+    /// The off-loop clipboard read started by an image-paste key press has
+    /// finished. The read itself is synchronous OS work — `osascript` on
+    /// macOS, a chain of `wl-paste`/`xclip` child processes on Linux, none of
+    /// them bounded — so it runs on a blocking thread and answers here rather
+    /// than on the key path, where it would freeze rendering and every pane.
+    ///
+    /// The target is carried as a stable `Workspace::id`, not an index:
+    /// workspaces can close while the read runs, and an index would then name
+    /// whichever workspace slid into the slot.
+    #[cfg(unix)]
+    RemoteClipboardImageCaptured {
+        workspace_id: String,
+        target_pane_id: PaneId,
+        capture: ClipboardImageCapture,
     },
     /// A live mount's drive task (`remote::federation::client::
     /// drive_mount_channel`) finished materializing a locally-spawned

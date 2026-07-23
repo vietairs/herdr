@@ -25,9 +25,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -45,8 +46,9 @@ use crate::remote::federation::id::ServerInstanceId;
 use crate::remote::federation::protocol::codec;
 use crate::remote::federation::protocol::negotiate::{negotiate, AgreedCaps};
 use crate::remote::federation::protocol::{
-    AgentStatusMessage, Capability, Channel, EventChannelMessage, EventCursor, EventFrame,
-    FaultMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot, ScrollbackReplay,
+    AgentStatusMessage, Capability, Channel, ClipboardStageFailure, ClipboardStageRequest,
+    ClipboardStageResponse, EventChannelMessage, EventCursor, EventFrame, FaultMessage,
+    FederationMessage, Handshake, HandshakeResponse, MountSnapshot, ScrollbackReplay,
     SplitPaneRequest, SplitPaneResponse, TerminalChannelMessage, FEDERATION_PROTOCOL_VERSION,
 };
 use crate::remote::federation::tee;
@@ -91,6 +93,10 @@ fn federation_capabilities() -> BTreeSet<Capability> {
     [
         Capability::new(Capability::SCROLLBACK_REPLAY),
         Capability::new(Capability::AGENT_STATUS),
+        // This module is Unix-only (`server::mod` gates its declaration), and
+        // so is the staging module behind this capability, so the two can
+        // never disagree about which targets can honour a stage request.
+        Capability::new(Capability::FILE_STAGING),
     ]
     .into_iter()
     .collect()
@@ -98,8 +104,11 @@ fn federation_capabilities() -> BTreeSet<Capability> {
 
 /// The largest cap across every channel, bounding a read-side allocation before
 /// a frame's true channel (and cap) is known — mirrors `serve::global_max_frame`.
+/// Derived from the channel list rather than naming one channel: hardcoding a
+/// particular channel's cap here silently rejects every frame on any channel
+/// whose cap is larger.
 fn global_max_frame() -> usize {
-    Channel::Clipboard.max_len()
+    Channel::largest_max_len()
 }
 
 /// Blocking sync read of one framed federation message; `Ok(None)` on a clean
@@ -242,10 +251,14 @@ fn handle_federation_connection(
         debug!(connid, err = %err, "federation socket receive timeout unavailable");
     }
 
-    if drive_handshake(&mut stream, connid, server_instance_id)?.is_none() {
+    // The negotiated set is carried, not discarded: it is what decides
+    // whether this connection may construct a stage frame at all. A peer that
+    // did not negotiate `file_staging` has no decoder for either stage
+    // variant, and one such frame ends its whole mount.
+    let Some(agreed) = drive_handshake(&mut stream, connid, server_instance_id)? else {
         debug!(connid, "federation handshake rejected or absent");
         return Ok(());
-    }
+    };
 
     // Clear the handshake read timeout: a mounted federated session idles
     // between the controller's inputs, so the command loop must not time out.
@@ -260,6 +273,7 @@ fn handle_federation_connection(
         &mut stream,
         epoch,
         connid,
+        &agreed,
         server_instance_id,
         &server_event_tx,
     )
@@ -275,6 +289,7 @@ fn drive_mount<S: FederationStream>(
     stream: &mut S,
     epoch: AcceptEpoch,
     connid: ConnId,
+    agreed: &AgreedCaps,
     server_instance_id: &ServerInstanceId,
     server_event_tx: &mpsc::Sender<ServerEvent>,
 ) -> io::Result<()> {
@@ -317,6 +332,8 @@ fn drive_mount<S: FederationStream>(
         epoch,
         connid,
         cursor,
+        agreed,
+        Arc::new(crate::remote::federation::file_staging::stage_remote_clipboard_image),
         server_instance_id,
         server_event_tx,
     )
@@ -346,11 +363,14 @@ impl FederationStream for LocalStream {
 /// opened terminal. All outbound producers funnel through one mpsc so writes
 /// never race on the shared socket. Returns when the peer closes, a read fails,
 /// or the writer fails — whichever comes first (recorded in `first_cause`).
+#[allow(clippy::too_many_arguments)]
 fn run_connection<S: FederationStream>(
     stream: &mut S,
     epoch: AcceptEpoch,
     connid: ConnId,
     initial_cursor: EventCursor,
+    agreed: &AgreedCaps,
+    staging_op: StagingOp,
     server_instance_id: &ServerInstanceId,
     server_event_tx: &mpsc::Sender<ServerEvent>,
 ) -> io::Result<()> {
@@ -388,6 +408,27 @@ fn run_connection<S: FederationStream>(
         })
     };
 
+    // The staging worker exists ONLY when both peers negotiated file staging.
+    // Making its absence the reason no stage frame can be built is what keeps
+    // "a newer host never answers an older controller" structural: with no
+    // worker there is no response path to reach.
+    let staging = if agreed
+        .0
+        .contains(&Capability::new(Capability::FILE_STAGING))
+    {
+        let (channel, out) = spawn_staging_worker(&shutdown, &first_cause, staging_op);
+        match out.lock() {
+            Ok(mut handle) => *handle = Some(out_tx.clone()),
+            Err(_) => debug!(
+                connid,
+                "federation staging outbound handle poisoned at spawn"
+            ),
+        }
+        Some((channel, out))
+    } else {
+        None
+    };
+
     // Inbound loop on THIS thread; it spawns an output pump per opened terminal.
     let mut pumps: HashMap<String, OutputPump> = HashMap::new();
     let read_result = reader_loop(
@@ -400,6 +441,7 @@ fn run_connection<S: FederationStream>(
         &first_cause,
         server_event_tx,
         &mut pumps,
+        staging.as_ref().map(|(channel, _out)| channel),
     );
 
     // Teardown in an order that cannot deadlock the writer:
@@ -416,6 +458,23 @@ fn run_connection<S: FederationStream>(
         let _ = pump.handle.join();
     }
     let _ = ticker.join();
+    // The staging worker is torn down without being joined: dropping its queue
+    // only wakes a worker parked in `recv()`, and a join would hold the lease
+    // (released by `LeaseReleaseGuard` when this returns) for as long as one
+    // filesystem call is stuck, refusing every later mount to this host.
+    // Revoking the outbound handle drops the worker's only sender right here,
+    // so `drop(out_tx)` below still disconnects the writer and its join stays
+    // bounded; a worker that finishes late discards its result.
+    if let Some((channel, staging_out)) = staging {
+        drop(channel);
+        match staging_out.lock() {
+            Ok(mut handle) => *handle = None,
+            Err(_) => debug!(
+                connid,
+                "federation staging outbound handle poisoned at teardown"
+            ),
+        }
+    }
     // If a fault (not a clean peer close) ended the connection, best-effort tell
     // the peer why before the socket closes. It may not arrive if the link is
     // already broken (e.g. a WriterFailed cause), hence best-effort; enqueued
@@ -451,6 +510,7 @@ fn reader_loop<S: Read>(
     first_cause: &Arc<FirstCauseCell>,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     pumps: &mut HashMap<String, OutputPump>,
+    staging: Option<&StagingChannel>,
 ) -> io::Result<()> {
     loop {
         match read_frame_blocking(reader) {
@@ -478,6 +538,9 @@ fn reader_loop<S: Read>(
             }
             Ok(Some(FederationMessage::SplitPaneRequest(request))) => {
                 handle_split_pane_request(request, out_tx, shutdown, first_cause, server_event_tx);
+            }
+            Ok(Some(FederationMessage::ClipboardStageRequest(request))) => {
+                handle_clipboard_stage_request(request, staging, out_tx, shutdown, first_cause);
             }
             Ok(Some(FederationMessage::SnapshotRequest(_))) => {
                 handle_snapshot_request(
@@ -823,6 +886,275 @@ fn enqueue_outbound(
     }
 }
 
+/// How many stage requests one connection may have in the system at once,
+/// **counting the one being staged right now**. A payload is held whole in
+/// memory (encoded, decoded, and written), so this is the only bound on how
+/// much a single controller can make this host allocate for pastes.
+///
+/// Deliberately not expressed as the staging queue's depth: once the worker has
+/// `recv`d a request, a queue of this depth would accept two more, putting
+/// three payloads in flight.
+const MAX_CONCURRENT_STAGES: usize = 2;
+
+/// Performs the actual filesystem write for one stage request. One shared
+/// closure rather than a bare `fn` pointer so a test can substitute an
+/// operation that parks on a channel *it* owns; a `fn` pointer cannot capture,
+/// which would force every such test onto one process-global rendezvous and
+/// make them race each other. Production always passes
+/// [`crate::remote::federation::file_staging::stage_remote_clipboard_image`].
+type StagingOp = Arc<dyn Fn(&str, &[u8]) -> Result<PathBuf, ClipboardStageFailure> + Send + Sync>;
+
+/// The connection's revocable outbound handle for the staging worker.
+///
+/// The worker must not hold a plain `out_tx` clone: the writer's `recv()` has
+/// no timeout, so a live sender held by a thread stuck in a filesystem call
+/// would keep the writer's join from ever completing. Teardown sets this to
+/// `None`, which drops the worker's only sender synchronously; a worker that
+/// finishes afterwards finds `None` and discards its result.
+type RevocableOut = Arc<Mutex<Option<std_mpsc::SyncSender<FederationMessage>>>>;
+
+/// One admitted stage request's share of [`MAX_CONCURRENT_STAGES`], released
+/// when this value is dropped.
+///
+/// RAII rather than a `fetch_add`/`fetch_sub` pair is load-bearing. The permit
+/// is taken by the reader *before* the request is handed to the worker, so a
+/// hand-off that fails (a full queue, or a worker already gone at teardown)
+/// hands the request — and this guard with it — straight back to the reader,
+/// where dropping it returns the permit. A decrement that lived only in the
+/// worker loop would leak on exactly that path, and the connection would
+/// answer `Busy` for the rest of its life with nothing actually staging.
+struct StagePermit {
+    live: Arc<AtomicUsize>,
+}
+
+impl StagePermit {
+    /// Takes one permit, or `None` when the cap is already reached. The
+    /// compare-and-swap keeps the count exact under the reader thread racing
+    /// the worker's release.
+    fn acquire(live: &Arc<AtomicUsize>) -> Option<Self> {
+        let mut current = live.load(Ordering::Acquire);
+        loop {
+            if current >= MAX_CONCURRENT_STAGES {
+                return None;
+            }
+            match live.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(Self {
+                        live: Arc::clone(live),
+                    })
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+impl Drop for StagePermit {
+    fn drop(&mut self) {
+        self.live.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// One request queued for the staging worker, carrying its own admission
+/// permit so the permit's lifetime is exactly the request's.
+struct StageJob {
+    request: ClipboardStageRequest,
+    permit: StagePermit,
+}
+
+/// The reader side's handle on a connection's staging worker. Absent
+/// (`None` at the call site) whenever `file_staging` was not agreed — which is
+/// what makes "a host never emits a stage frame it did not negotiate"
+/// structural rather than a check somebody could forget.
+struct StagingChannel {
+    jobs: std_mpsc::SyncSender<StageJob>,
+    live: Arc<AtomicUsize>,
+}
+
+/// Spawns one connection's staging worker and returns the reader's handle on
+/// it plus the revocable outbound handle teardown must clear.
+///
+/// The worker is **detached — never joined**. Dropping the job queue only wakes
+/// a worker parked in `recv()`; it cannot interrupt a base64 decode or a
+/// `write_all` already under way. Joining it would therefore pin
+/// `LeaseReleaseGuard` — and with it this host's single-controller slot — for
+/// as long as one filesystem call is stuck, refusing every later mount.
+fn spawn_staging_worker(
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    op: StagingOp,
+) -> (StagingChannel, RevocableOut) {
+    let out: RevocableOut = Arc::new(Mutex::new(None));
+    let (jobs, rx) = std_mpsc::sync_channel::<StageJob>(MAX_CONCURRENT_STAGES);
+    let worker_out = Arc::clone(&out);
+    let worker_shutdown = Arc::clone(shutdown);
+    let worker_first_cause = Arc::clone(first_cause);
+    std::thread::spawn(move || {
+        staging_worker_loop(rx, &worker_out, &worker_shutdown, &worker_first_cause, op)
+    });
+    (
+        StagingChannel {
+            jobs,
+            live: Arc::new(AtomicUsize::new(0)),
+        },
+        out,
+    )
+}
+
+/// Stage one request at a time until the queue disconnects.
+///
+/// The ordering is the contract: **decode before touching the filesystem**, so
+/// a frame-legal but undecodable payload is answered `InvalidPayload` with no
+/// file created and is never misreported as a disk failure.
+///
+/// The response goes out through [`enqueue_outbound`] like every other producer
+/// on this connection. A silently dropped answer would be the worst outcome
+/// available here: the file exists on this host, the controller's pending entry
+/// is already claimed, and nothing downstream can retry — the controller would
+/// simply time out and report that this host never answered. Failing the link
+/// fast instead leaves the controller something it can retry.
+fn staging_worker_loop(
+    jobs: std_mpsc::Receiver<StageJob>,
+    out: &RevocableOut,
+    shutdown: &AtomicBool,
+    first_cause: &FirstCauseCell,
+    op: StagingOp,
+) {
+    use base64::Engine as _;
+
+    while let Ok(job) = jobs.recv() {
+        // Dropping the job here releases its permit; nothing was written.
+        if shutdown.load(Ordering::SeqCst) {
+            continue;
+        }
+        let StageJob { request, permit } = job;
+        let ClipboardStageRequest {
+            request_id,
+            payload_base64,
+            original_filename,
+        } = request;
+
+        let response = match base64::engine::general_purpose::STANDARD.decode(&payload_base64) {
+            Err(err) => {
+                debug!(request_id, %err, "federation stage payload is not decodable base64");
+                ClipboardStageResponse::Failed {
+                    request_id,
+                    failure: ClipboardStageFailure::InvalidPayload,
+                }
+            }
+            Ok(bytes) => match op(&original_filename, &bytes) {
+                Ok(path) => match path.to_str() {
+                    Some(path) => ClipboardStageResponse::Staged {
+                        request_id,
+                        path: path.to_string(),
+                    },
+                    // The staging module only ever returns a path built from
+                    // a root it already proved losslessly UTF-8, so this is
+                    // unreachable in practice; answering rather than panicking
+                    // keeps a surprise from killing a live connection.
+                    None => ClipboardStageResponse::Failed {
+                        request_id,
+                        failure: ClipboardStageFailure::StagingUnavailable,
+                    },
+                },
+                Err(failure) => ClipboardStageResponse::Failed {
+                    request_id,
+                    failure,
+                },
+            },
+        };
+
+        // Locked only for the enqueue itself, never across filesystem work.
+        match out.lock() {
+            Ok(handle) => match handle.as_ref() {
+                Some(tx) => {
+                    if !enqueue_outbound(
+                        tx,
+                        FederationMessage::ClipboardStageResponse(response),
+                        first_cause,
+                        shutdown,
+                    ) {
+                        warn!(
+                            request_id,
+                            "federation stage response could not be queued; tearing down the link"
+                        );
+                    }
+                }
+                None => debug!(
+                    request_id,
+                    "federation stage finished after teardown; discarding the response"
+                ),
+            },
+            Err(poisoned) => {
+                debug!(request_id, "federation stage outbound handle poisoned");
+                drop(poisoned);
+            }
+        }
+        drop(permit);
+    }
+}
+
+/// Route one inbound `ClipboardStageRequest`: admit it and hand it to the
+/// worker, or refuse it — never stage on this thread. The reader also services
+/// every pane's input, resize, open and close, so a multi-MiB write here would
+/// stall every pane on the mount for the duration of the write.
+///
+/// With no worker (`staging` is `None`) the capability was not agreed, and the
+/// frame is dropped without any answer: emitting a `ClipboardStageResponse` to
+/// a peer that never negotiated the variant fails its decoder and tears down
+/// its whole mount. An unnegotiated request is a protocol violation by the
+/// peer, not a user-visible failure.
+fn handle_clipboard_stage_request(
+    request: ClipboardStageRequest,
+    staging: Option<&StagingChannel>,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+) {
+    let request_id = request.request_id;
+    let Some(staging) = staging else {
+        warn!(
+            request_id,
+            "dropping a federation stage request on a link that never agreed file staging"
+        );
+        return;
+    };
+
+    let refuse = |reason: &'static str| {
+        debug!(request_id, reason, "refusing a federation stage request");
+        let _ = enqueue_outbound(
+            out_tx,
+            FederationMessage::ClipboardStageResponse(ClipboardStageResponse::Failed {
+                request_id,
+                // Backpressure, not a disk failure: the client maps
+                // `WriteFailed` to "the remote host ran out of space", which
+                // would be a lie about a retryable queue limit.
+                failure: ClipboardStageFailure::Busy,
+            }),
+            first_cause,
+            shutdown,
+        );
+    };
+
+    let Some(permit) = StagePermit::acquire(&staging.live) else {
+        refuse("concurrent stage limit reached");
+        return;
+    };
+
+    // The permit travels with the request. A `try_send` error hands the whole
+    // `StageJob` back inside the error value, so the permit is dropped with it
+    // right here and the connection does not wedge at `Busy`.
+    if let Err(err) = staging.jobs.try_send(StageJob { request, permit }) {
+        drop(err);
+        refuse("staging worker queue unavailable");
+    }
+}
+
 /// The connection's single outbound serializer: drain framed messages from the
 /// queue and write them over the `try_clone`d handle. Exits cleanly when every
 /// sender is dropped (`recv` returns `Err`), or records `WriterFailed` and
@@ -1116,8 +1448,8 @@ impl Drop for LeaseReleaseGuard {
 
 /// The stream-generic handshake exchange: read the peer's `Handshake`, negotiate
 /// against this server's identity + capabilities, and reply `Accept`/`Reject`.
-/// Returns the agreed capabilities on acceptance (sub-brick 2c continues into
-/// mount with them), `None` on a rejection or a missing handshake. Generic over
+/// Returns the agreed capabilities on acceptance so the mount can gate every
+/// later send on them, `None` on a rejection or a missing handshake. Generic over
 /// `Read + Write` so it is unit-tested over a `UnixStream` pair.
 fn drive_handshake<S: Read + Write>(
     stream: &mut S,
@@ -1280,7 +1612,8 @@ mod tests {
         });
 
         // Acquire → Mount → stream the snapshot, all bridged through the actor.
-        drive_mount(&mut server, 0, 1, &sid, &tx).expect("mount runs end to end");
+        drive_mount(&mut server, 0, 1, &AgreedCaps(BTreeSet::new()), &sid, &tx)
+            .expect("mount runs end to end");
 
         client_thread.join().expect("client thread");
 
@@ -1362,6 +1695,7 @@ mod tests {
             &first_cause,
             &tx,
             &mut pumps,
+            None,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -1427,6 +1761,7 @@ mod tests {
             &first_cause,
             &tx,
             &mut pumps,
+            None,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -1491,6 +1826,7 @@ mod tests {
             &first_cause,
             &tx,
             &mut pumps,
+            None,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -1511,98 +1847,6 @@ mod tests {
             }
             other => panic!("expected SnapshotResponse, got {other:?}"),
         }
-    }
-
-    // Opening a terminal must also ask its child to repaint: `Open{replay}`
-    // carries `handoff_history_ansi`, which is empty for an alternate-screen
-    // app, so without the nudge an agent pane mirrors as a blank grid. The
-    // nudge is requested once per terminal — a duplicate `Open` stays a no-op.
-    #[test]
-    fn opening_a_terminal_requests_a_child_repaint_exactly_once() {
-        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
-        let observed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let loop_handle = {
-            let observed = Arc::clone(&observed);
-            std::thread::spawn(move || {
-                // Kept alive for the whole loop so the subscriptions handed to
-                // `open_terminal` stay open.
-                let (bytes_tx, _) = broadcast::channel::<Bytes>(8);
-                while let Some(ServerEvent::Federation(command)) = rx.blocking_recv() {
-                    match command {
-                        FederationCommand::SubscribeOutput(id, reply) => {
-                            observed
-                                .lock()
-                                .expect("observed lock")
-                                .push(format!("subscribe:{id}"));
-                            let _ = reply.send(Some(bytes_tx.subscribe()));
-                        }
-                        FederationCommand::ScrollbackReplay(id, reply) => {
-                            observed
-                                .lock()
-                                .expect("observed lock")
-                                .push(format!("replay:{id}"));
-                            let _ = reply.send(Vec::new());
-                        }
-                        FederationCommand::NudgeRedraw { terminal_id, .. } => {
-                            observed
-                                .lock()
-                                .expect("observed lock")
-                                .push(format!("nudge:{terminal_id}"));
-                        }
-                        _ => {}
-                    }
-                }
-            })
-        };
-
-        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
-        for _ in 0..2 {
-            write_frame_blocking(
-                &mut client,
-                &FederationMessage::Terminal(TerminalChannelMessage::Open {
-                    terminal_id: "t1".to_string(),
-                    mount_generation: MOUNT_GENERATION,
-                    replay: ScrollbackReplay { bytes: Vec::new() },
-                }),
-            )
-            .expect("client writes open");
-        }
-        drop(client);
-
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let first_cause = Arc::new(FirstCauseCell::new());
-        let (out_tx, _out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
-        let mut pumps = HashMap::new();
-        reader_loop(
-            &mut server,
-            0,
-            1,
-            &ServerInstanceId("test-inst".to_string()),
-            &out_tx,
-            &shutdown,
-            &first_cause,
-            &tx,
-            &mut pumps,
-        )
-        .expect("reader loop drains to EOF");
-        for pump in pumps.into_values() {
-            pump.stop.store(true, Ordering::SeqCst);
-            let _ = pump.handle.join();
-        }
-        drop(tx);
-        loop_handle.join().expect("mock loop joins");
-
-        let observed = observed.lock().expect("observed lock").clone();
-        assert_eq!(
-            observed,
-            vec![
-                "subscribe:t1".to_string(),
-                "replay:t1".to_string(),
-                "nudge:t1".to_string(),
-            ],
-            "an Open subscribes, fetches the replay, then nudges — and the \
-             duplicate Open adds nothing"
-        );
     }
 
     #[test]
@@ -1684,7 +1928,7 @@ mod tests {
 
         open_terminal(
             "t1".to_string(),
-            0,
+            1,
             1,
             &out_tx,
             &shutdown,
@@ -1747,5 +1991,600 @@ mod tests {
         );
         assert_eq!(first_cause.get(), Some(TunnelExit::EgressOverflow));
         assert!(shutdown.load(Ordering::SeqCst), "teardown is signalled");
+    }
+
+    // ---- file staging -------------------------------------------------
+
+    const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nfake";
+
+    fn caps(with_staging: bool) -> AgreedCaps {
+        let mut set: BTreeSet<Capability> = BTreeSet::new();
+        set.insert(Capability::new(Capability::AGENT_STATUS));
+        if with_staging {
+            set.insert(Capability::new(Capability::FILE_STAGING));
+        }
+        AgreedCaps(set)
+    }
+
+    fn stage_frame(request_id: u64, payload_base64: &str) -> FederationMessage {
+        FederationMessage::ClipboardStageRequest(ClipboardStageRequest {
+            request_id,
+            payload_base64: payload_base64.to_string(),
+            original_filename: "image.png".to_string(),
+        })
+    }
+
+    fn png_payload() -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(PNG_BYTES)
+    }
+
+    fn input_frame(terminal_id: &str) -> FederationMessage {
+        FederationMessage::Terminal(TerminalChannelMessage::Input {
+            terminal_id: terminal_id.to_string(),
+            mount_generation: MOUNT_GENERATION,
+            bytes: b"x".to_vec(),
+        })
+    }
+
+    /// One live `run_connection` over a socket pair, plus a mock server event
+    /// loop that reports the terminal ids whose input actually reached it —
+    /// which is how these tests observe that the reader kept servicing panes.
+    struct ConnectionHarness {
+        client: UnixStream,
+        inputs: std_mpsc::Receiver<String>,
+        conn: Option<std::thread::JoinHandle<io::Result<()>>>,
+        mock: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ConnectionHarness {
+        fn spawn(agreed: AgreedCaps, op: StagingOp) -> Self {
+            let (client, mut server) = UnixStream::pair().expect("socket pair");
+            let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+            let (input_tx, inputs) = std_mpsc::channel::<String>();
+            let mock = std::thread::spawn(move || {
+                while let Some(ev) = rx.blocking_recv() {
+                    if let ServerEvent::Federation(FederationCommand::SendInput {
+                        terminal_id,
+                        ..
+                    }) = ev
+                    {
+                        let _ = input_tx.send(terminal_id);
+                    }
+                }
+            });
+            let conn = std::thread::spawn(move || {
+                run_connection(
+                    &mut server,
+                    0,
+                    1,
+                    EventCursor(0),
+                    &agreed,
+                    op,
+                    &ServerInstanceId("test-inst".to_string()),
+                    &tx,
+                )
+            });
+            Self {
+                client,
+                inputs,
+                conn: Some(conn),
+                mock: Some(mock),
+            }
+        }
+
+        fn send(&mut self, msg: &FederationMessage) {
+            write_frame_blocking(&mut self.client, msg).expect("client writes a frame");
+        }
+
+        /// Next `ClipboardStageResponse` written by the connection, skipping
+        /// unrelated outbound traffic. `None` once the read window elapses —
+        /// a window long enough that expiring it means the test failed, so a
+        /// half-read frame afterwards cannot matter.
+        fn next_stage_response(&mut self) -> Option<ClipboardStageResponse> {
+            self.client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("client read timeout");
+            let response = loop {
+                match read_frame_blocking(&mut self.client) {
+                    Ok(Some(FederationMessage::ClipboardStageResponse(response))) => {
+                        break Some(response)
+                    }
+                    Ok(Some(_other)) => continue,
+                    Ok(None) => break None,
+                    Err(_) => break None,
+                }
+            };
+            self.client
+                .set_read_timeout(None)
+                .expect("clear client read timeout");
+            response
+        }
+
+        /// Asserts nothing that looks like a stage frame reaches the peer in
+        /// `window`. The read timeout is what bounds each attempt.
+        fn assert_no_stage_frame_within(&mut self, window: Duration) {
+            self.client
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("client read timeout");
+            let deadline = std::time::Instant::now() + window;
+            while std::time::Instant::now() < deadline {
+                match read_frame_blocking(&mut self.client) {
+                    Ok(Some(FederationMessage::ClipboardStageResponse(response))) => {
+                        panic!("a stage frame reached the peer: {response:?}")
+                    }
+                    Ok(Some(_other)) => continue,
+                    Ok(None) => break,
+                    Err(_) => continue,
+                }
+            }
+            self.client
+                .set_read_timeout(None)
+                .expect("clear client read timeout");
+        }
+
+        fn expect_input(&self, terminal_id: &str) {
+            let got = self
+                .inputs
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reader kept servicing terminal input");
+            assert_eq!(got, terminal_id);
+        }
+
+        /// Ends the connection and returns `run_connection`'s result.
+        fn finish(mut self) -> io::Result<()> {
+            let _ = self.client.shutdown(std::net::Shutdown::Both);
+            let result = self
+                .conn
+                .take()
+                .expect("connection thread")
+                .join()
+                .expect("connection thread joins");
+            let _ = self.mock.take().expect("mock thread").join();
+            result
+        }
+    }
+
+    /// A staging op that parks until the test releases it, reporting each
+    /// request it actually reached.
+    struct ParkedOp {
+        op: StagingOp,
+        entered: std_mpsc::Receiver<String>,
+        release: std_mpsc::SyncSender<()>,
+    }
+
+    fn parked_op() -> ParkedOp {
+        let (entered_tx, entered) = std_mpsc::channel::<String>();
+        let (release, release_rx) = std_mpsc::sync_channel::<()>(8);
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let op: StagingOp = Arc::new(move |name: &str, _bytes: &[u8]| {
+            let _ = entered_tx.send(name.to_string());
+            let guard = release_rx.lock().expect("release channel");
+            let _ = guard.recv();
+            Err(ClipboardStageFailure::WriteFailed)
+        });
+        ParkedOp {
+            op,
+            entered,
+            release,
+        }
+    }
+
+    /// The reader thread also services every pane's input, resize and close,
+    /// so a stage request must be handed off, never staged where it can stall
+    /// them. The queue still holding the request while a later input frame has
+    /// already been serviced is exactly that property.
+    #[test]
+    fn reader_loop_hands_a_clipboard_stage_request_to_the_staging_worker_without_blocking() {
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let (input_tx, inputs) = std_mpsc::channel::<String>();
+        let mock = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::SendInput {
+                    terminal_id, ..
+                }) = ev
+                {
+                    let _ = input_tx.send(terminal_id);
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(&mut client, &stage_frame(1, &png_payload()))
+            .expect("client writes a stage request");
+        write_frame_blocking(&mut client, &input_frame("t1")).expect("client writes input");
+        drop(client);
+
+        // No worker is spawned here: the test holds the queue's receiving end
+        // itself, so a reader that staged inline could never reach the input
+        // frame behind it.
+        let (jobs, jobs_rx) = std_mpsc::sync_channel::<StageJob>(MAX_CONCURRENT_STAGES);
+        let staging = StagingChannel {
+            jobs,
+            live: Arc::new(AtomicUsize::new(0)),
+        };
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            Some(&staging),
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        mock.join().expect("mock loop joins");
+
+        assert_eq!(
+            inputs
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the input frame behind the stage request was serviced"),
+            "t1"
+        );
+        let job = jobs_rx
+            .try_recv()
+            .expect("the stage request is still queued, not staged on the reader");
+        assert_eq!(job.request.request_id, 1);
+        assert!(
+            out_rx.try_recv().is_err(),
+            "an admitted request must not answer before it is staged"
+        );
+    }
+
+    /// The serving half of the capability gate. A host that negotiated no file
+    /// staging must not put *either* stage frame on the wire: an older
+    /// controller has no decoder for the variant, its `read_frame` fails, and
+    /// its whole mount — every pane on the link — dies.
+    #[test]
+    fn a_host_without_the_agreed_file_staging_capability_never_emits_a_stage_frame() {
+        // An op that *would* answer if it were ever reached, so dropping the
+        // gate produces a frame this test can see. A panicking op would not:
+        // it would kill the worker silently and leave the wire exactly as
+        // quiet as a correctly gated host.
+        let staged = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&staged);
+        let answering_op: StagingOp = Arc::new(move |_name: &str, _bytes: &[u8]| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Err(ClipboardStageFailure::WriteFailed)
+        });
+        let mut harness = ConnectionHarness::spawn(caps(false), answering_op);
+        harness.send(&stage_frame(1, &png_payload()));
+        harness.send(&input_frame("t1"));
+
+        harness.expect_input("t1");
+        harness.assert_no_stage_frame_within(Duration::from_millis(600));
+        assert_eq!(
+            staged.load(Ordering::SeqCst),
+            0,
+            "an ungated request reached the staging operation"
+        );
+        harness
+            .finish()
+            .expect("the connection stays up and ends cleanly");
+
+        // Positive control: the identical exchange on a link that DID agree
+        // the capability answers. Without it this test would also pass against
+        // an implementation that never answers anybody.
+        let refusing_op: StagingOp =
+            Arc::new(|_name: &str, _bytes: &[u8]| Err(ClipboardStageFailure::WriteFailed));
+        let mut harness = ConnectionHarness::spawn(caps(true), refusing_op);
+        harness.send(&stage_frame(1, &png_payload()));
+        harness.send(&input_frame("t1"));
+        harness.expect_input("t1");
+        assert!(
+            matches!(
+                harness.next_stage_response(),
+                Some(ClipboardStageResponse::Failed { request_id: 1, .. })
+            ),
+            "a negotiated link must answer the same request"
+        );
+        harness.finish().expect("the connection ends cleanly");
+    }
+
+    /// The cap counts the request the worker is actively staging, not just the
+    /// queued ones: a `sync_channel(2)` alone would admit a third payload and
+    /// triple the memory a single controller can pin.
+    #[test]
+    fn a_third_concurrent_stage_request_on_one_connection_is_refused_as_busy() {
+        let parked = parked_op();
+        let mut harness = ConnectionHarness::spawn(caps(true), Arc::clone(&parked.op));
+
+        harness.send(&stage_frame(1, &png_payload()));
+        harness.send(&stage_frame(2, &png_payload()));
+        // The first reaches the op; the second is admitted and waits behind it.
+        assert_eq!(
+            parked
+                .entered
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the first request reaches the staging operation"),
+            "image.png"
+        );
+
+        harness.send(&stage_frame(3, &png_payload()));
+        match harness.next_stage_response() {
+            Some(ClipboardStageResponse::Failed {
+                request_id,
+                failure,
+            }) => {
+                assert_eq!(request_id, 3, "the third request is the refused one");
+                assert_eq!(
+                    failure,
+                    ClipboardStageFailure::Busy,
+                    "backpressure must not be reported as a disk failure"
+                );
+            }
+            other => panic!("expected a Busy refusal, got {other:?}"),
+        }
+
+        // Release both admitted requests; their permits come back and a fourth
+        // request is admitted again, proving the refusal was a live cap and
+        // not a wedged connection.
+        let _ = parked.release.send(());
+        let _ = parked.release.send(());
+        assert_eq!(
+            parked
+                .entered
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the second admitted request reaches the operation"),
+            "image.png"
+        );
+        let _ = parked.release.send(());
+
+        harness.send(&stage_frame(4, &png_payload()));
+        assert_eq!(
+            parked
+                .entered
+                .recv_timeout(Duration::from_secs(5))
+                .expect("a fourth request is admitted once permits are returned"),
+            "image.png"
+        );
+        let _ = parked.release.send(());
+        harness.finish().expect("the connection ends cleanly");
+    }
+
+    /// The permit is taken before the hand-off, so the hand-off's failure path
+    /// is the one that leaks it. A permit released only inside the worker loop
+    /// would never come back here, and the connection would answer `Busy` for
+    /// the rest of its life with nothing actually staging.
+    #[test]
+    fn a_request_refused_by_a_full_staging_queue_still_returns_its_permit() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+
+        // A queue whose receiver is gone: every `try_send` fails, which is the
+        // state a request meets when it arrives during teardown.
+        let (jobs, jobs_rx) = std_mpsc::sync_channel::<StageJob>(MAX_CONCURRENT_STAGES);
+        drop(jobs_rx);
+        let live = Arc::new(AtomicUsize::new(0));
+        let dead = StagingChannel {
+            jobs,
+            live: Arc::clone(&live),
+        };
+        handle_clipboard_stage_request(
+            ClipboardStageRequest {
+                request_id: 1,
+                payload_base64: png_payload(),
+                original_filename: "image.png".to_string(),
+            },
+            Some(&dead),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+        );
+        match out_rx.try_recv().expect("the refusal is answered") {
+            FederationMessage::ClipboardStageResponse(ClipboardStageResponse::Failed {
+                request_id,
+                failure,
+            }) => {
+                assert_eq!(request_id, 1);
+                assert_eq!(failure, ClipboardStageFailure::Busy);
+            }
+            other => panic!("expected a Busy refusal, got {other:?}"),
+        }
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "the failed hand-off leaked its admission permit"
+        );
+
+        // The same counter, now with a live queue, still admits its full cap.
+        let (jobs, jobs_rx) = std_mpsc::sync_channel::<StageJob>(MAX_CONCURRENT_STAGES);
+        let alive = StagingChannel { jobs, live };
+        for request_id in 2..=3 {
+            handle_clipboard_stage_request(
+                ClipboardStageRequest {
+                    request_id,
+                    payload_base64: png_payload(),
+                    original_filename: "image.png".to_string(),
+                },
+                Some(&alive),
+                &out_tx,
+                &shutdown,
+                &first_cause,
+            );
+        }
+        assert!(
+            out_rx.try_recv().is_err(),
+            "both further requests must be admitted, not refused"
+        );
+        assert_eq!(
+            jobs_rx.try_recv().map(|job| job.request.request_id).ok(),
+            Some(2)
+        );
+        assert_eq!(
+            jobs_rx.try_recv().map(|job| job.request.request_id).ok(),
+            Some(3)
+        );
+    }
+
+    /// The controller lease is released only when `run_connection` returns, so
+    /// a join on a stuck filesystem call would pin this host's single
+    /// controller slot and refuse every later mount.
+    #[test]
+    fn a_blocked_staging_operation_does_not_delay_connection_teardown() {
+        let parked = parked_op();
+        let mut harness = ConnectionHarness::spawn(caps(true), Arc::clone(&parked.op));
+        harness.send(&stage_frame(1, &png_payload()));
+        assert_eq!(
+            parked
+                .entered
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the request reaches the staging operation"),
+            "image.png"
+        );
+
+        // Teardown runs on its own thread and is waited for with a bound: an
+        // implementation that joins the worker does not merely take longer,
+        // it never returns, and a plain call here would hang the suite rather
+        // than report a failure.
+        let (done_tx, done) = std_mpsc::channel::<io::Result<()>>();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(harness.finish());
+        });
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("teardown must not wait on the parked staging operation")
+            .expect("the connection ends cleanly");
+
+        // Releasing it afterwards must write nothing: the outbound handle was
+        // revoked at teardown, so a late result is discarded.
+        let _ = parked.release.send(());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    /// Decode before any filesystem access: an undecodable payload is a peer
+    /// error, not a disk error, and must not create anything on this host.
+    #[test]
+    fn a_malformed_base64_payload_is_reported_as_invalid_payload_without_touching_the_filesystem() {
+        let touched = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&touched);
+        let op: StagingOp = Arc::new(move |_name: &str, _bytes: &[u8]| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Err(ClipboardStageFailure::WriteFailed)
+        });
+        let mut harness = ConnectionHarness::spawn(caps(true), op);
+
+        harness.send(&stage_frame(1, "!!!! not base64 !!!!"));
+        match harness.next_stage_response() {
+            Some(ClipboardStageResponse::Failed {
+                request_id,
+                failure,
+            }) => {
+                assert_eq!(request_id, 1);
+                assert_eq!(failure, ClipboardStageFailure::InvalidPayload);
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+        assert_eq!(
+            touched.load(Ordering::SeqCst),
+            0,
+            "a malformed payload reached the filesystem"
+        );
+
+        // Positive control: a decodable payload on the same connection does
+        // reach the staging operation.
+        harness.send(&stage_frame(2, &png_payload()));
+        assert!(
+            matches!(
+                harness.next_stage_response(),
+                Some(ClipboardStageResponse::Failed {
+                    request_id: 2,
+                    failure: ClipboardStageFailure::WriteFailed,
+                })
+            ),
+            "a decodable payload must reach the staging operation"
+        );
+        assert_eq!(touched.load(Ordering::SeqCst), 1);
+        harness.finish().expect("the connection ends cleanly");
+    }
+
+    /// Runs one job through `staging_worker_loop` on this thread against an
+    /// egress queue pre-filled with `prefill` frames, and reports what the
+    /// worker did: the first outbound frame past the prefill, and the exit
+    /// cause it recorded.
+    fn stage_one_job_with_egress_prefill(
+        prefill: usize,
+    ) -> (Option<FederationMessage>, Option<TunnelExit>, bool) {
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        for _ in 0..prefill {
+            out_tx
+                .try_send(input_frame("filler"))
+                .expect("the egress queue accepts frames up to its capacity");
+        }
+        let out: RevocableOut = Arc::new(Mutex::new(Some(out_tx)));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+
+        let (jobs, jobs_rx) = std_mpsc::sync_channel::<StageJob>(MAX_CONCURRENT_STAGES);
+        let live = Arc::new(AtomicUsize::new(0));
+        let permit = StagePermit::acquire(&live).expect("a permit is available");
+        jobs.try_send(StageJob {
+            request: ClipboardStageRequest {
+                request_id: 7,
+                payload_base64: png_payload(),
+                original_filename: "image.png".to_string(),
+            },
+            permit,
+        })
+        .expect("the job queue accepts the request");
+        // Dropping the sender ends the loop after the single job.
+        drop(jobs);
+
+        let op: StagingOp =
+            Arc::new(|_name: &str, _bytes: &[u8]| Ok(PathBuf::from("/tmp/staged/image.png")));
+        staging_worker_loop(jobs_rx, &out, &shutdown, &first_cause, op);
+
+        for _ in 0..prefill {
+            let _ = out_rx.try_recv();
+        }
+        (
+            out_rx.try_recv().ok(),
+            first_cause.get(),
+            shutdown.load(Ordering::SeqCst),
+        )
+    }
+
+    /// A successful stage answered into a full egress queue must surface as an
+    /// overflow teardown, never be discarded. Dropping it is the worst failure
+    /// this path has: the file is written on this host and the controller's
+    /// pending entry is claimed, so nothing can retry and the controller can
+    /// only report that this host never answered.
+    #[test]
+    fn a_stage_response_that_cannot_be_queued_tears_the_link_down_instead_of_vanishing() {
+        let (frame, cause, shutdown) = stage_one_job_with_egress_prefill(EGRESS_QUEUE_CAP);
+        assert!(
+            frame.is_none(),
+            "a full egress queue cannot have accepted the response"
+        );
+        assert_eq!(
+            cause,
+            Some(TunnelExit::EgressOverflow),
+            "a dropped stage response must be recorded as an egress overflow"
+        );
+        assert!(shutdown, "an unqueueable response must signal teardown");
+
+        // Positive control: the same fixture with room in the queue delivers
+        // the response and records no fault. Without it this test would also
+        // pass against a worker that tore the link down unconditionally.
+        let (frame, cause, shutdown) = stage_one_job_with_egress_prefill(0);
+        assert!(
+            matches!(
+                frame,
+                Some(FederationMessage::ClipboardStageResponse(
+                    ClipboardStageResponse::Staged { request_id: 7, .. }
+                ))
+            ),
+            "a queue with room must deliver the staged response, got {frame:?}"
+        );
+        assert_eq!(cause, None, "a delivered response records no fault");
+        assert!(!shutdown, "a delivered response must not signal teardown");
     }
 }

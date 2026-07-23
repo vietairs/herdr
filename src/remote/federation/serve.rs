@@ -144,11 +144,13 @@ pub(crate) fn empty_snapshot() -> SessionSnapshot {
     }
 }
 
-/// The largest cap across every channel (`Channel::Clipboard`), used to
-/// bound the read-side allocation before a frame's true channel (and
-/// therefore its true cap) is known from the decoded message.
+/// The largest cap across every channel, used to bound the read-side
+/// allocation before a frame's true channel (and therefore its true cap) is
+/// known from the decoded message. Derived from the channel list rather than
+/// naming one channel: hardcoding a particular channel's cap here silently
+/// rejects every frame on any channel whose cap is larger.
 fn global_max_frame() -> usize {
-    Channel::Clipboard.max_len()
+    Channel::largest_max_len()
 }
 
 /// `pub(crate)` (not just module-private) so `loopback.rs`'s tests can drive
@@ -246,10 +248,11 @@ where
             return Ok(());
         }
     };
+    let agreed_capabilities = agreed.0;
     write_frame(
         &mut writer,
         &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
-            agreed_capabilities: agreed.0,
+            agreed_capabilities: agreed_capabilities.clone(),
         }),
     )
     .await?;
@@ -291,7 +294,13 @@ where
             biased;
             frame = read_frame(&mut reader) => {
                 match frame {
-                    Ok(Some(msg)) => handle_inbound(&host, msg, &out_tx, &mut open_terminals),
+                    Ok(Some(msg)) => handle_inbound(
+                        &host,
+                        msg,
+                        &agreed_capabilities,
+                        &out_tx,
+                        &mut open_terminals,
+                    ),
                     Ok(None) => break Ok(()),
                     Err(err) => break Err(err),
                 }
@@ -413,9 +422,14 @@ fn poll_agent_statuses<H: FederationHost>(
 /// `#[allow(dead_code)]`: only reachable through `run()`, kept for
 /// `loopback.rs`'s tests (see `run`'s doc comment).
 #[allow(dead_code)]
+// The only reader of `agreed_capabilities` is the staging arm, and staging is
+// Unix-only, so on other targets the parameter is legitimately unread rather
+// than forgotten.
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn handle_inbound<H: FederationHost>(
     host: &Arc<H>,
     msg: FederationMessage,
+    agreed_capabilities: &BTreeSet<Capability>,
     out_tx: &mpsc::UnboundedSender<FederationMessage>,
     open_terminals: &mut HashMap<String, tokio::task::JoinHandle<()>>,
 ) {
@@ -439,10 +453,67 @@ fn handle_inbound<H: FederationHost>(
             let _ = out_tx.send(FederationMessage::SplitPaneResponse(response));
             return;
         }
+        // Staging runs INLINE here, unlike production. This handler only ever
+        // drives `loopback.rs`'s in-process server, where a blocking write on
+        // the connection task is harmless and where staging inline is what
+        // lets an end-to-end test exercise the real staging module. Production
+        // traffic goes through `server::federation_accept::reader_loop`, which
+        // hands the request to a detached worker precisely because its reader
+        // also services every pane's input, resize and close.
+        //
+        // Same two invariants as production: refuse to construct either frame
+        // unless the capability was agreed, and decode before touching the
+        // filesystem.
+        #[cfg(unix)]
+        FederationMessage::ClipboardStageRequest(request) => {
+            use base64::Engine as _;
+
+            if !agreed_capabilities.contains(&Capability::new(Capability::FILE_STAGING)) {
+                tracing::warn!(
+                    request_id = request.request_id,
+                    "dropping a federation stage request on a link that never agreed file staging"
+                );
+                return;
+            }
+            let super::protocol::ClipboardStageRequest {
+                request_id,
+                payload_base64,
+                original_filename,
+            } = request;
+            let response = match base64::engine::general_purpose::STANDARD.decode(&payload_base64) {
+                Err(_) => super::protocol::ClipboardStageResponse::Failed {
+                    request_id,
+                    failure: super::protocol::ClipboardStageFailure::InvalidPayload,
+                },
+                Ok(bytes) => match super::file_staging::stage_remote_clipboard_image(
+                    &original_filename,
+                    &bytes,
+                ) {
+                    Ok(path) => match path.to_str() {
+                        Some(path) => super::protocol::ClipboardStageResponse::Staged {
+                            request_id,
+                            path: path.to_string(),
+                        },
+                        None => super::protocol::ClipboardStageResponse::Failed {
+                            request_id,
+                            failure: super::protocol::ClipboardStageFailure::StagingUnavailable,
+                        },
+                    },
+                    Err(failure) => super::protocol::ClipboardStageResponse::Failed {
+                        request_id,
+                        failure,
+                    },
+                },
+            };
+            let _ = out_tx.send(FederationMessage::ClipboardStageResponse(response));
+            return;
+        }
         // Handshake/MountSnapshot/Event/AgentStatus/SplitPaneResponse are
         // server->client only; Clipboard forwarding is deferred (see
         // implementation-notes.md). Anything else inbound is simply not
-        // actionable here.
+        // actionable here. On a non-Unix host there is no staging module, so
+        // an inbound stage request lands here too — dropped, exactly like the
+        // capability-not-agreed path above.
         _ => return,
     };
     if term_msg.mount_generation() != MOUNT_GENERATION {

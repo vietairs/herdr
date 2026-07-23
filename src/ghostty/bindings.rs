@@ -2788,3 +2788,11 @@ unsafe extern "C" {
         out_info: *mut GhosttyKittyGraphicsPlacementRenderInfo,
     ) -> GhosttyResult;
 }
+unsafe extern "C" {
+    #[doc = " Returns the terminal display width of a Unicode codepoint in\n terminal grid cells: 0, 1, or 2.\n\n @param cp The Unicode codepoint to measure\n @return Display width in cells: 0, 1, or 2"]
+    pub fn ghostty_unicode_codepoint_width(cp: u32) -> u8;
+}
+unsafe extern "C" {
+    #[doc = " Measures the terminal display width of the first grapheme cluster in a\n sequence of Unicode codepoints.\n\n @param cps Pointer to codepoints (may be NULL only when len is 0)\n @param len Number of codepoints available\n @param width Out: cluster display width in cells (0-2); may be NULL\n @return Number of codepoints in the first grapheme cluster"]
+    pub fn ghostty_unicode_grapheme_width(cps: *const u32, len: usize, width: *mut u8) -> usize;
+}

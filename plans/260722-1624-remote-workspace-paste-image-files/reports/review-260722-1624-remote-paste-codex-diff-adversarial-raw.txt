@@ -1,0 +1,400 @@
+   735	        assert_eq!(
+   736	            stage_into_with(&dir.path, "diagram.png", PNG_BYTES, &reject_all, &write),
+   737	            Err(ClipboardStageFailure::StagingUnavailable)
+   738	        );
+   739	        assert!(
+   740	            dir.entries().is_empty(),
+   741	            "the candidate was created before it was validated: {:?}",
+   742	            dir.entries()
+   743	        );
+   744	
+   745	        // Positive control through the same seam: an accepting validator stages.
+   746	        let accept_all = |_: &str| true;
+   747	        stage_into_with(&dir.path, "diagram.png", PNG_BYTES, &accept_all, &write)
+   748	            .expect("an accepted candidate stages");
+   749	        assert_eq!(dir.staged_entries().len(), 1);
+   750	    }
+   751	
+   752	    #[test]
+   753	    fn a_failed_write_leaves_no_partial_file_on_disk() {
+   754	        let dir = TestDir::new("partial");
+   755	        let failing = |file: &mut fs::File, bytes: &[u8]| {
+   756	            file.write_all(&bytes[..bytes.len() / 2])?;
+   757	            Err(io::Error::other("simulated short write"))
+   758	        };
+   759	        assert_eq!(
+   760	            stage_into_with(
+   761	                &dir.path,
+   762	                "diagram.png",
+   763	                PNG_BYTES,
+   764	                &is_injection_safe_path,
+   765	                &failing
+   766	            ),
+   767	            Err(ClipboardStageFailure::WriteFailed)
+   768	        );
+   769	        assert!(
+   770	            dir.staged_entries().is_empty(),
+   771	            "a failed write left a truncated file: {:?}",
+   772	            dir.staged_entries()
+   773	        );
+   774	
+   775	        // Positive control: the same fixture with a working writer leaves one file.
+   776	        let working = |file: &mut fs::File, bytes: &[u8]| file.write_all(bytes);
+   777	        stage_into_with(
+   778	            &dir.path,
+   779	            "diagram.png",
+   780	            PNG_BYTES,
+   781	            &is_injection_safe_path,
+   782	            &working,
+   783	        )
+   784	        .expect("a working writer stages");
+   785	        assert_eq!(dir.staged_entries().len(), 1);
+   786	    }
+   787	
+   788	    #[test]
+   789	    fn staged_path_returned_to_the_client_satisfies_the_shared_path_allowlist() {
+   790	        let dir = TestDir::new("allowlist");
+   791	        let staged = stage_into(&dir.path, "diagram.png", PNG_BYTES).expect("stages");
+   792	        let as_str = staged.to_str().expect("staged path is lossless utf-8");
+   832	    }
+   833	}
+   834	
+   835	/// Enqueue one outbound frame on the bounded writer queue. A full queue means
+   836	/// the peer is draining slower than we produce: fail fast — record
+   837	/// `EgressOverflow` (first-cause) and signal teardown rather than block a
+   838	/// producer thread or buffer without bound. `false` tells the caller to stop
+   839	/// (overflow or the writer already gone).
+   840	fn enqueue_outbound(
+   841	    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+   842	    msg: FederationMessage,
+   843	    first_cause: &FirstCauseCell,
+   844	    shutdown: &AtomicBool,
+   845	) -> bool {
+   846	    match out_tx.try_send(msg) {
+   847	        Ok(()) => true,
+   848	        Err(std_mpsc::TrySendError::Full(_)) => {
+   849	            first_cause.set(TunnelExit::EgressOverflow);
+   850	            shutdown.store(true, Ordering::SeqCst);
+   851	            false
+   852	        }
+   853	        Err(std_mpsc::TrySendError::Disconnected(_)) => false,
+   854	    }
+   855	}
+   856	
+   857	/// How many stage requests one connection may have in the system at once,
+   858	/// **counting the one being staged right now**. A payload is held whole in
+   859	/// memory (encoded, decoded, and written), so this is the only bound on how
+  1018	                        failure: ClipboardStageFailure::StagingUnavailable,
+  1019	                    },
+  1020	                },
+  1021	                Err(failure) => ClipboardStageResponse::Failed {
+  1022	                    request_id,
+  1023	                    failure,
+  1024	                },
+  1025	            },
+  1026	        };
+  1027	
+  1028	        // Locked only for the enqueue itself, never across filesystem work.
+  1029	        match out.lock() {
+  1030	            Ok(handle) => match handle.as_ref() {
+  1031	                Some(tx) => {
+  1032	                    let _ = tx.try_send(FederationMessage::ClipboardStageResponse(response));
+  1033	                }
+  1034	                None => debug!(
+  1035	                    request_id,
+  1036	                    "federation stage finished after teardown; discarding the response"
+  1037	                ),
+  1038	            },
+  1039	            Err(poisoned) => {
+  1040	                debug!(request_id, "federation stage outbound handle poisoned");
+  1041	                drop(poisoned);
+  1042	            }
+  1043	        }
+  1044	        drop(permit);
+  1045	    }
+  1046	}
+  1047	
+  1048	/// Route one inbound `ClipboardStageRequest`: admit it and hand it to the
+  1049	/// worker, or refuse it — never stage on this thread. The reader also services
+  1900	        shutdown.store(true, Ordering::SeqCst);
+  1901	        for (_id, pump) in pumps.drain() {
+  1902	            pump.stop.store(true, Ordering::SeqCst);
+  1903	            let _ = pump.handle.join();
+  1904	        }
+  1905	        drop(out_tx);
+  1906	        drop(tx);
+  1907	        loop_handle.join().expect("mock loop joins");
+  1908	    }
+  1909	
+  1910	    #[test]
+  1911	    fn enqueue_outbound_fails_fast_on_a_full_queue() {
+  1912	        // A peer that stops reading fills the bounded queue; the next enqueue
+  1913	        // must fail fast as EgressOverflow and signal teardown, never block.
+  1914	        let (tx, _rx) = std_mpsc::sync_channel::<FederationMessage>(1);
+  1915	        let first_cause = FirstCauseCell::new();
+  1916	        let shutdown = AtomicBool::new(false);
+  1917	
+  1918	        assert!(
+  1919	            enqueue_outbound(
+  1920	                &tx,
+  1921	                FederationMessage::Event(EventChannelMessage::Reset),
+  1922	                &first_cause,
+  1923	                &shutdown,
+  1924	            ),
+  1925	            "the first frame fits the one slot"
+  1926	        );
+  1927	        assert!(
+  1928	            !enqueue_outbound(
+  1929	                &tx,
+  1930	                FederationMessage::Event(EventChannelMessage::Reset),
+  1931	                &first_cause,
+  1932	                &shutdown,
+  1933	            ),
+  1934	            "the second frame overflows and fails fast"
+  1935	        );
+  1936	        assert_eq!(first_cause.get(), Some(TunnelExit::EgressOverflow));
+  1937	        assert!(shutdown.load(Ordering::SeqCst), "teardown is signalled");
+  1938	    }
+  2280	                .expect("the second admitted request reaches the operation"),
+  2281	            "image.png"
+  2282	        );
+  2283	        let _ = parked.release.send(());
+  2284	
+  2285	        harness.send(&stage_frame(4, &png_payload()));
+  2286	        assert_eq!(
+  2287	            parked
+  2288	                .entered
+  2289	                .recv_timeout(Duration::from_secs(5))
+  2290	                .expect("a fourth request is admitted once permits are returned"),
+  2291	            "image.png"
+  2292	        );
+  2293	        let _ = parked.release.send(());
+  2294	        harness.finish().expect("the connection ends cleanly");
+  2295	    }
+  2296	
+  2297	    /// The permit is taken before the hand-off, so the hand-off's failure path
+  2298	    /// is the one that leaks it. A permit released only inside the worker loop
+  2299	    /// would never come back here, and the connection would answer `Busy` for
+  2300	    /// the rest of its life with nothing actually staging.
+  2301	    #[test]
+  2302	    fn a_request_refused_by_a_full_staging_queue_still_returns_its_permit() {
+  2303	        let shutdown = Arc::new(AtomicBool::new(false));
+  2304	        let first_cause = Arc::new(FirstCauseCell::new());
+  2305	        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+  2306	
+  2307	        // A queue whose receiver is gone: every `try_send` fails, which is the
+  2308	        // state a request meets when it arrives during teardown.
+  2309	        let (jobs, jobs_rx) = std_mpsc::sync_channel::<StageJob>(MAX_CONCURRENT_STAGES);
+  2310	        drop(jobs_rx);
+  2311	        let live = Arc::new(AtomicUsize::new(0));
+  2312	        let dead = StagingChannel {
+  2313	            jobs,
+  2314	            live: Arc::clone(&live),
+  2315	        };
+  2316	        handle_clipboard_stage_request(
+  2317	            ClipboardStageRequest {
+  2318	                request_id: 1,
+  2319	                payload_base64: png_payload(),
+  2320	                original_filename: "image.png".to_string(),
+  2321	            },
+  2322	            Some(&dead),
+  2323	            &out_tx,
+  2324	            &shutdown,
+  2325	            &first_cause,
+  2326	        );
+  2327	        match out_rx.try_recv().expect("the refusal is answered") {
+  2328	            FederationMessage::ClipboardStageResponse(ClipboardStageResponse::Failed {
+  2329	                request_id,
+  2330	                failure,
+  2331	            }) => {
+  2332	                assert_eq!(request_id, 1);
+  2333	                assert_eq!(failure, ClipboardStageFailure::Busy);
+  2334	            }
+  2335	            other => panic!("expected a Busy refusal, got {other:?}"),
+  2336	        }
+  2337	        assert_eq!(
+  2338	            live.load(Ordering::SeqCst),
+  2339	            0,
+  2340	            "the failed hand-off leaked its admission permit"
+  2341	        );
+  2342	
+  2343	        // The same counter, now with a live queue, still admits its full cap.
+  2344	        let (jobs, jobs_rx) = std_mpsc::sync_channel::<StageJob>(MAX_CONCURRENT_STAGES);
+  2345	        let alive = StagingChannel { jobs, live };
+  2346	        for request_id in 2..=3 {
+  2347	            handle_clipboard_stage_request(
+  2348	                ClipboardStageRequest {
+  2349	                    request_id,
+  2350	                    payload_base64: png_payload(),
+  2351	                    original_filename: "image.png".to_string(),
+  2352	                },
+  2353	                Some(&alive),
+  2354	                &out_tx,
+  2355	                &shutdown,
+  2356	                &first_cause,
+  2357	            );
+  2358	        }
+  2359	        assert!(
+  2360	            out_rx.try_recv().is_err(),
+  2361	            "both further requests must be admitted, not refused"
+  2362	        );
+  2363	        assert_eq!(
+  2364	            jobs_rx.try_recv().map(|job| job.request.request_id).ok(),
+  2365	            Some(2)
+  2366	        );
+  2367	        assert_eq!(
+  2368	            jobs_rx.try_recv().map(|job| job.request.request_id).ok(),
+  2369	            Some(3)
+  2370	        );
+  2371	    }
+  2372	
+  2373	    /// The controller lease is released only when `run_connection` returns, so
+  2374	    /// a join on a stuck filesystem call would pin this host's single
+  2375	    /// controller slot and refuse every later mount.
+  2376	    #[test]
+  2377	    fn a_blocked_staging_operation_does_not_delay_connection_teardown() {
+  2378	        let parked = parked_op();
+  2379	        let mut harness = ConnectionHarness::spawn(caps(true), Arc::clone(&parked.op));
+  2380	        harness.send(&stage_frame(1, &png_payload()));
+  2381	        assert_eq!(
+  2382	            parked
+  2383	                .entered
+  2384	                .recv_timeout(Duration::from_secs(5))
+  2385	                .expect("the request reaches the staging operation"),
+  2386	            "image.png"
+  2387	        );
+  2388	
+  2389	        // Teardown runs on its own thread and is waited for with a bound: an
+  2390	        // implementation that joins the worker does not merely take longer,
+  2391	        // it never returns, and a plain call here would hang the suite rather
+  2392	        // than report a failure.
+  2393	        let (done_tx, done) = std_mpsc::channel::<io::Result<()>>();
+  2394	        std::thread::spawn(move || {
+  2395	            let _ = done_tx.send(harness.finish());
+  2396	        });
+  2397	        done.recv_timeout(Duration::from_secs(5))
+  2398	            .expect("teardown must not wait on the parked staging operation")
+  2399	            .expect("the connection ends cleanly");
+  2400	
+  2401	        // Releasing it afterwards must write nothing: the outbound handle was
+  2402	        // revoked at teardown, so a late result is discarded.
+  2403	        let _ = parked.release.send(());
+  2404	        std::thread::sleep(Duration::from_millis(200));
+  2405	    }
+  2406	
+  2407	    /// Decode before any filesystem access: an undecodable payload is a peer
+  2408	    /// error, not a disk error, and must not create anything on this host.
+  2409	    #[test]
+  2410	    fn a_malformed_base64_payload_is_reported_as_invalid_payload_without_touching_the_filesystem() {
+     1	# Task Group: herdr remote-workspace federation adversarial plan review
+     2	
+     3	scope: evidence-first read-only review of the herdr remote-workspace federation plan, where the user wants architecture claims checked against live repo code and findings ranked by severity before any implementation begins
+     4	applies_to: cwd=/Users/hvnguyen/Projects/herdr; reuse_rule=safe for similar herdr architecture-review, plan-review, or read-only adversarial validation requests in this checkout; treat exact plan paths, current bridge/API code, and unresolved protocol design as run-specific
+     5	
+     6	## Task 1: Remote-workspace federation plan review found transport, ordering, and runtime-construction assumptions unsupported by the current code
+     7	
+     8	### rollout_summary_files
+     9	
+    10	- rollout_summaries/2026-07-13T02-47-47-gHYp-herdr_remote_workspace_federation_readonly_review.md (cwd=/Users/hvnguyen/Projects/herdr, rollout_path=/Users/hvnguyen/.codex/sessions/2026/07/13/rollout-2026-07-13T12-47-47-019f595f-a2df-7060-a997-2df812bb9d1d.jsonl, updated_at=2026-07-13T02:55:50+00:00, thread_id=019f595f-a2df-7060-a997-2df812bb9d1d, read-only adversarial review concluded that remote protocol/cursor work must come before local federation work)
+    11	
+    12	### keywords
+    13	
+    14	- herdr, remote-workspace federation, read-only review, adversarial plan review, EventHub, SessionSnapshot, session.snapshot, events.subscribe, SshStdioBridge, remote-client-bridge, TerminalRuntime, PaneRuntime, TerminalSource, wire protocol, cursor, epoch, watermark, ordering
+    15	
+    16	## User preferences
+    17	
+    18	- when the user says "Do NOT modify any source files — review only" -> keep the task strictly read-only and do not drift into implementation or exploratory patches [Task 1]
+    19	- when the user asks for findings ranked by severity with "concrete evidence", "why it matters", and "a concrete recommendation" -> preserve that evidence-first review structure instead of giving only a summary verdict [Task 1]
+    20	- when the user asks what "a fresh model catches that the plan's authoring model may have missed" -> look for architecture blind spots and unsupported assumptions, not just wording polish [Task 1]
+     1	thread_id: 019f595f-a2df-7060-a997-2df812bb9d1d
+     2	updated_at: 2026-07-13T02:55:50+00:00
+     3	rollout_path: /Users/hvnguyen/.codex/sessions/2026/07/13/rollout-2026-07-13T12-47-47-019f595f-a2df-7060-a997-2df812bb9d1d.jsonl
+     4	cwd: /Users/hvnguyen/Projects/working_workflow
+     5	git_branch: main
+     6	
+     7	# Adversarial read-only review of the herdr remote-workspace federation plan
+     8	
+     9	Rollout context: The user asked for a read-only adversarial review of `/Users/hvnguyen/Projects/herdr/plans/260713-1217-herdr-remote-workspace-federation/plan.md` plus all phase files and specific reports, with every architecture claim grounded in repo source and every plan claim grounded in a plan/phase file. The review target was a major re-architecture of `herdr --remote ssh user@ip` from full-screen attach into mounting the remote session as a new local workspace.
+    10	
+    11	## Task 1: Review the federation plan
+    12	
+    13	Outcome: success
+    14	
+    15	Preference signals:
+    16	- The user explicitly required: “Do NOT modify any source files — review only.” -> future similar reviews should default to read-only unless the user says otherwise.
+    17	- The user required “findings ranked by severity (Critical / High / Medium / Low)” and for each finding to include “concrete evidence (file:line or plan section quoted/paraphrased), why it matters, and a concrete recommendation.” -> future review output should stay evidence-first, severity-ranked, and action-oriented.
+    18	- The user required grounding every claim in actual source read from the repo and every plan claim in a specific plan/phase file -> future review should avoid speculative architecture claims and cite exact files.
+    19	
+    20	Key steps:
+    21	- Read the plan and all eight phase files in `plans/260713-1217-herdr-remote-workspace-federation/`.
+    22	- Read the supporting reports, especially `arch-probe-terminalruntime-source-seam.md`, `scenario-federation-edge-cases.md`, `scout-wire-protocol-server-client.md`, plus the other scout/synthesis reports.
+
+hook: PostToolUse
+hook: PostToolUse Completed
+codex
+Found 5 implementation issues (1 high, 4 medium) plus 2 low vacuous-test gaps. No source files modified; tests not executed.
+
+- **High — unsolicited stage responses can exhaust memory and stall the mount reader.** `src/remote/federation/client.rs:824-852`  
+  A hostile remote sends 256 uncorrelated `Staged` responses with near-24 MiB `path` strings. They enter the count-bounded App queue before request-ID validation; the next `send().await` blocks the sole federation reader. Result: roughly 6 GiB retained and all pane input, resize, open/close, and output handling on that mount stalls. `client.rs:2639-2778` uses two short paths and cannot expose this.
+
+- **Medium — returned-path traversal passes validation.** `src/app/remote_clipboard_stage.rs:149-186`, `src/remote/federation/file_staging.rs:328-340`  
+  `/tmp/herdr-clipboard-images-501/../../home/me/.ssh/federation-clipboard-id_rsa` is absolute, control-free, allowlisted, and has a correctly prefixed final component. It is pasted unchanged at `remote_clipboard_stage.rs:460`, but resolves outside staging. A hostile remote can inject any same-prefix path; no test rejects `.` or `..` components.
+
+- **Medium — bidi controls were fixed server-side but remain accepted at the client injection boundary.** `src/app/remote_clipboard_stage.rs:159-185`, `src/remote/federation/file_staging.rs:315-340`  
+  A response such as `/tmp/federation-clipboard-safe\u{202e}gnp.png` passes the client’s C0/C1 and shared allowlist checks, then reaches the PTY. It is visually deceptive in terminals. The staging filename sanitizer rejects these controls, but the hostile returned-path sanitizer does not.
+
+- **Medium — a completed stage response is silently dropped under egress backpressure.** `src/server/federation_accept.rs:1028-1044`  
+  Unlike normal producers, the worker ignores `try_send` failure instead of using fail-fast `enqueue_outbound` (`:835-855`). If terminal output fills the 1024-frame queue while staging completes, the success response is lost; if the peer drains afterward, the link remains up, the client times out, and the remote file is orphaned. The overflow test exercises only `enqueue_outbound`.
+
+- **Medium — timeout and slow-transfer tests do not prove timers are scheduled.** `src/app/remote_clipboard_stage.rs:295-316`; tests at `:861-888`, `:1106-1127`  
+  Both tests manually inject/call the resulting events. Removing either `tokio::spawn` leaves those assertions valid. Regression scenario: a remote never responds; after two requests, entries never expire and all subsequent image pastes remain `TooManyInFlight`.
+
+- **Low — artifact cleanup coverage omits flush/sync failure.** `src/remote/federation/file_staging.rs:753-786`  
+  The test injects failure only in `write`; deleting cleanup from the `flush` or `sync_all` branches (`:179-184`) still passes. A late ENOSPC/EIO could then leave a staged partial file.
+
+- **Low — unsafe-root test does not prove root validation precedes cleanup.** `src/remote/federation/file_staging.rs:679-707`  
+  Removing `validate_staging_root` at `:121` still rejects the test roots later during candidate validation. With an existing unsafe root containing stale prefixed files, that regression would run `cleanup_stale` first and delete them before rejecting.
+
+Checked clean: source filename guard order, pre-`OpenOptions` candidate validation, current write/flush/sync cleanup code, per-mount `StagePermit` CAS/RAII handoff paths, capability-gated outbound requests, and detached-worker teardown ordering. I did not re-raise the explicitly settled protocol, Windows, or mount-end items.
+
+Unresolved questions: none.
+
+
+hook: Stop
+hook: Stop
+hook: Stop
+hook: Stop
+hook: Stop Failed
+hook: Stop Completed
+hook: Stop Completed
+hook: Stop Completed
+tokens used
+288,056
+Found 5 implementation issues (1 high, 4 medium) plus 2 low vacuous-test gaps. No source files modified; tests not executed.
+
+- **High — unsolicited stage responses can exhaust memory and stall the mount reader.** `src/remote/federation/client.rs:824-852`  
+  A hostile remote sends 256 uncorrelated `Staged` responses with near-24 MiB `path` strings. They enter the count-bounded App queue before request-ID validation; the next `send().await` blocks the sole federation reader. Result: roughly 6 GiB retained and all pane input, resize, open/close, and output handling on that mount stalls. `client.rs:2639-2778` uses two short paths and cannot expose this.
+
+- **Medium — returned-path traversal passes validation.** `src/app/remote_clipboard_stage.rs:149-186`, `src/remote/federation/file_staging.rs:328-340`  
+  `/tmp/herdr-clipboard-images-501/../../home/me/.ssh/federation-clipboard-id_rsa` is absolute, control-free, allowlisted, and has a correctly prefixed final component. It is pasted unchanged at `remote_clipboard_stage.rs:460`, but resolves outside staging. A hostile remote can inject any same-prefix path; no test rejects `.` or `..` components.
+
+- **Medium — bidi controls were fixed server-side but remain accepted at the client injection boundary.** `src/app/remote_clipboard_stage.rs:159-185`, `src/remote/federation/file_staging.rs:315-340`  
+  A response such as `/tmp/federation-clipboard-safe\u{202e}gnp.png` passes the client’s C0/C1 and shared allowlist checks, then reaches the PTY. It is visually deceptive in terminals. The staging filename sanitizer rejects these controls, but the hostile returned-path sanitizer does not.
+
+- **Medium — a completed stage response is silently dropped under egress backpressure.** `src/server/federation_accept.rs:1028-1044`  
+  Unlike normal producers, the worker ignores `try_send` failure instead of using fail-fast `enqueue_outbound` (`:835-855`). If terminal output fills the 1024-frame queue while staging completes, the success response is lost; if the peer drains afterward, the link remains up, the client times out, and the remote file is orphaned. The overflow test exercises only `enqueue_outbound`.
+
+- **Medium — timeout and slow-transfer tests do not prove timers are scheduled.** `src/app/remote_clipboard_stage.rs:295-316`; tests at `:861-888`, `:1106-1127`  
+  Both tests manually inject/call the resulting events. Removing either `tokio::spawn` leaves those assertions valid. Regression scenario: a remote never responds; after two requests, entries never expire and all subsequent image pastes remain `TooManyInFlight`.
+
+- **Low — artifact cleanup coverage omits flush/sync failure.** `src/remote/federation/file_staging.rs:753-786`  
+  The test injects failure only in `write`; deleting cleanup from the `flush` or `sync_all` branches (`:179-184`) still passes. A late ENOSPC/EIO could then leave a staged partial file.
+
+- **Low — unsafe-root test does not prove root validation precedes cleanup.** `src/remote/federation/file_staging.rs:679-707`  
+  Removing `validate_staging_root` at `:121` still rejects the test roots later during candidate validation. With an existing unsafe root containing stale prefixed files, that regression would run `cleanup_stale` first and delete them before rejecting.
+
+Checked clean: source filename guard order, pre-`OpenOptions` candidate validation, current write/flush/sync cleanup code, per-mount `StagePermit` CAS/RAII handoff paths, capability-gated outbound requests, and detached-worker teardown ordering. I did not re-raise the explicitly settled protocol, Windows, or mount-end items.
+
+Unresolved questions: none.
+
+
