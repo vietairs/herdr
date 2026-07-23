@@ -614,3 +614,45 @@ What: `begin_remote_clipboard_stage_with_timings` takes the slow-toast delay and
 Why: the previous timer tests injected their events by hand, so deleting either `tokio::spawn` left both green — a remote that never answers would have leaked pending entries until the in-flight cap refused every further paste. `tokio::time::advance` was unavailable because tokio's `test-util` feature is not enabled and Cargo.toml is out of scope.
 Evidence: mutation — deleting either spawn fails `a_stage_schedules_the_waits_that_announce_it_and_then_reap_it` ("no wait told the user…" / "no wait reaped…").
 Reversibility: inline the wrapper's two arguments back into the body.
+
+## Unfenced inbound stage request left as a uniform follow-up, not patched here
+What: `handle_clipboard_stage_request` still carries no `(epoch, connid)` fence; recorded as a follow-up covering all three unfenced inbound commands instead of a bespoke fix for staging alone.
+Why: the reader thread cannot read the lease directly, so fencing staging alone needs a new actor command plus a round-trip on every paste. `handle_split_pane_request` and `handle_snapshot_request` have the identical shape, and SplitPane is strictly worse (the actor executes it with no `is_mounted_controller` check, so a revoked connection can already mutate the App). One uniform fence is the right shape; three ad-hoc ones are not.
+Evidence: pre-merge review + refutation — a SUCCESSFUL live handoff replaces the process and reaps the stale connection, so the window exists only on handoff ROLLBACK (`rollback_handoff_before_commit` reopens admission with the epoch bumped but never force-closes the revoked stream). Bounded by the 500 MiB quota and the 24h sweep.
+Reversibility: N/A — deferred; no code changed.
+
+## Cross-model review found six majors the four-lens Claude review did not
+What: a codex/gpt-5.6-sol pass on the shipped diff raised 8 findings (6 major); independent Claude refutation confirmed 7 and rated 1 merge-blocking. Four fixed (`ce9b8641`), three deferred below.
+Why: worth recording as a process fact, not just a bug list — four high-effort Claude lenses WITH adversarial refutation returned 0 majors on the same diff. The input-gate lens specifically verified "local panes stay byte-identical" and passed, while codex found the intercept ignored `KeyEventKind` (six clipboard reads per held key) and classified remoteness by workspace membership. Single-model review has correlated blind spots that more lenses of the same model do not remove.
+Evidence: mutation — removing the repeat gate makes `a_held_image_paste_key_captures_once_and_swallows_its_repeats` count 6 captures instead of 1.
+Reversibility: each fix is self-contained; the repeat gate is one `if` in `handle_key`.
+
+## Three cross-model findings deferred rather than fixed
+What: (#3) fd-relative staging-root TOCTOU, (#7/#8) pane.move across a federation boundary.
+Why: #3 needs `openat`/`O_NOFOLLOW`/`fchmod`/`unlinkat` threaded through `cleanup_stale` and both stage paths, and its window needs a shared NON-sticky TMPDIR — Linux `/tmp` is sticky, macOS TMPDIR is per-user private — while this branch is already a strict improvement over base (which had no symlink/ownership validation at all). #7/#8 share one root cause OUTSIDE this feature: `handle_pane_move` lacks the `IdClass::Remote` refusal that its siblings `pane.split` and `tab.create` already have, so a remote pane can be moved across hosts at all.
+Evidence: refuters confirmed all three real, all three non-blocking; #7/#8 unreachable unless `pane.move` straddles a federation boundary.
+Reversibility: N/A — deferred; recorded in plans/260723-0100-federation-reconnect-lifecycle/plan.md.
+
+## Ship-gate reconciles against the fork point, not master
+What: the gate's "territory" diff is `git diff 5ec2a10b...HEAD -- src/ docs/` (7063 lines), not `master...HEAD` (192 lines).
+Why: master already carries `af1e5be0` + `eda4943d` — part of THIS feature was fast-forwarded into the local master mid-pipeline, so a master-relative diff would reconcile only the last two fix commits against a five-phase plan and silently pass everything phases 01-04 shipped. The feature has never reached GitHub (large-file push block), so the fork point is the true "before".
+Evidence: `git merge-base --is-ancestor HEAD master` false; branch 2 ahead / 0 behind; master@eda4943d contains the base paste commit.
+Reversibility: trivial — recompute the diff file with a different base and re-run the gate.
+
+## Ship-gate 2026-07-23: four discrepancies accepted, AC6 rewritten, manual validation deferred
+What: user ticked all four --hard acknowledgments (P4 HOL blocking stays; zero-byte-payload guard and MAX_RETURNED_PATH_BYTES shipped unlogged; UnsupportedExtension toast copy changed from plan; both new-module <200 LOC budgets blown), chose "rewrite AC6 then re-gate", and accepted the missing manual validation as a known evidence gap. Asked that all four be noted for future plans.
+Why: three of the four are bookkeeping, not behaviour — the guards are additive hardening, the shipped toast copy is more accurate than the planned string, and the LOC budget was set before either module's test volume was known. P4 is assumption A1, reconfirmed against the shipped artifact rather than inherited from the earlier gate. AC6 was unreachable as written because Windows does not build at fork base 5ec2a10b.
+Evidence: ship-gate cross-check, 78 rows, 55 conforming / 21 deviated-logged / 2 attention; explainer at plans/reports/ship-gate-260723-remote-workspace-paste-image-files.html.
+Reversibility: plan.md criterion 6 rewrite and the two new Deferred bullets are text-only; the code is untouched by this gate.
+
+## Four rules for future plans in this repo (from the discrepancies above)
+What: (1) a <200 LOC budget on a new module must exclude tests AND be set after the test plan exists, or not set at all — both modules here blew it and both were right to; (2) additive hardening still needs an impl-notes line, because "it only makes things safer" is exactly what a silent divergence looks like from the gate's side; (3) user-visible strings drafted in a plan are drafts — measure them against the render width before treating them as a contract; (4) never write an acceptance criterion against a check that does not pass at the fork's base commit.
+Why: rules 1-3 each cost a ship-gate acknowledgment this round; rule 4 cost a full criterion rewrite and a re-gate.
+Evidence: this gate's four acknowledgments plus the AC6 rewrite.
+Reversibility: guidance only.
+
+## Re-gate 2026-07-23: criterion 6a-6d green at HEAD, 6e cannot be run on this workstation
+What: re-ran the rewritten criterion 6 against ce9b8641 rather than citing phase-05 evidence. 6a fmt CLEAN. 6b 3043 passed / 2 failed, both failures pass in isolation and neither file (`api/server/pane_graphics_stream.rs`, `workspace.rs`) appears in the feature diff. 6c clippy exit 0, ZERO errors — the plan expected 3 baseline errors, so the baseline improved; 3 warnings remain, all pre-existing (`pane_source.rs:464`, `id.rs:162`, `protocol/mod.rs:48` CLIPBOARD, confirmed dead at base by predict C3). 6d config_reference_check exit 0 AND docs_translation_parity exit 0 — the previously-recorded ja/zh-cn parity failure is gone. 6e BLOCKED: `cargo clippy --target x86_64-pc-windows-msvc` never reaches rustc; build.rs:78 dies in the vendored libghostty-vt zig build with 24 undefined Darwin libc symbols while linking the zig build runner.
+Why: 6e is a host toolchain limitation, not a code fault — reproducible after deleting the 222 MB `.zig-cache` (git-ignored, 0 tracked files) and retrying, so it is not stale state. Host build re-verified green afterwards, so clearing the cache left the tree healthy.
+Evidence: this session's runs; earlier phases recorded "exactly the 10 pre-existing errors" for the same command (impl-notes:420, :534), so this workstation's ability to cross-compile changed at some point between phase 05 and now.
+Reversibility: N/A — measurement only. The cfg-gate contract 6e asserts is still verifiable on the Windows VM or in CI.
