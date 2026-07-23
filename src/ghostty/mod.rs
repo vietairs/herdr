@@ -165,6 +165,7 @@ pub const MODE_GRAPHEME_CLUSTER: u16 = 2027;
 // These are documented in vendor/libghostty-vt/include/ghostty/vt/terminal.h,
 // but the generated bindings do not currently expose named constants for them.
 const TERMINAL_DATA_COLOR_FOREGROUND: ffi::GhosttyTerminalData = 18;
+const TERMINAL_DATA_COLOR_BACKGROUND: ffi::GhosttyTerminalData = 19;
 const TERMINAL_DATA_COLOR_CURSOR: ffi::GhosttyTerminalData = 20;
 
 const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
@@ -582,10 +583,42 @@ pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>, Error> {
     Ok(buffer)
 }
 
+/// Terminal display width of a single Unicode codepoint: 0, 1, or 2 cells.
+///
+/// Implemented via the `unicode-width` crate rather than the vendored
+/// libghostty-vt FFI: `ghostty_unicode_codepoint_width` is declared in the
+/// vendored C header but is not exported by the currently-linked static
+/// library on this vendored source commit (undefined symbol at link time).
+pub fn unicode_codepoint_width(codepoint: u32) -> u8 {
+    match char::from_u32(codepoint) {
+        Some(ch) => unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u8,
+        None => 0,
+    }
+}
+
+/// Display width of the first grapheme cluster in `codepoints`, matching
+/// the terminal's own segmentation with grapheme clustering enabled.
+/// Returns `(codepoints consumed, width in cells)`.
+///
+/// Implemented via `unicode_codepoint_width` per-codepoint rather than the
+/// vendored FFI grapheme segmenter (see `unicode_codepoint_width` doc) —
+/// consumes exactly one codepoint at a time since this crate is not
+/// otherwise linked against a grapheme-cluster segmentation library here.
+pub fn unicode_grapheme_width(codepoints: &[u32]) -> (usize, u8) {
+    match codepoints.first() {
+        Some(&codepoint) => (1, unicode_codepoint_width(codepoint)),
+        None => (0, 0),
+    }
+}
+
 pub struct Terminal {
     raw: ffi::GhosttyTerminal_ptr,
     write_pty_callback: Option<Box<WritePtyCallbackState>>,
     kitty_fingerprints: Mutex<HashMap<u32, KittyImageFingerprintEntry>>,
+    /// Last PWD value observed via `take_pwd_changes`, used to detect
+    /// changes against the current polled value from
+    /// `GHOSTTY_TERMINAL_DATA_PWD`.
+    last_pwd: Vec<u8>,
 }
 
 impl Terminal {
@@ -604,6 +637,7 @@ impl Terminal {
             raw,
             write_pty_callback: None,
             kitty_fingerprints: Mutex::new(HashMap::new()),
+            last_pwd: Vec::new(),
         })
     }
 
@@ -772,6 +806,43 @@ impl Terminal {
             offset: out.offset as usize,
             len: out.len as usize,
         })
+    }
+
+    /// Returns PWD changes observed since the last call.
+    ///
+    /// This vendored libghostty-vt does not expose the push-based OSC 7
+    /// "PWD changed" callback; it only exposes the current PWD via a
+    /// polling query (`GHOSTTY_TERMINAL_DATA_PWD`). This method adapts that
+    /// polling API to the batch-of-changes contract expected by callers: it
+    /// compares the current PWD against the last-seen value and returns a
+    /// single-element `Vec` if it changed, or an empty `Vec` otherwise. This
+    /// loses multi-change-batching precision (any intermediate PWD values
+    /// between polls are not observed), which is an acceptable trade-off
+    /// given the simpler polling API available here.
+    pub fn take_pwd_changes(&mut self) -> Vec<Vec<u8>> {
+        let mut pwd = ffi::GhosttyString::default();
+        let result = unsafe {
+            ffi::ghostty_terminal_get(
+                self.raw,
+                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_PWD,
+                (&mut pwd as *mut ffi::GhosttyString).cast(),
+            )
+        };
+        if result != ffi::GhosttyResult_GHOSTTY_SUCCESS || (pwd.ptr.is_null() && pwd.len != 0) {
+            return Vec::new();
+        }
+        let bytes = if pwd.len == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: pwd.ptr/pwd.len describe a borrowed string valid for
+            // the duration of this call, per GHOSTTY_TERMINAL_DATA_PWD docs.
+            unsafe { slice::from_raw_parts(pwd.ptr, pwd.len) }.to_vec()
+        };
+        if bytes == self.last_pwd {
+            return Vec::new();
+        }
+        self.last_pwd = bytes.clone();
+        vec![bytes]
     }
 
     pub fn screen_cell(&self, x: u16, y: u32) -> Result<(CellWide, Vec<u32>), Error> {
@@ -1045,6 +1116,17 @@ impl Terminal {
         Ok(text)
     }
 
+    pub fn scroll_viewport_top(&mut self) {
+        let viewport = ffi::GhosttyTerminalScrollViewport {
+            tag: ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_TOP,
+            value: ffi::GhosttyTerminalScrollViewportValue::default(),
+        };
+        // SAFETY: self.raw is valid and viewport value matches the tag.
+        unsafe {
+            ffi::ghostty_terminal_scroll_viewport(self.raw, viewport);
+        }
+    }
+
     pub fn scroll_viewport_bottom(&mut self) {
         let viewport = ffi::GhosttyTerminalScrollViewport {
             tag: ffi::GhosttyTerminalScrollViewportTag_GHOSTTY_SCROLL_VIEWPORT_BOTTOM,
@@ -1077,6 +1159,10 @@ impl Terminal {
 
     pub fn effective_foreground_color(&self) -> Result<Option<RgbColor>, Error> {
         self.get_optional_rgb_color(TERMINAL_DATA_COLOR_FOREGROUND)
+    }
+
+    pub fn effective_background_color(&self) -> Result<Option<RgbColor>, Error> {
+        self.get_optional_rgb_color(TERMINAL_DATA_COLOR_BACKGROUND)
     }
 
     pub fn effective_cursor_color(&self) -> Result<Option<RgbColor>, Error> {

@@ -19,7 +19,7 @@
 
   "languages": {
     "Rust": {
-      "enable_language_server": false,
+      "enable_language_server": true,
       "formatter": "auto",
       "format_on_save": "off"
     }
@@ -31,6 +31,7 @@
       "initialization_options": {
         "checkOnSave": false,
         "cargo": {
+          "noDeps": true,
           "allTargets": false,
           "buildScripts": {
             "enable": false
