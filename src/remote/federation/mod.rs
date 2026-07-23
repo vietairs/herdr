@@ -73,3 +73,11 @@ pub(crate) mod sanitize;
 // `run_remote`'s federated arm onto it.
 #[cfg(unix)]
 pub(crate) mod session;
+
+// Remote-side clipboard-image staging for federated paste. Unix-only: the
+// 0600/0700 guarantees it relies on are no-ops on Windows, and its filename
+// contract assumes POSIX separator semantics. `pub(crate)` so the server-side
+// inbound dispatch and the client-side injection guard — both outside this
+// module tree — can name its items.
+#[cfg(unix)]
+pub(crate) mod file_staging;

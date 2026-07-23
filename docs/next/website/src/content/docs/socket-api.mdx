@@ -81,7 +81,7 @@ herdr pane split w1:p1 --direction right --ratio 0.333
 Wait for an agent:
 
 ```bash
-herdr wait agent-status w1:p1 --status done
+herdr agent wait w1:p1 --until done
 ```
 
 Read pane output:
@@ -105,7 +105,7 @@ Raw socket method names use dot notation:
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.prompt`, `agent.wait`, `agent.send_keys`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -704,8 +704,8 @@ herdr pane read w1:p1 --source detection
 Use waits to coordinate agents and scripts.
 
 ```bash
-herdr wait agent-status w1:p1 --status done
-herdr wait agent-status w1:p1 --status blocked
+herdr agent wait w1:p1 --until done
+herdr agent wait w1:p1 --until blocked
 ```
 
 Agent waits observe semantic state, not arbitrary command completion.

@@ -1382,6 +1382,7 @@ fi
     script.push_str(
         r#"if [ -n "$home" ]; then
     emit "$home/.local/share/mise/installs/herdr/$version/bin/herdr"
+    emit "$home/.local/share/mise/installs/herdr/$version/herdr"
     emit "$home/.local/share/mise/installs/github-ogulcancelik-herdr/$version/herdr"
     emit "$home/.nix-profile/bin/herdr"
 fi
@@ -2009,7 +2010,7 @@ fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource
 
     let dir = private_download_dir(&asset_key)?;
     let path = dir.join("herdr.tmp");
-    let status = Command::new("curl")
+    let status = crate::noninteractive_process::curl_command()
         .args(["-sfL", "--max-time", "120", "-o"])
         .arg(&path)
         .arg(&asset.url)
@@ -2033,7 +2034,7 @@ fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource
 }
 
 fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
-    let output = Command::new("curl")
+    let output = crate::noninteractive_process::curl_command()
         .args([
             "-sfL",
             "--retry",
@@ -3073,11 +3074,6 @@ mod tests {
         assert_eq!(err, "--remote target must not start with '-'");
     }
 
-    // Server-side guard (`handle_workspace_mount_remote`) reuses this CLI
-    // validator directly rather than re-implementing the same option-like
-    // rejection rule — this is the unit-level proof it rejects the values
-    // the API handler test suite (`app::api::workspaces::tests`) exercises
-    // end to end.
     #[test]
     fn validate_remote_target_rejects_empty_and_option_like_values() {
         assert!(validate_remote_target("").is_err());
@@ -3262,6 +3258,7 @@ mod tests {
         assert!(
             script.contains("emit \"$home/.local/share/mise/installs/herdr/$version/bin/herdr\"")
         );
+        assert!(script.contains("emit \"$home/.local/share/mise/installs/herdr/$version/herdr\""));
         assert!(script.contains(
             "emit \"$home/.local/share/mise/installs/github-ogulcancelik-herdr/$version/herdr\""
         ));
