@@ -70,11 +70,32 @@ impl WorkspaceGitStatusSnapshot {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 static NEXT_WORKSPACE_ID: AtomicU64 = AtomicU64::new(1);
 const PUBLIC_ID_ALPHABET: &[u8; 32] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ0";
 
+// The process-global counter is correct for the real server (one process,
+// stable monotonic public ids for its whole lifetime). Under `cargo test`
+// every unit test in this crate shares that same static in one binary, so a
+// large suite creating many thousands of `Workspace`s across unrelated
+// tests can walk the counter past what a single test expects for "a freshly
+// generated id is short". Route test builds through a thread-local counter
+// instead: each test's assertions only care about ids generated within that
+// test, and Rust's test harness gives each test its own thread.
+#[cfg(test)]
+thread_local! {
+    static NEXT_WORKSPACE_ID_TEST: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
 pub(crate) fn generate_workspace_id() -> String {
+    #[cfg(not(test))]
     let counter = NEXT_WORKSPACE_ID.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    let counter = NEXT_WORKSPACE_ID_TEST.with(|cell| {
+        let current = cell.get();
+        cell.set(current + 1);
+        current
+    });
     format!("w{}", encode_public_number(counter as usize))
 }
 
@@ -127,18 +148,27 @@ pub(crate) fn reserve_workspace_ids(workspaces: &[Workspace]) {
         return;
     };
 
-    let mut current = NEXT_WORKSPACE_ID.load(Ordering::Relaxed);
-    while current < next {
-        match NEXT_WORKSPACE_ID.compare_exchange_weak(
-            current,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => break,
-            Err(observed) => current = observed,
+    #[cfg(not(test))]
+    {
+        let mut current = NEXT_WORKSPACE_ID.load(Ordering::Relaxed);
+        while current < next {
+            match NEXT_WORKSPACE_ID.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
         }
     }
+    #[cfg(test)]
+    NEXT_WORKSPACE_ID_TEST.with(|cell| {
+        if cell.get() < next {
+            cell.set(next);
+        }
+    });
 }
 
 /// A named workspace containing tabs.

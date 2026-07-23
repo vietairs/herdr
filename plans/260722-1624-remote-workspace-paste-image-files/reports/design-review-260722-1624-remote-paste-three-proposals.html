@@ -1,0 +1,650 @@
+<title>Remote-workspace paste — three designs</title>
+
+<style>
+  :root {
+    --ground:      #F4F6F7;
+    --ground-2:    #E9EDEF;
+    --ground-3:    #DDE3E6;
+    --rule:        #C7D0D5;
+    --text:        #10151B;
+    --text-2:      #48565F;
+    --text-3:      #6E7D87;
+    --remote:      #A85F13;
+    --remote-bg:   #F6E9D8;
+    --local:       #2C6E78;
+    --local-bg:    #DCECEE;
+    --good:        #3F7F55;
+    --warn:        #9A6F16;
+    --crit:        #A63F2E;
+    --code-bg:     #E7ECEE;
+
+    --measure: 68ch;
+    --f-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --f-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:    #10151B;
+      --ground-2:  #171F27;
+      --ground-3:  #1F2933;
+      --rule:      #2C3945;
+      --text:      #EAF0F3;
+      --text-2:    #A3B2BC;
+      --text-3:    #7B8C97;
+      --remote:    #E0A253;
+      --remote-bg: #2E2317;
+      --local:     #63B7C2;
+      --local-bg:  #15282C;
+      --good:      #6FBF8C;
+      --warn:      #D9AC4E;
+      --crit:      #E08472;
+      --code-bg:   #1A222B;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:    #10151B;
+    --ground-2:  #171F27;
+    --ground-3:  #1F2933;
+    --rule:      #2C3945;
+    --text:      #EAF0F3;
+    --text-2:    #A3B2BC;
+    --text-3:    #7B8C97;
+    --remote:    #E0A253;
+    --remote-bg: #2E2317;
+    --local:     #63B7C2;
+    --local-bg:  #15282C;
+    --good:      #6FBF8C;
+    --warn:      #D9AC4E;
+    --crit:      #E08472;
+    --code-bg:   #1A222B;
+  }
+
+  :root[data-theme="light"] {
+    --ground:    #F4F6F7;
+    --ground-2:  #E9EDEF;
+    --ground-3:  #DDE3E6;
+    --rule:      #C7D0D5;
+    --text:      #10151B;
+    --text-2:    #48565F;
+    --text-3:    #6E7D87;
+    --remote:    #A85F13;
+    --remote-bg: #F6E9D8;
+    --local:     #2C6E78;
+    --local-bg:  #DCECEE;
+    --good:      #3F7F55;
+    --warn:      #9A6F16;
+    --crit:      #A63F2E;
+    --code-bg:   #E7ECEE;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--text);
+    font-family: var(--f-sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: var(--measure);
+    margin: 0 auto;
+    padding: 0 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 2.5rem;
+  }
+  .wide { max-width: 1040px; }
+
+  /* ---- masthead ---- */
+  .masthead {
+    border-bottom: 1px solid var(--rule);
+    padding: 4.5rem 0 2.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .kicker {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+  }
+  h1 {
+    font-family: var(--f-mono);
+    font-size: clamp(28px, 5vw, 40px);
+    line-height: 1.15;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 18px;
+    color: var(--text-2);
+    margin: 0;
+    text-wrap: pretty;
+  }
+
+  h2 {
+    font-family: var(--f-mono);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.75rem;
+    text-wrap: balance;
+  }
+  h3 {
+    font-family: var(--f-mono);
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0 0 0.4rem;
+  }
+  p { margin: 0 0 1rem; text-wrap: pretty; }
+  p:last-child { margin-bottom: 0; }
+
+  section { display: flex; flex-direction: column; gap: 0.5rem; }
+
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.87em;
+    background: var(--code-bg);
+    padding: 0.12em 0.36em;
+    border-radius: 3px;
+    word-break: break-word;
+  }
+
+  a { color: var(--local); }
+
+  /* ---- the finding callout ---- */
+  .finding {
+    border: 1px solid var(--rule);
+    background: var(--remote-bg);
+    padding: 1.1rem 1.25rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .finding .label {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--remote);
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 0.6rem;
+  }
+  .finding p { margin: 0; }
+
+  /* ---- proposal blocks ---- */
+  .proposal {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+  }
+  .phead { display: flex; align-items: baseline; gap: 0.85rem; }
+  .letter {
+    font-family: var(--f-mono);
+    font-size: 30px;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--text-3);
+  }
+  .proposal[data-pick="yes"] .letter { color: var(--remote); }
+  .ptitle { display: flex; flex-direction: column; gap: 0.15rem; }
+  .ptitle h2 { margin: 0; }
+  .essence { color: var(--text-2); font-size: 15px; }
+
+  dl.facts {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.4rem 1.1rem;
+    margin: 0;
+    font-size: 15px;
+  }
+  dl.facts dt {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    padding-top: 0.32em;
+  }
+  dl.facts dd { margin: 0; }
+  @media (max-width: 560px) {
+    dl.facts { grid-template-columns: 1fr; gap: 0.15rem; }
+    dl.facts dd { margin-bottom: 0.6rem; }
+  }
+
+  .risk {
+    font-size: 14.5px;
+    color: var(--text-2);
+    border-left: 2px solid var(--crit);
+    padding-left: 0.85rem;
+  }
+  .risk b { color: var(--crit); font-weight: 600; }
+
+  /* ---- pills ---- */
+  .pills { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .pill {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    padding: 0.22em 0.6em;
+    border-radius: 100px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+  .pill.ok   { color: var(--good); }
+  .pill.warn { color: var(--warn); }
+  .pill.bad  { color: var(--crit); }
+  .pill.mute { color: var(--text-3); }
+
+  /* ---- table ---- */
+  .scroller {
+    overflow-x: auto;
+    border: 1px solid var(--rule);
+    background: var(--ground-2);
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 640px;
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.6rem 0.85rem;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  thead th {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    background: var(--ground-3);
+    white-space: nowrap;
+  }
+  tbody th {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-2);
+    white-space: nowrap;
+  }
+  tr:last-child th, tr:last-child td { border-bottom: 0; }
+  td.pick { background: var(--remote-bg); }
+
+  /* ---- diagrams ---- */
+  .diagram {
+    overflow-x: auto;
+    background: var(--ground-2);
+    border: 1px solid var(--rule);
+    padding: 1.25rem;
+  }
+  .diagram pre.mermaid { margin: 0; background: transparent; }
+  figcaption {
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    color: var(--text-3);
+    margin-top: 0.6rem;
+  }
+  figure { margin: 0; display: flex; flex-direction: column; }
+
+  /* ---- questions ---- */
+  ol.q { margin: 0; padding-left: 1.3rem; display: flex; flex-direction: column; gap: 0.7rem; }
+  ol.q li::marker { font-family: var(--f-mono); color: var(--text-3); }
+  ol.q b { font-weight: 600; }
+
+  ul.tight { margin: 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.35rem; }
+
+  .verdict {
+    border: 1px solid var(--remote);
+    background: var(--remote-bg);
+    padding: 1.25rem 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .verdict h2 { color: var(--remote); }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding: 1.5rem 0 4rem;
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    color: var(--text-3);
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  :focus-visible { outline: 2px solid var(--local); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <div class="kicker">
+      <span>herdr · federation</span>
+      <span>design review</span>
+      <span>2026-07-22</span>
+    </div>
+    <h1>Pasting a file into a pane that lives on another machine</h1>
+    <p class="standfirst">
+      Three ways to close the gap that currently forces you out of herdr and into
+      <code>cmux ssh appn-ltu-vm-105</code>. Pick one before any code is written.
+    </p>
+  </header>
+
+  <section>
+    <h2>Why it's broken</h2>
+    <p>
+      Paste already works — it just works on the wrong machine. When you paste an image, the local
+      server writes the bytes to a temp file and types <em>that local path</em> into the pane
+      (<code>server/clipboard_image.rs:13</code>). For a pane on a mounted remote workspace the PTY is
+      running on the far side of the SSH link, so the agent receives a path to a file that does not
+      exist on its filesystem. <code>cmux ssh</code> works precisely because there the file and the
+      agent share a host.
+    </p>
+  </section>
+
+  <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  subgraph L["local machine"]
+    CB["clipboard / dropped file"] --> ST["stage to $TMPDIR<br/>clipboard_image.rs:13"]
+    ST --> PT["type the path<br/>pane.rs:3072"]
+  end
+  subgraph R["appn-ltu-vm-105"]
+    AG["agent reads path"]
+  end
+  PT -- "TerminalChannelMessage::Input" --> AG
+  AG -.->|"ENOENT — file is<br/>on the other host"| X(("✕"))
+</pre>
+    <figcaption>Today: bytes never cross the link, only a path that means nothing on arrival.</figcaption>
+  </figure>
+
+  <div class="finding">
+    <span class="label">What scouting turned up</span>
+    <p>
+      <strong>The rails for this were already laid, then left dormant.</strong>
+      <code>ClipboardMessage</code> and <code>FederationMessage::Clipboard</code> already ship in
+      protocol v3 with a 16&nbsp;MiB channel cap. <code>send_local_clipboard_to_remote()</code> exists
+      in <code>client.rs:452</code> with the comment <em>"no production call site until P8 wires a real
+      paste keybinding to a live mount."</em> The receiving end at <code>serve.rs:441</code> drops it
+      on the floor: <em>"Clipboard forwarding is deferred (M9)."</em>
+    </p>
+    <p>
+      So this is finishing P8 + M9, not inventing a protocol. The catch: that message carries no
+      extension, no filename, no target pane, and no reply path — which is exactly what the three
+      proposals disagree about.
+    </p>
+  </div>
+
+  <section>
+    <h2>The three designs</h2>
+    <p>
+      They differ on one axis above all: <strong>who writes into the PTY</strong>, and therefore
+      whether you ever find out that a paste failed.
+    </p>
+  </section>
+
+  <figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph A["A — fire and forget"]
+    A1["client sends bytes<br/>+ terminal_id"] --> A2["remote stages file"]
+    A2 --> A3["remote types path<br/>into its own PTY"]
+    A3 --> A4["no reply, ever"]
+  end
+  subgraph B["B — correlated stage, client injects"]
+    B1["client sends<br/>StageRequest + request_id"] --> B2["remote stages file"]
+    B2 --> B3["replies StageResponse<br/>Ok(path) | Err(reason)"]
+    B3 --> B4["client types path via the<br/>existing local paste path"]
+  end
+  subgraph C["C — second SSH channel"]
+    C1["client spawns<br/>herdr internal stage-file"] --> C2["bytes over ssh stdin<br/>off the federation link"]
+    C2 --> C3["remote stages, returns path<br/>via its own JSON API"]
+  end
+</pre>
+    <figcaption>A and B share the federation tunnel; C deliberately steps off it.</figcaption>
+  </figure>
+
+  <div class="proposal">
+    <div class="phead">
+      <span class="letter">A</span>
+      <div class="ptitle">
+        <h2>Finish the dormant rails</h2>
+        <span class="essence">Remote stages the file and pastes into its own pane. Nothing comes back.</span>
+      </div>
+    </div>
+    <div class="pills">
+      <span class="pill ok">no version bump</span>
+      <span class="pill ok">smallest — 350-500 LOC</span>
+      <span class="pill ok">loopback-testable</span>
+      <span class="pill bad">silent on failure</span>
+      <span class="pill warn">2nd PTY-write path</span>
+    </div>
+    <dl class="facts">
+      <dt>Wire</dt>
+      <dd>Add <code>#[serde(default)]</code> fields to the already-shipped <code>ClipboardMessage</code>
+        — same idiom as <code>AgentStatusMessage.agent</code>. Protocol stays v3.</dd>
+      <dt>Injects</dt>
+      <dd>Remote server, into <code>terminal_id</code> from the message.</dd>
+      <dt>Reversibility</dt>
+      <dd>Easy — effectively two files.</dd>
+    </dl>
+    <p class="risk">
+      <b>Riskiest:</b> there is no acknowledgement of any kind. Mount drops mid-transfer, remote disk
+      full, payload over cap — all of it vanishes with nothing on your screen. That is a design
+      property, not a bug to fix later.
+    </p>
+  </div>
+
+  <div class="proposal" data-pick="yes">
+    <div class="phead">
+      <span class="letter">B</span>
+      <div class="ptitle">
+        <h2>Stage remotely, paste locally</h2>
+        <span class="essence">Remote only writes the file and hands back its path; the existing local paste code types it.</span>
+      </div>
+    </div>
+    <div class="pills">
+      <span class="pill ok">no version bump</span>
+      <span class="pill ok">failures are visible</span>
+      <span class="pill ok">one PTY-write path in the codebase</span>
+      <span class="pill ok">loopback-testable</span>
+      <span class="pill warn">500-700 LOC</span>
+    </div>
+    <dl class="facts">
+      <dt>Wire</dt>
+      <dd>Two purpose-built variants gated by a new negotiated <code>Capability</code> — the
+        codebase's own documented mechanism for adding a message without a version bump. Mirrors
+        <code>SplitPaneRequest</code>/<code>Response</code> correlation via <code>request_id</code>.</dd>
+      <dt>Injects</dt>
+      <dd>Local client, through the paste path that already exists and is already exercised.</dd>
+      <dt>Reversibility</dt>
+      <dd>Medium — protocol variants, capability, and a pending-request map to unwind.</dd>
+    </dl>
+    <p class="risk">
+      <b>Riskiest:</b> the pending-request map is new state that has to survive mount teardown
+      cleanly — <code>end_federation_mount()</code> aborts tasks, so an in-flight request must time
+      out rather than hang or panic on a dropped channel.
+    </p>
+  </div>
+
+  <div class="proposal">
+    <div class="phead">
+      <span class="letter">C</span>
+      <div class="ptitle">
+        <h2>Out-of-band over a second SSH session</h2>
+        <span class="essence">Keep bulk bytes off the interactive tunnel entirely; a new CLI subcommand does the staging.</span>
+      </div>
+    </div>
+    <div class="pills">
+      <span class="pill ok">no size ceiling</span>
+      <span class="pill ok">protocol untouched</span>
+      <span class="pill bad">needs a whole new test harness</span>
+      <span class="pill bad">600-900 LOC</span>
+      <span class="pill warn">new remote entry point</span>
+    </div>
+    <dl class="facts">
+      <dt>Wire</dt>
+      <dd>None — this is off the federation protocol. SSH already runs
+        <code>ControlMaster=auto</code>, so a second session is nearly free.</dd>
+      <dt>Injects</dt>
+      <dd>Either side; the remote would act through its own JSON API, which fits the
+        runtime/client boundary rule in <code>CLAUDE.md</code> better than anything else here.</dd>
+      <dt>Reversibility</dt>
+      <dd>Hardest — a new subcommand becomes a used interface quickly.</dd>
+    </dl>
+    <p class="risk">
+      <b>Riskiest:</b> it solves large-file transfer, which nobody asked for, at a cost nobody
+      budgeted. The loopback harness cannot test it at all, so it drags in new test scaffolding and a
+      subprocess-to-mount-teardown lifecycle.
+    </p>
+  </div>
+
+  <section>
+    <h2>Side by side</h2>
+  </section>
+
+  <div class="scroller">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col"></th>
+          <th scope="col">A · fire &amp; forget</th>
+          <th scope="col">B · correlated</th>
+          <th scope="col">C · out-of-band</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Protocol version</th>
+          <td>unchanged (v3)</td>
+          <td class="pick">unchanged (v3), capability-gated</td>
+          <td>not applicable</td>
+        </tr>
+        <tr>
+          <th scope="row">Failure is visible</th>
+          <td>no</td>
+          <td class="pick">yes — timeout / error</td>
+          <td>yes — exit code</td>
+        </tr>
+        <tr>
+          <th scope="row">New PTY-write code</th>
+          <td>yes, remote-side</td>
+          <td class="pick">none — reuses local paste</td>
+          <td>depends on flavour</td>
+        </tr>
+        <tr>
+          <th scope="row">Size ceiling</th>
+          <td>16 MiB channel cap</td>
+          <td class="pick">16 MiB, enforced both ends</td>
+          <td>none until one is added</td>
+        </tr>
+        <tr>
+          <th scope="row">Fits loopback harness</th>
+          <td>yes</td>
+          <td class="pick">yes</td>
+          <td>no</td>
+        </tr>
+        <tr>
+          <th scope="row">Rough size</th>
+          <td>350–500 LOC</td>
+          <td class="pick">500–700 LOC</td>
+          <td>600–900 LOC</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="verdict">
+    <h2>Recommendation — B</h2>
+    <p>
+      B costs roughly 150–200 lines more than A and buys the one thing A structurally cannot have:
+      you find out when a paste fails. It also keeps a single PTY-write path in the whole codebase
+      rather than growing a second one on the remote side, and its compat story uses the mechanism
+      the project already documents for this exact situation.
+    </p>
+    <p>
+      If you want the thinnest possible v1 instead, take <strong>A scoped to images only</strong> —
+      with the understanding that silent failure is an accepted gap, not an oversight.
+      <strong>C is not recommended now;</strong> revisit it only if "arbitrary file" turns out to
+      mean hundred-megabyte build artifacts.
+    </p>
+  </div>
+
+  <section>
+    <h2>Two things worth correcting</h2>
+    <ul class="tight">
+      <li><strong>Image and arbitrary-file are two features, not one.</strong> Local
+        <em>capture</em> is image-only today — <code>read_image_file_from_terminal_drop()</code>. All
+        three proposals generalise the wire and staging side; none of them size the work to capture a
+        non-image file in the first place.</li>
+      <li><strong>A live bug sits in the staging path regardless of which you pick.</strong>
+        <code>sanitize_extension()</code> silently rewrites any unrecognised extension to
+        <code>.png</code>. Fine when everything is an image; actively wrong the moment you paste
+        <code>report.pdf</code>.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>What the plan does next</h2>
+  </section>
+
+  <figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  P1["approve a design<br/>(you are here)"] --> P2["predict<br/>5-persona debate"]
+  P2 --> P3["plan --tdd<br/>+ red-team"]
+  P3 --> P4["direction confirm<br/>(you again)"]
+  P4 --> P5["codex adversarial<br/>review of plan"]
+  P5 --> P6["implement<br/>+ impl-notes"]
+  P6 --> P7["code review<br/>+ security scan"]
+  P7 --> P8["ship-gate --hard"]
+  P8 --> P9["PR + pre-merge review<br/>(you merge)"]
+</pre>
+    <figcaption>R7 high-risk route. Two hard stops before implementation; you own the merge.</figcaption>
+  </figure>
+
+  <section>
+    <h2>Open questions</h2>
+    <p>These shape the plan. I'll assume sensible defaults if you'd rather not answer all of them.</p>
+    <ol class="q">
+      <li><b>Is arbitrary-file really v1?</b> Or is image-paste-over-federation the actual need, with
+        generic files as a fast-follow? This decides whether capture generalisation is in scope.</li>
+      <li><b>Filename preservation.</b> Should the agent see <code>screenshot-of-error.png</code>, or
+        is today's opaque <code>client-3-clipboard-1753...png</code> fine?</li>
+      <li><b>Anything above 16 MiB?</b> Only matters if the answer changes C's standing.</li>
+      <li><b>Remote staging directory lifetime</b> — the same 24-hour sweep as local, or cleared when
+        the mount goes away?</li>
+    </ol>
+  </section>
+
+  <footer>
+    <span>herdr · feat/remote-workspace-paste-image-files · worktree off 5ec2a10b</span>
+    <span>evidence: 4-scout blindspot sweep + brainstorm report, plans/260722-1624-remote-workspace-paste-image-files/reports/</span>
+    <span>no code has been written yet</span>
+  </footer>
+</div>

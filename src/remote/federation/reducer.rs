@@ -30,7 +30,7 @@
 //! per-item.
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::api::schema::common::AgentStatus;
 use crate::api::schema::events::{EventData, EventKind};
@@ -41,8 +41,9 @@ use crate::api::schema::workspaces::WorkspaceInfo;
 use crate::api::schema::EventEnvelope;
 use crate::api::EventHub;
 
+use super::client::MountConnectionEpoch;
 use super::id::{fence, map_in, FenceResult, Mount};
-use super::protocol::{AgentStatusMessage, EventChannelMessage, EventCursor};
+use super::protocol::{AgentStatusMessage, Capability, EventChannelMessage, EventCursor};
 use super::sanitize::{sanitize_remote_string, sanitize_remote_string_opt};
 
 /// Outcome of applying one [`EventChannelMessage`] to the reducer's cursor.
@@ -101,6 +102,17 @@ pub(crate) struct RemoteMirror {
     /// right before/after a flip still applies); only the *display*
     /// decision changes.
     stale: bool,
+    /// What this mount's handshake actually negotiated. It lives on the
+    /// mirror because the mirror is what reaches every send site, and an
+    /// optional-feature frame sent to a peer that never advertised it fails
+    /// that peer's decoder and kills the whole mount — so the agreed set has
+    /// to be readable wherever such a frame could be constructed. Pure data,
+    /// so `AppState` stays pure.
+    agreed_capabilities: BTreeSet<Capability>,
+    /// Which connection to this host produced this mirror. See
+    /// [`MountConnectionEpoch`] for why neither `mount_generation` nor
+    /// `server_instance_id` can tell a fresh mount from a superseded one.
+    connection_epoch: MountConnectionEpoch,
 }
 
 impl RemoteMirror {
@@ -112,7 +124,32 @@ impl RemoteMirror {
             tabs: HashMap::new(),
             panes: HashMap::new(),
             stale: false,
+            // A mirror that has not been through a handshake has negotiated
+            // nothing and belongs to no connection; both are set by
+            // `connect_and_mount` on success.
+            agreed_capabilities: BTreeSet::new(),
+            connection_epoch: MountConnectionEpoch::UNMOUNTED,
         }
+    }
+
+    /// Records what the mount's handshake agreed on. Not `required`: a peer
+    /// that agrees to nothing optional must still mount.
+    pub(crate) fn set_agreed_capabilities(&mut self, capabilities: BTreeSet<Capability>) {
+        self.agreed_capabilities = capabilities;
+    }
+
+    /// Whether both peers advertised `capability` at handshake time. Every
+    /// optional-feature send site must consult this before building a frame.
+    pub(crate) fn supports(&self, capability: &Capability) -> bool {
+        self.agreed_capabilities.contains(capability)
+    }
+
+    pub(crate) fn set_connection_epoch(&mut self, epoch: MountConnectionEpoch) {
+        self.connection_epoch = epoch;
+    }
+
+    pub(crate) fn connection_epoch(&self) -> MountConnectionEpoch {
+        self.connection_epoch
     }
 
     /// Flips the disconnect/stale marker (P9 call site). Does not itself

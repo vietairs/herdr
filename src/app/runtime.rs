@@ -38,7 +38,27 @@ pub(crate) struct WorkspaceGitRefreshOutput {
     pub(crate) cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
 }
 
+fn retain_custom_command_after_wait(
+    pid: u32,
+    result: std::io::Result<Option<std::process::ExitStatus>>,
+) -> bool {
+    match result {
+        Ok(None) => true,
+        Ok(Some(_)) => false,
+        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => true,
+        Err(err) => {
+            tracing::warn!(pid, err = %err, "failed to reap detached custom command");
+            false
+        }
+    }
+}
+
 impl App {
+    pub(crate) fn reap_finished_custom_commands(&mut self) {
+        self.detached_custom_command_children
+            .retain_mut(|child| retain_custom_command_after_wait(child.id(), child.try_wait()));
+    }
+
     pub(crate) fn shutdown_detached_terminal_runtimes(&mut self) {
         let terminal_ids = std::mem::take(&mut self.state.terminal_runtime_shutdowns);
         for terminal_id in terminal_ids {
@@ -135,7 +155,7 @@ impl App {
                 let key_id = repeat_key_identity(&key);
                 match key.kind {
                     crossterm::event::KeyEventKind::Press => {
-                        if self.state.mode == Mode::Terminal {
+                        if self.state.popup_pane.is_some() || self.state.mode == Mode::Terminal {
                             self.suppressed_repeat_keys.remove(&key_id);
                         } else {
                             self.suppressed_repeat_keys.insert(key_id);
@@ -144,7 +164,7 @@ impl App {
                         true
                     }
                     crossterm::event::KeyEventKind::Repeat => {
-                        if self.state.mode == Mode::Terminal
+                        if (self.state.popup_pane.is_some() || self.state.mode == Mode::Terminal)
                             && !self.suppressed_repeat_keys.contains(&key_id)
                         {
                             self.handle_key(key).await;
@@ -164,7 +184,7 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                if self.state.mouse_capture {
+                if self.state.popup_pane.is_some() || self.state.mouse_capture {
                     self.handle_mouse(mouse);
                 } else {
                     self.state
@@ -173,6 +193,7 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {
+                self.send_outer_focus_event(crate::ghostty::FocusEvent::Gained);
                 if self.state.redraw_on_focus_gained {
                     self.request_full_redraw();
                 }
@@ -181,6 +202,7 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::OuterFocusLost => {
+                self.send_outer_focus_event(crate::ghostty::FocusEvent::Lost);
                 self.state.outer_terminal_focus = Some(false);
                 false
             }
@@ -247,6 +269,21 @@ impl App {
                 self.refresh_agent_notification_delivery_contexts(&mut deliveries);
                 self.emit_delayed_client_local_agent_notifications(&deliveries);
                 self.sync_toast_deadline(previous_toast);
+                changed = true;
+            }
+        }
+
+        if self
+            .state
+            .next_managed_agent_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let panes = self.state.reconcile_managed_agents_at(now);
+            if !panes.is_empty() {
+                for (ws_idx, pane_id) in panes {
+                    self.emit_pane_updated(ws_idx, pane_id);
+                }
+                self.schedule_session_save();
                 changed = true;
             }
         }
@@ -584,6 +621,7 @@ impl App {
             self.config_diagnostic_deadline,
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
+            self.state.next_managed_agent_deadline(),
             self.copy_feedback_deadline,
             self.next_animation_tick,
             include_git_refresh
@@ -709,6 +747,13 @@ mod tests {
     use crate::app::state;
     use crate::workspace::Workspace;
     use std::path::PathBuf;
+
+    #[test]
+    fn interrupted_custom_command_wait_keeps_child_for_retry() {
+        let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "test interrupt");
+
+        assert!(retain_custom_command_after_wait(42, Err(interrupted)));
+    }
 
     fn test_app_with_pane() -> (super::super::App, crate::layout::PaneId) {
         let mut app = super::super::App::new(
