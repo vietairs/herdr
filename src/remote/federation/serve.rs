@@ -110,6 +110,14 @@ pub(crate) trait FederationHost: 'static {
         focus: bool,
     ) -> Result<(String, String), String>;
 
+    /// Performs a real close on this host's own workspace, closing the pane
+    /// backing `target_pane_id` (a raw, un-namespaced remote pane id) — Gap
+    /// A server-side test-loopback surface
+    /// (plans/260724-1536-federation-pane-close-sync), mirroring
+    /// `split_pane`'s contract. Returns an error string describing why the
+    /// pane could not be closed (unknown pane, ...).
+    fn close_pane(&self, target_pane_id: &str) -> Result<(), String>;
+
     /// Snapshot of every known terminal's current agent status, polled and
     /// diffed by this module so only changes are sent over the wire.
     fn agent_statuses(&self) -> Vec<(String, AgentStatus)>;
@@ -451,6 +459,17 @@ fn handle_inbound<H: FederationHost>(
                 Err(reason) => super::protocol::SplitPaneResponse::Failed { request_id, reason },
             };
             let _ = out_tx.send(FederationMessage::SplitPaneResponse(response));
+            return;
+        }
+        FederationMessage::ClosePaneRequest(super::protocol::ClosePaneRequest {
+            request_id,
+            target_pane_id,
+        }) => {
+            let response = match host.close_pane(&target_pane_id) {
+                Ok(()) => super::protocol::ClosePaneResponse::Closed { request_id },
+                Err(reason) => super::protocol::ClosePaneResponse::Failed { request_id, reason },
+            };
+            let _ = out_tx.send(FederationMessage::ClosePaneResponse(response));
             return;
         }
         // Staging runs INLINE here, unlike production. This handler only ever

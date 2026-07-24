@@ -29,12 +29,21 @@ use super::id::ServerInstanceId;
 /// variant.
 ///
 /// `SnapshotRequest`/`SnapshotResponse` (post-mount pane mirroring resync,
-/// plans/260722-1327) were added WITHOUT a version bump: v3 has never
-/// shipped in a release (no `federation_accept.rs`/`client.rs` production
-/// call site existed in any tagged version — see
-/// `plans/260713-1217-herdr-remote-workspace-federation/implementation-notes.md`),
-/// so there is no deployed peer that could observe the addition as a skew.
-pub const FEDERATION_PROTOCOL_VERSION: u32 = 3;
+/// plans/260722-1327) were added WITHOUT a version bump, on the reasoning
+/// that v3 had never shipped in a release. **That reasoning is stale and has
+/// been superseded**: v3 (the 2->3 bump at commit `89f40780`) is an ancestor
+/// of tag `v0.7.5-hvn.1` and was live-deployed/verified end-to-end on real
+/// remote hosts (see `plans/260724-1536-federation-pane-close-sync/plan.md`
+/// Phase 0 and memory `herdr-dev-instance-federation-ops`). So this next
+/// bump, 3 -> 4, for `ClosePaneRequest`/`ClosePaneResponse` (federation
+/// pane-close sync, plans/260724-1536-federation-pane-close-sync) follows the
+/// `Fault` 1->2 precedent: a new top-level variant a v3 peer cannot decode,
+/// not an additive field, so it must gate on the version rather than rely on
+/// graceful skew — `codec.rs::decode` hard-rejects any version mismatch
+/// before touching the payload, and `negotiate()` hard-rejects the whole
+/// handshake on a mismatch, so there is no per-message degrade path an
+/// unbumped addition could lean on.
+pub const FEDERATION_PROTOCOL_VERSION: u32 = 4;
 
 /// An optional feature two federation peers may support. Modeled as an
 /// opaque name rather than a closed enum so an older peer can simply not
@@ -307,6 +316,31 @@ pub enum SplitPaneResponse {
     },
 }
 
+/// Request to close an existing remote pane on the serving host's own
+/// workspace, sent by a mounting client so a local pane-close action tears
+/// down the pane on the mounted host instead of only mutating the local
+/// mirror (Gap A, plans/260724-1536-federation-pane-close-sync).
+/// `request_id` correlates the eventual `ClosePaneResponse`, mirroring
+/// `SplitPaneRequest`'s bare-u64 pairing rather than introducing an RPC
+/// framework — the control channel carries no other request/response
+/// pairing today.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosePaneRequest {
+    pub request_id: u64,
+    /// Raw (un-namespaced) remote pane id to close, as carried by the
+    /// mount's own `SessionSnapshot`/event stream — never a locally
+    /// namespaced `r:<host>:...` id.
+    pub target_pane_id: String,
+}
+
+/// Response to a `ClosePaneRequest`: either a confirmation the pane is gone,
+/// or a reason it could not be closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClosePaneResponse {
+    Closed { request_id: u64 },
+    Failed { request_id: u64, reason: String },
+}
+
 /// Request from a mounting client to write a file into the serving host's own
 /// staging directory, so a paste performed against a mirrored remote pane
 /// produces a path that resolves on the *remote* host rather than locally.
@@ -491,6 +525,8 @@ pub enum FederationMessage {
     Fault(FaultMessage),
     SplitPaneRequest(SplitPaneRequest),
     SplitPaneResponse(SplitPaneResponse),
+    ClosePaneRequest(ClosePaneRequest),
+    ClosePaneResponse(ClosePaneResponse),
     SnapshotRequest(SnapshotRequest),
     /// Answer to a `SnapshotRequest`: a fresh atomic (snapshot, cursor) pair,
     /// same shape as the mount handshake's own `MountSnapshot` — the
@@ -513,6 +549,7 @@ impl FederationMessage {
             Self::Clipboard(_) => Channel::Clipboard,
             Self::Fault(_) => Channel::Control,
             Self::SplitPaneRequest(_) | Self::SplitPaneResponse(_) => Channel::Control,
+            Self::ClosePaneRequest(_) | Self::ClosePaneResponse(_) => Channel::Control,
             Self::SnapshotRequest(_) => Channel::Control,
             // Carries a full `SessionSnapshot`, same payload shape/size as
             // the mount handshake's `MountSnapshot` — reuse its channel cap.
@@ -577,6 +614,39 @@ mod tests {
 
         let failed = FederationMessage::SplitPaneResponse(SplitPaneResponse::Failed {
             request_id: 7,
+            reason: "no such pane".to_string(),
+        });
+        let encoded = codec::encode(&failed).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, failed);
+    }
+
+    #[test]
+    fn close_pane_request_response_roundtrip_through_the_wire_codec() {
+        let request = FederationMessage::ClosePaneRequest(ClosePaneRequest {
+            request_id: 9,
+            target_pane_id: "term_1".to_string(),
+        });
+        assert_eq!(request.channel(), Channel::Control);
+        let encoded = codec::encode(&request).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, request);
+
+        let closed =
+            FederationMessage::ClosePaneResponse(ClosePaneResponse::Closed { request_id: 9 });
+        assert_eq!(closed.channel(), Channel::Control);
+        let encoded = codec::encode(&closed).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, closed);
+
+        let failed = FederationMessage::ClosePaneResponse(ClosePaneResponse::Failed {
+            request_id: 9,
             reason: "no such pane".to_string(),
         });
         let encoded = codec::encode(&failed).expect("encode must succeed");
