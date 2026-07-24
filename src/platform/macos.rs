@@ -588,7 +588,23 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Reads a clipboard image, trying every pasteboard shape herdr knows how to
+/// coerce to bytes.
+///
+/// `the clipboard as «class PNGf»` only succeeds when the pasteboard holds
+/// real image data (e.g. a screenshot, or a copy from an image editor). A
+/// `Cmd+C` on a file in Finder — the common way to copy an existing image —
+/// instead populates a `«class furl»` (file URL) entry, which `PNGf`
+/// coercion cannot see at all; it fails with no indication a file reference
+/// was ever there. [`read_clipboard_image_via_file_url`] is the fallback for
+/// that shape, tried only after the direct read comes back empty so a
+/// pasteboard that genuinely holds no image still reports `None` exactly as
+/// before.
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
+    read_clipboard_image_via_pngf().or_else(read_clipboard_image_via_file_url)
+}
+
+fn read_clipboard_image_via_pngf() -> Option<ClipboardImage> {
     let path = std::env::temp_dir().join(format!(
         "herdr-clipboard-image-{}-{}.png",
         std::process::id(),
@@ -627,6 +643,44 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
         bytes,
         extension: "png",
     })
+}
+
+/// Resolves a `«class furl»` pasteboard entry to a POSIX path and, if it
+/// survives the same shape contract the bracketed-paste bridge uses
+/// (`crate::image_path`), reads it. Deliberately *not* gated by
+/// `crate::image_path::recognized_image_drop_location`: that gate exists to
+/// keep the bracketed-paste bridge from mistaking ordinary pasted text for a
+/// clipboard image; this call only ever runs behind an explicit
+/// `remote_image_paste` keypress the user pressed on purpose, so any image
+/// file the OS clipboard actually names is fair game, not just a temp one.
+///
+/// Shells out to `osascript` synchronously, same as `read_clipboard_image_via_pngf`
+/// above it: both are only ever reached through `read_clipboard_image`, which
+/// every caller runs on a blocking thread
+/// (`App::begin_remote_clipboard_image_capture`), never on the render/event
+/// loop, so blocking here does not freeze the UI.
+fn read_clipboard_image_via_file_url() -> Option<ClipboardImage> {
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg("POSIX path of (the clipboard as «class furl»)")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    image_from_file_url_text(&text)
+}
+
+/// The testable half of [`read_clipboard_image_via_file_url`]: everything
+/// that happens once the raw AppleScript stdout is in hand. Kept separate so
+/// the shape/existence/size validation can be asserted without shelling out
+/// to `osascript` or holding a live pasteboard.
+fn image_from_file_url_text(text: &str) -> Option<ClipboardImage> {
+    let (path, extension) = crate::image_path::local_image_path_from_text(text)?;
+    crate::image_path::read_local_image_file(&path, extension)
 }
 
 fn unique_timestamp_nanos() -> u128 {
@@ -1073,6 +1127,76 @@ mod tests {
             target_nofile_soft_limit(16_384, libc::RLIM_INFINITY, 8192),
             None
         );
+    }
+
+    /// A file under the OS temp dir, deleted on drop. Named like an
+    /// `osascript -e 'POSIX path of ...'` result: a bare path, no quoting.
+    struct TempFurlTarget {
+        path: std::path::PathBuf,
+    }
+
+    impl TempFurlTarget {
+        fn new(extension: &str, bytes: &[u8]) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "herdr-furl-fallback-test-{}-{}.{extension}",
+                std::process::id(),
+                unique_timestamp_nanos()
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempFurlTarget {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn file_url_fallback_reads_a_valid_png() {
+        let file = TempFurlTarget::new("png", b"png-bytes");
+        let text = format!("{}\n", file.path.display());
+
+        let image = image_from_file_url_text(&text).unwrap();
+
+        assert_eq!(image.bytes, b"png-bytes");
+        assert_eq!(image.extension, "png");
+    }
+
+    #[test]
+    fn file_url_fallback_reads_a_valid_jpg_and_normalizes_jpeg() {
+        let file = TempFurlTarget::new("jpeg", b"jpeg-bytes");
+        let text = format!("{}\n", file.path.display());
+
+        let image = image_from_file_url_text(&text).unwrap();
+
+        assert_eq!(image.bytes, b"jpeg-bytes");
+        assert_eq!(image.extension, "jpg");
+    }
+
+    #[test]
+    fn file_url_fallback_rejects_a_non_image_file() {
+        let file = TempFurlTarget::new("txt", b"not an image");
+        let text = format!("{}\n", file.path.display());
+
+        assert!(image_from_file_url_text(&text).is_none());
+    }
+
+    #[test]
+    fn file_url_fallback_rejects_a_missing_path() {
+        let text = "/nonexistent/herdr-furl-fallback-missing.png\n".to_string();
+
+        assert!(image_from_file_url_text(&text).is_none());
+    }
+
+    #[test]
+    fn file_url_fallback_rejects_an_oversized_file() {
+        let oversized = vec![7u8; crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD + 1];
+        let file = TempFurlTarget::new("png", &oversized);
+        let text = format!("{}\n", file.path.display());
+
+        assert!(image_from_file_url_text(&text).is_none());
     }
 
     fn build_procargs2(exec_path: &str, argv: &[&str], env: &[&str]) -> Vec<u8> {
