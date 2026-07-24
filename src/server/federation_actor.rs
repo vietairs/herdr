@@ -151,6 +151,17 @@ pub(crate) enum FederationCommand {
         focus: bool,
         reply: oneshot::Sender<Result<(String, String), String>>,
     },
+    /// Performs a real close of `target_pane_id` (a raw, un-namespaced
+    /// remote pane id) on this host's own live workspace — the serving-host
+    /// half of Gap A (plans/260724-1536-federation-pane-close-sync): a
+    /// mounting client's pane-close action must tear down the pane that
+    /// actually lives here, not just the client's local mirror. Reuses the
+    /// same JSON-API method the local TUI/CLI close action calls
+    /// (`Method::PaneClose`), same reasoning as `SplitPane` above.
+    ClosePane {
+        target_pane_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 // `ServerEvent` derives `Debug`, so its `Federation` variant needs one — but the
@@ -192,6 +203,9 @@ impl std::fmt::Debug for FederationCommand {
             FederationCommand::AgentStatuses(_) => f.write_str("AgentStatuses"),
             FederationCommand::SplitPane { target_pane_id, .. } => {
                 write!(f, "SplitPane({target_pane_id})")
+            }
+            FederationCommand::ClosePane { target_pane_id, .. } => {
+                write!(f, "ClosePane({target_pane_id})")
             }
         }
     }
@@ -418,6 +432,45 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                         })
                         .unwrap_or_else(|| "pane split failed".to_string());
                     Err(reason)
+                });
+            let _ = reply.send(outcome);
+        }
+        FederationCommand::ClosePane {
+            target_pane_id,
+            reply,
+        } => {
+            let response = app.handle_api_request_after_internal_events_drained(Request {
+                id: "federation-close-pane".to_string(),
+                method: Method::PaneClose(crate::api::schema::PaneTarget {
+                    pane_id: target_pane_id,
+                }),
+            });
+            let outcome = serde_json::from_str::<SuccessResponse>(&response)
+                .ok()
+                .map(|_success| Ok(()))
+                .unwrap_or_else(|| {
+                    let error_value = serde_json::from_str::<serde_json::Value>(&response)
+                        .ok()
+                        .and_then(|value| value.get("error").cloned());
+                    let code = error_value
+                        .as_ref()
+                        .and_then(|error| error.get("code"))
+                        .and_then(|code| code.as_str())
+                        .unwrap_or("pane_close_failed");
+                    let message = error_value
+                        .as_ref()
+                        .and_then(|error| error.get("message"))
+                        .and_then(|message| message.as_str())
+                        .unwrap_or("pane close failed");
+                    // Prefix the reason with the JSON-API's own `error.code`
+                    // (a stable, independently-tested identifier) rather than
+                    // handing back only the freeform `message`. `client.rs`'s
+                    // idempotent-retry classification matches this `code:`
+                    // prefix instead of sniffing the human-readable message
+                    // text for "not found" — two independently-editable
+                    // strings on either side of the wire that could
+                    // otherwise drift out of sync.
+                    Err(format!("{code}: {message}"))
                 });
             let _ = reply.send(outcome);
         }
@@ -969,6 +1022,68 @@ mod tests {
                 direction: crate::remote::federation::protocol::SplitDirection::Right,
                 ratio: None,
                 focus: false,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(
+            outcome.is_err(),
+            "an unknown target pane must fail, not misfile"
+        );
+    }
+
+    /// `ClosePane` performs a real close against the live `App` (via the
+    /// same `Method::PaneClose` handler the local TUI/CLI path uses) and
+    /// replies `Ok(())` — Gap A server-side wiring
+    /// (plans/260724-1536-federation-pane-close-sync).
+    #[tokio::test]
+    async fn close_pane_against_a_known_target_pane_closes_it_and_replies_ok() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("metadata")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let mut lease = FederationLease::new();
+        let response = app.handle_api_request_after_internal_events_drained(Request {
+            id: "seed".to_string(),
+            method: Method::PaneCurrent(crate::api::schema::PaneCurrentParams {
+                caller_pane_id: None,
+            }),
+        });
+        let target_pane_id = serde_json::from_str::<SuccessResponse>(&response)
+            .ok()
+            .and_then(|success| match success.result {
+                ResponseResult::PaneCurrent { pane } => Some(pane.pane_id),
+                _ => None,
+            })
+            .expect("a seeded App has one focused pane");
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::ClosePane {
+                target_pane_id,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(outcome.is_ok(), "closing a known pane must succeed");
+        assert!(
+            app.state.workspaces.is_empty(),
+            "the seeded workspace's only pane closing must close the workspace too"
+        );
+    }
+
+    #[test]
+    fn close_pane_against_an_unknown_target_pane_replies_with_a_reason() {
+        let mut app = test_app();
+        let mut lease = FederationLease::new();
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::ClosePane {
+                target_pane_id: "no-such-pane".to_string(),
                 reply: tx,
             },
         );

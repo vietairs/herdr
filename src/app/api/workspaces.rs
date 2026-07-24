@@ -489,6 +489,7 @@ impl App {
             .map(|ws| ws.id.clone());
 
         self.purge_pending_remote_splits_for_workspaces(&closing_ids);
+        self.purge_pending_remote_closes_for_workspaces(&closing_ids);
 
         self.state.selected = idx;
         self.state.close_selected_workspace();
@@ -770,6 +771,7 @@ impl App {
                 .filter_map(|&i| self.state.workspaces.get(i).map(|ws| ws.id.clone()))
                 .collect();
             self.purge_pending_remote_splits_for_workspaces(&closing_ids);
+            self.purge_pending_remote_closes_for_workspaces(&closing_ids);
             self.purge_pending_remote_clipboard_stages_for_workspaces(&closing_ids);
             self.state.end_federation_mount(&host_key);
         }

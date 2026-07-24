@@ -36,6 +36,16 @@ fn next_remote_split_request_id() -> u64 {
     NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Mints a fresh, process-wide-unique `ClosePaneRequest::request_id`. A
+/// separate counter from `next_remote_split_request_id` (not a shared one) so
+/// a split and a close minted "at the same time" can never collide, matching
+/// that function's own reasoning for why a bare counter (not a per-mount map)
+/// is enough today.
+fn next_remote_close_request_id() -> u64 {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
         let target = if let Some(target_pane_id) = params.target_pane_id.as_deref() {
@@ -311,6 +321,96 @@ impl App {
             "split request sent to the remote host; the new pane will appear once \
              the remote host replies (materializing it locally is a follow-up)",
         )
+    }
+
+    /// Dispatches a close targeting a remote-federated workspace's pane over
+    /// its mount's federation link instead of tearing down the local mirror
+    /// pane directly (Gap A, plans/260724-1536-federation-pane-close-sync).
+    /// Mirrors `dispatch_remote_pane_split`'s exact shape/reasoning: this
+    /// JSON-API handler runs synchronously inline with `App`'s own tick and
+    /// cannot await the eventual `ClosePaneResponse` the mount's async drive
+    /// task will read (`remote::federation::client::drive_mount_channel`), so
+    /// it sends the request now (the real close happens on the remote host,
+    /// reusing its own `Method::PaneClose` handler — see
+    /// `server::federation_actor`'s `ClosePane` command) and acknowledges
+    /// with `remote_close_pending` rather than fabricating a success this
+    /// handler cannot yet know is true. Tearing the local mirror pane down
+    /// when the response arrives is `App::handle_federation_close_pane_ready`
+    /// (`app/creation.rs`). Falls back to `remote_close_unsupported` when the
+    /// target pane has no live mount (no `remote_out_tx`), so a stale/
+    /// disconnected mount never silently no-ops.
+    fn dispatch_remote_pane_close(
+        &mut self,
+        id: String,
+        ws_idx: usize,
+        target_pane_id: PaneId,
+    ) -> Result<(), String> {
+        let live_mount = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.terminal_id(target_pane_id))
+            .cloned()
+            .and_then(|terminal_id| self.terminal_runtimes.get(&terminal_id))
+            .and_then(|runtime| {
+                let raw_terminal_id = runtime.remote_terminal_id()?.to_string();
+                let out_tx = runtime.remote_out_tx()?;
+                Some((raw_terminal_id, out_tx))
+            });
+
+        let Some((raw_target_pane_id, out_tx)) = live_mount else {
+            return Err(encode_error(
+                id,
+                "remote_close_unsupported",
+                "closing a pane in a remote-federated workspace requires a live mount; \
+                 this pane's mount is not connected",
+            ));
+        };
+
+        // Same origin-fencing reasoning as `dispatch_remote_pane_split`: the
+        // eventual `ClosePaneResponse` is only honored if it arrives tagged
+        // with this same mount's `HostKey`.
+        let Some(origin) = self.federation_host_key_for_workspace(ws_idx) else {
+            return Err(encode_error(
+                id,
+                "remote_close_unsupported",
+                "closing a pane in a remote-federated workspace requires a live mount; \
+                 this workspace has no registered federation mount",
+            ));
+        };
+
+        let request_id = next_remote_close_request_id();
+        let sent = out_tx.send(
+            crate::remote::federation::protocol::FederationMessage::ClosePaneRequest(
+                crate::remote::federation::protocol::ClosePaneRequest {
+                    request_id,
+                    target_pane_id: raw_target_pane_id,
+                },
+            ),
+        );
+        if sent.is_err() {
+            return Err(encode_error(
+                id,
+                "remote_close_unsupported",
+                "the remote mount's link is closing; the close request could not be sent",
+            ));
+        }
+
+        self.register_pending_remote_close(
+            request_id,
+            crate::app::creation::PendingRemoteClose {
+                workspace_id: self.public_workspace_id(ws_idx),
+                pane_id: target_pane_id,
+                origin,
+            },
+        );
+
+        Err(encode_error(
+            id,
+            "remote_close_pending",
+            "close request sent to the remote host; the pane will disappear once \
+             the remote host confirms it is gone",
+        ))
     }
 
     pub(super) fn handle_pane_list(&mut self, id: String, params: PaneListParams) -> String {
@@ -1704,17 +1804,61 @@ impl App {
 
     /// Close a pane; `Err` carries the encoded error response.
     pub(super) fn close_pane(&mut self, id: String, target: &PaneTarget) -> Result<(), String> {
-        let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+        // Federation's `ClosePane` command (server::federation_actor) reuses
+        // this same handler with a raw terminal id (the id space a mount's
+        // client knows about — see `dispatch_remote_pane_close` below), not a
+        // public `w…:p…` pane id. Resolve terminal ids first, exactly
+        // mirroring `handle_pane_split`'s `resolve_terminal_target` ->
+        // `parse_pane_id` fallback order, so an ordinary public-id caller is
+        // unaffected and a raw federation terminal id resolves too.
+        let target_resolution = self
+            .resolve_terminal_target(&target.pane_id)
+            .ok()
+            .map(|resolved| (resolved.ws_idx, resolved.pane_id))
+            .or_else(|| self.parse_pane_id(&target.pane_id));
+        let Some((ws_idx, pane_id)) = target_resolution else {
             return Err(pane_not_found(id, &target.pane_id));
         };
+        // Federation-mount awareness, mirroring `handle_pane_split`'s guard
+        // (panes.rs:80-85): a federated workspace's local pane is only a
+        // mirror of a pane that actually lives on the serving host, so the
+        // real close decision belongs there. Dispatch over the mount's
+        // federation link instead of tearing down the local mirror pane
+        // directly — `App::close_pane`/`ws.close_pane` closing the mirror
+        // without telling the serving host is exactly Gap A from
+        // plans/260724-1536-federation-pane-close-sync.
+        if matches!(
+            crate::remote::federation::id::classify(&self.public_workspace_id(ws_idx)),
+            crate::remote::federation::id::IdClass::Remote(_)
+        ) {
+            return self.dispatch_remote_pane_close(id, ws_idx, pane_id);
+        }
         let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return Err(pane_not_found(id, &target.pane_id));
         };
         let workspace_id = self.public_workspace_id(ws_idx);
         let layout_update_target = self.layout_update_target_after_pane_removal(ws_idx, pane_id);
-        if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
-            && self.state.confirm_implicit_worktree_group_close(ws_idx)
-        {
+        // `confirm_implicit_worktree_group_close` mutates this App's OWN
+        // interactive state (`self.mode = Mode::ConfirmClose`,
+        // `self.selected = ws_idx`) to open the confirmation modal a local
+        // TUI keybinding or local CLI/socket caller can resolve. A
+        // federation-originated close (routed through
+        // `FederationCommand::ClosePane`, always dispatched with this fixed
+        // internal request id — see `server::federation_actor`) is a
+        // different trust boundary: the requester is a remote peer with no
+        // way to answer that modal, so it must be refused outright instead
+        // of hijacking the serving host's own session into an unsolicited
+        // confirmation dialog.
+        let would_close_worktree_group = id != "federation-close-pane"
+            && self.state.close_pane_would_close_workspace(ws_idx, pane_id)
+            && self.state.confirm_implicit_worktree_group_close(ws_idx);
+        let federation_would_close_worktree_group = id == "federation-close-pane"
+            && self.state.close_pane_would_close_workspace(ws_idx, pane_id)
+            && self.state.confirm_close
+            && self
+                .state
+                .workspace_close_would_close_worktree_group(ws_idx);
+        if would_close_worktree_group || federation_would_close_worktree_group {
             return Err(encode_error(
                 id,
                 "confirmation_required",
@@ -4076,6 +4220,279 @@ mod tests {
         assert_eq!(
             panes_before, panes_after,
             "a refused remote split must not create any local pane"
+        );
+    }
+
+    // Gap A (plans/260724-1536-federation-pane-close-sync): closing a pane
+    // in a federation-mounted (`r:`-namespaced) workspace must be refused
+    // explicitly when the mount has no live link, never silently torn down
+    // locally — mirrors `pane_split_in_a_federated_workspace_is_refused_not_
+    // misfiled_locally` above.
+    #[test]
+    fn pane_close_in_a_federated_workspace_with_no_live_mount_is_refused_not_misfiled_locally() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("metadata")];
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].id = "r:alice@10.0.0.1#s1:default".to_string();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        let panes_before = app.state.workspaces[0].tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 80, 24))
+            .len();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            crate::api::schema::PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "remote_close_unsupported");
+        let panes_after = app.state.workspaces[0].tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 80, 24))
+            .len();
+        assert_eq!(
+            panes_before, panes_after,
+            "a refused remote close must not remove any local pane"
+        );
+    }
+
+    /// Builds an `App` with one federation-mounted workspace materialized
+    /// from a real (single-pane) remote snapshot, going through the actual
+    /// `materialize_federation_mount`/`build_remote_pane` path — not a
+    /// hand-built fixture that skips it — so the pane's runtime carries a
+    /// real `remote_out_tx`/`remote_terminal_id`, exactly like a live mount.
+    fn app_with_federation_mounted_pane() -> (
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<
+            crate::remote::federation::protocol::FederationMessage,
+        >,
+        usize,
+    ) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        let host_key = crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1");
+        let mount = crate::remote::federation::id::Mount {
+            host_key,
+            server_instance_id: crate::remote::federation::id::ServerInstanceId(
+                "inst-a".to_string(),
+            ),
+            mount_generation: 1,
+        };
+        let mut mirror = crate::remote::federation::reducer::RemoteMirror::new(mount.clone());
+        let snapshot = crate::api::schema::session::SessionSnapshot {
+            version: "0.0.0-test".to_string(),
+            protocol: 1,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: vec![crate::api::schema::WorkspaceInfo {
+                workspace_id: "w1".to_string(),
+                number: 1,
+                label: "remote workspace".to_string(),
+                focused: false,
+                pane_count: 1,
+                tab_count: 1,
+                active_tab_id: "w1-tab".to_string(),
+                agent_status: crate::api::schema::common::AgentStatus::Idle,
+                tokens: Default::default(),
+                worktree: None,
+            }],
+            tabs: vec![crate::api::schema::TabInfo {
+                tab_id: "w1-tab".to_string(),
+                workspace_id: "w1".to_string(),
+                number: 1,
+                label: "remote tab".to_string(),
+                focused: false,
+                pane_count: 1,
+                agent_status: crate::api::schema::common::AgentStatus::Idle,
+            }],
+            panes: vec![crate::api::schema::PaneInfo {
+                pane_id: "p1".to_string(),
+                terminal_id: "t1".to_string(),
+                workspace_id: "w1".to_string(),
+                tab_id: "w1-tab".to_string(),
+                focused: false,
+                cwd: Some("/home/alice/project".to_string()),
+                foreground_cwd: None,
+                label: Some("remote pane".to_string()),
+                agent: None,
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: crate::api::schema::common::AgentStatus::Idle,
+                state_labels: Default::default(),
+                tokens: Default::default(),
+                agent_session: None,
+                scroll: None,
+                revision: 0,
+            }],
+            layouts: Vec::new(),
+            agents: Vec::new(),
+        };
+        mirror.apply_snapshot(
+            &snapshot,
+            crate::remote::federation::protocol::EventCursor(0),
+        );
+
+        let mut router = crate::remote::federation::client::TerminalChannelRouter::new();
+        let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed against a loopback-shaped snapshot");
+        let ws_idx = created[0];
+        // `federation_host_key_for_workspace` (used by
+        // `dispatch_remote_pane_close` to fence the eventual response's
+        // origin) reads the live `remote_mirrors` registry, which
+        // `materialize_federation_mount` itself never populates — register
+        // it the same way a real mount handler would.
+        app.state
+            .begin_federation_mount(mirror)
+            .expect("registering the mirror must succeed for a fresh HostKey");
+        (app, out_rx, ws_idx)
+    }
+
+    /// Phase 3 (plans/260724-1536-federation-pane-close-sync): closing a
+    /// pane whose workspace is a live federation mount must dispatch a
+    /// `ClosePaneRequest` over the mount's link, register a pending-close
+    /// entry, acknowledge with `remote_close_pending`, and NOT touch the
+    /// local mirror pane — the real close decision belongs to the serving
+    /// host, which will answer asynchronously
+    /// (`App::handle_federation_close_pane_ready`).
+    #[tokio::test]
+    async fn dispatch_remote_pane_close_sends_a_request_and_registers_pending() {
+        let (mut app, mut out_rx, ws_idx) = app_with_federation_mounted_pane();
+        let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        let public_pane_id = app.public_pane_id(ws_idx, pane_id).unwrap();
+        let panes_before = app.state.workspaces[ws_idx].tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 80, 24))
+            .len();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            crate::api::schema::PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "remote_close_pending");
+
+        let panes_after = app.state.workspaces[ws_idx].tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 80, 24))
+            .len();
+        assert_eq!(
+            panes_before, panes_after,
+            "dispatching a remote close must not touch the local mirror pane; only the \
+             eventual ClosePaneResponse does"
+        );
+
+        // Skip the `Terminal(Open{..})` frame `build_remote_pane` already
+        // queued on this same out-tx at materialization time — the
+        // `ClosePaneRequest` is sent afterward, by `dispatch_remote_pane_
+        // close`, not necessarily as the very first frame on the link.
+        let request = loop {
+            match out_rx.try_recv().expect("a ClosePaneRequest was sent") {
+                crate::remote::federation::protocol::FederationMessage::ClosePaneRequest(
+                    request,
+                ) => break request,
+                crate::remote::federation::protocol::FederationMessage::Terminal(_) => continue,
+                other => panic!("expected ClosePaneRequest, got {other:?}"),
+            }
+        };
+        assert_eq!(request.target_pane_id, "t1");
+        assert!(app.pending_remote_closes.contains_key(&request.request_id));
+    }
+
+    /// A federation-originated `ClosePane` (routed through
+    /// `FederationCommand::ClosePane`'s fixed `"federation-close-pane"`
+    /// request id — see `server::federation_actor`) against the serving
+    /// host's own pane, when closing it would implicitly close a worktree
+    /// group, must be refused with `confirmation_required` WITHOUT mutating
+    /// this App's own interactive `mode`/`selected` — a remote peer must
+    /// never be able to hijack the serving host's session into an
+    /// unsolicited confirmation modal it cannot answer (threat-model finding
+    /// from the pane-close-sync review, plans/260724-1536-federation-pane-
+    /// close-sync).
+    #[test]
+    fn federation_close_that_would_close_a_worktree_group_is_refused_without_hijacking_local_mode()
+    {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("parent"), Workspace::test_new("child")];
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        app.state.workspaces[1].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-issue".into(),
+            is_linked_worktree: true,
+        });
+        app.state.confirm_close = true;
+        app.state.mode = Mode::Navigate;
+        app.state.selected = 1;
+
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+
+        let response = app.handle_pane_close(
+            "federation-close-pane".to_string(),
+            crate::api::schema::PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "confirmation_required");
+        assert_eq!(
+            app.state.mode,
+            Mode::Navigate,
+            "a federation-originated close must never open the serving host's own \
+             confirmation modal"
+        );
+        assert_eq!(
+            app.state.selected, 1,
+            "a federation-originated close must never change the serving host's own \
+             workspace selection"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            2,
+            "the refused close must not remove either workspace"
         );
     }
 

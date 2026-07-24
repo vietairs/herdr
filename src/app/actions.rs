@@ -2840,6 +2840,10 @@ impl AppState {
             #[cfg(unix)]
             AppEvent::FederationResyncPaneRemoved { .. } => Vec::new(),
             #[cfg(unix)]
+            AppEvent::FederationClosePaneReady { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationClosePaneFailed { .. } => Vec::new(),
+            #[cfg(unix)]
             AppEvent::FederationClipboardStageReady { .. } => Vec::new(),
             #[cfg(unix)]
             AppEvent::FederationClipboardStageFailed { .. } => Vec::new(),

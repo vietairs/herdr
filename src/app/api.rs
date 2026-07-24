@@ -206,6 +206,23 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::FederationClosePaneReady { request_id, origin } = ev {
+            self.handle_federation_close_pane_ready(request_id, origin);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationClosePaneFailed {
+            request_id,
+            reason,
+            origin,
+        } = ev
+        {
+            self.handle_federation_close_pane_failed(request_id, reason, origin);
+            return;
+        }
+
+        #[cfg(unix)]
         if let AppEvent::FederationClipboardStageReady {
             request_id,
             remote_path,

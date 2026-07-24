@@ -679,6 +679,12 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
             FederationMessage::SplitPaneRequest(_) => {
                 tracing::debug!("federation client received a SplitPaneRequest; ignoring");
             }
+            // `ClosePaneRequest` is client->server only, same reasoning as
+            // `SplitPaneRequest` above (Gap A, plans/260724-1536-federation-
+            // pane-close-sync).
+            FederationMessage::ClosePaneRequest(_) => {
+                tracing::debug!("federation client received a ClosePaneRequest; ignoring");
+            }
             FederationMessage::SnapshotRequest(_) => {
                 tracing::debug!("federation client received a SnapshotRequest; ignoring");
             }
@@ -801,6 +807,71 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                     }
                 }
             },
+            // The remote host already performed (or refused) the real close
+            // by the time this arrives (Gap A, plans/260724-1536-federation-
+            // pane-close-sync). Unlike `SplitPaneResponse::Created`, no new
+            // `TerminalRuntime` needs spawning here — closing only needs
+            // `&mut App` to tear an existing local mirror pane down, which
+            // this task does not have, so it hands the outcome back via
+            // `AppEvent::FederationClosePaneReady`/`Failed` the same way
+            // `SplitPaneResponse` hands its outcome back.
+            // `Failed { reason }` prefixed with the JSON-API's own
+            // `pane_not_found` error code is folded into `ClosePaneReady`
+            // instead of `ClosePaneFailed` (Predict risk 3): the target is
+            // already gone on the remote side, so a retried or duplicate
+            // close request must be treated as an idempotent success, never
+            // surfaced as a user-visible error. Matched on the structured
+            // `error.code` prefix (`server::federation_actor`'s `ClosePane`
+            // dispatch formats it as `"{code}: {message}"`), not on the
+            // freeform message text, so a future wording change to the
+            // human-readable message can never silently flip this
+            // classification.
+            FederationMessage::ClosePaneResponse(response) => {
+                let Some(ctx) = split_materialization else {
+                    tracing::info!(
+                        "remote close responded; no live session to notify of the outcome"
+                    );
+                    continue;
+                };
+                match response {
+                    super::protocol::ClosePaneResponse::Closed { request_id } => {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationClosePaneReady {
+                                request_id,
+                                origin: ctx.origin.clone(),
+                            })
+                            .await;
+                    }
+                    super::protocol::ClosePaneResponse::Failed { request_id, reason }
+                        if reason.starts_with("pane_not_found:") =>
+                    {
+                        tracing::info!(
+                            request_id,
+                            %reason,
+                            "remote close target already gone; treating as an idempotent success"
+                        );
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationClosePaneReady {
+                                request_id,
+                                origin: ctx.origin.clone(),
+                            })
+                            .await;
+                    }
+                    super::protocol::ClosePaneResponse::Failed { request_id, reason } => {
+                        tracing::warn!(request_id, %reason, "remote close failed");
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationClosePaneFailed {
+                                request_id,
+                                reason,
+                                origin: ctx.origin.clone(),
+                            })
+                            .await;
+                    }
+                }
+            }
             // Stage requests are client->server only; a host that sends one
             // is misbehaving. Drop it and keep the link up — an unexpected
             // optional-feature frame is never worth tearing a mount down for.
