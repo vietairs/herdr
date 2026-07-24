@@ -870,6 +870,30 @@ impl App {
             .retain(|_, pending| !workspace_ids.contains(&pending.workspace_id));
     }
 
+    /// Drops `remote_resync_pane_index` entries whose local pane belongs to
+    /// one of the given (closing) workspace ids. Every mount-time pane now
+    /// gets an entry in this index (`build_remote_pane`), so unmount must
+    /// purge it the same way the sibling `purge_pending_remote_*_for_
+    /// workspaces` helpers purge their maps — otherwise a stale
+    /// `remote_pane_id -> local PaneId` entry leaks forever once the
+    /// workspace it pointed into is gone. Unlike the sibling maps, entries
+    /// here don't carry a `workspace_id`, so membership is resolved by
+    /// walking the still-live workspaces' pane ids before they're removed.
+    pub(crate) fn purge_remote_resync_pane_index_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        let closing_pane_ids: std::collections::HashSet<PaneId> = self
+            .state
+            .workspaces
+            .iter()
+            .filter(|ws| workspace_ids.contains(&ws.id))
+            .flat_map(|ws| ws.tabs.iter().flat_map(|tab| tab.layout.pane_ids()))
+            .collect();
+        self.remote_resync_pane_index
+            .retain(|_, local_pane_id| !closing_pane_ids.contains(local_pane_id));
+    }
+
     /// `AppEvent::FederationSplitPaneReady` handler: the drive task already
     /// built the new pane's real `TerminalRuntime` (it owns the mount's
     /// `TerminalChannelRouter`/out-tx, which this handler does not); this
@@ -2237,6 +2261,68 @@ mod federation_materialization_tests {
         assert!(
             !app.remote_resync_pane_index.contains_key(&remote_pane_id),
             "the reverse index entry must be consumed on removal"
+        );
+    }
+
+    /// Memory-leak regression (plans/260724-1536-federation-pane-close-sync
+    /// pre-merge review): `handle_workspace_close`'s locally-initiated
+    /// federated unmount purges `pending_remote_splits`/`_closes`/
+    /// `_clipboard_stages` for the closing workspaces but, before this fix,
+    /// never purged `remote_resync_pane_index` — and since every mount-time
+    /// pane is now indexed there (Gap B fix above), each unmount leaked one
+    /// entry per pane forever. Builds a real mount via
+    /// `materialize_federation_mount` (so the index is populated the same
+    /// way production does it), adds a manually-inserted entry standing in
+    /// for a pane that belongs to a *different*, still-live workspace, then
+    /// asserts the purge removes only the closing workspace's entries.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unmount_purges_remote_resync_pane_index_for_closing_workspace_only() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let closing_workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        assert!(
+            !app.remote_resync_pane_index.is_empty(),
+            "materializing the mount must have indexed its mount-time panes, or this test \
+             checks nothing"
+        );
+
+        // Stand in for an entry belonging to a different, still-live
+        // workspace: a `PaneId` deliberately not part of `ws_idx`'s layout.
+        let other_remote_pane_id = "other-workspace:p1".to_string();
+        let other_local_pane_id = crate::layout::PaneId::alloc();
+        app.remote_resync_pane_index
+            .insert(other_remote_pane_id.clone(), other_local_pane_id);
+
+        let mut closing_ids = std::collections::HashSet::new();
+        closing_ids.insert(closing_workspace_id);
+        app.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
+
+        for tab in &app.state.workspaces[ws_idx].tabs {
+            for pane_id in tab.layout.pane_ids() {
+                assert!(
+                    !app.remote_resync_pane_index
+                        .values()
+                        .any(|local_pane_id| *local_pane_id == pane_id),
+                    "the closing workspace's pane must no longer be indexed after purge"
+                );
+            }
+        }
+        assert_eq!(
+            app.remote_resync_pane_index.get(&other_remote_pane_id),
+            Some(&other_local_pane_id),
+            "an entry belonging to a different, still-live workspace must survive the purge"
         );
     }
 
