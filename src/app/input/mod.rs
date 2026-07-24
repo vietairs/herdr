@@ -832,8 +832,8 @@ fn resolve_remote_paste_target(state: &AppState) -> Option<RemotePasteTarget> {
             space_key,
             mirror_host_keys = ?state
                 .remote_mirrors
-                .iter()
-                .map(|(host_key, _)| host_key.as_str().to_owned())
+                .keys()
+                .map(|host_key| host_key.as_str().to_owned())
                 .collect::<Vec<_>>(),
             "remote paste target: no mirror matches the workspace space key"
         );
