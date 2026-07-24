@@ -1764,7 +1764,54 @@ impl App {
                     } else if self.state.mode != Mode::Terminal {
                         self.paste_into_active_text_input(&text);
                     } else {
-                        if let Some(ws_idx) = self.state.active {
+                        // Same interception as `App::handle_paste`: a
+                        // bracketed paste landing on a federated remote pane
+                        // may be a terminal-substituted local screenshot path
+                        // that would be dead on the remote host. The headless
+                        // server routes pastes through this arm, not
+                        // `handle_paste`, so the check must run here too.
+                        #[cfg(unix)]
+                        let intercepted = {
+                            use crate::app::input::BracketedPasteImageDecision;
+                            match crate::app::input::bracketed_paste_image_decision(
+                                &self.state,
+                                &text,
+                            ) {
+                                BracketedPasteImageDecision::Unsupported => {
+                                    self.raise_clipboard_stage_toast(
+                                        crate::app::remote_clipboard_stage::TOAST_TITLE_FAILED,
+                                        crate::app::input::TOAST_REMOTE_TOO_OLD,
+                                    );
+                                    true
+                                }
+                                BracketedPasteImageDecision::Capture {
+                                    ws_idx,
+                                    target_pane_id,
+                                    path,
+                                    extension,
+                                } => {
+                                    // Off-loop like the ctrl+v clipboard
+                                    // read: a synchronous 16MiB file read
+                                    // here would stall the shared server
+                                    // event loop.
+                                    self.begin_remote_clipboard_image_capture(
+                                        ws_idx,
+                                        target_pane_id,
+                                        move || {
+                                            crate::image_path::read_verified_image_drop_file(
+                                                &path, extension,
+                                            )
+                                        },
+                                    );
+                                    true
+                                }
+                                BracketedPasteImageDecision::FallThrough => false,
+                            }
+                        };
+                        #[cfg(not(unix))]
+                        let intercepted = false;
+                        if intercepted {
+                        } else if let Some(ws_idx) = self.state.active {
                             if let Some(ws) = self.state.workspaces.get(ws_idx) {
                                 if let Some(focused) = ws.focused_pane_id() {
                                     if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
