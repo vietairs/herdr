@@ -232,6 +232,20 @@ impl FederationHost for FixtureHost {
         );
         Ok((new_id.clone(), new_id))
     }
+
+    /// Fixture-only close: proves the request/response roundtrip (protocol
+    /// scaffolding, tested by `serve.rs`'s tests) without a real
+    /// `AppState`-backed workspace to close against. Fails for an unknown
+    /// `target_pane_id`; otherwise drops it from the fixture's terminal map,
+    /// same shape as `split_pane` above (Gap A,
+    /// plans/260724-1536-federation-pane-close-sync).
+    fn close_pane(&self, target_pane_id: &str) -> Result<(), String> {
+        let mut terminals = self.terminals.lock().unwrap();
+        if terminals.remove(target_pane_id).is_none() {
+            return Err(format!("unknown target pane {target_pane_id}"));
+        }
+        Ok(())
+    }
 }
 
 /// Runs `serve::run` against `host` over an in-memory duplex; returns the
@@ -688,6 +702,87 @@ mod tests {
             response,
             FederationMessage::SplitPaneResponse(
                 crate::remote::federation::protocol::SplitPaneResponse::Failed {
+                    request_id: 2,
+                    ..
+                }
+            )
+        ));
+
+        drop(writer);
+        drop(reader);
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+    }
+
+    // Gap A protocol scaffolding (plans/260724-1536-federation-pane-close-
+    // sync): a `ClosePaneRequest` for a known pane produces a
+    // `ClosePaneResponse::Closed`; an unknown pane produces `Failed`.
+    #[tokio::test]
+    async fn close_pane_request_for_a_known_pane_yields_a_closed_response() {
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let host = Arc::new(FixtureHost::new().with_terminal("term_1", runtime, Vec::new()));
+        let (mut reader, mut writer, server_handle, _hs, _mount) =
+            connect_and_mount(host.clone()).await;
+
+        serve::write_frame(
+            &mut writer,
+            &FederationMessage::ClosePaneRequest(
+                crate::remote::federation::protocol::ClosePaneRequest {
+                    request_id: 1,
+                    target_pane_id: "term_1".to_string(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let response =
+            tokio::time::timeout(Duration::from_millis(500), serve::read_frame(&mut reader))
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        match response {
+            FederationMessage::ClosePaneResponse(
+                crate::remote::federation::protocol::ClosePaneResponse::Closed { request_id },
+            ) => {
+                assert_eq!(request_id, 1);
+            }
+            other => panic!("expected ClosePaneResponse::Closed, got {other:?}"),
+        }
+
+        drop(writer);
+        drop(reader);
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+    }
+
+    #[tokio::test]
+    async fn close_pane_request_for_an_unknown_pane_yields_a_failed_response() {
+        let host = Arc::new(FixtureHost::new());
+        let (mut reader, mut writer, server_handle, _hs, _mount) =
+            connect_and_mount(host.clone()).await;
+
+        serve::write_frame(
+            &mut writer,
+            &FederationMessage::ClosePaneRequest(
+                crate::remote::federation::protocol::ClosePaneRequest {
+                    request_id: 2,
+                    target_pane_id: "does_not_exist".to_string(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let response =
+            tokio::time::timeout(Duration::from_millis(500), serve::read_frame(&mut reader))
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            response,
+            FederationMessage::ClosePaneResponse(
+                crate::remote::federation::protocol::ClosePaneResponse::Failed {
                     request_id: 2,
                     ..
                 }

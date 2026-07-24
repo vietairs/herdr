@@ -47,9 +47,10 @@ use crate::remote::federation::protocol::codec;
 use crate::remote::federation::protocol::negotiate::{negotiate, AgreedCaps};
 use crate::remote::federation::protocol::{
     AgentStatusMessage, Capability, Channel, ClipboardStageFailure, ClipboardStageRequest,
-    ClipboardStageResponse, EventChannelMessage, EventCursor, EventFrame, FaultMessage,
-    FederationMessage, Handshake, HandshakeResponse, MountSnapshot, ScrollbackReplay,
-    SplitPaneRequest, SplitPaneResponse, TerminalChannelMessage, FEDERATION_PROTOCOL_VERSION,
+    ClipboardStageResponse, ClosePaneRequest, ClosePaneResponse, EventChannelMessage, EventCursor,
+    EventFrame, FaultMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot,
+    ScrollbackReplay, SplitPaneRequest, SplitPaneResponse, TerminalChannelMessage,
+    FEDERATION_PROTOCOL_VERSION,
 };
 use crate::remote::federation::tee;
 use crate::server::client_transport::ServerEvent;
@@ -539,6 +540,9 @@ fn reader_loop<S: Read>(
             Ok(Some(FederationMessage::SplitPaneRequest(request))) => {
                 handle_split_pane_request(request, out_tx, shutdown, first_cause, server_event_tx);
             }
+            Ok(Some(FederationMessage::ClosePaneRequest(request))) => {
+                handle_close_pane_request(request, out_tx, shutdown, first_cause, server_event_tx);
+            }
             Ok(Some(FederationMessage::ClipboardStageRequest(request))) => {
                 handle_clipboard_stage_request(request, staging, out_tx, shutdown, first_cause);
             }
@@ -613,6 +617,50 @@ fn handle_split_pane_request(
     let _ = enqueue_outbound(
         out_tx,
         FederationMessage::SplitPaneResponse(response),
+        first_cause,
+        shutdown,
+    );
+}
+
+/// Services one inbound `ClosePaneRequest` (Gap A,
+/// plans/260724-1536-federation-pane-close-sync): a blocking round-trip
+/// through `FederationCommand::ClosePane`, mirroring
+/// `handle_split_pane_request` exactly — replies with `ClosePaneResponse::
+/// Closed`/`Failed` on the shared outbound queue. A dropped/gone actor
+/// (server shutting down) replies `Failed` rather than silently dropping the
+/// peer's request.
+fn handle_close_pane_request(
+    request: ClosePaneRequest,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) {
+    let ClosePaneRequest {
+        request_id,
+        target_pane_id,
+    } = request;
+
+    let (reply, rx) = oneshot::channel();
+    let sent =
+        server_event_tx.blocking_send(ServerEvent::Federation(FederationCommand::ClosePane {
+            target_pane_id,
+            reply,
+        }));
+    let outcome = if sent.is_err() {
+        Err("server event loop is gone".to_string())
+    } else {
+        rx.blocking_recv()
+            .unwrap_or_else(|_| Err("federation close-pane reply dropped".to_string()))
+    };
+
+    let response = match outcome {
+        Ok(()) => ClosePaneResponse::Closed { request_id },
+        Err(reason) => ClosePaneResponse::Failed { request_id, reason },
+    };
+    let _ = enqueue_outbound(
+        out_tx,
+        FederationMessage::ClosePaneResponse(response),
         first_cause,
         shutdown,
     );
@@ -1781,6 +1829,70 @@ mod tests {
                 assert_eq!(new_terminal_id, "p1-split-term");
             }
             other => panic!("expected SplitPaneResponse::Created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reader_loop_routes_a_close_pane_request_and_replies_closed() {
+        // Mirrors `reader_loop_routes_a_split_pane_request_and_replies_
+        // created`: a mock actor loop answers `FederationCommand::ClosePane`
+        // directly, so this asserts only the reader's frame -> command ->
+        // response routing (Gap A, plans/260724-1536-federation-pane-close-
+        // sync).
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::ClosePane {
+                    target_pane_id: _,
+                    reply,
+                }) = ev
+                {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::ClosePaneRequest(
+                crate::remote::federation::protocol::ClosePaneRequest {
+                    request_id: 11,
+                    target_pane_id: "p1".to_string(),
+                },
+            ),
+        )
+        .expect("client writes close request");
+        drop(client); // EOF ends the reader after servicing the one frame
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            None,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let response = out_rx.try_recv().expect("a response was enqueued");
+        match response {
+            FederationMessage::ClosePaneResponse(
+                crate::remote::federation::protocol::ClosePaneResponse::Closed { request_id },
+            ) => {
+                assert_eq!(request_id, 11);
+            }
+            other => panic!("expected ClosePaneResponse::Closed, got {other:?}"),
         }
     }
 

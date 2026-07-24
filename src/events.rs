@@ -304,6 +304,28 @@ pub enum AppEvent {
         origin: crate::remote::federation::id::HostKey,
         pane_id: String,
     },
+    /// A live mount's drive task received a `ClosePaneResponse::Closed`
+    /// answering an earlier `ClosePaneRequest` this mount sent (Gap A,
+    /// plans/260724-1536-federation-pane-close-sync). Unlike
+    /// `FederationSplitPaneReady`, carries no pane payload — closing needs
+    /// no new `TerminalRuntime`, only tearing an existing local mirror pane
+    /// down (`App::handle_federation_close_pane_ready`, `app/creation.rs`).
+    #[cfg(unix)]
+    FederationClosePaneReady {
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+    },
+    /// The remote host rejected an earlier `ClosePaneRequest` (excluding a
+    /// "pane not found" style reason, which the drive task folds into
+    /// `FederationClosePaneReady` instead — see `client.rs`'s
+    /// `ClosePaneResponse::Failed` handling). Same shape/reasoning as
+    /// `FederationSplitPaneFailed`.
+    #[cfg(unix)]
+    FederationClosePaneFailed {
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    },
 }
 
 /// Payload for [`AppEvent::FederationResyncPaneCreated`] — the fully-built
