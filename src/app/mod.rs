@@ -159,6 +159,14 @@ pub struct App {
     /// eventual `SplitPaneResponse`'s materialized pane into the right spot
     /// (`App::handle_federation_split_pane_ready`, `app/creation.rs`).
     pub(crate) pending_remote_splits: HashMap<u64, creation::PendingRemoteSplit>,
+    /// Correlates an in-flight `ClosePaneRequest::request_id`
+    /// (`app/api/panes.rs::dispatch_remote_pane_close`, Gap A —
+    /// plans/260724-1536-federation-pane-close-sync) to the local layout
+    /// context (workspace/pane) needed to tear the mirror pane down once the
+    /// eventual `ClosePaneResponse` arrives
+    /// (`App::handle_federation_close_pane_ready`, `app/creation.rs`). Same
+    /// shape/reasoning as `pending_remote_splits`.
+    pub(crate) pending_remote_closes: HashMap<u64, creation::PendingRemoteClose>,
     /// Correlates an in-flight `ClipboardStageRequest::request_id`
     /// (`app/remote_clipboard_stage.rs::begin_remote_clipboard_stage`) to the
     /// mount, connection, workspace and pane the request was minted for, so
@@ -840,6 +848,7 @@ impl App {
             full_redraw_pending: false,
             overlay_panes: HashMap::new(),
             pending_remote_splits: HashMap::new(),
+            pending_remote_closes: HashMap::new(),
             #[cfg(unix)]
             pending_remote_clipboard_stages: HashMap::new(),
             remote_resync_pane_index: HashMap::new(),

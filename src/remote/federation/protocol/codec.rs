@@ -130,10 +130,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::super::{
-        AgentStatusMessage, Capability, Channel, ClipboardMessage, EventChannelMessage,
-        EventCursor, EventFrame, FaultMessage, FaultReason, FederationMessage, Handshake,
-        HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, SplitDirection,
-        SplitPaneRequest, SplitPaneResponse, TerminalChannelMessage,
+        AgentStatusMessage, Capability, Channel, ClipboardMessage, ClosePaneRequest,
+        ClosePaneResponse, EventChannelMessage, EventCursor, EventFrame, FaultMessage, FaultReason,
+        FederationMessage, Handshake, HandshakeResponse, MountSnapshot, RejectReason,
+        ScrollbackReplay, SplitDirection, SplitPaneRequest, SplitPaneResponse,
+        TerminalChannelMessage,
     };
     use super::*;
     use crate::api::schema::common::AgentStatus;
@@ -240,6 +241,15 @@ mod tests {
             }),
             FederationMessage::SplitPaneResponse(SplitPaneResponse::Failed {
                 request_id: 7,
+                reason: "no such pane".to_string(),
+            }),
+            FederationMessage::ClosePaneRequest(ClosePaneRequest {
+                request_id: 9,
+                target_pane_id: "term_1".to_string(),
+            }),
+            FederationMessage::ClosePaneResponse(ClosePaneResponse::Closed { request_id: 9 }),
+            FederationMessage::ClosePaneResponse(ClosePaneResponse::Failed {
+                request_id: 9,
                 reason: "no such pane".to_string(),
             }),
         ]

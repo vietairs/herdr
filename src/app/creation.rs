@@ -610,6 +610,18 @@ impl App {
                 let terminal_id = terminal.id.clone();
                 self.terminal_runtimes.insert(terminal_id.clone(), runtime);
                 self.state.terminals.insert(terminal_id, terminal);
+                // Gap B fix (plans/260724-1536-federation-pane-close-sync):
+                // `build_remote_pane` itself never indexes this pane, so
+                // without this insert `remote_resync_pane_index` never
+                // learns about ANY mount-time pane — only resync/split-
+                // created panes did before this fix — and a serving-host
+                // close of a mount-time pane silently no-ops in
+                // `handle_federation_resync_pane_removed` (the previously
+                // undiagnosed cause of "closing an original mount-time pane
+                // doesn't tear down live on the client; only a remount
+                // does").
+                self.remote_resync_pane_index
+                    .insert(first_pane.pane_id.clone(), root_pane_id);
                 let moved = MovedPane {
                     pane_id: root_pane_id,
                     pane_state,
@@ -704,6 +716,12 @@ impl App {
                         )
                         .is_ok()
                     {
+                        // Gap B fix (plans/260724-1536-federation-pane-close-
+                        // sync): same reasoning as the root-pane insert
+                        // above — index every mount-time pane, not just
+                        // resync/split-created ones.
+                        self.remote_resync_pane_index
+                            .insert(pane_info.pane_id.clone(), split_pane_id);
                         prev_pane_id = split_pane_id;
                     }
                 }
@@ -818,6 +836,62 @@ impl App {
     ) {
         self.pending_remote_splits
             .retain(|_, pending| !workspace_ids.contains(&pending.workspace_id));
+    }
+
+    /// Remembers the local pane a `ClosePaneRequest` was minted for, keyed by
+    /// its `request_id` (`app/api/panes.rs::dispatch_remote_pane_close`, Gap
+    /// A — plans/260724-1536-federation-pane-close-sync), so
+    /// `handle_federation_close_pane_ready`/`_failed` can act on the right
+    /// pane once the eventual response arrives. Mirrors
+    /// `register_pending_remote_split`.
+    pub(crate) fn register_pending_remote_close(
+        &mut self,
+        request_id: u64,
+        pending: PendingRemoteClose,
+    ) {
+        self.pending_remote_closes.insert(request_id, pending);
+    }
+
+    fn take_pending_remote_close(&mut self, request_id: u64) -> Option<PendingRemoteClose> {
+        self.pending_remote_closes.remove(&request_id)
+    }
+
+    /// Drops every pending remote-close registration targeting one of the
+    /// given (closing) workspace ids. Mirrors
+    /// `purge_pending_remote_splits_for_workspaces` — call this alongside it
+    /// from every site that removes a federated workspace, so a late/never-
+    /// arriving `ClosePaneResponse` for a torn-down mount can no longer act
+    /// on whatever later reuses the same slot.
+    pub(crate) fn purge_pending_remote_closes_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        self.pending_remote_closes
+            .retain(|_, pending| !workspace_ids.contains(&pending.workspace_id));
+    }
+
+    /// Drops `remote_resync_pane_index` entries whose local pane belongs to
+    /// one of the given (closing) workspace ids. Every mount-time pane now
+    /// gets an entry in this index (`build_remote_pane`), so unmount must
+    /// purge it the same way the sibling `purge_pending_remote_*_for_
+    /// workspaces` helpers purge their maps — otherwise a stale
+    /// `remote_pane_id -> local PaneId` entry leaks forever once the
+    /// workspace it pointed into is gone. Unlike the sibling maps, entries
+    /// here don't carry a `workspace_id`, so membership is resolved by
+    /// walking the still-live workspaces' pane ids before they're removed.
+    pub(crate) fn purge_remote_resync_pane_index_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        let closing_pane_ids: std::collections::HashSet<PaneId> = self
+            .state
+            .workspaces
+            .iter()
+            .filter(|ws| workspace_ids.contains(&ws.id))
+            .flat_map(|ws| ws.tabs.iter().flat_map(|tab| tab.layout.pane_ids()))
+            .collect();
+        self.remote_resync_pane_index
+            .retain(|_, local_pane_id| !closing_pane_ids.contains(local_pane_id));
     }
 
     /// `AppEvent::FederationSplitPaneReady` handler: the drive task already
@@ -991,6 +1065,165 @@ impl App {
                     _ => unreachable!("toast delivery was matched above"),
                 };
                 let _ = notify("remote split failed", Some(&reason));
+            }
+            _ => {}
+        }
+        self.render_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationClosePaneReady` handler (Gap A,
+    /// plans/260724-1536-federation-pane-close-sync): the serving host
+    /// confirmed it closed the pane this mount asked it to close
+    /// (`ClosePaneRequest` -> `ClosePaneResponse::Closed`); tear the local
+    /// mirror pane down the same way `handle_federation_resync_pane_removed`
+    /// does — the remote already made the real close decision, so unlike
+    /// the interactive `pane.close` API path this never asks for close
+    /// confirmation. Idempotent (Predict risk 3): if the pane was already
+    /// torn down by a resync in the meantime (e.g. the serving host's close
+    /// also showed up as a resync-removed pane before this response
+    /// arrived), `find_pane` returns `None` and this is a silent no-op
+    /// rather than a panic or a double `PaneClosed` emission.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_close_pane_ready(
+        &mut self,
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+    ) {
+        if let Some(pending) = self.pending_remote_closes.get(&request_id) {
+            if pending.origin != origin {
+                tracing::warn!(
+                    request_id,
+                    expected_origin = %pending.origin,
+                    got_origin = %origin,
+                    "dropping a close-pane response from a mount that did not \
+                     originate this request"
+                );
+                return;
+            }
+        }
+
+        let Some(pending) = self.take_pending_remote_close(request_id) else {
+            tracing::warn!(
+                request_id,
+                "remote close confirmed for an unknown/stale request; nothing to tear down"
+            );
+            return;
+        };
+
+        let Some((ws_idx, _)) = self.find_pane(pending.pane_id) else {
+            // Already gone — e.g. a resync
+            // (`handle_federation_resync_pane_removed`) tore it down first
+            // while this response was in flight. Idempotent success, not an
+            // error.
+            return;
+        };
+
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let public_pane_id = self.public_pane_id(ws_idx, pending.pane_id);
+        let layout_update_target =
+            self.layout_update_target_after_pane_removal(ws_idx, pending.pane_id);
+        let terminal_id = self.state.terminal_id_for_pane(ws_idx, pending.pane_id);
+
+        let should_close_workspace = {
+            let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                return;
+            };
+            ws.close_pane(pending.pane_id)
+        };
+        self.state.remove_plugin_pane_records([pending.pane_id]);
+
+        if should_close_workspace {
+            self.state.selected = ws_idx;
+            self.state.close_selected_workspace();
+            self.shutdown_detached_terminal_runtimes();
+            if let Some(public_pane_id) = public_pane_id {
+                self.emit_event(EventEnvelope {
+                    event: EventKind::PaneClosed,
+                    data: EventData::PaneClosed {
+                        pane_id: public_pane_id,
+                        workspace_id,
+                    },
+                });
+            }
+        } else {
+            if let Some(terminal_id) = terminal_id {
+                self.state.remove_unattached_terminal_ids([terminal_id]);
+            }
+            self.shutdown_detached_terminal_runtimes();
+            self.schedule_session_save();
+            if let Some(public_pane_id) = public_pane_id {
+                self.emit_event(EventEnvelope {
+                    event: EventKind::PaneClosed,
+                    data: EventData::PaneClosed {
+                        pane_id: public_pane_id,
+                        workspace_id,
+                    },
+                });
+            }
+            if let Some((ws_idx, tab_idx)) = layout_update_target {
+                self.emit_layout_updated_event(ws_idx, tab_idx);
+            }
+        }
+
+        self.render_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationClosePaneFailed` handler: the remote host
+    /// rejected (or the mount could not carry) an earlier `ClosePaneRequest`
+    /// — drop the pending context and surface it exactly like a failed
+    /// remote split (`handle_federation_split_pane_failed`), without
+    /// touching layout. A "pane not found" style failure is folded into an
+    /// idempotent `ClosePaneReady` instead of reaching this handler at all
+    /// (see `client.rs`'s `ClosePaneResponse::Failed` handling doc comment)
+    /// — Predict risk 3's retry/duplicate-click safety requirement.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_close_pane_failed(
+        &mut self,
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    ) {
+        if let Some(pending) = self.pending_remote_closes.get(&request_id) {
+            if pending.origin != origin {
+                tracing::warn!(
+                    request_id,
+                    expected_origin = %pending.origin,
+                    got_origin = %origin,
+                    "dropping a close-pane failure from a mount that did not \
+                     originate this request"
+                );
+                return;
+            }
+        }
+        self.take_pending_remote_close(request_id);
+        tracing::warn!(request_id, %reason, "remote close failed");
+        match self.state.toast_config.delivery {
+            crate::config::ToastDelivery::Herdr => {
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: super::ToastKind::NeedsAttention,
+                    title: "remote close failed".to_string(),
+                    context: reason,
+                    position: None,
+                    target: None,
+                });
+            }
+            crate::config::ToastDelivery::Terminal | crate::config::ToastDelivery::System
+                if self.local_terminal_notifications =>
+            {
+                let notify = match self.state.toast_config.delivery {
+                    crate::config::ToastDelivery::Terminal => {
+                        crate::terminal_notify::show_notification
+                    }
+                    crate::config::ToastDelivery::System => {
+                        crate::platform::show_desktop_notification
+                    }
+                    _ => unreachable!("toast delivery was matched above"),
+                };
+                let _ = notify("remote close failed", Some(&reason));
             }
             _ => {}
         }
@@ -1216,6 +1449,21 @@ pub(crate) struct PendingRemoteSplit {
     /// second, differently-mounted host could splice a pane into this
     /// workspace by predicting/observing the process-global `request_id`
     /// counter.
+    pub(crate) origin: crate::remote::federation::id::HostKey,
+}
+
+/// Local layout context a `ClosePaneRequest` was minted from, remembered
+/// until its `ClosePaneResponse` arrives (or the process ends). See
+/// `App::register_pending_remote_close`/`handle_federation_close_pane_ready`
+/// (Gap A, plans/260724-1536-federation-pane-close-sync).
+pub(crate) struct PendingRemoteClose {
+    /// Stable workspace id (`Workspace::id`), same reasoning as
+    /// `PendingRemoteSplit::workspace_id`.
+    pub(crate) workspace_id: String,
+    pub(crate) pane_id: PaneId,
+    /// The mount this close request was actually sent to
+    /// (`App::federation_host_key_for_workspace` at mint time), same
+    /// origin-fencing reasoning as `PendingRemoteSplit::origin`.
     pub(crate) origin: crate::remote::federation::id::HostKey,
 }
 
@@ -1607,6 +1855,170 @@ mod federation_materialization_tests {
         );
     }
 
+    /// Phase 4 (plans/260724-1536-federation-pane-close-sync): a
+    /// `ClosePaneResponse::Closed` (delivered as `AppEvent::
+    /// FederationClosePaneReady`) must tear the pending pane down, the same
+    /// way `handle_federation_resync_pane_removed` does — the remote already
+    /// made the real close decision.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_pane_ready_tears_down_the_pending_pane() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("local")];
+        app.state.active = Some(0);
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        let request_id = 42u64;
+        let origin = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id,
+                pane_id,
+                origin: origin.clone(),
+            },
+        );
+
+        app.handle_federation_close_pane_ready(request_id, origin);
+
+        assert!(
+            app.find_pane(pane_id).is_none(),
+            "a ClosePaneResponse::Closed must tear the pending pane down"
+        );
+        assert!(!app.pending_remote_closes.contains_key(&request_id));
+    }
+
+    /// Origin-check counterpart, mirroring `split_pane_response_from_a_
+    /// different_mount_than_the_request_is_ignored`: a close response
+    /// tagged with a different mount's `HostKey` must be dropped, leaving
+    /// the pending entry and the pane both untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_pane_ready_from_a_different_mount_than_the_request_is_ignored() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("local")];
+        app.state.active = Some(0);
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        let request_id = 43u64;
+        let real_origin = crate::remote::federation::id::HostKey::new("real-host", "s1");
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id,
+                pane_id,
+                origin: real_origin,
+            },
+        );
+
+        let spoofed_origin = crate::remote::federation::id::HostKey::new("evil-host", "s1");
+        app.handle_federation_close_pane_ready(request_id, spoofed_origin);
+
+        assert!(
+            app.pending_remote_closes.contains_key(&request_id),
+            "a response from the wrong origin must not consume the pending entry"
+        );
+        assert!(
+            app.find_pane(pane_id).is_some(),
+            "a response from the wrong origin must not tear any pane down"
+        );
+    }
+
+    /// Predict risk 3 (double-signal race): a pane that is BOTH registered
+    /// in `pending_remote_closes` (in-flight `ClosePaneRequest`) AND, before
+    /// the response arrives, gets torn down via the resync path
+    /// (`handle_federation_resync_pane_removed`) for the same pane must not
+    /// panic or double-emit `PaneClosed` when the `ClosePaneResponse::
+    /// Closed` arrives afterward — it is a no-op (pane already gone), not an
+    /// error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_pane_ready_after_the_pane_was_already_resync_removed_is_a_no_op() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        let root_pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+
+        let request_id = 44u64;
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id,
+                pane_id: root_pane_id,
+                origin: mount.host_key.clone(),
+            },
+        );
+
+        // The resync path tears the same pane down first (its own
+        // `ClosePaneResponse` has not arrived yet from this test's point of
+        // view — a plausible race between a resync poll and a slower
+        // response on the same link). The reverse-index key is the
+        // mirror's own namespaced id, not the raw snapshot pane id (see the
+        // Gap B regression test above), so find it by value.
+        let root_remote_pane_id = app
+            .remote_resync_pane_index
+            .iter()
+            .find_map(|(remote_id, local_id)| {
+                (*local_id == root_pane_id).then(|| remote_id.clone())
+            })
+            .expect("the mount-time root pane must be indexed by build_remote_pane");
+        app.handle_federation_resync_pane_removed(mount.host_key.clone(), root_remote_pane_id);
+        assert!(app.find_pane(root_pane_id).is_none());
+
+        // The (now-late) `ClosePaneResponse::Closed` must not panic and must
+        // not emit a second `PaneClosed` for an already-gone pane.
+        app.handle_federation_close_pane_ready(request_id, mount.host_key.clone());
+
+        assert!(
+            app.find_pane(root_pane_id).is_none(),
+            "the pane must remain gone; no re-creation or panic"
+        );
+    }
+
+    /// `AppEvent::FederationClosePaneFailed` handler: drops the pending
+    /// entry and does not touch layout, mirroring
+    /// `handle_federation_split_pane_failed`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_pane_failed_drops_the_pending_entry_without_touching_layout() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("local")];
+        app.state.active = Some(0);
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        let request_id = 45u64;
+        let origin = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id,
+                pane_id,
+                origin: origin.clone(),
+            },
+        );
+
+        app.handle_federation_close_pane_failed(request_id, "refused".to_string(), origin);
+
+        assert!(!app.pending_remote_closes.contains_key(&request_id));
+        assert!(
+            app.find_pane(pane_id).is_some(),
+            "a close failure must not touch the local pane"
+        );
+    }
+
     /// Post-mount pane mirroring fix, part 2 (plans/260722-1327): a resync
     /// diff's `AppEvent::FederationResyncPaneCreated` must splice the new
     /// pane into the already-mounted workspace's active tab, register it in
@@ -1759,7 +2171,14 @@ mod federation_materialization_tests {
                 .is_none(),
             "a resync-created pane from the wrong origin must not be spliced into any workspace"
         );
-        assert!(app.remote_resync_pane_index.is_empty());
+        // Gap B fix (plans/260724-1536-federation-pane-close-sync):
+        // `materialize_federation_mount` now indexes every mount-time pane
+        // too, so the index is no longer empty at this point — only the
+        // REJECTED pane's own id must be absent from it.
+        assert!(
+            !app.remote_resync_pane_index.contains_key(&remote_pane_id),
+            "a resync-created pane from the wrong origin must not be added to the reverse index"
+        );
     }
 
     /// Post-mount pane mirroring fix, part 2 (plans/260722-1327): a resync
@@ -1842,6 +2261,203 @@ mod federation_materialization_tests {
         assert!(
             !app.remote_resync_pane_index.contains_key(&remote_pane_id),
             "the reverse index entry must be consumed on removal"
+        );
+    }
+
+    /// Memory-leak regression (plans/260724-1536-federation-pane-close-sync
+    /// pre-merge review): `handle_workspace_close`'s locally-initiated
+    /// federated unmount purges `pending_remote_splits`/`_closes`/
+    /// `_clipboard_stages` for the closing workspaces but, before this fix,
+    /// never purged `remote_resync_pane_index` — and since every mount-time
+    /// pane is now indexed there (Gap B fix above), each unmount leaked one
+    /// entry per pane forever. Builds a real mount via
+    /// `materialize_federation_mount` (so the index is populated the same
+    /// way production does it), adds a manually-inserted entry standing in
+    /// for a pane that belongs to a *different*, still-live workspace, then
+    /// asserts the purge removes only the closing workspace's entries.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unmount_purges_remote_resync_pane_index_for_closing_workspace_only() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let closing_workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        assert!(
+            !app.remote_resync_pane_index.is_empty(),
+            "materializing the mount must have indexed its mount-time panes, or this test \
+             checks nothing"
+        );
+
+        // Stand in for an entry belonging to a different, still-live
+        // workspace: a `PaneId` deliberately not part of `ws_idx`'s layout.
+        let other_remote_pane_id = "other-workspace:p1".to_string();
+        let other_local_pane_id = crate::layout::PaneId::alloc();
+        app.remote_resync_pane_index
+            .insert(other_remote_pane_id.clone(), other_local_pane_id);
+
+        let mut closing_ids = std::collections::HashSet::new();
+        closing_ids.insert(closing_workspace_id);
+        app.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
+
+        for tab in &app.state.workspaces[ws_idx].tabs {
+            for pane_id in tab.layout.pane_ids() {
+                assert!(
+                    !app.remote_resync_pane_index
+                        .values()
+                        .any(|local_pane_id| *local_pane_id == pane_id),
+                    "the closing workspace's pane must no longer be indexed after purge"
+                );
+            }
+        }
+        assert_eq!(
+            app.remote_resync_pane_index.get(&other_remote_pane_id),
+            Some(&other_local_pane_id),
+            "an entry belonging to a different, still-live workspace must survive the purge"
+        );
+    }
+
+    /// Gap B regression (plans/260724-1536-federation-pane-close-sync):
+    /// before the fix, `build_remote_pane` never populated
+    /// `remote_resync_pane_index` for a MOUNT-TIME pane (only resync- and
+    /// split-created panes did), so a serving-host close of a pane that was
+    /// present at initial mount time silently no-op'd in
+    /// `handle_federation_resync_pane_removed` — the overwhelming majority
+    /// of panes a user actually sees. Builds a real 2-pane mount through
+    /// `materialize_federation_mount`/`build_remote_pane` (not a hand-built
+    /// fixture that skips it) and asserts a mount-time pane's removal now
+    /// tears the local pane down.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_removed_tears_down_a_mount_time_pane_not_just_resync_created_ones() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+
+        // `two_pane_snapshot()` seeds panes "p1" (root) and "p2" (split
+        // sibling) into the same tab, sorted by pane id — "p1" materializes
+        // as the tab's root pane. The reverse-index key is the mirror's own
+        // namespaced (`FedRef`-mapped) id, not the raw snapshot pane id, so
+        // find it by value (the local `PaneId` `build_remote_pane` actually
+        // produced) rather than assuming its exact wire encoding.
+        let root_pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        let root_remote_pane_id = app
+            .remote_resync_pane_index
+            .iter()
+            .find_map(|(remote_id, local_id)| {
+                (*local_id == root_pane_id).then(|| remote_id.clone())
+            })
+            .expect(
+                "regression check: a mount-time root pane must be indexed by build_remote_pane, \
+                 or this whole test is checking nothing",
+            );
+
+        app.handle_federation_resync_pane_removed(
+            mount.host_key.clone(),
+            root_remote_pane_id.clone(),
+        );
+
+        assert!(
+            app.find_pane(root_pane_id).is_none(),
+            "a mount-time pane's removal must tear the local pane down, not silently no-op"
+        );
+        assert!(
+            !app.remote_resync_pane_index
+                .contains_key(&root_remote_pane_id),
+            "the reverse index entry must be consumed on removal"
+        );
+    }
+
+    /// Non-regression counterpart: a resync/split-created pane's removal
+    /// (already covered above by `resync_pane_removed_tears_down_the_local_
+    /// pane_and_runtime`) must keep working unchanged after the Gap B fix —
+    /// this just re-asserts that same behavior survives alongside the new
+    /// mount-time indexing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_removed_still_tears_down_a_resync_created_pane_after_the_gap_b_fix() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel::<crate::events::AppEvent>(4);
+        let (rt_out_tx, _rt_out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
+        let (rt_clipboard_tx, _rt_clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let local_pane_id = crate::layout::PaneId::alloc();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote(
+            local_pane_id,
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            terminal_id.to_string(),
+            1,
+            rt_out_tx,
+            output_rx,
+            rt_clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        )
+        .expect("spawn_remote must succeed for a fresh channel pair");
+        let terminal =
+            crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
+        let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+        let remote_pane_id = format!("{workspace_id}:p9");
+
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: workspace_id.clone(),
+            pane_id: remote_pane_id.clone(),
+            local_pane_id,
+            terminal_id: terminal_id.clone(),
+            terminal,
+            runtime,
+            pane_state,
+        });
+        assert!(app.state.workspaces[ws_idx]
+            .pane_state(local_pane_id)
+            .is_some());
+
+        app.handle_federation_resync_pane_removed(mount.host_key.clone(), remote_pane_id.clone());
+
+        assert!(
+            app.find_pane(local_pane_id).is_none(),
+            "a resync-created pane's removal must still work unchanged after the Gap B fix"
         );
     }
 }
