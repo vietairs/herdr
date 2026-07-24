@@ -182,7 +182,9 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
 
       - name: Extract release notes from changelog
-        run: python3 scripts/changelog.py extract --version "${GITHUB_REF_NAME#v}" --output RELEASE_NOTES.md
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          python3 scripts/changelog.py extract --version "${TAG_VERSION%-hvn.*}" --output RELEASE_NOTES.md
 
       - name: Create release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
@@ -196,6 +198,7 @@ jobs:
 
   close-released-issues:
     needs: release
+    if: ${{ !contains(github.ref_name, '-hvn.') }}
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
@@ -332,6 +335,7 @@ jobs:
 
   update-latest-json:
     needs: release
+    if: ${{ !contains(github.ref_name, '-hvn.') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
