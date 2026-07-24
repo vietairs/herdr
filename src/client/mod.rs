@@ -1825,26 +1825,7 @@ fn read_image_file_from_terminal_drop(
     is_remote_client: bool,
 ) -> Option<crate::platform::ClipboardImage> {
     let (path, extension) = image_path_from_terminal_drop(data, is_remote_client)?;
-    let metadata = std::fs::metadata(&path).ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-
-    let file = std::fs::File::open(&path).ok()?;
-    let bytes =
-        match crate::platform::read_limited_reader(file, MAX_CLIPBOARD_IMAGE_PAYLOAD).ok()? {
-            crate::platform::LimitedRead::Complete(bytes) => bytes,
-            crate::platform::LimitedRead::Empty => return None,
-            crate::platform::LimitedRead::Oversized => {
-                warn!(
-                    max = MAX_CLIPBOARD_IMAGE_PAYLOAD,
-                    "local image file drop is too large to bridge"
-                );
-                return None;
-            }
-        };
-
-    Some(crate::platform::ClipboardImage { bytes, extension })
+    crate::image_path::read_local_image_file(&path, extension)
 }
 
 #[cfg(unix)]
@@ -1858,19 +1839,7 @@ fn image_path_from_terminal_drop(
 
     let bytes = bracketed_paste_payload(data).unwrap_or(data);
     let text = std::str::from_utf8(bytes).ok()?;
-    let text = text.trim_end_matches(['\r', '\n']);
-    if text.is_empty() || text.contains(['\r', '\n']) {
-        return None;
-    }
-
-    let text = unescape_terminal_drop_path(strip_matching_path_quotes(text));
-    let path = std::path::PathBuf::from(text);
-    if !path.is_absolute() {
-        return None;
-    }
-
-    let extension = recognized_image_extension(path.extension()?.to_str()?)?;
-    Some((path, extension))
+    crate::image_path::local_image_path_from_text(text)
 }
 
 #[cfg(unix)]
@@ -1878,54 +1847,6 @@ fn bracketed_paste_payload(data: &[u8]) -> Option<&[u8]> {
     const START: &[u8] = b"\x1b[200~";
     const END: &[u8] = b"\x1b[201~";
     data.strip_prefix(START)?.strip_suffix(END)
-}
-
-#[cfg(unix)]
-fn strip_matching_path_quotes(text: &str) -> &str {
-    if text.len() < 2 {
-        return text;
-    }
-
-    let bytes = text.as_bytes();
-    match (bytes.first(), bytes.last()) {
-        (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"')) => &text[1..text.len() - 1],
-        _ => text,
-    }
-}
-
-#[cfg(unix)]
-fn unescape_terminal_drop_path(text: &str) -> String {
-    let mut unescaped = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(escaped) = chars.next() {
-                unescaped.push(escaped);
-            } else {
-                unescaped.push(ch);
-            }
-        } else {
-            unescaped.push(ch);
-        }
-    }
-    unescaped
-}
-
-#[cfg(unix)]
-fn recognized_image_extension(extension: &str) -> Option<&'static str> {
-    if extension.eq_ignore_ascii_case("png") {
-        Some("png")
-    } else if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") {
-        Some("jpg")
-    } else if extension.eq_ignore_ascii_case("gif") {
-        Some("gif")
-    } else if extension.eq_ignore_ascii_case("webp") {
-        Some("webp")
-    } else if extension.eq_ignore_ascii_case("bmp") {
-        Some("bmp")
-    } else {
-        None
-    }
 }
 
 // ---------------------------------------------------------------------------

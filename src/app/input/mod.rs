@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::app::PaneClickState;
 use crate::input::TerminalKey;
@@ -170,6 +170,42 @@ impl App {
         if self.state.mode != Mode::Terminal {
             self.paste_into_active_text_input(&text);
             return;
+        }
+
+        // A bracketed paste landing on a federated remote pane may actually
+        // be a local screenshot: the terminal (iTerm2/Terminal.app "paste
+        // image as path") substitutes a local temp-file path for the image
+        // and delivers *that* as pasted text, not as the `ctrl+v` keybinding
+        // `remote_image_paste_decision` watches for. Forwarding that text
+        // verbatim sends a path that does not exist on the remote host. See
+        // `bracketed_paste_image_decision` for why an unmatched shape still
+        // falls through to the ordinary forward below.
+        #[cfg(unix)]
+        {
+            match bracketed_paste_image_decision(&self.state, &text) {
+                BracketedPasteImageDecision::Unsupported => {
+                    self.raise_clipboard_stage_toast(
+                        crate::app::remote_clipboard_stage::TOAST_TITLE_FAILED,
+                        TOAST_REMOTE_TOO_OLD,
+                    );
+                    return;
+                }
+                BracketedPasteImageDecision::Capture {
+                    ws_idx,
+                    target_pane_id,
+                    path,
+                    extension,
+                } => {
+                    // Off-loop like the ctrl+v clipboard read: the file can
+                    // be 16MiB, and a synchronous read here would stall
+                    // rendering and every pane for its duration.
+                    self.begin_remote_clipboard_image_capture(ws_idx, target_pane_id, move || {
+                        crate::image_path::read_verified_image_drop_file(&path, extension)
+                    });
+                    return;
+                }
+                BracketedPasteImageDecision::FallThrough => {}
+            }
         }
 
         if let Some(ws_idx) = self.state.active {
@@ -658,7 +694,7 @@ impl App {
 
 /// Toast context for a mount whose peer never negotiated file staging.
 #[cfg(unix)]
-const TOAST_REMOTE_TOO_OLD: &str = "remote herdr is too old for image paste; update it";
+pub(crate) const TOAST_REMOTE_TOO_OLD: &str = "remote herdr is too old for image paste; update it";
 
 /// Toast context for a press whose clipboard holds no pasteable image.
 #[cfg(unix)]
@@ -744,6 +780,77 @@ pub(crate) enum RemoteImagePasteDecision {
     },
 }
 
+/// The focused pane of the active workspace, when that workspace is a
+/// federation mount, along with whether the mount's peer has agreed to
+/// `FILE_STAGING`.
+///
+/// Shared by every intercept that needs to know "is this input headed at a
+/// federated remote pane" — the raw `ctrl+v` keybinding and the
+/// bracketed-paste image-path bridge both resolve the same target through
+/// this one path, so the two never disagree about which pane, or which
+/// mount, they are looking at.
+#[cfg(unix)]
+struct RemotePasteTarget {
+    ws_idx: usize,
+    target_pane_id: crate::layout::PaneId,
+    supports_file_staging: bool,
+}
+
+#[cfg(unix)]
+fn resolve_remote_paste_target(state: &AppState) -> Option<RemotePasteTarget> {
+    use crate::remote::federation::protocol::Capability;
+
+    if state.mode != Mode::Terminal {
+        debug!(mode = ?state.mode, "remote paste target: not in terminal mode");
+        return None;
+    }
+    let Some(ws_idx) = state.active else {
+        debug!("remote paste target: no active workspace");
+        return None;
+    };
+    let Some(workspace) = state.workspaces.get(ws_idx) else {
+        debug!(
+            ws_idx,
+            "remote paste target: active workspace index out of range"
+        );
+        return None;
+    };
+    // A federated workspace carries the mount's host key in its space
+    // membership; matching it against the live mirrors is what distinguishes
+    // "this workspace came from a remote host" from "this workspace is local".
+    let Some(space_key) = workspace.worktree_space().map(|space| space.key.as_str()) else {
+        debug!(workspace_id = %workspace.id, "remote paste target: workspace has no space membership");
+        return None;
+    };
+    let Some(mirror) = state
+        .remote_mirrors
+        .iter()
+        .find(|(host_key, _)| format!("federation:{}", host_key.as_str()) == space_key)
+        .map(|(_, mirror)| mirror)
+    else {
+        debug!(
+            space_key,
+            mirror_host_keys = ?state
+                .remote_mirrors
+                .keys()
+                .map(|host_key| host_key.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            "remote paste target: no mirror matches the workspace space key"
+        );
+        return None;
+    };
+    let Some(target_pane_id) = workspace.focused_pane_id() else {
+        debug!(workspace_id = %workspace.id, "remote paste target: workspace has no focused pane");
+        return None;
+    };
+    let supports_file_staging = mirror.supports(&Capability::new(Capability::FILE_STAGING));
+    Some(RemotePasteTarget {
+        ws_idx,
+        target_pane_id,
+        supports_file_staging,
+    })
+}
+
 /// Decides what a key press means for the remote image-paste intercept.
 ///
 /// Pure, and deliberately so: the branch that must never be taken by accident
@@ -754,46 +861,88 @@ pub(crate) fn remote_image_paste_decision(
     state: &AppState,
     key: TerminalKey,
 ) -> RemoteImagePasteDecision {
-    use crate::remote::federation::protocol::Capability;
-
-    if state.mode != Mode::Terminal {
-        return RemoteImagePasteDecision::FallThrough;
-    }
     let Some(binding) = state.remote_image_paste_key else {
         return RemoteImagePasteDecision::FallThrough;
     };
     if !crate::config::terminal_key_matches_combo(key, binding) {
         return RemoteImagePasteDecision::FallThrough;
     }
-    let Some(ws_idx) = state.active else {
+    let Some(target) = resolve_remote_paste_target(state) else {
         return RemoteImagePasteDecision::FallThrough;
     };
-    let Some(workspace) = state.workspaces.get(ws_idx) else {
-        return RemoteImagePasteDecision::FallThrough;
-    };
-    // A federated workspace carries the mount's host key in its space
-    // membership; matching it against the live mirrors is what distinguishes
-    // "this workspace came from a remote host" from "this workspace is local".
-    let Some(space_key) = workspace.worktree_space().map(|space| space.key.as_str()) else {
-        return RemoteImagePasteDecision::FallThrough;
-    };
-    let Some(mirror) = state
-        .remote_mirrors
-        .iter()
-        .find(|(host_key, _)| format!("federation:{}", host_key.as_str()) == space_key)
-        .map(|(_, mirror)| mirror)
-    else {
-        return RemoteImagePasteDecision::FallThrough;
-    };
-    let Some(target_pane_id) = workspace.focused_pane_id() else {
-        return RemoteImagePasteDecision::FallThrough;
-    };
-    if !mirror.supports(&Capability::new(Capability::FILE_STAGING)) {
+    if !target.supports_file_staging {
         return RemoteImagePasteDecision::Unsupported;
     }
     RemoteImagePasteDecision::Capture {
-        ws_idx,
-        target_pane_id,
+        ws_idx: target.ws_idx,
+        target_pane_id: target.target_pane_id,
+    }
+}
+
+/// What a bracketed-paste payload means for the remote image-path bridge:
+/// does the pasted text have the exact shape of a local image file the
+/// terminal substituted for a clipboard image (see `crate::image_path`),
+/// landing on a federated remote pane?
+///
+/// Deliberately conservative in the same spirit as `remote_image_paste_decision`:
+/// `FallThrough` covers every case where the paste should still reach the
+/// remote PTY as ordinary text, including a local pane, a non-federated
+/// workspace, or text that merely looks like a path. Unlike the keybinding
+/// intercept, an unmatched shape is not itself suspicious — most pastes are
+/// text — so only a *shape match* against a peer that lacks `FILE_STAGING`
+/// raises `Unsupported`; anything that never matched the shape falls
+/// through untouched.
+#[cfg(unix)]
+pub(crate) enum BracketedPasteImageDecision {
+    FallThrough,
+    Unsupported,
+    Capture {
+        ws_idx: usize,
+        target_pane_id: crate::layout::PaneId,
+        /// Canonicalized candidate for the OFF-LOOP read: the decision only
+        /// shape-checks and gates on the drop location; the caller hands this
+        /// path to `begin_remote_clipboard_image_capture` so the up-to-16MiB
+        /// file read never runs on the App event loop, and the read itself
+        /// re-proves temp-dir containment against the opened fd
+        /// (`crate::image_path::read_verified_image_drop_file`).
+        path: std::path::PathBuf,
+        extension: &'static str,
+    },
+}
+
+#[cfg(unix)]
+pub(crate) fn bracketed_paste_image_decision(
+    state: &AppState,
+    text: &str,
+) -> BracketedPasteImageDecision {
+    let Some(target) = resolve_remote_paste_target(state) else {
+        return BracketedPasteImageDecision::FallThrough;
+    };
+    let Some((path, extension)) = crate::image_path::local_image_path_from_text(text) else {
+        debug!("bracketed paste: text does not have image-path shape");
+        return BracketedPasteImageDecision::FallThrough;
+    };
+    // Ordinary paste content triggers this path, unlike the dedicated
+    // keybinding, so the shape match alone is not enough evidence: the
+    // candidate must also sit in a location only a clipboard-image drop
+    // would use, never a path the user typed or pasted on purpose. This
+    // on-loop check is advisory (cheap syscalls, decides interception vs
+    // fall-through only); the authoritative containment proof is re-run
+    // against the opened fd inside `read_verified_image_drop_file` during
+    // the off-loop read, so a symlink swapped in after this point cannot
+    // widen what gets bridged.
+    let Some(canonical_path) = crate::image_path::recognized_image_drop_location(&path) else {
+        debug!(path = %path.display(), temp_dir = %std::env::temp_dir().display(), "bracketed paste: image path is not in a recognized drop location");
+        return BracketedPasteImageDecision::FallThrough;
+    };
+    if !target.supports_file_staging {
+        return BracketedPasteImageDecision::Unsupported;
+    }
+    BracketedPasteImageDecision::Capture {
+        ws_idx: target.ws_idx,
+        target_pane_id: target.target_pane_id,
+        path: canonical_path,
+        extension,
     }
 }
 
@@ -1558,6 +1707,168 @@ mod remote_image_paste_tests {
             ImagePasteOutcome::Staged
         );
         assert_eq!(stage_requests(&drain(&mut out_rx)), vec!["image.png"]);
+    }
+
+    /// A file under the OS temp dir with a recognized image extension, the
+    /// shape a terminal's "paste image as path" convention produces. Cleaned
+    /// up on drop so a failing assertion still leaves nothing behind.
+    struct TempDropFile {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDropFile {
+        fn new(bytes: &[u8]) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "herdr-bracketed-paste-test-{}-{}.png",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDropFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[tokio::test]
+    async fn bracketed_paste_of_a_temp_image_path_stages_on_a_remote_pane() {
+        let mut app = test_app();
+        let (pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+        let file = TempDropFile::new(b"image-bytes");
+
+        assert!(matches!(
+            bracketed_paste_image_decision(&app.state, &file.path.display().to_string()),
+            BracketedPasteImageDecision::Capture {
+                ws_idx: 0,
+                target_pane_id,
+                ..
+            } if target_pane_id == pane_id
+        ));
+
+        app.handle_paste(file.path.display().to_string()).await;
+
+        // The file read runs off-loop; the paste is answered when its
+        // capture event comes back, exactly like the ctrl+v clipboard read.
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(10), app.event_rx.recv())
+            .await
+            .expect("the off-loop file read must answer")
+            .expect("the capture sender is still alive");
+        app.handle_internal_event(ev);
+
+        assert_eq!(
+            app.pending_remote_clipboard_stages.len(),
+            1,
+            "the path must have been staged, not forwarded as text"
+        );
+        assert_eq!(stage_requests(&drain(&mut out_rx)), vec!["image.png"]);
+    }
+
+    #[tokio::test]
+    async fn bracketed_paste_of_a_temp_image_path_on_a_local_pane_is_forwarded_unchanged() {
+        let mut app = test_app();
+        let (_pane_id, mut rx) = attach_local_pane(&mut app);
+        let file = TempDropFile::new(b"image-bytes");
+        let text = file.path.display().to_string();
+
+        assert!(matches!(
+            bracketed_paste_image_decision(&app.state, &text),
+            BracketedPasteImageDecision::FallThrough
+        ));
+
+        app.handle_paste(text.clone()).await;
+
+        let mut received = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            received.extend_from_slice(&bytes);
+        }
+        assert_eq!(
+            received,
+            text.into_bytes(),
+            "a local pane must receive the pasted path as ordinary text"
+        );
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bracketed_paste_of_ordinary_text_on_a_remote_pane_is_forwarded_unchanged() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+
+        assert!(matches!(
+            bracketed_paste_image_decision(&app.state, "not a path, just some pasted text"),
+            BracketedPasteImageDecision::FallThrough
+        ));
+
+        app.handle_paste("not a path, just some pasted text".to_string())
+            .await;
+
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+        // The remote runtime forwards ordinary pastes over the wire as a
+        // terminal write, not a `ClipboardStageRequest`, so the only thing
+        // this test needs to prove is that staging never happened.
+        assert!(stage_requests(&drain(&mut out_rx)).is_empty());
+    }
+
+    #[tokio::test]
+    async fn bracketed_paste_of_a_temp_image_path_is_unsupported_without_file_staging() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, false);
+        let file = TempDropFile::new(b"image-bytes");
+
+        assert!(matches!(
+            bracketed_paste_image_decision(&app.state, &file.path.display().to_string()),
+            BracketedPasteImageDecision::Unsupported
+        ));
+
+        app.handle_paste(file.path.display().to_string()).await;
+
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some(TOAST_TITLE_FAILED),
+            "a mount that cannot stage files must still tell the user, not silently forward"
+        );
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+        assert_no_frame(
+            &mut out_rx,
+            "an unsupported mount must not receive the raw path either",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bracketed_paste_of_a_path_outside_the_temp_dir_is_forwarded_unchanged() {
+        // Same shape as the accepted case (existing file, recognized
+        // extension, single line) but outside any recognized drop location —
+        // e.g. a path under the repo or the user's home directory that they
+        // pasted on purpose, not one the terminal substituted for a
+        // clipboard image.
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+        let home = std::env::var("HOME").expect("HOME must be set to run this test");
+        let path = std::path::PathBuf::from(home).join(format!(
+            "herdr-bracketed-paste-outside-test-{}-not-a-drop.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"bytes").unwrap();
+
+        assert!(
+            crate::image_path::recognized_image_drop_location(&path).is_none(),
+            "fixture must actually sit outside the temp dir root to exercise the gate"
+        );
+        assert!(matches!(
+            bracketed_paste_image_decision(&app.state, &path.display().to_string()),
+            BracketedPasteImageDecision::FallThrough
+        ));
+
+        let _ = std::fs::remove_file(&path);
+        assert!(stage_requests(&drain(&mut out_rx)).is_empty());
     }
 
     #[tokio::test]
