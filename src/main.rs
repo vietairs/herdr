@@ -67,6 +67,7 @@ mod detect;
 mod events;
 mod ghostty;
 mod handoff_runtime;
+mod image_path;
 mod input;
 mod integration;
 mod ipc;
