@@ -1595,6 +1595,10 @@ pub struct AppState {
     pub pane_gaps: bool,
     /// Automatically rebalance sibling split ratios on pane split/close.
     pub auto_resize_splits: bool,
+    /// Apply OSC 52 clipboard writes originating from a federated remote pane.
+    /// Read live on every clipboard event, so `reload_config` takes effect
+    /// without remounting.
+    pub accept_remote_clipboard_writes: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub hide_tab_bar_when_single_tab: bool,
     pub pane_history_persistence: bool,
@@ -2107,6 +2111,7 @@ impl AppState {
             },
             local_sound_playback: false,
             toast_config: ToastConfig::default(),
+            accept_remote_clipboard_writes: true,
             keybinds: Keybinds::default(),
             spinner_tick: 0,
             palette: Palette::catppuccin(),

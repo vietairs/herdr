@@ -64,12 +64,21 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
-        if let AppEvent::ClipboardWrite { content } = ev {
+        if let AppEvent::ClipboardWrite { content, origin } = ev {
+            if let Some(host) = origin.as_deref() {
+                if !self.state.accept_remote_clipboard_writes {
+                    tracing::debug!(
+                        %host,
+                        "ignoring remote clipboard write (remote.accept_clipboard_writes = false)"
+                    );
+                    return;
+                }
+            }
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
             #[cfg(test)]
             let _ = content;
-            self.show_clipboard_feedback();
+            self.show_clipboard_feedback(origin.as_deref());
             return;
         }
 
@@ -550,14 +559,20 @@ impl App {
         }
     }
 
-    pub(crate) fn show_clipboard_feedback(&mut self) {
+    /// `origin` is `Some(host_key)` when the write came from a federated
+    /// remote pane; the host is named in the toast so an unexpected remote
+    /// clipboard write is visible rather than silent.
+    pub(crate) fn show_clipboard_feedback(&mut self, origin: Option<&str>) {
         if !self.state.toast_config.clipboard.enabled {
             self.state.copy_feedback = None;
             self.copy_feedback_deadline = None;
             return;
         }
         self.state.copy_feedback = Some(crate::app::state::CopyFeedback {
-            message: "copied to clipboard".to_string(),
+            message: match origin {
+                Some(host) => format!("copied to clipboard from {host}"),
+                None => "copied to clipboard".to_string(),
+            },
         });
         self.copy_feedback_deadline = Some(Instant::now() + super::COPY_FEEDBACK_DURATION);
     }

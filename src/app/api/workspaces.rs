@@ -196,9 +196,56 @@ impl App {
             crate::remote::federation::client::spawn_mount_writer(tunnel_writer);
         let (inbound_clip_tx, _inbound_clip_rx) =
             tokio::sync::mpsc::channel::<crate::remote::federation::protocol::ClipboardMessage>(64);
-        let (outbound_clip_tx, _outbound_clip_rx) = tokio::sync::mpsc::unbounded_channel::<
+        let (outbound_clip_tx, outbound_clip_rx) = tokio::sync::mpsc::unbounded_channel::<
             crate::remote::federation::protocol::ClipboardMessage,
         >();
+        // Drain remote-origin OSC 52 clipboard writes emitted by the mirror
+        // emulator into the same `AppEvent::ClipboardWrite` path every local
+        // pane uses. That path is the only one that reaches the operator's
+        // system clipboard in BOTH run modes: monolithic writes it directly,
+        // while the headless server forwards it to the foreground client as
+        // `ServerMessage::Clipboard`. Writing the clipboard here instead would
+        // target the server host, not the operator's machine.
+        //
+        // Without this receiver the mirror's sender had no consumer, so a TUI
+        // running in a federated pane could report "copied" while the bytes
+        // were dropped on the floor. Ends when the mount drops its senders.
+        //
+        // The mount's `host_key` is used as the event origin rather than the
+        // channel's generic `"remote"` tag so the copy toast can name the host
+        // that wrote the clipboard, and so `remote.accept_clipboard_writes` has
+        // something meaningful to log when it refuses one. Policy is applied by
+        // the event handler, not here, so `reload_config` takes effect without
+        // remounting.
+        {
+            let clipboard_event_tx = self.event_tx.clone();
+            // `HostKey` is `user@ip#session-discriminator`; the toast shows the
+            // address only, since the discriminator is noise to a reader.
+            let clipboard_origin = host_key
+                .as_str()
+                .split_once('#')
+                .map(|(address, _)| address)
+                .unwrap_or_else(|| host_key.as_str())
+                .to_string();
+            tokio::spawn(
+                crate::remote::federation::pane_source::apply_remote_clipboard_writes(
+                    outbound_clip_rx,
+                    move |_origin_tag, payload| {
+                        if clipboard_event_tx
+                            .try_send(crate::events::AppEvent::ClipboardWrite {
+                                content: payload.to_vec(),
+                                origin: Some(clipboard_origin.clone()),
+                            })
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                "dropped remote clipboard write: event channel full or closed"
+                            );
+                        }
+                    },
+                ),
+            );
+        }
 
         let mut router = crate::remote::federation::client::TerminalChannelRouter::new();
         let opened = match self.materialize_federation_mount(

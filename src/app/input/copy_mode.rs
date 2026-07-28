@@ -25,7 +25,10 @@ impl App {
         if let Some(content) = self.state.request_clipboard_write.take() {
             if self
                 .event_tx
-                .try_send(crate::events::AppEvent::ClipboardWrite { content })
+                .try_send(crate::events::AppEvent::ClipboardWrite {
+                    content,
+                    origin: None,
+                })
                 .is_err()
             {
                 tracing::warn!("failed to queue clipboard write event");
@@ -1119,7 +1122,7 @@ mod tests {
 
     fn copy_mode_clipboard_text(app: &mut App) -> String {
         match app.event_rx.try_recv().expect("clipboard event") {
-            AppEvent::ClipboardWrite { content } => {
+            AppEvent::ClipboardWrite { content, .. } => {
                 String::from_utf8(content).expect("utf8 clipboard")
             }
             other => panic!("unexpected event: {other:?}"),
@@ -2025,7 +2028,7 @@ mod tests {
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
 
         match app.event_rx.try_recv().expect("clipboard event") {
-            AppEvent::ClipboardWrite { content } => assert_eq!(content, b"alp"),
+            AppEvent::ClipboardWrite { content, .. } => assert_eq!(content, b"alp"),
             other => panic!("unexpected event: {other:?}"),
         }
         assert_eq!(app.state.mode, Mode::Terminal);

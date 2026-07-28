@@ -387,6 +387,13 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Set false to run plain ssh against your ssh config unchanged — this does not
 # force keepalive or multiplexing off, it only stops herdr from adding its own.
 # manage_ssh_config = true
+# Apply OSC 52 clipboard writes from panes on a mounted remote host to this
+# machine's clipboard, the same way local panes already do. A mounted host can
+# only write the clipboard — herdr rejects OSC 52 read queries, so a remote can
+# never read what you copied — but a write can still replace contents you are
+# about to paste elsewhere. Set false when mounting hosts you do not fully
+# trust. Applied live on reload_config; the copy toast names the writing host.
+# accept_clipboard_writes = true
 
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.

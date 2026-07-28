@@ -2165,12 +2165,24 @@ impl HeadlessServer {
     /// Returns true if the event changed visual state (requiring a re-render).
     fn handle_internal_event_with_forwarding(&mut self, ev: AppEvent) -> bool {
         match &ev {
-            AppEvent::ClipboardWrite { content } => {
+            AppEvent::ClipboardWrite { content, origin } => {
+                // A write from a federated remote pane is subject to the
+                // operator's `remote.accept_clipboard_writes` policy. Checked
+                // here (not at the mount) so `reload_config` applies live.
+                if let Some(host) = origin.as_deref() {
+                    if !self.app.state.accept_remote_clipboard_writes {
+                        tracing::debug!(
+                            %host,
+                            "ignoring remote clipboard write (remote.accept_clipboard_writes = false)"
+                        );
+                        return false;
+                    }
+                }
                 // Clipboard writes are client-local side effects. Forward them only to
                 // the foreground client instead of broadcasting to every attached client.
                 let data = base64::engine::general_purpose::STANDARD.encode(content.as_slice());
                 if self.send_to_foreground_client(ServerMessage::Clipboard { data }) {
-                    self.app.show_clipboard_feedback();
+                    self.app.show_clipboard_feedback(origin.as_deref());
                 }
                 true
             }
@@ -8831,6 +8843,7 @@ next_tab = ""
 
         let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
             content: b"test".to_vec(),
+            origin: None,
         });
 
         assert!(changed);
@@ -8866,6 +8879,7 @@ next_tab = ""
 
         let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
             content: b"test".to_vec(),
+            origin: None,
         });
 
         assert!(changed);
@@ -8897,6 +8911,7 @@ next_tab = ""
 
         let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
             content: b"test".to_vec(),
+            origin: None,
         });
 
         assert!(changed);
