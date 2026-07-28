@@ -868,12 +868,23 @@ pub struct RemoteConfig {
     /// Add keepalive fallbacks and private connection reuse for `herdr --remote`.
     /// Set false to run plain ssh unchanged. Default: true.
     pub manage_ssh_config: bool,
+    /// Apply OSC 52 clipboard writes emitted by panes on a federated remote
+    /// host to this machine's clipboard. Default: true, matching the policy
+    /// local panes already get.
+    ///
+    /// Set false to ignore them. A mounted host can only *write* the
+    /// clipboard — herdr rejects OSC 52 read queries, so a remote can never
+    /// read what you copied — but a write still lets a remote pane replace
+    /// clipboard contents you are about to paste somewhere else. Turn this
+    /// off when mounting hosts you do not fully trust.
+    pub accept_clipboard_writes: bool,
 }
 
 impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             manage_ssh_config: true,
+            accept_clipboard_writes: true,
         }
     }
 }
@@ -1576,6 +1587,23 @@ mouse_scroll_lines = 1
 mouse_scroll_lines = 0
 "#;
         assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn remote_clipboard_writes_are_accepted_by_default_and_can_be_refused() {
+        let default: Config = toml::from_str("").expect("empty config parses");
+        assert!(default.remote.accept_clipboard_writes);
+
+        let refused: Config = toml::from_str(
+            r#"
+[remote]
+accept_clipboard_writes = false
+"#,
+        )
+        .expect("config parses");
+        assert!(!refused.remote.accept_clipboard_writes);
+        // Unrelated remote settings keep their defaults.
+        assert!(refused.remote.manage_ssh_config);
     }
 
     #[test]

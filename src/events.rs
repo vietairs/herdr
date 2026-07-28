@@ -140,7 +140,16 @@ pub enum AppEvent {
     },
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
-    ClipboardWrite { content: Vec<u8> },
+    ///
+    /// `origin` is `None` for a local pane and `Some(host_key)` for a pane
+    /// mirrored from a federated remote host. It drives both attribution in
+    /// the copy toast and the `remote.accept_clipboard_writes` policy check —
+    /// a remote host can write the operator's clipboard, so the operator
+    /// should be able to see which one did and to refuse it.
+    ClipboardWrite {
+        content: Vec<u8>,
+        origin: Option<String>,
+    },
     /// Prefix-mode ASCII input-source request, emitted on entering/leaving the ASCII input
     /// realm. The foreground process applies the host-local TIS switch (`active = true`) /
     /// restore (`active = false`): the client in server mode (via server forwarding), the

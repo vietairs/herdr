@@ -728,6 +728,7 @@ impl App {
             sound: config.ui.sound.clone(),
             local_sound_playback: true,
             toast_config: config.ui.toast.clone(),
+            accept_remote_clipboard_writes: config.remote.accept_clipboard_writes,
             keybinds: config.keybinds(),
             spinner_tick: 0,
             palette: theme_palette,
@@ -2305,6 +2306,7 @@ mod tests {
 
         app.handle_internal_event(AppEvent::ClipboardWrite {
             content: b"copied".to_vec(),
+            origin: None,
         });
 
         assert!(app.state.toast.is_none());
@@ -2314,12 +2316,54 @@ mod tests {
     }
 
     #[test]
+    fn remote_clipboard_write_names_the_host_that_wrote_it() {
+        let mut app = test_app();
+
+        app.handle_internal_event(AppEvent::ClipboardWrite {
+            content: b"copied".to_vec(),
+            origin: Some("hvnguyen@10.0.0.5".to_string()),
+        });
+
+        let feedback = app.state.copy_feedback.as_ref().expect("copy feedback");
+        assert_eq!(feedback.message, "copied to clipboard from hvnguyen@10.0.0.5");
+    }
+
+    #[test]
+    fn remote_clipboard_write_is_ignored_when_the_operator_refuses_remote_writes() {
+        let mut app = test_app();
+        app.state.accept_remote_clipboard_writes = false;
+
+        app.handle_internal_event(AppEvent::ClipboardWrite {
+            content: b"copied".to_vec(),
+            origin: Some("hvnguyen@10.0.0.5".to_string()),
+        });
+
+        assert!(app.state.copy_feedback.is_none());
+        assert!(app.copy_feedback_deadline.is_none());
+    }
+
+    #[test]
+    fn refusing_remote_clipboard_writes_does_not_affect_local_panes() {
+        let mut app = test_app();
+        app.state.accept_remote_clipboard_writes = false;
+
+        app.handle_internal_event(AppEvent::ClipboardWrite {
+            content: b"copied".to_vec(),
+            origin: None,
+        });
+
+        let feedback = app.state.copy_feedback.as_ref().expect("copy feedback");
+        assert_eq!(feedback.message, "copied to clipboard");
+    }
+
+    #[test]
     fn clipboard_feedback_can_be_disabled() {
         let mut app = test_app();
         app.state.toast_config.clipboard.enabled = false;
 
         app.handle_internal_event(AppEvent::ClipboardWrite {
             content: b"copied".to_vec(),
+            origin: None,
         });
 
         assert!(app.state.copy_feedback.is_none());
@@ -2340,6 +2384,7 @@ mod tests {
 
         app.handle_internal_event(AppEvent::ClipboardWrite {
             content: b"copied".to_vec(),
+            origin: None,
         });
 
         assert_eq!(app.state.toast, original_toast);
