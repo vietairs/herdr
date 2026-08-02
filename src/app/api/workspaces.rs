@@ -537,6 +537,12 @@ impl App {
 
         self.purge_pending_remote_splits_for_workspaces(&closing_ids);
         self.purge_pending_remote_closes_for_workspaces(&closing_ids);
+        // Same purge the locally-initiated close path runs before removing the
+        // workspaces. Without it a remote-initiated teardown (LinkClosed /
+        // Faulted) leaks `remote_resync_pane_index` entries whose local
+        // `PaneId` is already dead, so a later remount to the same host can
+        // route a resync pane-removal at a stale mapping.
+        self.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
 
         self.state.selected = idx;
         self.state.close_selected_workspace();
@@ -2044,6 +2050,66 @@ mod tests {
             .events_after(0)
             .iter()
             .any(|(_, event)| matches!(&event.data, EventData::WorkspaceClosed { .. })));
+    }
+
+    /// Memory-leak regression: the locally-initiated close path purges
+    /// `remote_resync_pane_index` for the workspaces it removes, but the
+    /// remote-initiated teardown here (LinkClosed / Faulted) did not — so
+    /// every remote-initiated unmount leaked one entry per mount-time pane
+    /// and left a `remote_pane_id -> dead PaneId` mapping that a later
+    /// remount to the same host could route a resync pane-removal at.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ended_purges_remote_resync_pane_index_for_its_workspaces() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert!(
+            !app.remote_resync_pane_index.is_empty(),
+            "the mount must have indexed its mount-time panes, or this test checks nothing"
+        );
+
+        // An entry for a different, still-live workspace must survive.
+        let other_remote_pane_id = "other-workspace:p1".to_string();
+        let other_local_pane_id = crate::layout::PaneId::alloc();
+        app.remote_resync_pane_index
+            .insert(other_remote_pane_id.clone(), other_local_pane_id);
+
+        let host_key = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+        app.handle_federation_mount_ended(
+            host_key,
+            1,
+            crate::remote::federation::client::MountConnectionEpoch::UNMOUNTED,
+            "remote-host".to_string(),
+            "link closed".to_string(),
+        );
+
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(
+            app.remote_resync_pane_index.len(),
+            1,
+            "only the unrelated entry may remain: {:?}",
+            app.remote_resync_pane_index
+        );
+        assert_eq!(
+            app.remote_resync_pane_index.get(&other_remote_pane_id),
+            Some(&other_local_pane_id)
+        );
     }
 
     #[cfg(unix)]
