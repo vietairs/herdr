@@ -121,6 +121,35 @@ impl App {
         }
     }
 
+    /// Persists the recent remote-mount targets list (most-recent-first,
+    /// already deduped/capped by the caller) as a TOML string array under
+    /// `[ui]`.
+    ///
+    /// The value is serialized by the `toml` crate rather than hand-quoted.
+    /// Unlike `save_theme`'s name (chosen from an enumerated UI list), a
+    /// target is arbitrary user text: `DOMAIN\user@host` is a legal OpenSSH
+    /// destination and an `~/.ssh/config` `Host` alias may contain a `"`.
+    /// A single unescaped `\` or `"` would make the whole `config.toml`
+    /// unparsable, and `Config::load` answers a top-level parse error by
+    /// returning `Config::default()` for the *entire* file — silently
+    /// resetting every unrelated setting on the next start.
+    ///
+    /// Persist only: the caller has already updated the in-memory list, so
+    /// there is nothing to re-read, and `apply_config_from_disk` would drag
+    /// in unrelated live side effects (agent-panel scroll reset, selection
+    /// clearing, a server-side config reload) on every successful mount.
+    pub(super) fn save_recent_remote_mount_targets(&mut self, targets: &[String]) {
+        let value = toml::Value::from(targets.to_vec()).to_string();
+        self.update_config_file("recent remote mount targets", |content| {
+            crate::config::upsert_section_value(
+                content,
+                "ui",
+                "recent_remote_mount_targets",
+                &value,
+            )
+        });
+    }
+
     pub(super) fn save_agent_panel_sort(&mut self, sort: crate::app::state::AgentPanelSort) {
         let value = match sort {
             crate::app::state::AgentPanelSort::Spaces => {
