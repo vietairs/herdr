@@ -825,6 +825,11 @@ pub struct UiConfig {
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
     pub sound: SoundConfig,
+    /// Most-recent-first list of remote-mount targets ("user@host") that
+    /// mounted successfully, capped at 5. TUI presentation/convenience state
+    /// for the mount-remote-workspace dialog's recents list — not a shared
+    /// runtime fact, so it is not exposed through the JSON API.
+    pub recent_remote_mount_targets: Vec<String>,
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -1029,6 +1034,7 @@ impl Default for UiConfig {
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
+            recent_remote_mount_targets: Vec::new(),
         }
     }
 }

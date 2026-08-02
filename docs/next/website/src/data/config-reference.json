@@ -691,6 +691,12 @@
           "type": "color",
           "default": "\"cyan\"",
           "description": "Accent color for highlights, borders, and navigation UI. Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250))."
+        },
+        {
+          "key": "ui.recent_remote_mount_targets",
+          "type": "list of strings",
+          "default": "[]",
+          "description": "Most-recent-first remote-mount targets shown in the mount remote workspace dialog. Written automatically after a successful mount and capped at 5; edit or clear it by hand to change what the dialog offers."
         }
       ]
     },

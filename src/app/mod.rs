@@ -325,6 +325,24 @@ fn parse_cjk_ime_agents(names: &[String]) -> Vec<crate::detect::Agent> {
     out
 }
 
+/// Defensive dedup/cap for the `[ui] recent_remote_mount_targets` list.
+/// `App::save_recent_remote_mount_targets` (`src/app/config_io.rs`) never
+/// writes a duplicate or over-cap list itself, but a hand-edited
+/// config.toml could, so both the initial `App::new` load and every
+/// `apply_config_from_disk` reload run the list through this before it
+/// reaches `AppState`.
+fn dedup_capped_recent_remote_mount_targets(targets: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for target in targets {
+        if seen.insert(target.clone()) {
+            out.push(target.clone());
+        }
+    }
+    out.truncate(state::RECENT_REMOTE_MOUNT_TARGETS_CAP);
+    out
+}
+
 fn normalize_theme_name(name: &str) -> String {
     name.to_lowercase().replace([' ', '_'], "-")
 }
@@ -624,6 +642,9 @@ impl App {
             request_complete_onboarding: false,
             remote_mount: None,
             abandoned_remote_mounts: Vec::new(),
+            recent_remote_mount_targets: dedup_capped_recent_remote_mount_targets(
+                &config.ui.recent_remote_mount_targets,
+            ),
             name_input: String::new(),
             name_input_replace_on_type: false,
             release_notes: None,
@@ -1582,6 +1603,9 @@ impl App {
                 }
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
+                self.state.recent_remote_mount_targets = dedup_capped_recent_remote_mount_targets(
+                    &config.ui.recent_remote_mount_targets,
+                );
             }
         }
 
@@ -2325,7 +2349,10 @@ mod tests {
         });
 
         let feedback = app.state.copy_feedback.as_ref().expect("copy feedback");
-        assert_eq!(feedback.message, "copied to clipboard from hvnguyen@10.0.0.5");
+        assert_eq!(
+            feedback.message,
+            "copied to clipboard from hvnguyen@10.0.0.5"
+        );
     }
 
     #[test]
@@ -3459,6 +3486,104 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("agent_panel_sort = \"priority\""));
         assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn record_successful_remote_mount_target_persists_most_recent_first() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("record-recent-remote-mount-target");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert!(app.state.recent_remote_mount_targets.is_empty());
+
+        app.record_successful_remote_mount_target("host-a");
+        app.record_successful_remote_mount_target("host-b");
+        // A re-success for an already-recorded target moves it to the front
+        // instead of duplicating it.
+        app.record_successful_remote_mount_target("host-a");
+
+        assert_eq!(
+            app.state.recent_remote_mount_targets,
+            vec!["host-a".to_string(), "host-b".to_string()]
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("recent_remote_mount_targets = [\"host-a\", \"host-b\"]"));
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn record_successful_remote_mount_target_escapes_quotes_and_backslashes() {
+        // `DOMAIN\user@host` is a legal OpenSSH destination and an ssh_config
+        // `Host` alias can contain a quote. Hand-quoting either one produces a
+        // config.toml that fails to parse, and a top-level parse error makes
+        // `Config::load` discard the *whole* file for defaults — so the value
+        // must be TOML-escaped and the file must stay parsable and preserve
+        // its unrelated keys.
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("record-recent-remote-mount-target-escaping");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n[ui]\naccent = \"red\"\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.record_successful_remote_mount_target("we\"ird@host");
+        app.record_successful_remote_mount_target("DOMAIN\\user@host");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: crate::config::Config = toml::from_str(&content)
+            .unwrap_or_else(|err| panic!("config must stay parsable, got {err}:\n{content}"));
+        assert_eq!(
+            parsed.ui.recent_remote_mount_targets,
+            vec!["DOMAIN\\user@host".to_string(), "we\"ird@host".to_string()],
+            "targets must round-trip through the file byte-for-byte"
+        );
+        assert_eq!(
+            parsed.ui.accent, "red",
+            "an unrelated key must survive the write"
+        );
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn record_successful_remote_mount_target_skips_the_write_when_nothing_changed() {
+        // Re-mounting the target that is already at index 0 leaves the list
+        // byte-identical; the whole read/format/write cycle must be skipped
+        // rather than rewriting the same bytes on every mount.
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("record-recent-remote-mount-target-noop");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.record_successful_remote_mount_target("host-a");
+        // Reset the file to its pre-write content: if the second record still
+        // writes, the key reappears.
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+
+        app.record_successful_remote_mount_target("host-a");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("recent_remote_mount_targets"),
+            "a no-op re-record must not rewrite the file, got:\n{content}"
+        );
+        assert_eq!(
+            app.state.recent_remote_mount_targets,
+            vec!["host-a".to_string()]
+        );
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

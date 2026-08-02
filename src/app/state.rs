@@ -639,9 +639,48 @@ pub struct RemoteMountState {
     pub error: Option<String>,
     pub submitting: bool,
     pub pending: Vec<String>,
+    /// Highlight index into `AppState::recent_remote_mount_targets`, driven
+    /// by Up/Down keys and clicks. `None` means "nothing picked yet", which
+    /// is the state the dialog opens in: the sibling menus' `MenuListState`
+    /// cannot express it (`highlighted: usize` always points at a row), so a
+    /// freshly-opened dialog would paint the most recent target as selected
+    /// while the input is still empty, and the first `Down` would jump past
+    /// it to index 1.
+    pub recents_highlighted: Option<usize>,
 }
 
 impl RemoteMountState {
+    /// Moves the recents highlight down one row and returns the new index.
+    /// From the initial "nothing picked yet" state this selects index 0 (the
+    /// most recent target) rather than skipping it. `None` when there is
+    /// nothing to highlight.
+    pub(crate) fn highlight_next_recent(&mut self, recents_count: usize) -> Option<usize> {
+        if recents_count == 0 {
+            return None;
+        }
+        let next = match self.recents_highlighted {
+            None => 0,
+            Some(idx) => (idx + 1).min(recents_count - 1),
+        };
+        self.recents_highlighted = Some(next);
+        Some(next)
+    }
+
+    /// Moves the recents highlight up one row and returns the new index.
+    /// Saturates at index 0, matching the sibling menus' `move_prev`; from
+    /// "nothing picked yet" it also lands on index 0.
+    pub(crate) fn highlight_prev_recent(&mut self, recents_count: usize) -> Option<usize> {
+        if recents_count == 0 {
+            return None;
+        }
+        let prev = match self.recents_highlighted {
+            None => 0,
+            Some(idx) => idx.saturating_sub(1),
+        };
+        self.recents_highlighted = Some(prev);
+        Some(prev)
+    }
+
     /// Starts tracking a freshly-submitted target list. Clears any prior
     /// inline error so the dialog reflects only this submission's outcome.
     pub(crate) fn begin_submission(&mut self, targets: Vec<String>) {
@@ -675,6 +714,45 @@ impl RemoteMountState {
         self.pending.remove(index);
         self.submitting = !self.pending.is_empty();
         true
+    }
+}
+
+/// Maximum number of recent remote-mount targets remembered/persisted.
+pub const RECENT_REMOTE_MOUNT_TARGETS_CAP: usize = 5;
+
+/// Records `target` as the most-recent successful remote-mount target:
+/// removes any existing exact-string match (a re-mount moves it to the front
+/// instead of duplicating it), inserts it at index 0, then truncates to
+/// `RECENT_REMOTE_MOUNT_TARGETS_CAP`. Pure list-mutation logic, kept free of
+/// I/O so it is testable via `AppState::test_new()` alone; persistence is a
+/// separate concern (`App::save_recent_remote_mount_targets` in
+/// `src/app/config_io.rs`).
+pub(crate) fn record_recent_remote_mount_target(recents: &mut Vec<String>, target: &str) {
+    recents.retain(|existing| existing != target);
+    recents.insert(0, target.to_string());
+    recents.truncate(RECENT_REMOTE_MOUNT_TARGETS_CAP);
+}
+
+impl AppState {
+    /// Fills `name_input` from the recents list at index `idx`
+    /// (`recent_remote_mount_targets`), leaving the dialog open so the user
+    /// can still edit before submitting. Pure state mutation (no config I/O),
+    /// so mouse click handling (`impl AppState` in
+    /// `src/app/input/mouse.rs`) can call it directly instead of round-
+    /// tripping through a `request_*` flag. No-op for an out-of-range index
+    /// (e.g. a stale click after the list shrank).
+    pub(crate) fn select_recent_remote_mount_target(&mut self, idx: usize) {
+        let Some(target) = self.recent_remote_mount_targets.get(idx).cloned() else {
+            return;
+        };
+        self.name_input = target;
+        self.name_input_replace_on_type = false;
+        if let Some(remote_mount) = &mut self.remote_mount {
+            remote_mount.recents_highlighted = Some(idx);
+            if !remote_mount.submitting {
+                remote_mount.error = None;
+            }
+        }
     }
 }
 
@@ -1523,6 +1601,14 @@ pub struct AppState {
     /// string alone — the mount events carry no per-submission identity).
     /// One entry per abandoned dial, so duplicates are tracked independently.
     pub abandoned_remote_mounts: Vec<String>,
+    /// Most-recent-first, deduped, capped-at-5 targets that have successfully
+    /// mounted. TUI presentation/convenience state (CLAUDE.md runtime/client
+    /// boundary) — persisted client-side under `[ui]` in config.toml the same
+    /// way theme/sound preferences are (`src/app/config_io.rs`), never
+    /// exposed through the JSON API. Loaded from disk at startup/config-reload
+    /// (`apply_live_config`) and updated by
+    /// `App::record_successful_remote_mount_target`.
+    pub recent_remote_mount_targets: Vec<String>,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
     pub release_notes: Option<ReleaseNotesState>,
@@ -2018,6 +2104,7 @@ impl AppState {
             request_complete_onboarding: false,
             remote_mount: None,
             abandoned_remote_mounts: Vec::new(),
+            recent_remote_mount_targets: Vec::new(),
             name_input: String::new(),
             name_input_replace_on_type: false,
             release_notes: None,
@@ -2513,6 +2600,51 @@ mod tests {
             server_instance_id: ServerInstanceId("inst-1".to_string()),
             mount_generation: 1,
         })
+    }
+
+    #[test]
+    fn record_recent_remote_mount_target_inserts_most_recent_first() {
+        let mut recents = Vec::new();
+        record_recent_remote_mount_target(&mut recents, "host-a");
+        record_recent_remote_mount_target(&mut recents, "host-b");
+        assert_eq!(recents, vec!["host-b".to_string(), "host-a".to_string()]);
+    }
+
+    #[test]
+    fn record_recent_remote_mount_target_dedupes_by_moving_to_front() {
+        let mut recents = vec![
+            "host-c".to_string(),
+            "host-b".to_string(),
+            "host-a".to_string(),
+        ];
+        record_recent_remote_mount_target(&mut recents, "host-a");
+        assert_eq!(
+            recents,
+            vec![
+                "host-a".to_string(),
+                "host-c".to_string(),
+                "host-b".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn record_recent_remote_mount_target_caps_at_five() {
+        let mut recents = Vec::new();
+        for host in ["h1", "h2", "h3", "h4", "h5", "h6"] {
+            record_recent_remote_mount_target(&mut recents, host);
+        }
+        assert_eq!(recents.len(), RECENT_REMOTE_MOUNT_TARGETS_CAP);
+        assert_eq!(
+            recents,
+            vec![
+                "h6".to_string(),
+                "h5".to_string(),
+                "h4".to_string(),
+                "h3".to_string(),
+                "h2".to_string(),
+            ]
+        );
     }
 
     // A duplicate `HostKey` mount is rejected with a typed error naming the
