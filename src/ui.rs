@@ -71,7 +71,7 @@ pub(crate) use self::{
         open_existing_worktree_visible_start, remove_worktree_button_rects,
         remove_worktree_popup_rect, rename_button_rects,
     },
-    remote_mount::{remote_mount_button_rects, remote_mount_inner_rect},
+    remote_mount::{remote_mount_button_rects, remote_mount_inner_rect, remote_mount_recent_at},
     settings::{
         settings_button_rects, settings_popup_height, settings_show_primary_action,
         SETTINGS_POPUP_WIDTH,

@@ -13,7 +13,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::api::schema::{ErrorResponse, SuccessResponse, WorkspaceMountRemoteParams};
 
-use super::state::{Mode, RemoteMountState};
+use super::state::{record_recent_remote_mount_target, Mode, RemoteMountState};
 use super::App;
 
 /// Parses the dialog's free-text input into a whitespace-separated target
@@ -85,12 +85,54 @@ impl App {
         true
     }
 
+    /// Records `target` as the most-recent successful remote-mount target and
+    /// persists the updated list to disk. The only call site
+    /// (`handle_federation_mount_ready`, `src/app/api/workspaces.rs`) is
+    /// `#[cfg(unix)]`-gated, so this has zero callers on
+    /// `x86_64-pc-windows-msvc` — `#[allow(dead_code)]` here, matching this
+    /// file's existing precedent on `claim_abandoned_remote_mount`.
+    #[allow(dead_code)]
+    pub(crate) fn record_successful_remote_mount_target(&mut self, target: &str) {
+        let mut targets = self.state.recent_remote_mount_targets.clone();
+        record_recent_remote_mount_target(&mut targets, target);
+        // Re-mounting the target already at index 0 produces an identical
+        // list; skip the whole read/format/write cycle rather than rewriting
+        // the same bytes on the event-loop tick for every mount.
+        if targets == self.state.recent_remote_mount_targets {
+            return;
+        }
+        self.state.recent_remote_mount_targets = targets.clone();
+        self.save_recent_remote_mount_targets(&targets);
+    }
+
     pub(crate) fn handle_remote_mount_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
                 self.close_remote_mount_dialog();
             }
             KeyCode::Enter => self.submit_remote_mount_via_api(),
+            KeyCode::Up if !self.state.recent_remote_mount_targets.is_empty() => {
+                let count = self.state.recent_remote_mount_targets.len();
+                let idx = self
+                    .state
+                    .remote_mount
+                    .as_mut()
+                    .and_then(|remote_mount| remote_mount.highlight_prev_recent(count));
+                if let Some(idx) = idx {
+                    self.state.select_recent_remote_mount_target(idx);
+                }
+            }
+            KeyCode::Down if !self.state.recent_remote_mount_targets.is_empty() => {
+                let count = self.state.recent_remote_mount_targets.len();
+                let idx = self
+                    .state
+                    .remote_mount
+                    .as_mut()
+                    .and_then(|remote_mount| remote_mount.highlight_next_recent(count));
+                if let Some(idx) = idx {
+                    self.state.select_recent_remote_mount_target(idx);
+                }
+            }
             KeyCode::Backspace => {
                 if self.state.name_input_replace_on_type {
                     self.state.name_input.clear();
@@ -495,5 +537,94 @@ mod tests {
             "expected the server's own error message, got: {error}"
         );
         assert!(app.state.remote_mirrors.is_empty());
+    }
+
+    #[test]
+    fn a_freshly_opened_dialog_highlights_nothing() {
+        // Nothing is typed yet, so no recent may render as selected — a
+        // highlighted row that Enter rejects with "enter at least one target"
+        // is a lie about the dialog's state.
+        let mut app = test_app();
+        app.state.recent_remote_mount_targets = vec!["host-b".to_string(), "host-a".to_string()];
+        app.open_remote_mount_dialog();
+
+        assert_eq!(
+            app.state.remote_mount.as_ref().unwrap().recents_highlighted,
+            None
+        );
+        assert!(app.state.name_input.is_empty());
+    }
+
+    #[test]
+    fn down_key_selects_the_most_recent_target_first() {
+        let mut app = test_app();
+        app.state.recent_remote_mount_targets = vec!["host-b".to_string(), "host-a".to_string()];
+        app.open_remote_mount_dialog();
+
+        app.handle_remote_mount_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+
+        // The first Down lands on index 0 (the most recent target) rather
+        // than skipping it.
+        assert_eq!(app.state.name_input, "host-b");
+        assert_eq!(
+            app.state.remote_mount.as_ref().unwrap().recents_highlighted,
+            Some(0)
+        );
+
+        app.handle_remote_mount_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+
+        assert_eq!(app.state.name_input, "host-a");
+        assert_eq!(
+            app.state.remote_mount.as_ref().unwrap().recents_highlighted,
+            Some(1)
+        );
+
+        // Clamps at the last entry.
+        app.handle_remote_mount_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+        assert_eq!(app.state.name_input, "host-a");
+    }
+
+    #[test]
+    fn up_key_clamps_at_the_first_recent() {
+        let mut app = test_app();
+        app.state.recent_remote_mount_targets = vec!["host-b".to_string(), "host-a".to_string()];
+        app.open_remote_mount_dialog();
+
+        app.handle_remote_mount_key(KeyEvent::new(KeyCode::Up, KeyModifiers::empty()));
+
+        assert_eq!(app.state.name_input, "host-b");
+        assert_eq!(
+            app.state.remote_mount.as_ref().unwrap().recents_highlighted,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn up_down_keys_are_a_noop_with_no_recents() {
+        let mut app = test_app();
+        app.open_remote_mount_dialog();
+        app.state.name_input = "typed-target".into();
+
+        app.handle_remote_mount_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+        app.handle_remote_mount_key(KeyEvent::new(KeyCode::Up, KeyModifiers::empty()));
+
+        // Falls through to the ordinary `_ => {}` arm rather than the
+        // recents-navigation arms, so the typed input is untouched.
+        assert_eq!(app.state.name_input, "typed-target");
+    }
+
+    #[test]
+    fn selecting_a_recent_still_lets_the_user_edit_before_submitting() {
+        // "Selecting a recent fills the target input (user can still edit
+        // before Enter)" — a recents pick must not lock the input field.
+        let mut app = test_app();
+        app.state.recent_remote_mount_targets = vec!["host-a".to_string()];
+        app.open_remote_mount_dialog();
+
+        app.handle_remote_mount_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+        assert_eq!(app.state.name_input, "host-a");
+
+        app.handle_remote_mount_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::empty()));
+        assert_eq!(app.state.name_input, "host-a2");
     }
 }
