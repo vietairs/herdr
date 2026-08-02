@@ -286,7 +286,19 @@ impl AppState {
                 }
 
                 if self.mode == Mode::MountRemoteWorkspace {
-                    if let Some(inner) = crate::ui::remote_mount_inner_rect(self.screen_rect()) {
+                    let recents_count = self.recent_remote_mount_targets.len();
+                    if let Some(inner) =
+                        crate::ui::remote_mount_inner_rect(self.screen_rect(), recents_count)
+                    {
+                        if let Some(idx) = crate::ui::remote_mount_recent_at(
+                            inner,
+                            recents_count,
+                            mouse.column,
+                            mouse.row,
+                        ) {
+                            self.select_recent_remote_mount_target(idx);
+                            return None;
+                        }
                         let (mount, cancel) = crate::ui::remote_mount_button_rects(inner);
                         match modal_action_from_buttons(
                             mouse.column,

@@ -282,6 +282,14 @@ impl App {
         };
         let _ = opened;
 
+        // The mount actually materialized — record it as a recent target now,
+        // independent of whether the mount-remote dialog is still open, was
+        // dismissed, or belongs to an earlier abandoned submission (those are
+        // resolved further below via `claim_abandoned_remote_mount` /
+        // `resolve_pending_target`, which also fire on failure paths above
+        // and must never be mistaken for "success").
+        self.record_successful_remote_mount_target(&target);
+
         self.render_dirty.store(true, Ordering::Release);
         self.render_notify.notify_one();
 
