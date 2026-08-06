@@ -151,7 +151,14 @@ fn collect_agent_panel_entries_with_runtimes(
         .enumerate()
         .flat_map(|(ws_idx, ws)| {
             let multi_tab = ws.tabs.len() > 1;
-            let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
+            // Same unspoofable remote-origin badge the workspace list applies
+            // (`workspace_display_label_with_origin_badge`). Without it an agent
+            // running on a federated pane is indistinguishable from a local one
+            // here, even though its workspace is marked remote one panel above.
+            let workspace_label = workspace_display_label_with_origin_badge(
+                ws,
+                ws.display_name_from(&app.terminals, terminal_runtimes),
+            );
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
@@ -206,12 +213,13 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
         ws.display_name_from_terminals(&app.terminals)
     };
     let label = workspace_display_label_with_origin_badge(ws, label);
+    let secondary = workspace_secondary_line_for_display(ws);
     let token_values = ws.metadata_tokens.values();
     tokens::space_rows(
         &app.sidebar_spaces,
         SpaceTokenContext {
             workspace: &label,
-            branch: branch.as_deref(),
+            branch: secondary.as_deref(),
             state_text: state_label(state, seen),
             ahead_behind: ws.git_ahead_behind(),
             tokens: &token_values,
@@ -302,8 +310,16 @@ pub(crate) fn workspace_federation_origin(
 
 /// Unspoofable remote-origin badge text for a federated workspace's sidebar
 /// row (RT-F8/S11.4); `None` for a local workspace.
+///
+/// Deliberately the bare glyph and nothing else. The badge shares one
+/// flexible-width token with the workspace label, and `truncate_end` keeps the
+/// prefix and drops the suffix — so every column the badge spends is a column
+/// taken from the folder name, and a badge carrying the full `user@ip#session`
+/// host key consumed the entire budget on a normal sidebar width, truncating
+/// the name away completely. The host itself is shown on the second row by
+/// [`workspace_secondary_line_for_display`], where it competes with nothing.
 pub(crate) fn federation_origin_badge(ws: &crate::workspace::Workspace) -> Option<String> {
-    workspace_federation_origin(ws).map(|host_key| format!("\u{2601} {}", host_key.as_str()))
+    workspace_federation_origin(ws).map(|_| "\u{2601}".to_string())
 }
 
 /// Prefixes `label` with the unspoofable remote-origin badge when `ws` is a
@@ -329,6 +345,25 @@ pub(crate) fn workspace_display_label_with_origin_badge(
 pub(crate) fn workspace_branch_for_display(ws: &crate::workspace::Workspace) -> Option<String> {
     if workspace_federation_origin(ws).is_some() {
         return None;
+    }
+    ws.branch()
+}
+
+/// The dim secondary row under a workspace's name: its git branch for a local
+/// workspace, and the host it was mounted from for a federated one.
+///
+/// A federated workspace has no branch to show — no field on `WorkspaceInfo` or
+/// `WorkspaceWorktreeInfo` carries one, so the serving host never sends a branch
+/// name at all, and [`workspace_branch_for_display`] additionally refuses to
+/// probe the local git cache for it. Rather than leave the row empty (which
+/// drops it entirely and makes remote workspaces render one line where local
+/// ones render two), it carries the mount origin, which is both known locally
+/// and the more useful fact about a remote workspace.
+pub(crate) fn workspace_secondary_line_for_display(
+    ws: &crate::workspace::Workspace,
+) -> Option<String> {
+    if let Some(host_key) = workspace_federation_origin(ws) {
+        return Some(host_key.host_address().to_string());
     }
     ws.branch()
 }
@@ -1339,12 +1374,13 @@ fn render_workspace_list(
         } else {
             p.overlay0
         });
+        let secondary = workspace_secondary_line_for_display(ws);
         let token_values = ws.metadata_tokens.values();
         let rows = tokens::space_rows(
             &app.sidebar_spaces,
             SpaceTokenContext {
                 workspace: &display_label,
-                branch: branch.as_deref(),
+                branch: secondary.as_deref(),
                 state_text: state_label(display_state, display_seen),
                 ahead_behind: ws.git_ahead_behind(),
                 tokens: &token_values,
@@ -2411,11 +2447,76 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ws.custom_name = Some("definitely-local-workspace".to_string());
 
         let badge = federation_origin_badge(&ws).expect("federated workspace must carry a badge");
-        assert!(badge.contains("alice@10.0.0.1#s1"));
+        assert_eq!(badge, "\u{2601}");
 
         let labeled = workspace_display_label_with_origin_badge(&ws, ws.display_name());
         assert!(labeled.starts_with(&badge));
         assert!(labeled.contains("definitely-local-workspace"));
+    }
+
+    #[test]
+    fn remote_badge_stays_narrow_enough_to_leave_the_folder_name_visible() {
+        // The badge and the label share one flexible-width token, and
+        // `truncate_end` keeps the prefix and drops the suffix — so a badge
+        // carrying the full host key ate the whole width budget and truncated
+        // the folder name away entirely.
+        let mut ws = Workspace::test_new("herdr");
+        ws.id = "r:someone@a-rather-long-host-alias#session-1:w1".to_string();
+
+        let labeled = workspace_display_label_with_origin_badge(&ws, ws.display_name());
+        let rendered = crate::ui::text::truncate_end(&labeled, 12);
+        assert!(
+            rendered.contains("herdr"),
+            "folder name must survive a narrow sidebar, got {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn federated_workspace_shows_its_host_where_a_local_one_shows_its_branch() {
+        let mut ws = Workspace::test_new("remote-repo");
+        ws.id = "r:bob@10.0.0.2#s1:w1".to_string();
+        // The session discriminator is identity-only noise; the address is the
+        // part worth a row of sidebar width.
+        assert_eq!(
+            workspace_secondary_line_for_display(&ws),
+            Some("bob@10.0.0.2".to_string())
+        );
+
+        let mut local = Workspace::test_new("local-repo");
+        local.cached_git_branch = Some("main".to_string());
+        assert_eq!(
+            workspace_secondary_line_for_display(&local),
+            Some("main".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_panel_entries_carry_the_remote_badge() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("remote-repo");
+        ws.id = "r:carol@10.0.0.3#s1:w1".to_string();
+        let pane = ws.tabs[0].root_pane;
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+        app.active = Some(0);
+        app.selected = 0;
+
+        let entries = agent_panel_entries(&app);
+        assert!(
+            !entries.is_empty(),
+            "test workspace must project at least one agent row"
+        );
+        for entry in &entries {
+            assert!(
+                entry.primary_label.starts_with('\u{2601}'),
+                "agent row for a federated workspace must carry the badge, got {:?}",
+                entry.primary_label
+            );
+        }
     }
 
     #[test]
@@ -2505,8 +2606,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             checkout_path: std::path::PathBuf::new(),
             is_linked_worktree: false,
         });
-        let badge_a = federation_origin_badge(&host_a).expect("host a must carry a badge");
-        let badge_b = federation_origin_badge(&host_b).expect("host b must carry a badge");
+        // Both carry the same remote-origin badge — it marks a workspace as
+        // remote, and deliberately says nothing more, so it cannot crowd out
+        // the folder name. Which host each came from is carried by the row's
+        // secondary line instead.
+        assert!(federation_origin_badge(&host_a).is_some());
+        assert!(federation_origin_badge(&host_b).is_some());
+        let origin_a =
+            workspace_secondary_line_for_display(&host_a).expect("host a must show its origin");
+        let origin_b =
+            workspace_secondary_line_for_display(&host_b).expect("host b must show its origin");
         app.workspaces = vec![host_a, host_b];
 
         let entries = workspace_list_entries(&app);
@@ -2517,11 +2626,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
 
         assert_ne!(
-            badge_a, badge_b,
-            "distinct hosts must render distinct badges"
+            origin_a, origin_b,
+            "distinct hosts must stay distinguishable in the sidebar"
         );
-        assert!(badge_a.contains("alice@10.0.0.1"));
-        assert!(badge_b.contains("bob@10.0.0.2"));
+        assert_eq!(origin_a, "alice@10.0.0.1");
+        assert_eq!(origin_b, "bob@10.0.0.2");
     }
 
     #[test]

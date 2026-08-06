@@ -35,6 +35,18 @@ impl HostKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The `user@ip` address alone, without the session discriminator.
+    ///
+    /// Identity comparisons must always use [`HostKey::as_str`]; this is the
+    /// human-facing address for surfaces that show which host a federated
+    /// workspace came from, where the discriminator is noise that crowds out
+    /// more useful text.
+    pub fn host_address(&self) -> &str {
+        self.0
+            .split_once('#')
+            .map_or(self.0.as_str(), |(addr, _)| addr)
+    }
 }
 
 impl std::fmt::Display for HostKey {
