@@ -359,6 +359,16 @@ pub(crate) fn workspace_branch_for_display(ws: &crate::workspace::Workspace) -> 
 /// drops it entirely and makes remote workspaces render one line where local
 /// ones render two), it carries the mount origin, which is both known locally
 /// and the more useful fact about a remote workspace.
+///
+/// Two consequences of riding the `Branch` token rather than a token of its
+/// own, both accepted: the origin is suppressed on an indented row (grouping
+/// sets `suppress_git_details`), and it is absent entirely if a user's
+/// `[ui.sidebar.spaces].rows` omits `branch`. The indented case is the one that
+/// occurs in practice — a mount serving two or more workspaces groups them by
+/// `worktree_space.key` — and it is tolerable because there is no separate
+/// group header: the group's parent row is itself a federated workspace and
+/// carries the origin, with the children visually nested beneath it. Grouping
+/// reads only `worktree_space.key`; nothing renders that struct's `label`.
 pub(crate) fn workspace_secondary_line_for_display(
     ws: &crate::workspace::Workspace,
 ) -> Option<String> {
@@ -2460,15 +2470,77 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         // `truncate_end` keeps the prefix and drops the suffix — so a badge
         // carrying the full host key ate the whole width budget and truncated
         // the folder name away entirely.
-        let mut ws = Workspace::test_new("herdr");
+        let mut ws = Workspace::test_new("herdr-checkout-name");
         ws.id = "r:someone@a-rather-long-host-alias#session-1:w1".to_string();
 
+        // Budget deliberately narrower than the label, so truncation really
+        // runs: what must survive is the START of the folder name, which is
+        // exactly what the badge used to displace.
         let labeled = workspace_display_label_with_origin_badge(&ws, ws.display_name());
+        assert!(
+            display_width(&labeled) > 12,
+            "test is only meaningful if the label actually needs truncating"
+        );
         let rendered = crate::ui::text::truncate_end(&labeled, 12);
         assert!(
             rendered.contains("herdr"),
             "folder name must survive a narrow sidebar, got {rendered:?}"
         );
+    }
+
+    #[test]
+    fn grouped_federated_children_rely_on_the_parent_row_for_their_origin() {
+        // A mount serving 2+ workspaces groups them by `worktree_space.key`,
+        // and grouping suppresses git-detail tokens on the indented children —
+        // which is what the origin rides on. Accepted: there is no separate
+        // group header, the parent row is itself federated and carries the
+        // origin. Pinned here so the day that stops being true is a test
+        // failure rather than a silent loss of host attribution.
+        let space = crate::workspace::WorktreeSpaceMembership {
+            key: "federation:dave@10.0.0.4#s1".to_string(),
+            label: "dave@10.0.0.4".to_string(),
+            repo_root: std::path::PathBuf::new(),
+            checkout_path: std::path::PathBuf::new(),
+            is_linked_worktree: false,
+        };
+        let mut parent = Workspace::test_new("remote-a");
+        parent.id = "r:dave@10.0.0.4#s1:w1".to_string();
+        parent.worktree_space = Some(space.clone());
+        let mut child = Workspace::test_new("remote-b");
+        child.id = "r:dave@10.0.0.4#s1:w2".to_string();
+        child.worktree_space = Some(space);
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![parent, child];
+
+        let entries = workspace_list_entries(&app);
+        assert!(
+            entries.iter().any(|entry| matches!(
+                entry,
+                WorkspaceListEntry::Workspace { indented, .. } if *indented
+            )),
+            "two workspaces on one mount must group, or this test proves nothing"
+        );
+
+        // The parent row is federated, so the origin is on screen for the group.
+        assert_eq!(
+            workspace_secondary_line_for_display(&app.workspaces[0]),
+            Some("dave@10.0.0.4".to_string())
+        );
+        // Every member still renders its own name, never the host, because
+        // `workspace_branch_for_display` stays `None` for federated workspaces
+        // and `grouped_child_display_label` therefore leaves the label alone.
+        for ws in &app.workspaces {
+            assert_eq!(workspace_branch_for_display(ws), None);
+            assert_eq!(
+                grouped_child_display_label(
+                    &ws.display_name(),
+                    workspace_branch_for_display(ws).as_deref(),
+                    ws.custom_name.is_some(),
+                ),
+                ws.display_name()
+            );
+        }
     }
 
     #[test]
