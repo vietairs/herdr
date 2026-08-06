@@ -608,8 +608,7 @@ impl App {
             }
             _ => {}
         }
-        self.render_dirty
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
 }
@@ -657,7 +656,6 @@ mod tests {
     use crate::remote::federation::protocol::Capability;
     use crate::workspace::Workspace;
     use bytes::Bytes;
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::sync::Notify;
@@ -1417,7 +1415,7 @@ mod tests {
             clipboard_tx,
             events_tx,
             Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(crate::render_signal::RenderSignal::new()),
         )
         .expect("a remote runtime needs no local PTY");
         app.terminal_runtimes.insert(terminal_id, runtime);

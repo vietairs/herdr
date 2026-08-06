@@ -43,7 +43,17 @@ use super::id::ServerInstanceId;
 /// before touching the payload, and `negotiate()` hard-rejects the whole
 /// handshake on a mismatch, so there is no per-message degrade path an
 /// unbumped addition could lean on.
-pub const FEDERATION_PROTOCOL_VERSION: u32 = 4;
+///
+/// Bumped 4 -> 5 when upstream v0.8.0 added the `EventKind::WorkspaceReordered`
+/// variant. `EventKind` is re-exported into `EventMessage.kind`, so a v4 peer
+/// receiving `"workspace_reordered"` fails to deserialize the whole frame —
+/// the same "new variant a peer cannot decode" case as the `Fault` 1->2 and
+/// `ClosePaneRequest` 3->4 bumps, not an additive field. Frames are serde_json
+/// (see `codec.rs`), so this is a decode error rather than a silently shifted
+/// discriminant; the bump converts it into a clean handshake reject instead of
+/// a mid-session frame error. v4 shipped in tags `v0.7.5-hvn.2` through
+/// `v0.7.5-hvn.6`, so it cannot be amended in place.
+pub const FEDERATION_PROTOCOL_VERSION: u32 = 5;
 
 /// An optional feature two federation peers may support. Modeled as an
 /// opaque name rather than a closed enum so an older peer can simply not

@@ -1,4 +1,6 @@
-use crate::config::{Keybinds, NewTerminalCwdConfig, SoundConfig, ToastConfig, ToastDelivery};
+use crate::config::{
+    Keybinds, NewTerminalCwdConfig, SoundConfig, TabBarPositionConfig, ToastConfig, ToastDelivery,
+};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
@@ -475,7 +477,7 @@ impl Palette {
             panel_bg: Color::Rgb(25, 23, 36),
             surface0: Color::Rgb(31, 29, 46),
             surface1: Color::Rgb(38, 35, 58),
-            surface_dim: Color::Rgb(25, 23, 36),
+            surface_dim: Color::Rgb(38, 35, 58),
             overlay0: Color::Rgb(110, 106, 134),
             overlay1: Color::Rgb(144, 140, 170),
             text: Color::Rgb(224, 222, 244),
@@ -955,6 +957,10 @@ pub enum Mode {
 }
 
 impl Mode {
+    pub(crate) fn mouse_motion_changes_view(self) -> bool {
+        matches!(self, Self::GlobalMenu | Self::ContextMenu | Self::Navigator)
+    }
+
     /// Whether keys in this mode are commands/navigation (an ASCII input source is wanted) rather
     /// than free text. This is an explicit **allowlist** of the prefix command/navigation realm:
     /// any mode NOT listed defaults to leaving the user's IME alone (the safe default), so adding a
@@ -962,8 +968,9 @@ impl Mode {
     /// `sync_prefix_input_source` (gated by `switch_ascii_input_source_in_prefix`) so multi-level
     /// prefix commands keep ASCII until they return to the terminal.
     ///
-    /// Known limitation: `Navigator`'s search box is also held on ASCII, since this `Mode`-level
-    /// predicate can't see `search_focused` (non-ASCII filtering there would need a runtime check).
+    /// Known limitation: the search boxes in `Navigator` and `KeybindHelp` are also held on ASCII,
+    /// since this `Mode`-level predicate can't see `search_focused` (non-ASCII filtering there
+    /// would need a runtime check).
     pub(crate) fn wants_ascii_input(self) -> bool {
         matches!(
             self,
@@ -1128,7 +1135,6 @@ pub enum SettingsSection {
     Sound,
     Toast,
     PaneLabels,
-    Experiments,
     Integrations,
 }
 
@@ -1139,7 +1145,6 @@ impl SettingsSection {
         Self::Toast,
         Self::PaneLabels,
         Self::Integrations,
-        Self::Experiments,
     ];
 
     pub fn label(self) -> &'static str {
@@ -1148,36 +1153,7 @@ impl SettingsSection {
             Self::Sound => "sound",
             Self::Toast => "toasts",
             Self::PaneLabels => "pane labels",
-            Self::Experiments => "experiments",
             Self::Integrations => "integrations",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExperimentSetting {
-    PaneHistory,
-    SwitchAsciiInputSourceInPrefix,
-}
-
-impl ExperimentSetting {
-    pub(crate) const ALL: [Self; 2] = [Self::PaneHistory, Self::SwitchAsciiInputSourceInPrefix];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::PaneHistory => "pane screen history",
-            Self::SwitchAsciiInputSourceInPrefix => {
-                "switch to ascii input source in prefix (macOS)"
-            }
-        }
-    }
-
-    pub(crate) fn enabled(self, state: &AppState) -> bool {
-        match self {
-            Self::PaneHistory => state.pane_history_persistence_enabled(),
-            Self::SwitchAsciiInputSourceInPrefix => {
-                state.switch_ascii_input_source_in_prefix_enabled()
-            }
         }
     }
 }
@@ -1277,10 +1253,16 @@ pub struct SettingsState {
     pub original_theme: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceDropTarget {
+    Before(usize),
+    End,
+}
+
 pub(crate) enum DragTarget {
     WorkspaceReorder {
         source_ws_idx: usize,
-        insert_idx: Option<usize>,
+        drop_target: Option<WorkspaceDropTarget>,
     },
     TabReorder {
         ws_idx: usize,
@@ -1504,8 +1486,11 @@ pub struct ProductAnnouncementState {
     pub preview: bool,
 }
 
+#[derive(Default)]
 pub struct KeybindHelpState {
     pub scroll: u16,
+    pub query: String,
+    pub search_focused: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1678,6 +1663,7 @@ pub struct AppState {
     pub prompt_new_tab_name: bool,
     pub prompt_new_workspace_name: bool,
     pub pane_borders: bool,
+    pub pane_scrollbars: bool,
     pub pane_gaps: bool,
     /// Automatically rebalance sibling split ratios on pane split/close.
     pub auto_resize_splits: bool,
@@ -1687,6 +1673,7 @@ pub struct AppState {
     pub accept_remote_clipboard_writes: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub hide_tab_bar_when_single_tab: bool,
+    pub tab_bar_position: TabBarPositionConfig,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
@@ -1713,8 +1700,6 @@ pub struct AppState {
     pub local_sound_playback: bool,
     pub toast_config: ToastConfig,
     pub keybinds: Keybinds,
-    /// Frame counter for spinner animations (wraps around).
-    pub spinner_tick: u32,
     /// UI color palette — all sidebar/UI colors centralized for theming.
     pub palette: Palette,
     /// Currently applied theme name (for settings UI).
@@ -1894,14 +1879,6 @@ impl AppState {
         self.show_agent_labels_on_pane_borders
     }
 
-    pub fn pane_history_persistence_enabled(&self) -> bool {
-        self.pane_history_persistence
-    }
-
-    pub fn switch_ascii_input_source_in_prefix_enabled(&self) -> bool {
-        self.switch_ascii_input_source_in_prefix
-    }
-
     pub(crate) fn pane_exposes_host_cursor(
         &self,
         _ws_idx: usize,
@@ -1954,7 +1931,7 @@ impl AppState {
             || self.focused_pane_requests_mouse_capture_from(terminal_runtimes)
     }
 
-    pub fn is_prefix_key(&self, key: crate::input::TerminalKey) -> bool {
+    pub fn is_prefix_key(&self, key: &crate::input::TerminalKey) -> bool {
         crate::config::terminal_key_matches_combo(key, (self.prefix_code, self.prefix_mods))
     }
 
@@ -2051,7 +2028,7 @@ pub fn key_matches(
     expected_mods: KeyModifiers,
 ) -> bool {
     crate::config::terminal_key_matches_combo(
-        crate::input::TerminalKey::from(*key),
+        &crate::input::TerminalKey::from(*key),
         (expected_code, expected_mods),
     )
 }
@@ -2109,7 +2086,7 @@ impl AppState {
             name_input_replace_on_type: false,
             release_notes: None,
             product_announcement: None,
-            keybind_help: KeybindHelpState { scroll: 0 },
+            keybind_help: KeybindHelpState::default(),
             navigator: NavigatorState::default(),
             copy_mode: None,
             workspace_scroll: 0,
@@ -2176,10 +2153,12 @@ impl AppState {
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
             pane_borders: true,
+            pane_scrollbars: true,
             pane_gaps: false,
             auto_resize_splits: false,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
+            tab_bar_position: TabBarPositionConfig::Top,
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,
@@ -2200,7 +2179,6 @@ impl AppState {
             toast_config: ToastConfig::default(),
             accept_remote_clipboard_writes: true,
             keybinds: Keybinds::default(),
-            spinner_tick: 0,
             palette: Palette::catppuccin(),
             theme_name: "catppuccin".to_string(),
             theme_runtime: ThemeRuntimeConfig {
@@ -2499,16 +2477,11 @@ impl AppState {
             match &drag.target {
                 DragTarget::WorkspaceReorder {
                     source_ws_idx,
-                    insert_idx,
+                    drop_target,
                 } => {
                     assert_workspace_index(*source_ws_idx, "workspace drag source");
-                    if let Some(insert_idx) = insert_idx {
-                        assert!(
-                            *insert_idx <= self.workspaces.len(),
-                            "workspace drag insert index {} out of bounds for {} workspaces",
-                            insert_idx,
-                            self.workspaces.len()
-                        );
+                    if let Some(WorkspaceDropTarget::Before(ws_idx)) = drop_target {
+                        assert_workspace_index(*ws_idx, "workspace drag target");
                     }
                 }
                 DragTarget::TabReorder {

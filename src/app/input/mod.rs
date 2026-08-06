@@ -36,7 +36,9 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
     assert_eq!(modified_url_click_modifier(), KeyModifiers::CONTROL);
 }
 
+mod clipboard;
 mod copy_mode;
+mod lease;
 mod modal;
 mod mouse;
 mod navigate;
@@ -47,9 +49,11 @@ mod sidebar;
 mod terminal;
 
 pub(crate) use self::{
+    lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
     modal::{
         handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
-        insert_navigator_search_text, insert_rename_input_text, open_new_workspace_dialog,
+        insert_keybind_help_query_text, insert_navigator_search_text, insert_rename_input_text,
+        open_new_workspace_dialog,
     },
     navigate::{
         terminal_direct_indexed_navigation_action, terminal_direct_non_indexed_navigation_action,
@@ -71,17 +75,19 @@ use super::App;
 // ---------------------------------------------------------------------------
 
 impl App {
-    pub(super) async fn handle_key(&mut self, key: TerminalKey) {
+    pub(super) async fn handle_key(
+        &mut self,
+        key: TerminalKey,
+    ) -> Option<super::TerminalInputTarget> {
         if self.state.popup_pane.is_some() {
-            self.handle_terminal_key(key).await;
-            return;
+            return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
             if let Some(text) = crate::platform::read_clipboard_text() {
                 self.paste_into_active_text_input(&text);
             }
-            return;
+            return None;
         }
 
         // A `keys.remote_image_paste` press only belongs to this intercept
@@ -92,7 +98,7 @@ impl App {
         // non-terminal mode keeps its own keymap.
         #[cfg(unix)]
         {
-            let decision = remote_image_paste_decision(&self.state, key);
+            let decision = remote_image_paste_decision(&self.state, &key);
             // Note the absence of a `FallThrough` branch: this block sits
             // above `match self.state.mode`, so a default branch that
             // returned would swallow every key this intercept did not claim.
@@ -101,7 +107,7 @@ impl App {
                     crate::app::remote_clipboard_stage::TOAST_TITLE_FAILED,
                     TOAST_REMOTE_TOO_OLD,
                 );
-                return;
+                return None;
             }
             if let RemoteImagePasteDecision::Capture {
                 ws_idx,
@@ -121,12 +127,12 @@ impl App {
                     target_pane_id,
                     crate::platform::read_clipboard_image,
                 );
-                return;
+                return None;
             }
         }
 
         match self.state.mode {
-            Mode::Terminal => self.handle_terminal_key(key).await,
+            Mode::Terminal => return self.handle_terminal_key(key).await,
             Mode::Prefix => self.handle_prefix_key(key),
             Mode::Navigate => self.handle_navigate_key(key),
             Mode::Copy => self.handle_copy_mode_key(key),
@@ -149,12 +155,73 @@ impl App {
                 }
                 Mode::Settings => self.handle_settings_key(key_event),
                 Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
-                Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key_event),
+                Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
                 Mode::Navigator => {
                     handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
                 }
                 Mode::Terminal => unreachable!(),
             },
+        }
+        None
+    }
+
+    pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.state.popup_pane.is_some() {
+            if let Some(runtime) = self.popup_runtime() {
+                let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
+            } else {
+                self.close_popup_pane();
+            }
+            return;
+        }
+        if self.state.mode != Mode::Terminal {
+            self.paste_into_active_text_input(text);
+            return;
+        }
+
+        self.state.clear_selection();
+        self.selection_autoscroll_deadline = None;
+        self.state.update_dismissed = true;
+        if let Some(ws_idx) = self.state.active {
+            if let Some(runtime) = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            {
+                let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
+            }
+        }
+    }
+
+    pub(super) async fn handle_text_commit(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if self.state.popup_pane.is_some() {
+            if let Some(runtime) = self.popup_runtime() {
+                let _ = runtime.send_bytes(Bytes::from(text)).await;
+            } else {
+                self.close_popup_pane();
+            }
+            return;
+        }
+        if self.state.mode != Mode::Terminal {
+            self.paste_into_active_text_input(&text);
+            return;
+        }
+
+        self.state.clear_selection();
+        self.selection_autoscroll_deadline = None;
+        self.state.update_dismissed = true;
+        if let Some(ws_idx) = self.state.active {
+            if let Some(runtime) = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            {
+                let _ = runtime.send_bytes(Bytes::from(text)).await;
+            }
         }
     }
 
@@ -251,6 +318,13 @@ impl App {
                 insert_navigator_search_text(&mut self.state, &self.terminal_runtimes, text);
                 true
             }
+            Mode::KeybindHelp => {
+                if !self.state.keybind_help.search_focused {
+                    return false;
+                }
+                insert_keybind_help_query_text(&mut self.state, text);
+                true
+            }
             Mode::Copy => {
                 let Some(prompt) = self
                     .state
@@ -335,6 +409,31 @@ impl App {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        self.handle_mouse_from_input_source(super::LOCAL_INPUT_SOURCE, mouse);
+    }
+
+    pub(super) fn handle_mouse_from_input_source(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+    ) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.pending_url_click_sources.remove(&source_id);
+            }
+            MouseEventKind::Drag(MouseButton::Left)
+                if self.pending_url_click_sources.contains(&source_id) =>
+            {
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left)
+                if self.pending_url_click_sources.remove(&source_id) =>
+            {
+                return;
+            }
+            _ => {}
+        }
+
         if self.state.popup_pane.is_some() {
             self.handle_popup_mouse(mouse);
             return;
@@ -363,36 +462,18 @@ impl App {
             }
         }
 
-        if self.handle_modified_url_click(mouse) {
+        if self.handle_modified_url_click(source_id, mouse) {
             return;
         }
 
         let handled_pane_double_click = self.handle_pane_double_click(mouse);
+        if !handled_pane_double_click {
+            self.focus_pane_before_mouse_press(mouse);
+        }
 
         let previous_agent_panel_sort = self.state.agent_panel_sort;
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
-            let right_button = matches!(
-                mouse.kind,
-                MouseEventKind::Down(MouseButton::Right)
-                    | MouseEventKind::Up(MouseButton::Right)
-                    | MouseEventKind::Drag(MouseButton::Right)
-            );
-            let intentional_pane_press = matches!(
-                mouse.kind,
-                MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
-            );
-            if !right_button
-                && intentional_pane_press
-                && matches!(self.state.mode, Mode::Terminal | Mode::Resize)
-            {
-                if let (Some(ws_idx), Some(info)) = (
-                    self.state.active,
-                    self.state.pane_at(mouse.column, mouse.row).cloned(),
-                ) {
-                    self.focus_pane_internal_via_api(ws_idx, info.id);
-                }
-            }
             if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
                 match action {
                     MouseAction::NewWorkspace => {
@@ -406,12 +487,6 @@ impl App {
                         }
                         SettingsAction::SaveAgentBorderLabels(enabled) => {
                             self.save_agent_border_labels(enabled)
-                        }
-                        SettingsAction::SavePaneHistory(enabled) => {
-                            self.save_pane_history_persistence(enabled)
-                        }
-                        SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
-                            self.save_switch_ascii_input_source_in_prefix(enabled)
                         }
                         SettingsAction::InstallRecommendedIntegrations => {
                             self.install_recommended_integrations()
@@ -429,6 +504,9 @@ impl App {
                         source_ws_idx,
                         insert_idx,
                     } => self.move_workspace_via_api(source_ws_idx, insert_idx),
+                    MouseAction::MoveWorkspaceBlock { params } => {
+                        self.move_workspace_block_via_api(params)
+                    }
                     MouseAction::MoveTab {
                         ws_idx,
                         source_tab_idx,
@@ -465,18 +543,7 @@ impl App {
             self.save_agent_panel_sort(self.state.agent_panel_sort);
         }
 
-        if let Some(content) = self.state.request_clipboard_write.take() {
-            if self
-                .event_tx
-                .try_send(crate::events::AppEvent::ClipboardWrite {
-                    content,
-                    origin: None,
-                })
-                .is_err()
-            {
-                tracing::warn!("failed to queue clipboard write event");
-            }
-        }
+        self.dispatch_pending_clipboard_write();
 
         // Sync autoscroll deadline with state (mouse handler may have
         // set or cleared selection_autoscroll during handle_mouse).
@@ -538,13 +605,44 @@ impl App {
         let Some(bytes) = bytes else {
             return;
         };
-        rt.scroll_reset();
+        if !matches!(mouse.kind, MouseEventKind::Moved) {
+            rt.scroll_reset();
+        }
         if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
             warn!(err = %err, kind = ?mouse.kind, "failed to forward popup mouse event");
         }
     }
 
-    fn handle_modified_url_click(&mut self, mouse: MouseEvent) -> bool {
+    fn focus_pane_before_mouse_press(&mut self, mouse: MouseEvent) {
+        if !matches!(self.state.mode, Mode::Terminal | Mode::Resize)
+            || !matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
+            )
+        {
+            return;
+        }
+
+        let Some(pane_id) = self
+            .state
+            .pane_at(mouse.column, mouse.row)
+            .map(|info| info.id)
+        else {
+            return;
+        };
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+
+        // Focus through the runtime API before an application can consume its press.
+        self.focus_pane_internal_via_api(ws_idx, pane_id);
+    }
+
+    fn handle_modified_url_click(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+    ) -> bool {
         if self.state.mode != Mode::Terminal
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             || !mouse.modifiers.contains(modified_url_click_modifier())
@@ -565,6 +663,7 @@ impl App {
         };
 
         self.last_pane_click = None;
+        self.pending_url_click_sources.insert(source_id);
         match self.invoke_plugin_link_handler_for_url(&url, info.id) {
             Ok(true) => return true,
             Ok(false) => {}
@@ -611,14 +710,12 @@ impl App {
         };
 
         // Require the second click to land near the first click in the same pane
-        // and within the double-click window so adjacent interactions do not copy.
+        // and within the double-click window so adjacent interactions do not select a word.
         if !self.take_pane_double_click(click) {
             return false;
         }
 
-        // Preserve a short highlight after copying so the user gets visible
-        // confirmation without leaving a persistent selection behind.
-        self.copy_double_clicked_word(click)
+        self.select_double_clicked_word(click)
     }
 
     fn pane_click_candidate(&mut self, mouse: MouseEvent) -> Option<PaneClickState> {
@@ -662,18 +759,20 @@ impl App {
         true
     }
 
-    fn copy_double_clicked_word(&mut self, click: PaneClickState) -> bool {
-        let copied = self.state.copy_word_at_pane_cell(
+    fn select_double_clicked_word(&mut self, click: PaneClickState) -> bool {
+        let selected = self.state.select_word_at_pane_cell(
             &self.terminal_runtimes,
             click.pane_id,
             click.viewport_row,
             click.col,
         );
-        if copied {
-            self.selection_highlight_clear_deadline =
-                Some(std::time::Instant::now() + super::PANE_COPY_HIGHLIGHT_DURATION);
+        if selected {
+            self.selection_highlight_clear_deadline = self
+                .state
+                .copy_on_select
+                .then(|| std::time::Instant::now() + super::PANE_COPY_HIGHLIGHT_DURATION);
         }
-        copied
+        selected
     }
 }
 
@@ -862,12 +961,12 @@ fn resolve_remote_paste_target(state: &AppState) -> Option<RemotePasteTarget> {
 #[cfg(unix)]
 pub(crate) fn remote_image_paste_decision(
     state: &AppState,
-    key: TerminalKey,
+    key: &TerminalKey,
 ) -> RemoteImagePasteDecision {
     let Some(binding) = state.remote_image_paste_key else {
         return RemoteImagePasteDecision::FallThrough;
     };
-    if !crate::config::terminal_key_matches_combo(key, binding) {
+    if !crate::config::terminal_key_matches_combo(&key, binding) {
         return RemoteImagePasteDecision::FallThrough;
     }
     let Some(target) = resolve_remote_paste_target(state) else {
@@ -1099,6 +1198,7 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
             .as_ref()
             .is_some_and(|open| open.search_focused),
         Mode::Navigator => state.navigator.search_focused,
+        Mode::KeybindHelp => state.keybind_help.search_focused,
         Mode::Copy => state
             .copy_mode
             .as_ref()
@@ -1131,8 +1231,12 @@ impl AppState {
             .and_then(|i| self.workspaces.get(i))
             .and_then(|ws| {
                 let tab = ws.active_tab()?;
-                let pane_id = tab.layout.focused();
-                tab.follow_cwd_for_pane(pane_id, &self.terminals, terminal_runtimes)
+                let terminal_id = tab.terminal_id(tab.layout.focused())?;
+                super::creation::launch_cwd_for_terminal(
+                    terminal_id,
+                    &self.terminals,
+                    terminal_runtimes,
+                )
             });
         let cwd = Some(super::creation::resolve_new_terminal_cwd(
             &self.new_terminal_cwd,
@@ -1151,6 +1255,7 @@ impl AppState {
                 cwd,
                 self.pane_scrollback_limit_bytes,
                 self.host_terminal_theme,
+                self.host_terminal_appearance,
                 crate::pane::PaneShellConfig::new(&self.default_shell, self.shell_mode),
                 Vec::new(),
             ) {
@@ -1300,6 +1405,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paste_routes_to_keybind_help_query_only_when_searching() {
+        let mut app = test_app();
+        app.state.mode = Mode::KeybindHelp;
+        app.handle_paste("ignored".into()).await;
+        assert!(app.state.keybind_help.query.is_empty());
+
+        app.state.keybind_help.search_focused = true;
+        app.state.keybind_help.scroll = 3;
+        app.handle_paste("work\nspace".into()).await;
+
+        assert_eq!(app.state.keybind_help.query, "workspace");
+        assert_eq!(app.state.keybind_help.scroll, 0);
+    }
+
+    #[tokio::test]
     async fn paste_routes_to_new_linked_worktree_input() {
         let mut app = test_app();
         app.state.mode = Mode::NewLinkedWorktree;
@@ -1364,6 +1484,12 @@ mod tests {
         state.navigator.search_focused = true;
         assert!(modal_paste_target_active(&state));
 
+        state.mode = Mode::KeybindHelp;
+        state.keybind_help.search_focused = false;
+        assert!(!modal_paste_target_active(&state));
+        state.keybind_help.search_focused = true;
+        assert!(modal_paste_target_active(&state));
+
         state.mode = Mode::ConfirmClose;
         assert!(!modal_paste_target_active(&state));
     }
@@ -1383,7 +1509,6 @@ mod remote_image_paste_tests {
     use crate::workspace::Workspace;
     use bytes::Bytes;
     use std::collections::BTreeSet;
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::sync::Notify;
@@ -1459,7 +1584,7 @@ mod remote_image_paste_tests {
             clipboard_tx,
             events_tx,
             Arc::new(Notify::new()),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(crate::render_signal::RenderSignal::new()),
         )
         .expect("a remote runtime needs no local PTY");
         app.terminal_runtimes.insert(terminal_id, runtime);
@@ -1537,7 +1662,7 @@ mod remote_image_paste_tests {
         let (pane_id, _out_rx) = attach_remote_mount(&mut app, true);
 
         assert_eq!(
-            remote_image_paste_decision(&app.state, ctrl_v()),
+            remote_image_paste_decision(&app.state, &ctrl_v()),
             RemoteImagePasteDecision::Capture {
                 ws_idx: 0,
                 target_pane_id: pane_id,
@@ -1549,14 +1674,14 @@ mod remote_image_paste_tests {
         assert_eq!(
             remote_image_paste_decision(
                 &app.state,
-                TerminalKey::new(KeyCode::Char('x'), KeyModifiers::CONTROL)
+                &TerminalKey::new(KeyCode::Char('x'), KeyModifiers::CONTROL)
             ),
             RemoteImagePasteDecision::FallThrough
         );
         // Neither is any key at all once the binding is cleared.
         app.state.remote_image_paste_key = None;
         assert_eq!(
-            remote_image_paste_decision(&app.state, ctrl_v()),
+            remote_image_paste_decision(&app.state, &ctrl_v()),
             RemoteImagePasteDecision::FallThrough
         );
     }
@@ -1586,7 +1711,7 @@ mod remote_image_paste_tests {
         let (_pane_id, mut rx) = attach_local_pane(&mut app);
 
         assert_eq!(
-            remote_image_paste_decision(&app.state, ctrl_v()),
+            remote_image_paste_decision(&app.state, &ctrl_v()),
             RemoteImagePasteDecision::FallThrough
         );
 
@@ -1626,7 +1751,7 @@ mod remote_image_paste_tests {
         assert_eq!(
             remote_image_paste_decision(
                 &app.state,
-                TerminalKey::new(KeyCode::Down, KeyModifiers::empty())
+                &TerminalKey::new(KeyCode::Down, KeyModifiers::empty())
             ),
             RemoteImagePasteDecision::FallThrough
         );
@@ -1645,7 +1770,7 @@ mod remote_image_paste_tests {
         let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, false);
 
         assert_eq!(
-            remote_image_paste_decision(&app.state, ctrl_v()),
+            remote_image_paste_decision(&app.state, &ctrl_v()),
             RemoteImagePasteDecision::Unsupported
         );
 
@@ -1669,7 +1794,7 @@ mod remote_image_paste_tests {
         let mut app = test_app();
         let (pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
         assert_eq!(
-            remote_image_paste_decision(&app.state, ctrl_v()),
+            remote_image_paste_decision(&app.state, &ctrl_v()),
             RemoteImagePasteDecision::Capture {
                 ws_idx: 0,
                 target_pane_id: pane_id,
@@ -2103,7 +2228,7 @@ mod remote_image_paste_tests {
         let mut app = test_app();
         let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
         assert!(matches!(
-            remote_image_paste_decision(&app.state, ctrl_v()),
+            remote_image_paste_decision(&app.state, &ctrl_v()),
             RemoteImagePasteDecision::Capture { .. }
         ));
 
