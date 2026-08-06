@@ -23,7 +23,11 @@ pub struct HostKey(String);
 impl HostKey {
     /// Builds a `HostKey` from a `user@ip`-style address and a session
     /// discriminator. Neither component may contain `:`, since that is the
-    /// separator used in the public id encoding.
+    /// separator used in the public id encoding, and `user_at_ip` should not
+    /// contain `#`, which [`HostKey::host_address`] treats as the boundary
+    /// between the two components when splitting the address back out for
+    /// display. Identity is unaffected either way — comparisons use the whole
+    /// string — so a `#` in the address degrades display only.
     pub fn new(user_at_ip: impl Into<String>, session_discriminator: impl Into<String>) -> Self {
         Self(format!(
             "{}#{}",
@@ -228,6 +232,19 @@ mod tests {
             server_instance_id: ServerInstanceId(instance.to_string()),
             mount_generation: generation,
         }
+    }
+
+    #[test]
+    fn host_address_strips_the_session_discriminator_without_touching_identity() {
+        let one = HostKey::new("alice@10.0.0.1", "s1");
+        let two = HostKey::new("alice@10.0.0.1", "s2");
+
+        assert_eq!(one.host_address(), "alice@10.0.0.1");
+        assert_eq!(two.host_address(), "alice@10.0.0.1");
+        // Same address, different sessions: identical for display, distinct for
+        // identity. Anything comparing `host_address` would conflate them.
+        assert_ne!(one, two);
+        assert_ne!(one.as_str(), two.as_str());
     }
 
     #[test]
