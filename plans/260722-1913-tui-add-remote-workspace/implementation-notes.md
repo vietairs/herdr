@@ -200,3 +200,15 @@
   `assertion 'left == right' failed / left: ["different-host"] / right: ["already-mounted-host"]`;
   restoring the guard makes it pass. Full `remote_mount` suite (17 tests) green after restore.
   Reversibility: trivial, revert to the pre-fix test body if this scenario is unwanted.
+
+## 260724-1405 headless server bypassed bracketed-paste image interception
+- What: wired `bracketed_paste_image_decision` into the headless server's `RawInputEvent::Paste` arm (src/app/mod.rs ~1766), which called `try_send_paste` directly; made `TOAST_REMOTE_TOO_OLD` pub(crate).
+- Why: live cmd+v on a remote pane pasted the local `$TMPDIR/clipboard-*.png` path as dead text — only `App::handle_paste` (runtime path) had the interception; server mode never calls it. Debug log showed Paste parsed but zero decision debug lines.
+- Evidence: herdr-server.log 03:58:33 `event=Paste("/var/folders/.../clipboard-...png")` with no follow-up; bracketed_paste 15/15 + remote_image_paste 21/21 green after fix.
+- Reversibility: single additive block, `intercepted` flag (no early return, preserves queued-event processing); revert by deleting the block.
+
+## 260724-1420 pre-ship review: off-loop read + fd-pinned containment
+- What: bracketed-paste bridge no longer reads the file inside the decision; Capture carries path+extension, both call sites route through begin_remote_clipboard_image_capture (spawn_blocking); new image_path::read_verified_image_drop_file opens first then compares (dev,ino) of the fd vs the temp-dir-contained canonical path; read_local_image_file now single-open fd-based.
+- Why: parallel review found (a) sync up-to-16MiB read on the App event loop violating the codebase's own spawn_blocking invariant, (b) canonicalize-then-reopen symlink-swap TOCTOU that could exfiltrate an out-of-temp file to the remote.
+- Evidence: review workflow wf_cb18000f-bcf findings; suites green after fix: image_path 18, bracketed_paste 15, remote_image_paste 21.
+- Reversibility: additive helper + variant shape change; revert restores sync read.

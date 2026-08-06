@@ -1,0 +1,1 @@
+- 260724-1536-federation-pane-close-sync — COMPLETE 2026-07-24 — shipped as PR #7 (merge 46316fde): bidirectional federation pane-close sync, protocol v3→4; live-verified on vm-100/105

@@ -1,0 +1,43 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Ship-Gate — Federation Pane-Close Sync</title>
+<style>
+body{font-family:-apple-system,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a}
+h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:2rem;border-bottom:1px solid #ddd;padding-bottom:.3rem}
+table{border-collapse:collapse;width:100%;font-size:.85rem}th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left;vertical-align:top}
+th{background:#f4f4f4}code{background:#f0f0f0;padding:.1em .3em;border-radius:3px;font-size:.85em}
+.ok{color:#0a7a2f;font-weight:600}.warn{color:#b26a00;font-weight:600}
+</style></head><body>
+<h1>Ship-Gate Explainer — Federation Pane-Close Sync (protocol v3→4)</h1>
+
+<h2>TL;DR</h2>
+<p>Closing a pane now works bidirectionally across a herdr federation link. A close on a mirrored remote pane sends a <code>ClosePaneRequest</code> over the Control channel to the serving host (Gap A), and a pane removed on the serving host now tears down its mirror on the client even for mount-time panes (Gap B — a bug in the existing resync index, fixed by registering panes at build time). Protocol version bumped 3→4 because v3 shipped in release <code>v0.7.5-hvn.1</code>.</p>
+
+<h2>Context</h2>
+<p>Plan: <code>plans/260724-1536-federation-pane-close-sync/plan.md</code>. Prior workaround was closing the pane over ssh and remounting. Memory note <em>herdr-federation-no-pane-close-wire-message</em> documented the gap; this diff closes it.</p>
+
+<h2>Intuition</h2>
+<p>The close path mirrors the existing SplitPane pattern end-to-end: client resolves the pane target, mints a pending-close entry, sends <code>ClosePaneRequest</code>; the serving host resolves and closes locally (refusing, read-only, any close that would need a local confirmation modal — federation origin can never answer one); response comes back as <code>ClosePaneReady</code>/<code>Failed</code>, with a structured <code>pane_not_found:</code> reason folded into idempotent success. Gap B fix: <code>build_remote_pane</code> now populates <code>remote_resync_pane_index</code> so the existing removal handler covers mount-time panes.</p>
+
+<h2>Blast Radius</h2>
+<ul>
+<li><b>Wire protocol v4</b> — both ends (local + VM servers) must be rebuilt together after merge; a v3 server will refuse v4 mounts.</li>
+<li>Touched: protocol types/codec, federation actor + accept loop on the server, client dispatch, app close path (<code>app/api/panes.rs</code>), pane creation/teardown (<code>creation.rs</code>), loopback test fixture.</li>
+<li>Known documented limitation: chained mounts (A→B→C) close propagation — pre-existing, documented, not fixed here.</li>
+<li>No suspicious embedded content, no secrets in the diff.</li>
+</ul>
+
+<h2>Predicted-vs-Actual</h2>
+<table><tr><th>Risk</th><th>Severity</th><th>Handling</th><th>Verdict</th></tr>
+<tr><td>Gap B premise stale</td><td>Medium</td><td>TDD regression test proves gap before fix (creation.rs tests)</td><td class="ok">handled</td></tr>
+<tr><td>v3 already deployed → bump needed</td><td>High</td><td>Bumped 3→4 with git-evidence doc comment (89f40780 ∈ v0.7.5-hvn.1)</td><td class="ok">handled</td></tr>
+<tr><td>Double-close race / not-found fold</td><td>High</td><td>Idempotent handler + structured <code>pane_not_found:</code> fold + race test</td><td class="ok">handled</td></tr>
+<tr><td>Pane-identity raw-index misuse</td><td>High</td><td><code>resolve_terminal_target</code> first, parse fallback — mirrors split</td><td class="ok">handled</td></tr>
+<tr><td>Focus/layout fallout on federation close</td><td>Medium</td><td>Federation-origin close refused read-only; no mode/selection mutation; tested</td><td class="ok">handled</td></tr>
+</table>
+
+<h2>Plan-vs-Shipped</h2>
+<p>All 8 phases shipped. 7 as-planned; 1 deviation, logged in impl-notes entry 2: the pre-existing test <code>resync_pane_created_from_the_wrong_origin_is_dropped</code> updated from <code>is_empty()</code> to <code>!contains_key(...)</code> because the index now legitimately holds mount-time entries. Full 22-row audit table in the cross-check report (all rows evidence-quoted, zero SILENTLY DIVERGENT, zero dropped).</p>
+
+<h2>Verification</h2>
+<p>3165 tests passed; 1 failure is the known pre-existing AddrInUse port flake (passes in isolation). <code>cargo fmt</code> and <code>cargo check</code> clean.</p>
+</body></html>
