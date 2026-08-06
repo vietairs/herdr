@@ -403,7 +403,7 @@ pub(crate) struct SplitMaterializationContext {
     pub(crate) host_terminal_theme: crate::terminal_theme::TerminalTheme,
     pub(crate) events: mpsc::Sender<crate::events::AppEvent>,
     pub(crate) render_notify: std::sync::Arc<tokio::sync::Notify>,
-    pub(crate) render_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) render_dirty: std::sync::Arc<crate::render_signal::RenderSignal>,
     /// This mount's own `HostKey`, stamped onto every `FederationSplitPaneReady`/
     /// `FederationSplitPaneFailed` this drive task emits. `App` compares it
     /// against the originating `PendingRemoteSplit::origin` before splicing a
@@ -1960,7 +1960,7 @@ mod tests {
             origin: crate::remote::federation::id::HostKey::new("test-host", "s1"),
             events: events_tx,
             render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-            render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            render_dirty: std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
         };
         let hub = EventHub::default();
         let _ = tokio::time::timeout(
@@ -2129,7 +2129,7 @@ mod tests {
             origin: this_host_key.clone(),
             events: events_tx,
             render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-            render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            render_dirty: std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
         };
         let hub = EventHub::default();
         let _ = tokio::time::timeout(
@@ -2297,7 +2297,7 @@ mod tests {
             origin: this_host_key.clone(),
             events: events_tx,
             render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-            render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            render_dirty: std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
         };
         let hub = EventHub::default();
         let _ = tokio::time::timeout(
@@ -2453,7 +2453,7 @@ mod tests {
             origin: this_host_key.clone(),
             events: events_tx,
             render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-            render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            render_dirty: std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
         };
         let hub = EventHub::default();
         let _ = tokio::time::timeout(
@@ -2788,7 +2788,7 @@ mod tests {
             origin: origin.clone(),
             events: events_tx,
             render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-            render_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            render_dirty: std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
         };
         let hub = EventHub::default();
         let _ = tokio::time::timeout(

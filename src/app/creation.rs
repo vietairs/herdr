@@ -42,6 +42,24 @@ pub(crate) fn resolve_new_terminal_cwd(
     }
 }
 
+pub(super) fn launch_cwd_for_terminal(
+    terminal_id: &crate::terminal::TerminalId,
+    terminals: &std::collections::HashMap<
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+    >,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+) -> Option<PathBuf> {
+    terminal_runtimes
+        .get(terminal_id)
+        .and_then(|runtime| runtime.follow_cwd())
+        .or_else(|| {
+            terminals
+                .get(terminal_id)
+                .map(|terminal| terminal.cwd.clone())
+        })
+}
+
 impl App {
     pub(super) fn seed_cwd_from_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         self.state
@@ -50,15 +68,17 @@ impl App {
             .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
     }
 
-    pub(super) fn follow_cwd_for_pane_in_workspace(
+    pub(super) fn launch_cwd_for_pane_in_workspace(
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) -> Option<PathBuf> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
-        ws.tabs.get(tab_idx)?.follow_cwd_for_pane(
-            pane_id,
+        let workspace = self.state.workspaces.get(ws_idx)?;
+        let tab = workspace
+            .tabs
+            .get(workspace.find_tab_index_for_pane(pane_id)?)?;
+        launch_cwd_for_terminal(
+            tab.terminal_id(pane_id)?,
             &self.state.terminals,
             &self.terminal_runtimes,
         )
@@ -66,7 +86,7 @@ impl App {
 
     pub(super) fn focused_pane_cwd_in_workspace(&self, ws_idx: usize) -> Option<PathBuf> {
         let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
-        self.follow_cwd_for_pane_in_workspace(ws_idx, pane_id)
+        self.launch_cwd_for_pane_in_workspace(ws_idx, pane_id)
     }
 
     pub(super) fn resolve_new_terminal_cwd(&self, follow_cwd: Option<PathBuf>) -> PathBuf {
@@ -188,6 +208,7 @@ impl App {
             initial_cwd,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
+            self.state.host_terminal_appearance,
             crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
             Vec::new(),
         )?;
@@ -241,6 +262,7 @@ impl App {
             cols,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
+            self.state.host_terminal_appearance,
             crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
             self.event_tx.clone(),
             self.render_notify.clone(),
@@ -1011,8 +1033,7 @@ impl App {
         }
         self.emit_layout_updated_event(ws_idx, tab_idx);
 
-        self.render_dirty
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
 
@@ -1068,8 +1089,7 @@ impl App {
             }
             _ => {}
         }
-        self.render_dirty
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
 
@@ -1167,8 +1187,7 @@ impl App {
             }
         }
 
-        self.render_dirty
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
 
@@ -1227,8 +1246,7 @@ impl App {
             }
             _ => {}
         }
-        self.render_dirty
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
 
@@ -1332,8 +1350,7 @@ impl App {
         }
         self.emit_layout_updated_event(ws_idx, tab_idx);
 
-        self.render_dirty
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
 
@@ -1423,8 +1440,7 @@ impl App {
             }
         }
 
-        self.render_dirty
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
 }
@@ -1725,7 +1741,7 @@ mod federation_materialization_tests {
         let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
         let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
         let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let render_dirty = std::sync::Arc::new(crate::render_signal::RenderSignal::new());
 
         let pane_id = crate::layout::PaneId::alloc();
         let terminal_id = crate::terminal::TerminalId::alloc();
@@ -1806,7 +1822,7 @@ mod federation_materialization_tests {
         let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
         let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
         let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let render_dirty = std::sync::Arc::new(crate::render_signal::RenderSignal::new());
 
         let pane_id = crate::layout::PaneId::alloc();
         let terminal_id = crate::terminal::TerminalId::alloc();
@@ -2046,7 +2062,7 @@ mod federation_materialization_tests {
         let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
         let (rt_clipboard_tx, _rt_clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
         let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let render_dirty = std::sync::Arc::new(crate::render_signal::RenderSignal::new());
 
         let local_pane_id = crate::layout::PaneId::alloc();
         let terminal_id = crate::terminal::TerminalId::alloc();
@@ -2127,7 +2143,7 @@ mod federation_materialization_tests {
         let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
         let (rt_clipboard_tx, _rt_clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
         let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let render_dirty = std::sync::Arc::new(crate::render_signal::RenderSignal::new());
 
         let local_pane_id = crate::layout::PaneId::alloc();
         let terminal_id = crate::terminal::TerminalId::alloc();
@@ -2207,7 +2223,7 @@ mod federation_materialization_tests {
         let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
         let (rt_clipboard_tx, _rt_clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
         let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let render_dirty = std::sync::Arc::new(crate::render_signal::RenderSignal::new());
 
         let local_pane_id = crate::layout::PaneId::alloc();
         let terminal_id = crate::terminal::TerminalId::alloc();
@@ -2413,7 +2429,7 @@ mod federation_materialization_tests {
         let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
         let (rt_clipboard_tx, _rt_clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
         let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let render_dirty = std::sync::Arc::new(crate::render_signal::RenderSignal::new());
 
         let local_pane_id = crate::layout::PaneId::alloc();
         let terminal_id = crate::terminal::TerminalId::alloc();
