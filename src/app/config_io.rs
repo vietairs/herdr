@@ -108,19 +108,6 @@ impl App {
         }
     }
 
-    pub(super) fn save_switch_ascii_input_source_in_prefix(&mut self, enabled: bool) {
-        if self.update_config_file("prefix ascii input source", |content| {
-            crate::config::upsert_section_bool(
-                content,
-                "experimental",
-                "switch_ascii_input_source_in_prefix",
-                enabled,
-            )
-        }) {
-            self.apply_config_from_disk(false);
-        }
-    }
-
     /// Persists the recent remote-mount targets list (most-recent-first,
     /// already deduped/capped by the caller) as a TOML string array under
     /// `[ui]`.

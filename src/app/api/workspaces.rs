@@ -1,11 +1,9 @@
 use std::path::PathBuf;
-#[cfg(unix)]
-use std::sync::atomic::Ordering;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
-    WorkspaceMountRemoteParams, WorkspaceMoveParams, WorkspaceRenameParams,
-    WorkspaceReportMetadataParams, WorkspaceTarget,
+    WorkspaceMountRemoteParams, WorkspaceMoveBlockParams, WorkspaceMoveParams,
+    WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget,
 };
 use crate::app::App;
 #[cfg(unix)]
@@ -290,7 +288,7 @@ impl App {
         // and must never be mistaken for "success").
         self.record_successful_remote_mount_target(&target);
 
-        self.render_dirty.store(true, Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
 
         let event_hub = self.event_hub.clone();
@@ -429,7 +427,7 @@ impl App {
             }
             _ => {}
         }
-        self.render_dirty.store(true, Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
 
         // Correlate this failure back to the mount dialog, if one is open and
@@ -517,7 +515,7 @@ impl App {
                 .is_some_and(|space| space.key == space_key)
         }) else {
             tracing::warn!(%target, %reason, "federation mount ended but no workspaces to remove");
-            self.render_dirty.store(true, Ordering::Release);
+            self.render_dirty.request_generic();
             self.render_notify.notify_one();
             return;
         };
@@ -572,7 +570,7 @@ impl App {
             });
         }
 
-        self.render_dirty.store(true, Ordering::Release);
+        self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
 
@@ -712,6 +710,76 @@ impl App {
                 data: EventData::WorkspaceMoved {
                     workspace_id,
                     insert_index,
+                    workspaces: workspaces.clone(),
+                },
+            });
+        }
+
+        encode_success(id, ResponseResult::WorkspaceList { workspaces })
+    }
+
+    pub(super) fn handle_workspace_move_block(
+        &mut self,
+        id: String,
+        params: WorkspaceMoveBlockParams,
+    ) -> String {
+        if params.workspace_ids.is_empty() {
+            return encode_error(
+                id,
+                "workspace_move_block_failed",
+                "workspace_ids must not be empty",
+            );
+        }
+
+        let mut workspace_ids = Vec::with_capacity(params.workspace_ids.len());
+        let mut seen_ids = std::collections::HashSet::new();
+        for requested_id in &params.workspace_ids {
+            let Some(index) = self.parse_workspace_id(requested_id) else {
+                return workspace_not_found(id, requested_id);
+            };
+            let Some(workspace) = self.state.workspaces.get(index) else {
+                return workspace_not_found(id, requested_id);
+            };
+            if !seen_ids.insert(workspace.id.clone()) {
+                return encode_error(
+                    id,
+                    "workspace_move_block_failed",
+                    format!("workspace {requested_id} appears more than once"),
+                );
+            }
+            workspace_ids.push(workspace.id.clone());
+        }
+
+        let before_workspace_id = match params.before_workspace_id {
+            Some(requested_id) => {
+                let Some(index) = self.parse_workspace_id(&requested_id) else {
+                    return workspace_not_found(id, &requested_id);
+                };
+                let Some(workspace) = self.state.workspaces.get(index) else {
+                    return workspace_not_found(id, &requested_id);
+                };
+                if seen_ids.contains(&workspace.id) {
+                    return encode_error(
+                        id,
+                        "workspace_move_block_failed",
+                        "before_workspace_id must not be part of workspace_ids",
+                    );
+                }
+                Some(workspace.id.clone())
+            }
+            None => None,
+        };
+
+        let moved = self
+            .state
+            .move_workspace_block(&workspace_ids, before_workspace_id.as_deref());
+        let workspaces = self.workspace_list_info();
+        if moved {
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceReordered,
+                data: EventData::WorkspaceReordered {
+                    workspace_ids,
+                    before_workspace_id,
                     workspaces: workspaces.clone(),
                 },
             });
@@ -1169,6 +1237,59 @@ mod tests {
                     && workspaces[2].workspace_id == moved_id
             )
         }));
+    }
+
+    #[test]
+    fn api_workspace_move_block_reorders_atomically() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![
+            Workspace::test_new("child"),
+            Workspace::test_new("normal"),
+            Workspace::test_new("parent"),
+            Workspace::test_new("tail"),
+        ];
+        let parent_id = app.public_workspace_id(2);
+        let child_id = app.public_workspace_id(0);
+        let tail_id = app.public_workspace_id(3);
+
+        let response = app.handle_workspace_move_block(
+            "req".into(),
+            WorkspaceMoveBlockParams {
+                workspace_ids: vec![parent_id.clone(), child_id.clone()],
+                before_workspace_id: Some(tail_id.clone()),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorkspaceList { workspaces } = success.result else {
+            panic!("expected workspace list");
+        };
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.display_name())
+                .collect::<Vec<_>>(),
+            ["normal", "parent", "child", "tail"]
+        );
+        assert_eq!(workspaces[1].workspace_id, parent_id);
+        assert_eq!(workspaces[2].workspace_id, child_id);
+        let events = event_hub.events_after(0);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].1.data,
+            EventData::WorkspaceReordered {
+                workspace_ids,
+                before_workspace_id,
+                workspaces,
+            } if workspace_ids.first() == Some(&parent_id)
+                && workspace_ids.get(1) == Some(&child_id)
+                && workspace_ids.len() == 2
+                && before_workspace_id.as_deref() == Some(tail_id.as_str())
+                && workspaces[1].workspace_id == parent_id
+        ));
     }
 
     #[test]
@@ -2195,7 +2316,7 @@ mod tests {
         let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
         let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
         let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
-        let render_dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let render_dirty = std::sync::Arc::new(crate::render_signal::RenderSignal::new());
         let terminal_id = crate::terminal::TerminalId::alloc();
         let runtime = crate::terminal::TerminalRuntime::spawn_remote(
             crate::layout::PaneId::alloc(),

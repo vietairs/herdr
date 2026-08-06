@@ -102,6 +102,15 @@ impl RemoteTerminalSourceHandle {
         self.out_tx.clone()
     }
 
+    /// Clone of this pane's bounded input sender. `mpsc::Sender` is cheaply
+    /// cloneable and `'static`, unlike this handle itself (which owns
+    /// non-cloneable reader/forward `JoinHandle`s), so a caller that needs to
+    /// enqueue input from a detached task (e.g. delayed auto-submit) can hold
+    /// this clone instead of the whole handle.
+    pub(crate) fn input_tx(&self) -> mpsc::Sender<Bytes> {
+        self.input_tx.clone()
+    }
+
     /// Spawns the byte-in task (drains `output_rx`, calls `on_read`) and the
     /// input-forwarding task (drains a per-pane bounded queue onto the
     /// shared `out_tx`). Neither task touches a local child process or PTY
