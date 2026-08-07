@@ -86,7 +86,13 @@ export default defineConfig({
       ],
       components: {
         Banner: './src/components/Banner.astro',
+        // Head emits the pagefind version filter and Search scopes the index by
+        // locale and channel. Without both registered the site still builds, but
+        // every page loses its version filter and docs search silently mixes
+        // stable, preview, and archived results.
+        Head: './src/components/Head.astro',
         Header: './src/components/Header.astro',
+        Search: './src/components/Search.astro',
         Sidebar: './src/components/Sidebar.astro',
         SiteTitle: './src/components/SiteTitle.astro',
       },

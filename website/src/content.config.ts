@@ -2,20 +2,12 @@ import { defineCollection, z } from 'astro:content';
 import { glob } from 'astro/loaders';
 import { docsLoader } from '@astrojs/starlight/loaders';
 import { docsSchema } from '@astrojs/starlight/schema';
-
-const docsLocales = ['ja', 'zh-cn'];
-
-function docsPath({ entry }: { entry: string }) {
-  const slug = entry.replace(/\.(md|mdx|markdown|mdown|mkdn|mkd|mdwn)$/i, '');
-  const normalized = slug.replace(/\/index$/, '');
-  for (const locale of docsLocales) {
-    if (normalized === locale) return `${locale}/docs`;
-    if (normalized.startsWith(`${locale}/`)) {
-      return `${locale}/docs/${normalized.slice(locale.length + 1)}`;
-    }
-  }
-  return normalized === 'index' ? 'docs' : `docs/${normalized}`;
-}
+// Single source of truth for docs slugs. A local copy here loses the `preview`
+// and `_versions/<version>` prefix handling, which silently routes archived
+// docs to /docs/_versions/<version>/ instead of /docs/<version>/ — it still
+// builds, and docs-path.test.ts still passes, because the test covers the
+// shared helper rather than whatever the loader happens to call.
+import { docsPath } from './docs-path';
 
 export const collections = {
   docs: defineCollection({ loader: docsLoader({ generateId: docsPath }), schema: docsSchema() }),
