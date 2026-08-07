@@ -1491,6 +1491,9 @@ async fn run_client_loop(
                     info!(
                         "clipboard image paste trigger received, but local clipboard has no image"
                     );
+                    if suppress_unbridged_clipboard_image_trigger(&data, is_remote_client) {
+                        continue;
+                    }
                 }
                 if let Some(image) = read_image_file_from_terminal_drop(&data, is_remote_client) {
                     info!(
@@ -1851,19 +1854,48 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
     }
 }
 
+/// An image paste that carries no text payload, as some host terminals report
+/// `Cmd+V` with an image-only clipboard (measured on Warp).
+#[cfg(unix)]
+const EMPTY_BRACKETED_PASTE: &[u8] = b"\x1b[200~\x1b[201~";
+
+/// Whether an unbridgeable trigger must be swallowed instead of forwarded.
+///
+/// A `herdr --remote` client that claims one of these triggers and then finds
+/// no image on *its own* clipboard used to forward the raw bytes on. The
+/// server reads them as an image-paste trigger too, so it would answer by
+/// reading the **server host's** clipboard and staging whatever image happened
+/// to be sitting there — an image the person at this keyboard never saw.
+/// Keeping the empty paste here is free: it carries no payload, so nothing is
+/// lost by not delivering it.
+///
+/// Deliberately narrow. The configured key is still forwarded, because it also
+/// reaches panes that are not federated at all, where it is an ordinary
+/// keystroke the pane app expects (readline quoted-insert, vim visual-block);
+/// only the server knows whether the focused pane is federated, and it cannot
+/// yet tell a remote client's input from a local one.
+#[cfg(unix)]
+fn suppress_unbridged_clipboard_image_trigger(data: &[u8], is_remote_client: bool) -> bool {
+    is_remote_client && data == EMPTY_BRACKETED_PASTE
+}
+
 #[cfg(unix)]
 fn should_bridge_clipboard_image_paste(
     data: &[u8],
     is_remote_client: bool,
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
 ) -> bool {
-    if data == b"\x1b[200~\x1b[201~" {
-        return is_remote_client;
-    }
-
     let Some(remote_image_paste_key) = remote_image_paste_key else {
+        // An unset binding turns the whole feature off, both triggers with it.
+        // Reading the clipboard for the empty paste here would leave the off
+        // switch half-connected: the server-side gate would be honoured while
+        // a `herdr --remote` client kept staging images behind it.
         return false;
     };
+
+    if data == EMPTY_BRACKETED_PASTE {
+        return is_remote_client;
+    }
 
     let events = crate::raw_input::parse_raw_input_bytes_sync(data);
     matches!(
@@ -2322,6 +2354,14 @@ mod tests {
         assert!(should_bridge_clipboard_image_paste(
             b"\x1b[200~\x1b[201~",
             true,
+            Some(ctrl_v)
+        ));
+        // An unset binding is the feature's off switch and governs both
+        // triggers. Without this the switch would be half-connected: the
+        // server would honour it while a remote client kept bridging.
+        assert!(!should_bridge_clipboard_image_paste(
+            b"\x1b[200~\x1b[201~",
+            true,
             None
         ));
         assert!(!should_bridge_clipboard_image_paste(
@@ -2339,6 +2379,33 @@ mod tests {
             b"v",
             true,
             Some(ctrl_v)
+        ));
+    }
+
+    /// A `herdr --remote` client whose own clipboard holds no image must not
+    /// let the empty paste through: the server would answer it by reading the
+    /// *server host's* clipboard and staging an image the person at this
+    /// keyboard never saw.
+    #[cfg(unix)]
+    #[test]
+    fn an_unbridged_empty_paste_is_swallowed_only_for_a_remote_client() {
+        assert!(suppress_unbridged_clipboard_image_trigger(
+            b"\x1b[200~\x1b[201~",
+            true
+        ));
+        // A local client's server *is* this machine, so its clipboard is the
+        // user's own; the empty paste still goes on and the feature still
+        // works from a plain local session.
+        assert!(!suppress_unbridged_clipboard_image_trigger(
+            b"\x1b[200~\x1b[201~",
+            false
+        ));
+        // Narrow on purpose: the configured key also reaches non-federated
+        // panes as an ordinary keystroke, so it is still forwarded.
+        assert!(!suppress_unbridged_clipboard_image_trigger(&[0x16], true));
+        assert!(!suppress_unbridged_clipboard_image_trigger(
+            b"\x1b[200~text\x1b[201~",
+            true
         ));
     }
 

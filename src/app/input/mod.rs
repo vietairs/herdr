@@ -92,43 +92,13 @@ impl App {
 
         // A `keys.remote_image_paste` press only belongs to this intercept
         // when the focused pane really is a pane of a live mounted remote
-        // workspace. Anything else falls through untouched into the mode
-        // dispatch below, so a local `ctrl+v` still reaches the pane app that
-        // wants it (readline quoted-insert, vim visual-block) and every
-        // non-terminal mode keeps its own keymap.
+        // workspace whose peer can stage files. Anything else falls through
+        // untouched into the mode dispatch below, so a local `ctrl+v` still
+        // reaches the pane app that wants it (readline quoted-insert, vim
+        // visual-block) and every non-terminal mode keeps its own keymap.
         #[cfg(unix)]
-        {
-            let decision = remote_image_paste_decision(&self.state, &key);
-            // Note the absence of a `FallThrough` branch: this block sits
-            // above `match self.state.mode`, so a default branch that
-            // returned would swallow every key this intercept did not claim.
-            if let RemoteImagePasteDecision::Unsupported = decision {
-                self.raise_clipboard_stage_toast(
-                    crate::app::remote_clipboard_stage::TOAST_TITLE_FAILED,
-                    TOAST_REMOTE_TOO_OLD,
-                );
-                return None;
-            }
-            if let RemoteImagePasteDecision::Capture {
-                ws_idx,
-                target_pane_id,
-            } = decision
-            {
-                // Reading the clipboard is unbounded synchronous OS work — a
-                // child `osascript` on macOS, a chain of `wl-paste`/`xclip`
-                // spawns on Linux — and this is the hot terminal key path, so
-                // doing it here would freeze rendering, every local and remote
-                // pane, and the API loop for as long as the clipboard owner
-                // takes to answer. It is started on a blocking thread instead
-                // and answers as an event. The key is still consumed right
-                // here, so the press never reaches the remote PTY.
-                self.begin_remote_clipboard_image_capture(
-                    ws_idx,
-                    target_pane_id,
-                    crate::platform::read_clipboard_image,
-                );
-                return None;
-            }
+        if self.dispatch_remote_image_paste_key(&key) == RemoteImagePasteKeyDisposition::Consume {
+            return None;
         }
 
         match self.state.mode {
@@ -239,39 +209,16 @@ impl App {
             return;
         }
 
-        // A bracketed paste landing on a federated remote pane may actually
-        // be a local screenshot: the terminal (iTerm2/Terminal.app "paste
-        // image as path") substitutes a local temp-file path for the image
-        // and delivers *that* as pasted text, not as the `ctrl+v` keybinding
-        // `remote_image_paste_decision` watches for. Forwarding that text
-        // verbatim sends a path that does not exist on the remote host. See
-        // `bracketed_paste_image_decision` for why an unmatched shape still
-        // falls through to the ordinary forward below.
+        // A bracketed paste landing on a federated remote pane may actually be
+        // a local clipboard image rather than text — either as a substituted
+        // temp-file path or as an empty paste. The shared intercept decides;
+        // anything it does not claim falls through to the ordinary forward
+        // below untouched.
         #[cfg(unix)]
         {
-            match bracketed_paste_image_decision(&self.state, &text) {
-                BracketedPasteImageDecision::Unsupported => {
-                    self.raise_clipboard_stage_toast(
-                        crate::app::remote_clipboard_stage::TOAST_TITLE_FAILED,
-                        TOAST_REMOTE_TOO_OLD,
-                    );
-                    return;
-                }
-                BracketedPasteImageDecision::Capture {
-                    ws_idx,
-                    target_pane_id,
-                    path,
-                    extension,
-                } => {
-                    // Off-loop like the ctrl+v clipboard read: the file can
-                    // be 16MiB, and a synchronous read here would stall
-                    // rendering and every pane for its duration.
-                    self.begin_remote_clipboard_image_capture(ws_idx, target_pane_id, move || {
-                        crate::image_path::read_verified_image_drop_file(&path, extension)
-                    });
-                    return;
-                }
-                BracketedPasteImageDecision::FallThrough => {}
+            if self.dispatch_bracketed_paste_image(&text) == RemoteImagePasteKeyDisposition::Consume
+            {
+                return;
             }
         }
 
@@ -870,11 +817,14 @@ pub(crate) fn spawn_clipboard_image_capture<F>(
 pub(crate) enum RemoteImagePasteDecision {
     /// Not this intercept's key. The press is left completely alone.
     FallThrough,
-    /// A mounted remote pane whose peer never agreed to file staging. The key
-    /// is still consumed: falling through would send a raw `Ctrl-V` to the
-    /// remote PTY and the user would be told nothing at all, because an old
-    /// peer cannot answer with a refusal it does not know how to send.
-    Unsupported,
+    /// A mounted remote pane whose peer never agreed to file staging. The
+    /// feature cannot work on this pane for the life of the mount, so the key
+    /// is *not* claimed: it goes on to the pane app as usual, and the reason
+    /// is reported once per pane so the press does not merely look ignored.
+    /// Carries the pane so that report can be de-duplicated.
+    Unsupported {
+        target_pane_id: crate::layout::PaneId,
+    },
     /// A mounted remote pane on a peer that can stage files.
     Capture {
         ws_idx: usize,
@@ -973,7 +923,9 @@ pub(crate) fn remote_image_paste_decision(
         return RemoteImagePasteDecision::FallThrough;
     };
     if !target.supports_file_staging {
-        return RemoteImagePasteDecision::Unsupported;
+        return RemoteImagePasteDecision::Unsupported {
+            target_pane_id: target.target_pane_id,
+        };
     }
     RemoteImagePasteDecision::Capture {
         ws_idx: target.ws_idx,
@@ -1048,6 +1000,230 @@ pub(crate) fn bracketed_paste_image_decision(
     }
 }
 
+/// What a remote image-paste intercept decided about one piece of local input
+/// — a key press or a bracketed paste payload — in the only terms its callers
+/// care about: does that input still belong to the pane?
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteImagePasteKeyDisposition {
+    /// Not claimed. Keep dispatching exactly as if the intercept did not exist.
+    Forward,
+    /// Claimed. The input must not reach the pane.
+    Consume,
+}
+
+/// The clipboard reader the raw-key intercept hands to the off-loop capture.
+///
+/// A seam rather than a direct call to `crate::platform::read_clipboard_image`
+/// so that "one physical press starts exactly one clipboard read" is
+/// assertable: the real reader spawns `osascript` on macOS and a chain of
+/// `wl-paste`/`xclip` on Linux, so a test that counts reads would otherwise
+/// spawn one child process per counted read and read the developer's own
+/// clipboard.
+#[cfg(all(unix, not(test)))]
+fn clipboard_image_reader() -> fn() -> Option<crate::platform::ClipboardImage> {
+    crate::platform::read_clipboard_image
+}
+
+/// Test build: answers "no image" instantly, touching no OS clipboard. Every
+/// started read still resolves into exactly one
+/// `AppEvent::RemoteClipboardImageCaptured` on the App's own event channel, so
+/// counting those events counts the reads a key path launched — per App, and
+/// therefore isolated between tests running in the same process.
+#[cfg(all(unix, test))]
+fn clipboard_image_reader() -> fn() -> Option<crate::platform::ClipboardImage> {
+    || None
+}
+
+#[cfg(unix)]
+impl App {
+    /// Runs the `keys.remote_image_paste` intercept for one key.
+    ///
+    /// Shared by every dispatcher that forwards keys to a pane — the legacy
+    /// `handle_key` loop and the headless `prepare_terminal_key_forward` path
+    /// the attached-client server actually runs — so the two can never
+    /// disagree about which presses are claimed or how an unusable mount is
+    /// reported.
+    pub(crate) fn dispatch_remote_image_paste_key(
+        &mut self,
+        key: &TerminalKey,
+    ) -> RemoteImagePasteKeyDisposition {
+        match remote_image_paste_decision(&self.state, key) {
+            // Not this intercept's key. Note the absence of any side effect
+            // here: callers rely on a fall-through leaving the key completely
+            // untouched, so a local ctrl+v still reaches the pane app that
+            // wants it (readline quoted-insert, vim visual-block).
+            RemoteImagePasteDecision::FallThrough => RemoteImagePasteKeyDisposition::Forward,
+            RemoteImagePasteDecision::Unsupported { target_pane_id } => {
+                // The peer cannot stage a file, and that cannot change while
+                // the mount lives, so the feature will never work on this
+                // pane. Claiming the key anyway would take ctrl+v away from
+                // the pane app permanently in exchange for nothing, so the
+                // key is delivered and the reason is reported instead.
+                //
+                // Reported once per pane: the key now reaches the pane app,
+                // so pressing it is an ordinary thing to do, and repeating
+                // the same unchanging notice on every press would be noise.
+                if key.kind == crossterm::event::KeyEventKind::Press
+                    && self
+                        .remote_image_paste_unsupported_notices
+                        .insert(target_pane_id)
+                {
+                    self.raise_clipboard_stage_toast(
+                        crate::app::remote_clipboard_stage::TOAST_TITLE_FAILED,
+                        TOAST_REMOTE_TOO_OLD,
+                    );
+                }
+                RemoteImagePasteKeyDisposition::Forward
+            }
+            RemoteImagePasteDecision::Capture {
+                ws_idx,
+                target_pane_id,
+            } => {
+                // Only a press starts a read. Under the enhanced keyboard
+                // protocol a held key also reports `Repeat`, and the lease
+                // table reprocesses the repeats of a consumed press back
+                // through this same path, so without this gate one held
+                // ctrl+v would start a clipboard read, a blocking thread, a
+                // staged remote file and a pasted path per repeat. The repeat
+                // is still consumed rather than forwarded: the key belongs to
+                // the intercept, and passing it on would send the remote PTY
+                // the very `0x16` the press deliberately withheld.
+                if key.kind != crossterm::event::KeyEventKind::Press {
+                    return RemoteImagePasteKeyDisposition::Consume;
+                }
+                // Reading the clipboard is unbounded synchronous OS work — a
+                // child `osascript` on macOS, a chain of `wl-paste`/`xclip`
+                // spawns on Linux — and this is the hot terminal key path
+                // shared by every pane and every client, so the read runs
+                // off-loop and answers as an event.
+                debug!(
+                    ws_idx,
+                    ?target_pane_id,
+                    "intercepted remote image paste key before forwarding to pane"
+                );
+                self.begin_remote_clipboard_image_capture(
+                    ws_idx,
+                    target_pane_id,
+                    clipboard_image_reader(),
+                );
+                RemoteImagePasteKeyDisposition::Consume
+            }
+        }
+    }
+
+    /// Runs the clipboard-image intercepts for one bracketed paste payload.
+    ///
+    /// Shared by every dispatcher that forwards pastes to a pane — the legacy
+    /// `handle_paste` loop and the headless `RawInputEvent::Paste` arm the
+    /// attached-client server actually runs — for the same reason the key
+    /// intercept is shared: the two must not drift.
+    ///
+    /// Two shapes are recognized, and neither can be induced remotely. A
+    /// bracketed paste only ever originates on the local terminal's stdin
+    /// (`crate::raw_input`); a remote pane produces terminal *output*, which
+    /// is parsed into screen cells and never re-enters input dispatch. So a
+    /// hostile peer cannot make the local clipboard be read.
+    pub(crate) fn dispatch_bracketed_paste_image(
+        &mut self,
+        text: &str,
+    ) -> RemoteImagePasteKeyDisposition {
+        if text.is_empty() {
+            return self.dispatch_empty_bracketed_paste();
+        }
+        // A bracketed paste landing on a federated remote pane may be a local
+        // screenshot: the terminal (iTerm2/Terminal.app/cmux "paste image as
+        // path") substitutes a local temp-file path for the image and delivers
+        // *that* as pasted text. Forwarding it verbatim sends the remote host
+        // a path that does not exist there.
+        match bracketed_paste_image_decision(&self.state, text) {
+            BracketedPasteImageDecision::Unsupported => {
+                self.raise_clipboard_stage_toast(
+                    crate::app::remote_clipboard_stage::TOAST_TITLE_FAILED,
+                    TOAST_REMOTE_TOO_OLD,
+                );
+                RemoteImagePasteKeyDisposition::Consume
+            }
+            BracketedPasteImageDecision::Capture {
+                ws_idx,
+                target_pane_id,
+                path,
+                extension,
+            } => {
+                // Off-loop like the ctrl+v clipboard read: the file can be
+                // 16MiB, and a synchronous read here would stall rendering and
+                // every pane for its duration.
+                self.begin_remote_clipboard_image_capture(ws_idx, target_pane_id, move || {
+                    crate::image_path::read_verified_image_drop_file(&path, extension)
+                });
+                RemoteImagePasteKeyDisposition::Consume
+            }
+            BracketedPasteImageDecision::FallThrough => RemoteImagePasteKeyDisposition::Forward,
+        }
+    }
+
+    /// An *empty* bracketed paste (`ESC[200~ESC[201~`) on a federated remote
+    /// pane starts the same clipboard-image capture the `ctrl+v` intercept
+    /// starts.
+    ///
+    /// Measured on macOS: Warp answers Cmd+V with a screenshot on the
+    /// clipboard by emitting exactly that empty bracket pair — the image has no
+    /// text flavor, so the paste carries no payload. herdr already reads the
+    /// same signal this way for its own `herdr --remote` client
+    /// (`crate::client`); this extends it to federation mounts, where the
+    /// capture and staging path already exists.
+    ///
+    /// An empty paste is also what a genuinely empty *text* clipboard produces,
+    /// and the two are indistinguishable at this point. That costs nothing: the
+    /// capture simply reports no image and the user gets the ordinary "no image
+    /// on the clipboard" toast, which is the truth in both cases.
+    fn dispatch_empty_bracketed_paste(&mut self) -> RemoteImagePasteKeyDisposition {
+        // One setting governs the whole clipboard-image-paste feature.
+        // `keys.remote_image_paste = ""` is documented as the way to turn it
+        // off, and a user who set it did so to stop herdr reading the
+        // clipboard, not merely to free one keystroke — so it must also stop
+        // this trigger, which reads the same clipboard for the same purpose
+        // and would otherwise leave the feature with no off switch at all.
+        if self.state.remote_image_paste_key.is_none() {
+            return RemoteImagePasteKeyDisposition::Forward;
+        }
+        // Not a federated pane: an empty paste is the pane app's business, and
+        // reading the clipboard for a local pane would be a side effect the
+        // user never asked for.
+        let Some(target) = resolve_remote_paste_target(&self.state) else {
+            return RemoteImagePasteKeyDisposition::Forward;
+        };
+        if !target.supports_file_staging {
+            // Same contract as the key intercept: the peer will never be able
+            // to stage a file, so the paste is delivered rather than
+            // confiscated, and the reason is reported once per pane.
+            if self
+                .remote_image_paste_unsupported_notices
+                .insert(target.target_pane_id)
+            {
+                self.raise_clipboard_stage_toast(
+                    crate::app::remote_clipboard_stage::TOAST_TITLE_FAILED,
+                    TOAST_REMOTE_TOO_OLD,
+                );
+            }
+            return RemoteImagePasteKeyDisposition::Forward;
+        }
+        debug!(
+            ws_idx = target.ws_idx,
+            target_pane_id = ?target.target_pane_id,
+            "intercepted an empty bracketed paste as a clipboard image paste"
+        );
+        // Off-loop for the same reason as the key path: the read spawns a
+        // child process and this is the shared event loop.
+        self.begin_remote_clipboard_image_capture(
+            target.ws_idx,
+            target.target_pane_id,
+            clipboard_image_reader(),
+        );
+        RemoteImagePasteKeyDisposition::Consume
+    }
+}
+
 /// Whether a claimed image paste reached the wire. The key is consumed either
 /// way — the user asked for an image paste on a remote pane, and answering
 /// with a raw `Ctrl-V` to the remote PTY would be worse than a toast.
@@ -1062,13 +1238,48 @@ pub(crate) enum ImagePasteOutcome {
 
 #[cfg(unix)]
 impl App {
+    /// Drops the per-pane clipboard-image-paste bookkeeping of the given
+    /// (closing) workspaces.
+    ///
+    /// Both sets are keyed by `PaneId` and neither is otherwise reachable once
+    /// the pane is gone: the unsupported-mount notice would sit there for the
+    /// life of the process, and an in-flight marker whose answer is dropped
+    /// (the workspace lookup in `handle_remote_clipboard_image_captured`
+    /// fails silently) would too. Run wherever the other per-pane federation
+    /// indexes are purged, so the whole group behaves the same on both the
+    /// locally-initiated close and the remote teardown.
+    pub(crate) fn purge_remote_image_paste_pane_state_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        let closing_pane_ids: std::collections::HashSet<crate::layout::PaneId> = self
+            .state
+            .workspaces
+            .iter()
+            .filter(|ws| workspace_ids.contains(&ws.id))
+            .flat_map(|ws| ws.tabs.iter().flat_map(|tab| tab.layout.pane_ids()))
+            .collect();
+        self.remote_image_paste_unsupported_notices
+            .retain(|pane_id| !closing_pane_ids.contains(pane_id));
+        self.remote_clipboard_image_reads_in_flight
+            .retain(|pane_id| !closing_pane_ids.contains(pane_id));
+    }
+
     /// Starts the off-loop clipboard read for a claimed image-paste press.
     ///
     /// Records the target as a stable workspace id rather than the index the
     /// decision produced: the read can outlive the workspace, and an index
     /// would then name whichever workspace took over the slot.
+    ///
+    /// At most one read runs per pane at a time. The trigger is user input, and
+    /// input arrives in floods — a held `Cmd+V`, a terminal replaying a paste —
+    /// while a read is an unbounded blocking child process. A second read
+    /// started while the first is outstanding would ask the same clipboard the
+    /// same question, so the flood is answered by the read already running
+    /// rather than by one child per event. A distinct later trigger, once the
+    /// pane has no read outstanding, is never dropped.
     pub(crate) fn begin_remote_clipboard_image_capture<F>(
-        &self,
+        &mut self,
         ws_idx: usize,
         target_pane_id: crate::layout::PaneId,
         read: F,
@@ -1078,6 +1289,16 @@ impl App {
         let Some(workspace_id) = self.state.workspaces.get(ws_idx).map(|ws| ws.id.clone()) else {
             return;
         };
+        if !self
+            .remote_clipboard_image_reads_in_flight
+            .insert(target_pane_id)
+        {
+            debug!(
+                ?target_pane_id,
+                "a clipboard image read is already running for this pane; not starting another"
+            );
+            return;
+        }
         spawn_clipboard_image_capture(
             self.event_tx.clone(),
             workspace_id,
@@ -1096,6 +1317,13 @@ impl App {
         capture: crate::events::ClipboardImageCapture,
     ) {
         use crate::events::ClipboardImageCapture;
+
+        // The read this event answers is over, whatever it found, so the pane
+        // may start another one. Released before any early return below: a
+        // "no image" or timed-out answer must not leave the pane unable to try
+        // again.
+        self.remote_clipboard_image_reads_in_flight
+            .remove(&target_pane_id);
 
         let image = match capture {
             ClipboardImageCapture::Image(image) => image,
@@ -1767,11 +1995,13 @@ mod remote_image_paste_tests {
     #[tokio::test]
     async fn image_paste_decision_is_unsupported_when_the_mount_lacks_the_staging_capability() {
         let mut app = test_app();
-        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, false);
+        let (pane_id, mut out_rx) = attach_remote_mount(&mut app, false);
 
         assert_eq!(
             remote_image_paste_decision(&app.state, &ctrl_v()),
-            RemoteImagePasteDecision::Unsupported
+            RemoteImagePasteDecision::Unsupported {
+                target_pane_id: pane_id
+            }
         );
 
         app.handle_key(ctrl_v()).await;
@@ -1780,13 +2010,30 @@ mod remote_image_paste_tests {
             Some(TOAST_TITLE_FAILED),
             "an unusable mount must tell the user instead of doing nothing"
         );
-        assert_no_frame(
-            &mut out_rx,
-            "the key must be consumed: neither raw input nor a stage frame may \
-             reach a peer that cannot answer",
-        )
-        .await;
+        // The peer can never answer a stage request, so nothing may be staged
+        // — but the key is not taken away from the pane app either: a feature
+        // that can never run on this mount must not cost the user ctrl+v for
+        // the life of the mount, so the plain `0x16` still reaches the pane.
+        assert_eq!(
+            recv_input_bytes(
+                &mut out_rx,
+                "a mount that cannot stage must still let ctrl+v reach the pane app",
+            )
+            .await,
+            vec![0x16]
+        );
         assert!(app.pending_remote_clipboard_stages.is_empty());
+
+        // Same unchanging fact, so it is reported once and not on every
+        // press: the key now reaches the pane app, which makes pressing it
+        // repeatedly ordinary use rather than a repeated request.
+        app.state.toast = None;
+        app.handle_key(ctrl_v()).await;
+        assert!(
+            app.state.toast.is_none(),
+            "the unusable-mount notice repeated on a later press: {:?}",
+            app.state.toast
+        );
 
         // Positive control on the identical fixture: with the capability
         // agreed, a stage frame really does reach this receiver, so "nothing
@@ -2314,5 +2561,619 @@ mod remote_image_paste_tests {
             app.state.toast.is_none(),
             "a resolved stage must not be announced as still running"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The dispatcher every attached client actually goes through.
+    //
+    // `handle_key` only runs in the monolithic `--no-session` loop; a normal
+    // session routes keys through `handle_terminal_key_headless_from`, so
+    // these cases assert the intercept on that path rather than on the
+    // decision function alone.
+    // -----------------------------------------------------------------
+
+    /// Raw terminal-input bytes the mount received, in arrival order.
+    fn input_bytes(messages: &[FederationMessage]) -> Vec<u8> {
+        messages
+            .iter()
+            .filter_map(|msg| match msg {
+                FederationMessage::Terminal(
+                    crate::remote::federation::protocol::TerminalChannelMessage::Input {
+                        bytes,
+                        ..
+                    },
+                ) => Some(bytes.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Waits for the pane's input-forwarding task to put the key on the mount.
+    /// A remote runtime hands user input to a bounded queue drained by a
+    /// spawned task, so an immediate `try_recv` would report "empty" for a key
+    /// that is forwarded a moment later.
+    async fn recv_input_bytes(
+        rx: &mut mpsc::UnboundedReceiver<FederationMessage>,
+        why: &str,
+    ) -> Vec<u8> {
+        let mut seen = Vec::new();
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
+                Ok(Some(msg)) => {
+                    seen.push(msg);
+                    let bytes = input_bytes(&seen);
+                    if !bytes.is_empty() {
+                        return bytes;
+                    }
+                }
+                Ok(None) | Err(_) => panic!("{why}, but the mount received {seen:?}"),
+            }
+        }
+    }
+
+    /// One raw input event, as the attached-client dispatcher sees it.
+    fn raw(key: TerminalKey) -> crate::raw_input::RawInputEvent {
+        crate::raw_input::RawInputEvent::Key(key)
+    }
+
+    /// How many clipboard reads a key path started.
+    ///
+    /// Counted by their answers: a started read always resolves into exactly
+    /// one `AppEvent::RemoteClipboardImageCaptured` on this App's own event
+    /// channel, so the count is per-App and unaffected by other tests running
+    /// in the same process. In a test build the read itself is the instant
+    /// no-op seam (`clipboard_image_reader`), so this settles immediately
+    /// instead of spawning one `osascript`/`wl-paste` per counted read.
+    async fn clipboard_reads_started(app: &mut App) -> usize {
+        let mut started = 0;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(250), app.event_rx.recv())
+                .await
+            {
+                Ok(Some(AppEvent::RemoteClipboardImageCaptured { .. })) => started += 1,
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return started,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn live_key_dispatch_intercepts_the_image_paste_key_on_a_mounted_remote_pane() {
+        let mut app = test_app();
+        let (pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+        let workspace_id = app.state.workspaces[0].id.clone();
+
+        assert!(
+            app.handle_terminal_key_headless(ctrl_v()).is_none(),
+            "the intercept must claim the key instead of forwarding it"
+        );
+
+        // The off-loop clipboard read is what proves the capture branch ran:
+        // it answers as an event addressed at the pane the decision resolved,
+        // whatever the OS clipboard happens to hold on this machine.
+        match tokio::time::timeout(std::time::Duration::from_secs(10), app.event_rx.recv()).await {
+            Ok(Some(AppEvent::RemoteClipboardImageCaptured {
+                workspace_id: captured_workspace_id,
+                target_pane_id,
+                ..
+            })) => {
+                assert_eq!(captured_workspace_id, workspace_id);
+                assert_eq!(target_pane_id, pane_id);
+            }
+            other => panic!("the capture branch must start a clipboard read, got {other:?}"),
+        }
+        assert_no_frame(
+            &mut out_rx,
+            "an intercepted image-paste key must not also reach the remote PTY",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn live_key_dispatch_forwards_the_image_paste_key_on_a_local_pane() {
+        let mut app = test_app();
+        let (_pane_id, mut rx) = attach_local_pane(&mut app);
+
+        app.handle_terminal_key_headless(ctrl_v());
+
+        let mut received = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            received.extend_from_slice(&bytes);
+        }
+        assert_eq!(
+            received,
+            vec![0x16],
+            "ctrl+v must still reach a local pane app"
+        );
+        assert!(
+            app.state.toast.is_none(),
+            "a local ctrl+v must not raise an image-paste toast"
+        );
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_key_dispatch_forwards_the_image_paste_key_when_the_binding_is_disabled() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+        // An empty `keys.remote_image_paste` is how a user turns the raw-key
+        // intercept off; the key then belongs to the pane app again, even on
+        // a mount that could have staged the image.
+        app.state.remote_image_paste_key = None;
+
+        app.handle_terminal_key_headless(ctrl_v());
+
+        assert_eq!(
+            recv_input_bytes(
+                &mut out_rx,
+                "a disabled binding must leave ctrl+v to the remote PTY"
+            )
+            .await,
+            vec![0x16]
+        );
+        assert!(app.state.toast.is_none());
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_key_dispatch_forwards_a_non_matching_key_on_a_mounted_remote_pane() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ));
+
+        assert_eq!(
+            recv_input_bytes(
+                &mut out_rx,
+                "a key that is not the binding must reach the remote PTY untouched"
+            )
+            .await,
+            vec![0x18]
+        );
+        assert!(app.state.toast.is_none());
+    }
+
+    #[tokio::test]
+    async fn live_key_dispatch_reports_a_mount_that_cannot_stage_but_still_delivers_the_key() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, false);
+
+        app.handle_terminal_key_headless(ctrl_v());
+
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some(TOAST_TITLE_FAILED),
+            "an unusable mount must tell the user instead of doing nothing"
+        );
+        // Nothing can be staged on this peer, but the key is not confiscated
+        // for it: the feature can never work here, and consuming ctrl+v for
+        // the life of the mount would cost the pane app a key it needs
+        // (readline quoted-insert, vim visual-block) in exchange for nothing.
+        assert_eq!(
+            recv_input_bytes(
+                &mut out_rx,
+                "a mount that cannot stage must still let ctrl+v reach the pane app",
+            )
+            .await,
+            vec![0x16]
+        );
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+
+        // Once, not per press. The notice is about a mount capability that
+        // cannot change while the mount lives, and the key reaching the pane
+        // app makes pressing it repeatedly ordinary use.
+        app.state.toast = None;
+        app.handle_terminal_key_headless(ctrl_v());
+        assert!(
+            app.state.toast.is_none(),
+            "the unusable-mount notice repeated on a later press: {:?}",
+            app.state.toast
+        );
+        assert_eq!(
+            recv_input_bytes(&mut out_rx, "the second press must reach the pane app too").await,
+            vec![0x16],
+            "silencing the repeated notice must not also silence the key"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_key_dispatch_starts_one_clipboard_read_for_one_physical_press() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+
+        app.route_client_events(
+            vec![
+                raw(ctrl_v()),
+                raw(ctrl_v().with_kind(crossterm::event::KeyEventKind::Release)),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            clipboard_reads_started(&mut app).await,
+            1,
+            "one press must start exactly one clipboard read"
+        );
+        assert_no_frame(
+            &mut out_rx,
+            "a claimed image-paste key must not also reach the remote PTY",
+        )
+        .await;
+    }
+
+    // Under the enhanced keyboard protocol a held key also reports `Repeat`,
+    // and the lease table reprocesses the repeats of a *consumed* press back
+    // through the same handler. Without a press gate, leaning on ctrl+v for a
+    // second would start a clipboard read, a blocking thread, a staged remote
+    // file and a pasted path per repeat.
+    #[tokio::test]
+    async fn live_key_dispatch_starts_no_further_clipboard_read_while_the_key_is_held() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+
+        let mut events = vec![raw(ctrl_v())];
+        events.extend(
+            (0..5).map(|_| raw(ctrl_v().with_kind(crossterm::event::KeyEventKind::Repeat))),
+        );
+        events.push(raw(
+            ctrl_v().with_kind(crossterm::event::KeyEventKind::Release)
+        ));
+        app.route_client_events(events, false);
+
+        assert_eq!(
+            clipboard_reads_started(&mut app).await,
+            1,
+            "the press starts one clipboard read and the five repeats start none"
+        );
+        // A repeat is consumed rather than passed on: forwarding it would
+        // send the remote PTY the very `0x16` the press withheld.
+        assert_no_frame(
+            &mut out_rx,
+            "a repeat of a claimed image-paste key must not reach the remote PTY",
+        )
+        .await;
+    }
+
+    // A host can also report a held key as one event with a repeat count,
+    // which the lease table expands into `repeat_count - 1` reprocessed
+    // repeats. Same defect, same guard, different arrival shape.
+    #[tokio::test]
+    async fn live_key_dispatch_starts_one_clipboard_read_for_a_pre_counted_repeat() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+
+        app.route_client_events(vec![raw(ctrl_v().with_repeat_count(3))], false);
+
+        assert_eq!(
+            clipboard_reads_started(&mut app).await,
+            1,
+            "a press carrying a repeat count must still start one clipboard read"
+        );
+        assert_no_frame(
+            &mut out_rx,
+            "the expanded repeats must not reach the remote PTY either",
+        )
+        .await;
+    }
+
+    // -----------------------------------------------------------------
+    // The empty bracketed paste, which is what Warp emits for Cmd+V when the
+    // clipboard holds an image and therefore has no text flavor.
+    //
+    // Measured on macOS 2026-08-07 with a screenshot on the clipboard:
+    //   Warp            -> ESC[200~ ESC[201~        (EMPTY_BRACKETED_PASTE)
+    //   cmux            -> ESC[200~/var/...png ESC[201~
+    //   Terminal.app    -> nothing at all
+    // These fixtures are those exact byte strings, fed through the real
+    // `raw_input` parser, so a change in either the parser or the intercept
+    // shows up here rather than in a hand-written `Paste(...)` event.
+    // -----------------------------------------------------------------
+
+    /// Warp's Cmd+V with an image-only clipboard, byte for byte.
+    const EMPTY_BRACKETED_PASTE: &[u8] = b"\x1b[200~\x1b[201~";
+
+    #[test]
+    fn the_measured_warp_cmd_v_bytes_parse_as_an_empty_paste() {
+        // The whole bridge rests on this: if the parser ever stopped turning
+        // the empty bracket pair into an empty `Paste`, every test below would
+        // still pass while the feature was dead.
+        let events = crate::raw_input::parse_raw_input_bytes_sync(EMPTY_BRACKETED_PASTE);
+        assert!(
+            matches!(events.as_slice(), [crate::raw_input::RawInputEvent::Paste(text)] if text.is_empty()),
+            "the measured Warp bytes must arrive as one empty paste, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_bracketed_paste_starts_one_clipboard_read_on_a_mounted_remote_pane() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+
+        app.route_client_input(EMPTY_BRACKETED_PASTE.to_vec());
+
+        assert_eq!(
+            clipboard_reads_started(&mut app).await,
+            1,
+            "an empty bracketed paste on a staging-capable mount must start exactly one clipboard read"
+        );
+        assert_no_frame(
+            &mut out_rx,
+            "a claimed empty paste must not also reach the remote PTY",
+        )
+        .await;
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+    }
+
+    /// The legacy dispatcher (`herdr --remote`, `--no-session`) shares the same
+    /// intercept, so it must reach the same conclusion from the same input.
+    #[tokio::test]
+    async fn empty_bracketed_paste_starts_one_clipboard_read_on_the_legacy_paste_path() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+
+        app.handle_paste(String::new()).await;
+
+        assert_eq!(
+            clipboard_reads_started(&mut app).await,
+            1,
+            "the legacy paste path must claim the empty paste too"
+        );
+        assert_no_frame(
+            &mut out_rx,
+            "a claimed empty paste must not also reach the remote PTY",
+        )
+        .await;
+    }
+
+    /// An empty bracketed paste is *also* what a genuinely empty text clipboard
+    /// produces, and the two are indistinguishable here. The outcome must be
+    /// the ordinary "no image" notice, not an error and not a lost keystroke.
+    #[tokio::test]
+    async fn empty_bracketed_paste_with_no_clipboard_image_reports_it_and_stages_nothing() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+
+        app.route_client_input(EMPTY_BRACKETED_PASTE.to_vec());
+
+        // The test-build reader answers "no image" instantly, which is exactly
+        // the empty-clipboard case; the answer is handled on the real path.
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(10), app.event_rx.recv())
+            .await
+            .expect("the off-loop clipboard read must answer")
+            .expect("the capture sender is still alive");
+        assert!(
+            matches!(
+                ev,
+                AppEvent::RemoteClipboardImageCaptured {
+                    capture: crate::events::ClipboardImageCapture::NoImage,
+                    ..
+                }
+            ),
+            "the empty-clipboard case must resolve as NoImage, got {ev:?}"
+        );
+        app.handle_internal_event(ev);
+
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.context.as_str()),
+            Some(TOAST_NO_CLIPBOARD_IMAGE),
+            "an empty clipboard must be reported, not swallowed"
+        );
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+        assert_no_frame(&mut out_rx, "nothing may be staged for an empty clipboard").await;
+    }
+
+    #[tokio::test]
+    async fn empty_bracketed_paste_on_an_ordinary_local_pane_is_forwarded_unchanged() {
+        let mut app = test_app();
+        let (_pane_id, mut rx) = attach_local_pane(&mut app);
+
+        app.route_client_input(EMPTY_BRACKETED_PASTE.to_vec());
+
+        // The pane's bracketed-paste mode is off in this fixture, so an empty
+        // paste forwards an empty payload — the point is that a payload was
+        // forwarded at all rather than claimed by the intercept.
+        assert!(
+            rx.try_recv().is_ok(),
+            "an empty paste on a local pane must still reach the pane"
+        );
+        assert_eq!(
+            clipboard_reads_started(&mut app).await,
+            0,
+            "a local pane must never trigger a clipboard read"
+        );
+        assert!(app.state.toast.is_none());
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+    }
+
+    /// Same contract as the key intercept on a peer that cannot stage: the
+    /// paste is delivered rather than confiscated, and the unchanging reason is
+    /// reported at most once per pane.
+    #[tokio::test]
+    async fn empty_bracketed_paste_reports_a_mount_that_cannot_stage_but_still_delivers_it() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, false);
+
+        assert_eq!(
+            app.dispatch_bracketed_paste_image(""),
+            RemoteImagePasteKeyDisposition::Forward,
+            "a mount that can never stage must not swallow the paste"
+        );
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some(TOAST_TITLE_FAILED),
+            "an unusable mount must tell the user instead of doing nothing"
+        );
+
+        app.state.toast = None;
+        assert_eq!(
+            app.dispatch_bracketed_paste_image(""),
+            RemoteImagePasteKeyDisposition::Forward
+        );
+        assert!(
+            app.state.toast.is_none(),
+            "the unusable-mount notice repeated on a later paste: {:?}",
+            app.state.toast
+        );
+
+        assert_eq!(
+            clipboard_reads_started(&mut app).await,
+            0,
+            "a peer that cannot stage must not cause a clipboard read"
+        );
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+        assert_no_frame(&mut out_rx, "nothing may be staged on an unusable mount").await;
+    }
+
+    /// `keys.remote_image_paste = ""` is documented as the off switch for
+    /// clipboard image paste, so it must silence this trigger too — otherwise
+    /// a user who turned the feature off to stop herdr reading their clipboard
+    /// still gets a clipboard read out of an ordinary Cmd+V.
+    #[tokio::test]
+    async fn empty_bracketed_paste_is_forwarded_when_the_binding_is_disabled() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+        app.state.remote_image_paste_key = None;
+
+        assert_eq!(
+            app.dispatch_bracketed_paste_image(""),
+            RemoteImagePasteKeyDisposition::Forward,
+            "a disabled binding must leave the empty paste to the pane"
+        );
+
+        assert_eq!(
+            clipboard_reads_started(&mut app).await,
+            0,
+            "a disabled binding must not read the clipboard"
+        );
+        assert!(app.state.toast.is_none());
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+        assert_no_frame(&mut out_rx, "nothing may be staged with the feature off").await;
+    }
+
+    /// The press gate that bounds a held ctrl+v cannot help here: a bracketed
+    /// paste carries no key kind and never enters the lease table. Without a
+    /// per-pane in-flight guard a held Cmd+V, or a terminal replaying a paste,
+    /// would start one `spawn_blocking` clipboard child per event.
+    #[tokio::test]
+    async fn a_flood_of_empty_bracketed_pastes_starts_one_clipboard_read() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+
+        for _ in 0..8 {
+            app.route_client_input(EMPTY_BRACKETED_PASTE.to_vec());
+        }
+
+        // Collected rather than merely counted: the one read that did start
+        // has to be handed back to the App below, because handling its answer
+        // is what releases the pane for the next paste.
+        let mut captures = Vec::new();
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(250), app.event_rx.recv())
+                .await
+            {
+                Ok(Some(ev @ AppEvent::RemoteClipboardImageCaptured { .. })) => captures.push(ev),
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => break,
+            }
+        }
+        assert_eq!(
+            captures.len(),
+            1,
+            "eight pastes arriving while one read is outstanding must start one read, not eight"
+        );
+        assert_no_frame(
+            &mut out_rx,
+            "a claimed empty paste must not reach the remote PTY, flood or not",
+        )
+        .await;
+
+        // The guard bounds a flood; it must not cost the user a later paste
+        // they actually meant. Once the read answers, the pane is free again.
+        for ev in captures {
+            app.handle_internal_event(ev);
+        }
+        app.route_client_input(EMPTY_BRACKETED_PASTE.to_vec());
+        assert_eq!(
+            clipboard_reads_started(&mut app).await,
+            1,
+            "a distinct paste with no read outstanding must still be answered"
+        );
+    }
+
+    /// Both per-pane sets are keyed by `PaneId` and unreachable once the pane
+    /// is gone, so a long-lived session would otherwise accumulate an entry
+    /// for every pane the user ever tried the feature on.
+    #[tokio::test]
+    async fn remote_image_paste_pane_state_is_purged_when_the_workspace_closes() {
+        let mut app = test_app();
+        let (pane_id, _out_rx) = attach_remote_mount(&mut app, true);
+        app.state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("survivor"));
+        app.state.ensure_test_terminals();
+        let survivor_pane_id = app.state.workspaces[1].tabs[0].root_pane;
+
+        app.remote_image_paste_unsupported_notices.insert(pane_id);
+        app.remote_image_paste_unsupported_notices
+            .insert(survivor_pane_id);
+        app.remote_clipboard_image_reads_in_flight.insert(pane_id);
+        app.remote_clipboard_image_reads_in_flight
+            .insert(survivor_pane_id);
+
+        let closing: std::collections::HashSet<String> =
+            [app.state.workspaces[0].id.clone()].into_iter().collect();
+        app.purge_remote_image_paste_pane_state_for_workspaces(&closing);
+
+        assert!(
+            !app.remote_image_paste_unsupported_notices
+                .contains(&pane_id),
+            "the closing workspace's notice must go with it"
+        );
+        assert!(
+            !app.remote_clipboard_image_reads_in_flight
+                .contains(&pane_id),
+            "the closing workspace's in-flight marker must go with it"
+        );
+        assert!(
+            app.remote_image_paste_unsupported_notices
+                .contains(&survivor_pane_id),
+            "another workspace's notice must survive"
+        );
+        assert!(
+            app.remote_clipboard_image_reads_in_flight
+                .contains(&survivor_pane_id),
+            "another workspace's in-flight marker must survive"
+        );
+    }
+
+    /// The cmux shape, unchanged by the empty-paste bridge: a non-empty paste
+    /// carrying a temp image path still goes through the path-shape gate.
+    #[tokio::test]
+    async fn bracketed_paste_of_the_measured_cmux_temp_path_still_stages() {
+        let mut app = test_app();
+        let (_pane_id, mut out_rx) = attach_remote_mount(&mut app, true);
+        let file = TempDropFile::new(b"image-bytes");
+
+        let mut bytes = b"\x1b[200~".to_vec();
+        bytes.extend_from_slice(file.path.display().to_string().as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        app.route_client_input(bytes);
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(10), app.event_rx.recv())
+            .await
+            .expect("the off-loop file read must answer")
+            .expect("the capture sender is still alive");
+        app.handle_internal_event(ev);
+
+        assert_eq!(
+            app.pending_remote_clipboard_stages.len(),
+            1,
+            "the path must have been staged, not forwarded as text"
+        );
+        assert_eq!(stage_requests(&drain(&mut out_rx)), vec!["image.png"]);
     }
 }

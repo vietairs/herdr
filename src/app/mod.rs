@@ -176,6 +176,37 @@ pub struct App {
     #[cfg(unix)]
     pub(crate) pending_remote_clipboard_stages:
         HashMap<u64, remote_clipboard_stage::PendingClipboardStage>,
+    /// Panes already told that their mount's peer is too old to stage files
+    /// (`app/input/mod.rs::dispatch_remote_image_paste_key`).
+    ///
+    /// A peer's agreed capabilities are fixed for the life of the mount, so
+    /// the notice is the same every time and saying it once per pane is the
+    /// whole story. It matters because the key is *not* consumed in that
+    /// case — it still reaches the pane app — so pressing it repeatedly is
+    /// ordinary use, and an unconditional toast would fire on every press.
+    /// Ids come from a global counter and are never reused, so an entry
+    /// cannot leak onto a later pane. Emptied for a pane when its workspace
+    /// closes or its mount ends, alongside the other per-pane federation
+    /// bookkeeping, so a long session cannot accumulate ids for panes that no
+    /// longer exist.
+    #[cfg(unix)]
+    pub(crate) remote_image_paste_unsupported_notices:
+        std::collections::HashSet<crate::layout::PaneId>,
+    /// Panes with an off-loop clipboard-image read already running
+    /// (`app/input/mod.rs::begin_remote_clipboard_image_capture`).
+    ///
+    /// Each read is a `spawn_blocking` child process (`osascript`,
+    /// `wl-paste`/`xclip`) with nothing else bounding how many may exist. The
+    /// key path is repeat-gated, but a bracketed paste carries no key kind and
+    /// no lease, so a held `Cmd+V` or a paste flood would otherwise start one
+    /// child per event. One read per pane at a time is enough: a second read
+    /// while the first is outstanding would only re-read the same clipboard.
+    /// An entry is always removed when the read answers — every read resolves
+    /// into exactly one `RemoteClipboardImageCaptured`, including the timeout
+    /// case — so a pane cannot get wedged.
+    #[cfg(unix)]
+    pub(crate) remote_clipboard_image_reads_in_flight:
+        std::collections::HashSet<crate::layout::PaneId>,
     /// Reverse index from a resync-revealed remote pane's namespaced
     /// (public) id to the local `PaneId` `App::
     /// handle_federation_resync_pane_created` materialized for it, so a
@@ -884,6 +915,10 @@ impl App {
             pending_remote_closes: HashMap::new(),
             #[cfg(unix)]
             pending_remote_clipboard_stages: HashMap::new(),
+            #[cfg(unix)]
+            remote_image_paste_unsupported_notices: std::collections::HashSet::new(),
+            #[cfg(unix)]
+            remote_clipboard_image_reads_in_flight: std::collections::HashSet::new(),
             remote_resync_pane_index: HashMap::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
@@ -1914,50 +1949,17 @@ impl App {
                     } else if self.state.mode != Mode::Terminal {
                         self.paste_into_active_text_input(&text);
                     } else {
-                        // Same interception as `App::handle_paste`: a
-                        // bracketed paste landing on a federated remote pane
-                        // may be a terminal-substituted local screenshot path
-                        // that would be dead on the remote host. The headless
+                        // Same interception as `App::handle_paste`, through
+                        // the same shared helper so the two dispatchers cannot
+                        // disagree: a bracketed paste landing on a federated
+                        // remote pane may be a local clipboard image, either as
+                        // a terminal-substituted temp path that would be dead
+                        // on the remote host or as an empty paste. The headless
                         // server routes pastes through this arm, not
                         // `handle_paste`, so the check must run here too.
                         #[cfg(unix)]
-                        let intercepted = {
-                            use crate::app::input::BracketedPasteImageDecision;
-                            match crate::app::input::bracketed_paste_image_decision(
-                                &self.state,
-                                &text,
-                            ) {
-                                BracketedPasteImageDecision::Unsupported => {
-                                    self.raise_clipboard_stage_toast(
-                                        crate::app::remote_clipboard_stage::TOAST_TITLE_FAILED,
-                                        crate::app::input::TOAST_REMOTE_TOO_OLD,
-                                    );
-                                    true
-                                }
-                                BracketedPasteImageDecision::Capture {
-                                    ws_idx,
-                                    target_pane_id,
-                                    path,
-                                    extension,
-                                } => {
-                                    // Off-loop like the ctrl+v clipboard
-                                    // read: a synchronous 16MiB file read
-                                    // here would stall the shared server
-                                    // event loop.
-                                    self.begin_remote_clipboard_image_capture(
-                                        ws_idx,
-                                        target_pane_id,
-                                        move || {
-                                            crate::image_path::read_verified_image_drop_file(
-                                                &path, extension,
-                                            )
-                                        },
-                                    );
-                                    true
-                                }
-                                BracketedPasteImageDecision::FallThrough => false,
-                            }
-                        };
+                        let intercepted = self.dispatch_bracketed_paste_image(&text)
+                            == crate::app::input::RemoteImagePasteKeyDisposition::Consume;
                         #[cfg(not(unix))]
                         let intercepted = false;
                         if intercepted {
