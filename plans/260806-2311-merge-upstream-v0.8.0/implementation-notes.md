@@ -181,3 +181,23 @@
   now cleanly REJECT at handshake rather than error mid-session.
 - Both local and remote servers must be rebuilt/restarted before any federation test (stale server
   images have previously produced misleading MountSnapshot failures).
+
+## 260807-1010 rewrote both VM IPs out of plans history; all GPG signatures lost as a consequence
+- What: `git filter-repo --replace-text` mapped the two real VM addresses to RFC 5737
+  documentation addresses across every ref, then force-pushed all 31 branches and 76 tags.
+  273 occurrences -> 0, verified from a fresh mirror clone of the remote. Exactly 13 files
+  differ vs the pre-rewrite master, all under `plans/`, zero outside it, so source is untouched.
+- Why it cost more than expected: `git fast-export` drops `gpgsig` and filter-repo has no
+  signature handling at all, so the repo went from 72 signed commits (first 500 alone) to ZERO,
+  and every commit downstream of the first signed ancestor was renumbered — including upstream's
+  own mainline as carried in this fork. Upstream v0.8.0 changed SHA.
+- Consequence to remember: **the fork no longer shares commit SHAs with upstream.** The next
+  `git merge upstream/master` will compute a useless merge base; use the `git replace` graft
+  recipe again, matching tree identity first. Also, this fork now holds unsigned copies of the
+  upstream maintainer's signed release commits.
+- Evidence: signed-commit count 72 -> 0 across the first 500 revs; filter-repo source contains no
+  `gpgsig`/`signed-commits` handling; `git fast-export --signed-commits` exists in git 2.55 but
+  filter-repo never passes it. Pre-rewrite backup mirror kept at /tmp/herdr-backup.git.
+- Reversibility: only from that backup, and only until it is deleted. Note the benefit is bounded:
+  the addresses were public from 2026-07-15 and GitHub still serves unreachable objects by SHA,
+  so this cleans visible history rather than un-publishing them.
