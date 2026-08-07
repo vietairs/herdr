@@ -100,6 +100,14 @@ impl App {
         }
     }
 
+    // No settings UI dispatches this yet (unlike its save_theme/save_sound/
+    // save_auto_resize_splits siblings, which are wired from
+    // `SettingsAction` handlers) — only the `settings_save_pane_history_
+    // persists_then_applies_live_config` test in `app/mod.rs` calls it today,
+    // so non-test builds see it as unreferenced. Keeping it (rather than
+    // deleting) preserves the tested save/apply behavior for the
+    // `experimental.pane_history` config field ahead of that UI landing.
+    #[allow(dead_code)]
     pub(super) fn save_pane_history_persistence(&mut self, enabled: bool) {
         if self.update_config_file("pane screen history", |content| {
             crate::config::upsert_section_bool(content, "experimental", "pane_history", enabled)

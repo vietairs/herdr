@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(not(test))]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use ratatui::layout::Direction;

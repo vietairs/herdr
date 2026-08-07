@@ -174,7 +174,10 @@ pub fn map_in(remote_id: impl Into<String>, mount: &Mount) -> FedRef {
 
 /// Recovers the raw remote id a `FedRef` was built from. Inverse of
 /// `map_in` with respect to the `remote_id` field: `map_out(map_in(id,
-/// mount)) == id` for any `id` and `mount`.
+/// mount)) == id` for any `id` and `mount`. Dormant outside tests until a
+/// live call site wires it, matching this module's `strip_mount_namespace`
+/// precedent (see `server/federation_actor.rs`'s reference to this pairing).
+#[allow(dead_code)]
 pub fn map_out(fed_ref: &FedRef) -> &str {
     &fed_ref.remote_id
 }

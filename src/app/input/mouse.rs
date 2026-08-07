@@ -2481,10 +2481,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(menu
-            .items()
-            .iter()
-            .any(|item| *item == "Auto-resize splits: On"));
+        assert!(menu.items().contains(&"Auto-resize splits: On"));
     }
 
     #[tokio::test]

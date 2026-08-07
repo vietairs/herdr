@@ -306,7 +306,7 @@ fn parse_default_color_events(body: &[u8]) -> Vec<DefaultColorEvent> {
 fn parse_palette_color_queries(body: &[u8]) -> Option<Vec<DefaultColorEvent>> {
     let rest = body.strip_prefix(b"4;")?;
     let parts: Vec<&[u8]> = rest.split(|byte| *byte == b';').collect();
-    if parts.is_empty() || parts.len() % 2 != 0 {
+    if parts.is_empty() || !parts.len().is_multiple_of(2) {
         return None;
     }
     let mut events = Vec::with_capacity(parts.len() / 2);

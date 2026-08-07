@@ -1953,10 +1953,11 @@ mod tests {
 
         assert!(app.state.remote_mirrors.is_empty());
         // No dial and no async event: nothing was spawned for this request.
-        assert!(matches!(
-            tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv()).await,
-            Err(_)
-        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv())
+                .await
+                .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -1978,10 +1979,11 @@ mod tests {
         assert_eq!(error.error.code, "invalid_request");
 
         assert!(app.state.remote_mirrors.is_empty());
-        assert!(matches!(
-            tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv()).await,
-            Err(_)
-        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), app.event_rx.recv())
+                .await
+                .is_err()
+        );
     }
 
     #[cfg(unix)]

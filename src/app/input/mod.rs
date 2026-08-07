@@ -916,7 +916,7 @@ pub(crate) fn remote_image_paste_decision(
     let Some(binding) = state.remote_image_paste_key else {
         return RemoteImagePasteDecision::FallThrough;
     };
-    if !crate::config::terminal_key_matches_combo(&key, binding) {
+    if !crate::config::terminal_key_matches_combo(key, binding) {
         return RemoteImagePasteDecision::FallThrough;
     }
     let Some(target) = resolve_remote_paste_target(state) else {

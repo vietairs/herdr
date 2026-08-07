@@ -64,6 +64,11 @@ pub const FEDERATION_PROTOCOL_VERSION: u32 = 5;
 pub struct Capability(pub String);
 
 impl Capability {
+    /// Names an OSC-52-style clipboard-mirror surface. No production peer
+    /// advertises it yet (`FILE_STAGING`'s doc comment above notes it "has no
+    /// call site" by design) — only `codec.rs`/`negotiate.rs` tests exercise
+    /// it today, so non-test builds see it as unreferenced.
+    #[allow(dead_code)]
     pub const CLIPBOARD: &'static str = "clipboard";
     pub const SCROLLBACK_REPLAY: &'static str = "scrollback_replay";
     pub const AGENT_STATUS: &'static str = "agent_status";

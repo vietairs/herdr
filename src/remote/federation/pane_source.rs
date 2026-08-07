@@ -284,6 +284,10 @@ mod tests {
         Arc<Mutex<Vec<u8>>>,
     );
 
+    /// Captured `(origin_tag, payload)` pairs recorded by the apply callback
+    /// in the OSC52 policy-parity test below.
+    type AppliedClipboardWrites = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     fn spawn_capturing(terminal_id: &str, mount_generation: u64) -> CapturingFixture {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let (output_tx, output_rx) = mpsc::channel::<Bytes>(64);
@@ -470,7 +474,7 @@ mod tests {
     #[tokio::test]
     async fn remote_and_local_origin_clipboard_writes_are_applied_through_the_same_policy() {
         let (tx, rx) = mpsc::unbounded_channel::<ClipboardMessage>();
-        let applied: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let applied: AppliedClipboardWrites = Arc::new(Mutex::new(Vec::new()));
         let applied_for_closure = applied.clone();
 
         let drain = tokio::spawn(apply_remote_clipboard_writes(
