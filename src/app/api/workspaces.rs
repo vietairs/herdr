@@ -549,6 +549,7 @@ impl App {
         // `PaneId` is already dead, so a later remount to the same host can
         // route a resync pane-removal at a stale mapping.
         self.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
+        self.purge_remote_image_paste_pane_state_for_workspaces(&closing_ids);
 
         self.state.selected = idx;
         self.state.close_selected_workspace();
@@ -902,6 +903,7 @@ impl App {
             self.purge_pending_remote_splits_for_workspaces(&closing_ids);
             self.purge_pending_remote_closes_for_workspaces(&closing_ids);
             self.purge_pending_remote_clipboard_stages_for_workspaces(&closing_ids);
+            self.purge_remote_image_paste_pane_state_for_workspaces(&closing_ids);
             self.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
             self.state.end_federation_mount(&host_key);
         }

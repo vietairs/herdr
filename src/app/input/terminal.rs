@@ -74,6 +74,27 @@ impl App {
         self.selection_autoscroll_deadline = None;
         self.state.update_dismissed = true;
 
+        // A claimed `keys.remote_image_paste` press is taken ahead of every
+        // forwarding branch below: the focused pane's PTY lives on another
+        // host, so a raw ctrl+v byte forwarded there can never see this
+        // machine's clipboard. This is the same intercept the legacy
+        // single-input-source `handle_key` runs — literally the same function,
+        // so the two paths cannot drift — and the sibling of the
+        // bracketed-paste check `route_client_events_from` runs on its `Paste`
+        // arm. The headless server dispatches keys through here instead of
+        // through `handle_key`, so the check has to exist on this path too or
+        // the binding is dead for every attached client.
+        //
+        // Only a claimed key returns: every other case, including a mount
+        // whose peer cannot stage files, leaves the key completely untouched
+        // and lets it continue into the branches below.
+        #[cfg(unix)]
+        if self.dispatch_remote_image_paste_key(&key)
+            == super::RemoteImagePasteKeyDisposition::Consume
+        {
+            return None;
+        }
+
         if let Some(action) =
             super::terminal_direct_non_indexed_navigation_action(&self.state, &key)
         {

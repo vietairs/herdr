@@ -359,7 +359,7 @@
           "key": "keys.remote_image_paste",
           "type": "string",
           "default": "\"ctrl+v\"",
-          "description": "Local-client shortcut that sends a clipboard image to a remote Herdr session."
+          "description": "Shortcut that sends a local clipboard image to the focused pane of a mounted remote workspace, or of a `herdr --remote` session. Set it to an empty string to turn clipboard image paste off entirely, including the empty-bracketed-paste trigger some terminals use for `Cmd+V`."
         },
         {
           "key": "keys.new_tab",
