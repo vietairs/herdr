@@ -380,12 +380,18 @@ jobs:
       - name: Commit preview publication
         env:
           KANGAL_GITHUB_TOKEN: ${{ secrets.KANGAL_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "kangal-bot"
           git config user.email "285672167+kangal-bot@users.noreply.github.com"
           git add -A docs/preview website/preview.json
           git diff --cached --quiet || git commit -m "docs: publish preview documentation"
-          remote="https://x-access-token:${KANGAL_GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # The bot PAT is the intended identity, but a fork running this
+          # workflow has no such secret and would fail authentication after
+          # every binary has already built. The job already holds
+          # `contents: write`, so fall back to the run's own token.
+          push_token="${KANGAL_GITHUB_TOKEN:-$GITHUB_TOKEN}"
+          remote="https://x-access-token:${push_token}@github.com/${GITHUB_REPOSITORY}.git"
           for attempt in 1 2 3; do
             git pull --rebase "$remote" master
             node website/scripts/docs-preview.mjs check
