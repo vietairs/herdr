@@ -64,6 +64,16 @@ def git_is_ancestor(ancestor: str, descendant: str) -> bool:
     return result.returncode == 0
 
 
+def git_commit_exists(rev: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def read_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -112,6 +122,12 @@ def preview_range_base(previous: str, commit: str) -> str:
         stable = latest_stable_tag(commit)
     except subprocess.CalledProcessError:
         return previous
+    # A recorded preview commit can stop resolving in this clone — a rewritten
+    # or force-pushed history drops the object the manifest still names. Treat
+    # that like no recorded commit at all and base the range on the stable tag,
+    # rather than handing an unresolvable revision to `git log a..b`.
+    if not git_commit_exists(previous):
+        return stable
     if git_is_ancestor(previous, stable) and git_is_ancestor(stable, commit):
         return stable
     return previous
@@ -247,6 +263,10 @@ def build_manifest(
 
 def cmd_notes(args: argparse.Namespace) -> int:
     previous = args.previous or previous_preview_commit(Path(args.manifest)) or latest_stable_tag()
+    # Same reasoning as `preview_range_base`: an unresolvable recorded commit
+    # would crash the `git log` range, so fall through to the stable tag.
+    if not git_commit_exists(previous):
+        previous = latest_stable_tag()
     notes = build_notes(previous, args.commit, args.build_id, args.base_version, args.repo)
     Path(args.output).write_text(notes, encoding="utf-8")
     return 0

@@ -101,6 +101,9 @@ class PreviewNotesTests(unittest.TestCase):
         with (
             mock.patch.object(preview, "latest_stable_tag", return_value="v0.7.0"),
             mock.patch.object(preview, "git_is_ancestor", return_value=True),
+            # Symbolic fixture names, so vouch for them: this test covers the
+            # ancestry path, not the unresolvable-previous fallback.
+            mock.patch.object(preview, "git_commit_exists", return_value=True),
         ):
             self.assertEqual(
                 preview.preview_range_base("previous-preview", "release"),
@@ -114,11 +117,56 @@ class PreviewNotesTests(unittest.TestCase):
         with (
             mock.patch.object(preview, "latest_stable_tag", return_value="v0.7.0"),
             mock.patch.object(preview, "git_is_ancestor", side_effect=is_ancestor),
+            # Symbolic fixture names, so vouch for them: this test covers the
+            # ancestry path, not the unresolvable-previous fallback.
+            mock.patch.object(preview, "git_commit_exists", return_value=True),
         ):
             self.assertEqual(
                 preview.preview_range_base("previous-preview", "new-feature"),
                 "previous-preview",
             )
+
+    def test_preview_range_base_falls_back_to_stable_when_previous_is_unresolvable(self):
+        # A rewritten or force-pushed history leaves the manifest naming a
+        # commit this clone no longer has; the range must still be buildable.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+
+            def git(*args: str) -> str:
+                return subprocess.check_output(
+                    ["git", *args],
+                    cwd=repo,
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+
+            git("init")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "Test User")
+
+            marker = repo / "marker.txt"
+            marker.write_text("release\n", encoding="utf-8")
+            git("add", "marker.txt")
+            git("commit", "-m", "release: v0.7.0")
+            git("tag", "v0.7.0")
+
+            marker.write_text("feature\n", encoding="utf-8")
+            git("commit", "-am", "feat: later work")
+            head = git("rev-parse", "HEAD")
+
+            missing = "44b3adb125524ea9a55739eee3776f922f2115ad"
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(repo)
+                self.assertFalse(preview.git_commit_exists(missing))
+                self.assertEqual(preview.preview_range_base(missing, head), "v0.7.0")
+                # The whole point: the resulting range is usable.
+                self.assertEqual(
+                    preview.commit_subjects("v0.7.0", head),
+                    ["feat: later work"],
+                )
+            finally:
+                os.chdir(original_cwd)
 
     def test_post_stable_history_selects_release_and_bases_range_on_stable_tag(self):
         with tempfile.TemporaryDirectory() as tmp:
