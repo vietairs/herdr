@@ -359,6 +359,9 @@ pub struct HeadlessServer {
     /// its own, so a federation handshake/mount fences stale traffic from a
     /// prior process. Replaces `AppFederationHost` as the owner (v5 finding
     /// C4). Dormant until the federation listener is exposed (b0.4).
+    // Read only by the `#[cfg(unix)]` federation listener/accessor; minted
+    // ungated so the struct literal stays platform-independent.
+    #[cfg_attr(not(unix), allow(dead_code))]
     federation_server_instance_id: crate::remote::federation::id::ServerInstanceId,
     /// Single-controller admission + linearized revocation for the co-located
     /// federation listener (P9.2b b0.2). One per live server; a replacement

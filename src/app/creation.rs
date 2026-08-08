@@ -842,6 +842,8 @@ impl App {
         self.pending_remote_splits.insert(request_id, pending);
     }
 
+    // Only reached from the `#[cfg(unix)]` federation response handlers below.
+    #[cfg(unix)]
     fn take_pending_remote_split(&mut self, request_id: u64) -> Option<PendingRemoteSplit> {
         self.pending_remote_splits.remove(&request_id)
     }
@@ -852,6 +854,8 @@ impl App {
     /// so a late/never-arriving `SplitPaneResponse` for a torn-down mount
     /// can no longer splice its pane into whatever workspace later reuses
     /// the same index, and the entry doesn't leak in the map forever.
+    // Only reached from the `#[cfg(unix)]` federation response handlers below.
+    #[cfg(unix)]
     pub(crate) fn purge_pending_remote_splits_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -874,6 +878,8 @@ impl App {
         self.pending_remote_closes.insert(request_id, pending);
     }
 
+    // Only reached from the `#[cfg(unix)]` federation response handlers below.
+    #[cfg(unix)]
     fn take_pending_remote_close(&mut self, request_id: u64) -> Option<PendingRemoteClose> {
         self.pending_remote_closes.remove(&request_id)
     }
@@ -884,6 +890,8 @@ impl App {
     /// from every site that removes a federated workspace, so a late/never-
     /// arriving `ClosePaneResponse` for a torn-down mount can no longer act
     /// on whatever later reuses the same slot.
+    // Only reached from the `#[cfg(unix)]` federation response handlers below.
+    #[cfg(unix)]
     pub(crate) fn purge_pending_remote_closes_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -901,6 +909,8 @@ impl App {
     /// workspace it pointed into is gone. Unlike the sibling maps, entries
     /// here don't carry a `workspace_id`, so membership is resolved by
     /// walking the still-live workspaces' pane ids before they're removed.
+    // Only reached from the `#[cfg(unix)]` federation response handlers below.
+    #[cfg(unix)]
     pub(crate) fn purge_remote_resync_pane_index_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -1448,6 +1458,10 @@ impl App {
 /// Local layout context a `SplitPaneRequest` was minted from, remembered
 /// until its `SplitPaneResponse` arrives (or the process ends). See
 /// `App::register_pending_remote_split`/`handle_federation_split_pane_ready`.
+/// Populated by the ungated dispatch path but only read by the
+/// `#[cfg(unix)]` federation response handlers, so every field is unread on a
+/// target without the federation mount primitives.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct PendingRemoteSplit {
     /// Stable workspace id (`Workspace::id`), not a `Vec` index — indices
     /// shift when workspaces close, so a raw `usize` here could splice a
@@ -1472,6 +1486,10 @@ pub(crate) struct PendingRemoteSplit {
 /// until its `ClosePaneResponse` arrives (or the process ends). See
 /// `App::register_pending_remote_close`/`handle_federation_close_pane_ready`
 /// (Gap A, plans/260724-1536-federation-pane-close-sync).
+/// Populated by the ungated dispatch path but only read by the
+/// `#[cfg(unix)]` federation response handlers, so every field is unread on a
+/// target without the federation mount primitives.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct PendingRemoteClose {
     /// Stable workspace id (`Workspace::id`), same reasoning as
     /// `PendingRemoteSplit::workspace_id`.

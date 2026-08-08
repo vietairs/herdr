@@ -1764,6 +1764,9 @@ pub struct AppState {
     /// Aborting an already-finished task is a safe no-op, so this is set
     /// unconditionally on both the reactive (`handle_federation_mount_ended`)
     /// and proactive (workspace close) teardown paths.
+    /// Only read by `end_federation_mount`, which is reachable only from the
+    /// `#[cfg(unix)]` mount paths, while the map itself is initialized ungated.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) mount_drive_tasks: std::collections::HashMap<
         crate::remote::federation::id::HostKey,
         tokio::task::JoinHandle<()>,
@@ -1795,6 +1798,10 @@ impl AppState {
     /// P8 requirement 5 (S10.1); Phase B requirement 5: registers a new
     /// federation mount, rejecting only a literal duplicate `HostKey` —
     /// distinct hosts mount concurrently into `remote_mirrors`.
+    // Only reached from the `#[cfg(unix)]` federation mount paths in
+    // `app/api/workspaces.rs`; pure state bookkeeping, so it is marked unused
+    // rather than compiled out.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn begin_federation_mount(
         &mut self,
         mirror: crate::remote::federation::reducer::RemoteMirror,
@@ -1810,6 +1817,7 @@ impl AppState {
     /// Tears down the live federation mount for `host_key` (disconnect / P9
     /// lifecycle), if any. A no-op when nothing is mounted for that host —
     /// never touches sibling mounts (Phase B requirement 2).
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn end_federation_mount(
         &mut self,
         host_key: &crate::remote::federation::id::HostKey,
@@ -1830,6 +1838,7 @@ impl AppState {
     /// documented-not-enforced across process boundaries for v1, per the
     /// phase file's explicit allowance ("If detection proves costly,
     /// downgrade to documented-not-enforced for v1 — state the choice").
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn double_attach_conflict(
         &self,
         host_key: &crate::remote::federation::id::HostKey,

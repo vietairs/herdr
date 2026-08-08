@@ -28,6 +28,9 @@ impl HostKey {
     /// between the two components when splitting the address back out for
     /// display. Identity is unaffected either way — comparisons use the whole
     /// string — so a `#` in the address degrades display only.
+    // Every production caller sits behind `#[cfg(unix)]` (the dial/mount and
+    // federation-accept paths); tests construct keys on every target.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn new(user_at_ip: impl Into<String>, session_discriminator: impl Into<String>) -> Self {
         Self(format!(
             "{}#{}",

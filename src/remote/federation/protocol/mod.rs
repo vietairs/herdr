@@ -70,7 +70,12 @@ impl Capability {
     /// it today, so non-test builds see it as unreferenced.
     #[allow(dead_code)]
     pub const CLIPBOARD: &'static str = "clipboard";
+    /// Advertised only by the `#[cfg(unix)]` handshake paths (`remote::unix`,
+    /// `federation::session`, `server::federation_accept`), so non-Unix builds
+    /// see these as unreferenced outside tests.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub const SCROLLBACK_REPLAY: &'static str = "scrollback_replay";
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub const AGENT_STATUS: &'static str = "agent_status";
     /// Gates the stage-then-inject file RPC (`ClipboardStageRequest` /
     /// `ClipboardStageResponse`): the mounting client ships bytes over the

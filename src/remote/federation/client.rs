@@ -30,7 +30,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 
-#[cfg(test)]
+// Named only by the agent-status relay test, which is Unix-only because it
+// drives `drive_mount_channel`.
+#[cfg(all(test, unix))]
 use crate::api::schema::common::AgentStatus;
 use crate::api::EventHub;
 use crate::pane::RelayedAgentStatus;
@@ -396,6 +398,10 @@ const CLIPBOARD_CHANNEL_CAPACITY: usize = 64;
 /// `host_terminal_theme` are captured once when the mount's drive task is
 /// spawned rather than re-queried per split (same "v1: splits materialize as
 /// a simple chain" simplification already accepted for mount-time panes).
+// `#[cfg(unix)]`: only reachable from the federation mount drive task, whose
+// dial/mount primitives live in `remote::unix`. Carries `AppEvent` senders for
+// the federation variants, which are `#[cfg(unix)]` for the same reason.
+#[cfg(unix)]
 pub(crate) struct SplitMaterializationContext {
     pub(crate) rows: u16,
     pub(crate) cols: u16,
@@ -542,6 +548,10 @@ pub(crate) fn send_local_clipboard_to_remote(
 /// identical to `drive_event_channel`; kept as a separate, additive function
 /// (rather than changing `drive_event_channel`'s signature) so P4's
 /// mount-only callers/tests are untouched.
+// `#[cfg(unix)]`: emits the `#[cfg(unix)]` federation `AppEvent` variants and is
+// only spawned by `remote::unix`-owned mount paths (`federation::session` and
+// `App::materialize_federation_mount`), both Unix-only.
+#[cfg(unix)]
 pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
     reader: &mut R,
     mirror: &mut RemoteMirror,
@@ -935,6 +945,8 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
 /// user-initiated split, there is no pending local request/toast target to
 /// fail here — the remote pane simply stays mirror-only metadata until the
 /// next resync retries).
+// `#[cfg(unix)]`: private helper of `drive_mount_channel`, same gate.
+#[cfg(unix)]
 async fn materialize_resync_pane(
     mount: &super::id::Mount,
     generation: u64,
@@ -1490,6 +1502,8 @@ mod tests {
     // `Event` + `Terminal::Output` + `Clipboard` message in one deterministic
     // sequence without reaching into `loopback.rs`'s private fixture state
     // (not this phase's file to modify).
+    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn drive_mount_channel_routes_terminal_and_clipboard_while_still_applying_events() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -1616,6 +1630,8 @@ mod tests {
     // into the mirror via `reconcile_by_diff` so a pane the mount never
     // saw at mount time (or in an earlier `Frame`'s bare payload) becomes
     // visible.
+    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_burst_of_structural_frames_coalesces_into_one_snapshot_request_and_the_response_updates_the_mirror(
     ) {
@@ -1764,6 +1780,8 @@ mod tests {
     // via `TerminalChannelRouter::route_agent_status`, keyed by the same
     // raw `terminal_id` `open_terminal` uses — not just get silently
     // dropped as it was before this fix.
+    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn drive_mount_channel_relays_agent_status_to_the_registered_pane_sink() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -1888,6 +1906,8 @@ mod tests {
     // real local `TerminalRuntime` (via `router.open_terminal` + `TerminalRuntime::
     // spawn_remote`, both already proven independently by `build_remote_pane`'s
     // own tests) and hand it back on `AppEvent::FederationSplitPaneReady`.
+    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn drive_mount_channel_materializes_a_runtime_on_split_pane_created() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -2001,6 +2021,8 @@ mod tests {
     // `App` would materialize a SECOND `TerminalRuntime`/pane for the same
     // remote terminal. Proves: pane count stays 1 in the mirror after the
     // resync, and no second `AppEvent` is emitted for the same pane.
+    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_split_created_pane_is_not_double_materialized_by_a_later_resync() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -2189,6 +2211,8 @@ mod tests {
     // and hand it back on `AppEvent::FederationResyncPaneCreated`, carrying
     // the workspace id a live `App` needs to splice it into the already-
     // mounted layout.
+    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn drive_mount_channel_materializes_a_runtime_on_resync_created_pane() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -2340,6 +2364,8 @@ mod tests {
     // longer reports must surface `AppEvent::FederationResyncPaneRemoved`
     // (namespaced pane id + this mount's origin) so `App` can tear down the
     // matching local runtime/layout entry.
+    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn drive_mount_channel_emits_resync_pane_removed_for_a_pane_dropped_from_the_snapshot() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -2706,6 +2732,8 @@ mod tests {
     /// A stage answer has to name both the mount it came from and the
     /// connection that produced it: a delayed answer from a connection a
     /// remount has already replaced must be distinguishable from a live one.
+    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn clipboard_stage_response_emits_an_app_event_carrying_origin_and_connection_epoch() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);

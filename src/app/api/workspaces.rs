@@ -927,7 +927,10 @@ impl App {
     /// workspace belongs to, if any — matches its `worktree_space` key
     /// (`federation:<host_key>`, set by `materialize_federation_mount`)
     /// against the live `remote_mirrors` registry.
-    #[cfg(unix)]
+    /// Reads only cross-platform state, so it stays ungated: the callers in
+    /// `api/panes.rs` are ungated too, and on a target without the dial/mount
+    /// primitives `remote_mirrors` is always empty, which makes this return
+    /// `None` and those callers report "not a federated workspace".
     pub(crate) fn federation_host_key_for_workspace(
         &self,
         index: usize,

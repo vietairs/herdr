@@ -694,7 +694,8 @@ impl RemoteAgentStatusGate {
     }
 }
 
-#[cfg(unix)]
+// Ungated: the body only uses cross-platform detection/probe helpers, and the
+// ungated `PaneRuntime::spawn_remote` needs it on every target.
 fn spawn_basic_detection_task(
     pane_id: PaneId,
     child_pid: Arc<AtomicU32>,

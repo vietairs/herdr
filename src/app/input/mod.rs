@@ -2,7 +2,11 @@
 
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use tracing::{debug, warn};
+// Every `debug!` site in this module sits inside a `#[cfg(unix)]` remote-paste
+// helper, so the import would be unused on non-Unix targets.
+#[cfg(unix)]
+use tracing::debug;
+use tracing::warn;
 
 use crate::app::PaneClickState;
 use crate::input::TerminalKey;
