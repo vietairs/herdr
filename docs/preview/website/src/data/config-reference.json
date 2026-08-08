@@ -359,7 +359,7 @@
           "key": "keys.remote_image_paste",
           "type": "string",
           "default": "\"ctrl+v\"",
-          "description": "Local-client shortcut that sends a clipboard image to a remote Herdr session."
+          "description": "Shortcut that sends a local clipboard image to the focused pane of a mounted remote workspace, or of a `herdr --remote` session. Set it to an empty string to turn clipboard image paste off entirely, including the empty-bracketed-paste trigger some terminals use for `Cmd+V`."
         },
         {
           "key": "keys.new_tab",
@@ -653,6 +653,12 @@
           "description": "Draw borders around split panes."
         },
         {
+          "key": "ui.pane_scrollbars",
+          "type": "boolean",
+          "default": "true",
+          "description": "Draw interactive scrollbars beside terminal panes. Disable to reclaim the scrollbar column and keep it out of terminal-native selections."
+        },
+        {
           "key": "ui.pane_gaps",
           "type": "boolean",
           "default": "true",
@@ -665,10 +671,26 @@
           "description": "Show agent labels in split pane borders when no manual pane label is set."
         },
         {
+          "key": "ui.auto_resize_splits",
+          "type": "boolean",
+          "default": "false",
+          "description": "Auto-rebalance split areas after each pane split or close."
+        },
+        {
           "key": "ui.hide_tab_bar_when_single_tab",
           "type": "boolean",
           "default": "false",
           "description": "Hide the tab row when the workspace has one tab."
+        },
+        {
+          "key": "ui.tab_bar_position",
+          "type": "enum",
+          "default": "\"top\"",
+          "description": "Place the desktop tab row above or below the terminal panes.",
+          "values": [
+            "top",
+            "bottom"
+          ]
         },
         {
           "key": "ui.agent_panel_sort",
@@ -702,7 +724,7 @@
           "key": "ui.sidebar.spaces.row_gap",
           "type": "integer",
           "default": "0",
-          "description": "Blank terminal rows between expanded Space sidebar entries. Set to 1 to restore the previous spacing. Consecutive indented worktree children remain packed as one group."
+          "description": "Blank terminal rows between worktree groups and unrelated top-level Spaces. Worktree parents and their indented children remain packed."
         },
         {
           "key": "ui.sidebar.spaces.rows",
@@ -715,6 +737,12 @@
           "type": "color",
           "default": "\"cyan\"",
           "description": "Accent color for highlights, borders, and navigation UI. Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250))."
+        },
+        {
+          "key": "ui.recent_remote_mount_targets",
+          "type": "list of strings",
+          "default": "[]",
+          "description": "Most-recent-first remote-mount targets shown in the mount remote workspace dialog. Written automatically after a successful mount and capped at 5; edit or clear it by hand to change what the dialog offers."
         }
       ]
     },
@@ -1046,6 +1074,12 @@
           "type": "boolean",
           "default": "true",
           "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+        },
+        {
+          "key": "remote.accept_clipboard_writes",
+          "type": "boolean",
+          "default": "true",
+          "description": "Apply OSC 52 clipboard writes from panes on a mounted remote host to this machine's clipboard. A remote can only write — herdr rejects OSC 52 read queries — but a write still replaces what you were about to paste. Set false when mounting hosts you do not fully trust."
         }
       ]
     },

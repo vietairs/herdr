@@ -38,7 +38,7 @@ Snapshot restore does not preserve running shells, servers, tests, or arbitrary 
 
 Pane screen history restores recent terminal contents after a full server restart. It restores what Herdr can show, not the old process.
 
-This is off by default because pane output can include secrets, tokens, prompts, and command output. Enable it from Settings > Experiments > pane screen history or with:
+This is off by default because pane output can include secrets, tokens, prompts, and command output. Enable it in the config file:
 
 ```toml
 [experimental]
@@ -67,6 +67,7 @@ Native session restore requires these Herdr integration versions or newer:
 | Agent | Minimum Herdr integration version | Resume command |
 | --- | --- | --- |
 | Pi | `2` | `pi --session <path-or-id>` |
+| Antigravity CLI | `1` | `agy --conversation <id>` |
 | OMP | `3` | `omp --resume=<path-or-id>` |
 | Claude Code | `6` | `claude --resume <id>` |
 | Codex | `5` | `codex resume <id>` |
@@ -93,8 +94,6 @@ If native agent session restore applies to a pane, Herdr resumes the agent sessi
 Live handoff is for update and remote attach flows that need to replace a running Herdr server. It asks the old server to transfer live panes to the new server, so pane processes can keep running across the server replacement.
 
 This is different from snapshot restore, pane history replay, and native agent session restore. Handoff tries to keep the current processes alive. The others reconstruct state after the old server has already stopped.
-
-Handoff protects long-lived server-owned session state: pane PTYs and processes, agent identity and durable metadata, and plugin/session state needed by the replacement server. It does not preserve transient coordination across the replacement boundary. In-flight CLI or API requests, waits, subscription streams, client sockets, and pane-to-pane messages may be interrupted; clients should reconnect and retry them.
 
 Live handoff is experimental and opt-in:
 
