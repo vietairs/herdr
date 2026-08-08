@@ -671,6 +671,12 @@
           "description": "Show agent labels in split pane borders when no manual pane label is set."
         },
         {
+          "key": "ui.auto_resize_splits",
+          "type": "boolean",
+          "default": "false",
+          "description": "Auto-rebalance split areas after each pane split or close."
+        },
+        {
           "key": "ui.hide_tab_bar_when_single_tab",
           "type": "boolean",
           "default": "false",
@@ -1068,6 +1074,12 @@
           "type": "boolean",
           "default": "true",
           "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+        },
+        {
+          "key": "remote.accept_clipboard_writes",
+          "type": "boolean",
+          "default": "true",
+          "description": "Apply OSC 52 clipboard writes from panes on a mounted remote host to this machine's clipboard. A remote can only write — herdr rejects OSC 52 read queries — but a write still replaces what you were about to paste. Set false when mounting hosts you do not fully trust."
         }
       ]
     },
