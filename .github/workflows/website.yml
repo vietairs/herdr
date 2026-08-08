@@ -18,6 +18,7 @@ on:
       - "docs/preview/**"
       - "docs/versions/**"
       - "scripts/test_preview.py"
+  workflow_dispatch:
 
 permissions:
   contents: read
