@@ -1026,19 +1026,22 @@ impl App {
         // and skips purging `pending_remote_splits` for it before removal,
         // since that purge otherwise only runs from
         // `handle_federation_mount_ended`, which never fires for a close the
-        // user initiated locally. `close_indices_for` groups every workspace
-        // sharing this mount's worktree space (federation mounts are never
-        // linked worktrees), and `close_selected_workspace` below removes
-        // that exact same group in one shot, so ending the mount here is
-        // always the "last workspace" case for it, never partial.
+        // user initiated locally. One mount can carry several workspaces, so
+        // closing one is the mount's last-workspace case only when no sibling
+        // from the same host remains: ending the mount while siblings are
+        // still mirrored would pull the link out from under them, and closing
+        // the whole worktree-space group would retire them outright. Purge
+        // this workspace's pending state alone and retire it on its own.
         #[cfg(unix)]
-        if let Some(host_key) = self.federation_host_key_for_workspace(index) {
+        let federated_origin = self.federation_host_key_for_workspace(index);
+        #[cfg(unix)]
+        if let Some(host_key) = federated_origin.as_ref() {
             let closing_ids: std::collections::HashSet<String> = self
                 .state
-                .close_indices_for(index)
-                .iter()
-                .filter_map(|&i| self.state.workspaces.get(i).map(|ws| ws.id.clone()))
-                .collect();
+                .workspaces
+                .get(index)
+                .map(|ws| std::iter::once(ws.id.clone()).collect())
+                .unwrap_or_default();
             self.purge_pending_remote_splits_for_workspaces(&closing_ids);
             self.purge_pending_remote_closes_for_workspaces(&closing_ids);
             self.purge_pending_remote_clipboard_stages_for_workspaces(&closing_ids);
@@ -1046,11 +1049,26 @@ impl App {
             self.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
             self.purge_remote_resync_tab_index_for_workspaces(&closing_ids);
             self.purge_remote_resync_workspace_index_for_workspaces(&closing_ids);
-            self.state.end_federation_mount(&host_key);
+
+            let siblings_remain = (0..self.state.workspaces.len()).any(|other| {
+                other != index
+                    && self.federation_host_key_for_workspace(other).as_ref() == Some(host_key)
+            });
+            if !siblings_remain {
+                self.state.end_federation_mount(host_key);
+            }
         }
 
         self.state.selected = index;
-        self.state.close_selected_workspace();
+        #[cfg(unix)]
+        let retire_one_only = federated_origin.is_some();
+        #[cfg(not(unix))]
+        let retire_one_only = false;
+        if retire_one_only {
+            self.close_single_workspace_at(index);
+        } else {
+            self.state.close_selected_workspace();
+        }
         self.state.remove_plugin_pane_records(pane_ids);
         self.shutdown_detached_terminal_runtimes();
         self.emit_event(EventEnvelope {
@@ -1490,6 +1508,21 @@ mod tests {
         target: &str,
         generation: u64,
     ) -> crate::remote::federation::reducer::RemoteMirror {
+        test_federation_mirror_with_workspaces(target, generation, 1)
+    }
+
+    /// `test_federation_mirror_with_workspace` for `workspace_count` remote
+    /// workspaces on the same mount, so a test can exercise the multi-
+    /// workspace mount shape a real `federation-serve` host reports. Every
+    /// workspace `w<n>` owns exactly one tab (`w<n>-tab`) and one pane
+    /// (`w<n>-p1`), which keeps each workspace's `remote_resync_*_index`
+    /// entries distinguishable by key.
+    #[cfg(unix)]
+    fn test_federation_mirror_with_workspaces(
+        target: &str,
+        generation: u64,
+        workspace_count: usize,
+    ) -> crate::remote::federation::reducer::RemoteMirror {
         use crate::api::schema::common::AgentStatus;
         use crate::api::schema::session::SessionSnapshot;
         use crate::api::schema::{
@@ -1498,42 +1531,42 @@ mod tests {
         use crate::remote::federation::protocol::EventCursor;
 
         let mut mirror = test_federation_mirror_at_generation(target, generation);
-        let snapshot = SessionSnapshot {
-            version: "0.0.0-test".to_string(),
-            protocol: 1,
-            focused_workspace_id: None,
-            focused_tab_id: None,
-            focused_pane_id: None,
-            workspaces: vec![WorkspaceInfo {
-                workspace_id: "w1".to_string(),
-                number: 1,
-                label: "remote workspace".to_string(),
+        let mut workspaces = Vec::new();
+        let mut tabs = Vec::new();
+        let mut panes = Vec::new();
+        for n in 1..=workspace_count {
+            let workspace_id = format!("w{n}");
+            let tab_id = format!("w{n}-tab");
+            workspaces.push(WorkspaceInfo {
+                workspace_id: workspace_id.clone(),
+                number: n,
+                label: format!("remote workspace {n}"),
                 focused: false,
                 pane_count: 1,
                 tab_count: 1,
-                active_tab_id: "w1-tab".to_string(),
+                active_tab_id: tab_id.clone(),
                 agent_status: AgentStatus::Idle,
                 tokens: Default::default(),
                 worktree: None,
-            }],
-            tabs: vec![RemoteTabInfo {
-                tab_id: "w1-tab".to_string(),
-                workspace_id: "w1".to_string(),
+            });
+            tabs.push(RemoteTabInfo {
+                tab_id: tab_id.clone(),
+                workspace_id: workspace_id.clone(),
                 number: 1,
-                label: "remote tab".to_string(),
+                label: format!("remote tab {n}"),
                 focused: false,
                 pane_count: 1,
                 agent_status: AgentStatus::Idle,
-            }],
-            panes: vec![RemotePaneInfo {
-                pane_id: "p1".to_string(),
-                terminal_id: "t1".to_string(),
-                workspace_id: "w1".to_string(),
-                tab_id: "w1-tab".to_string(),
+            });
+            panes.push(RemotePaneInfo {
+                pane_id: format!("w{n}-p1"),
+                terminal_id: format!("t{n}"),
+                workspace_id,
+                tab_id,
                 focused: false,
                 cwd: Some("/home/alice/project".to_string()),
                 foreground_cwd: None,
-                label: Some("remote pane".to_string()),
+                label: Some(format!("remote pane {n}")),
                 agent: None,
                 title: None,
                 terminal_title: None,
@@ -1545,7 +1578,17 @@ mod tests {
                 agent_session: None,
                 scroll: None,
                 revision: 0,
-            }],
+            });
+        }
+        let snapshot = SessionSnapshot {
+            version: "0.0.0-test".to_string(),
+            protocol: 1,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces,
+            tabs,
+            panes,
             layouts: Vec::new(),
             agents: Vec::new(),
         };
@@ -2590,6 +2633,293 @@ mod tests {
             .workspaces
             .iter()
             .all(|ws| ws.worktree_space().is_none()));
+    }
+
+    /// Every workspace of a mount shares one worktree-space key
+    /// (`federation:<host_key>`), so a close path that treats that group as
+    /// the unit of closure destroys the whole mount. Live-observed: closing
+    /// one of four mirrored workspaces removed all four and killed the link.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_one_of_several_federated_workspaces_keeps_siblings_and_mount() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror_with_workspaces("remote-host", 1, 3);
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+        assert_eq!(
+            app.state.workspaces.len(),
+            4,
+            "the mount must materialize all three remote workspaces"
+        );
+
+        // `Workspace::test_new` attaches a terminal it never registers, so
+        // the seeded local workspace needs one before the state invariants
+        // can be asserted at all.
+        app.state.ensure_test_terminals();
+
+        let host_key = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+        let space_key = format!("federation:{}", host_key.as_str());
+        // Close the middle mirrored workspace; its two siblings must live on.
+        let closing_workspace_id = app.public_workspace_id(2);
+        let surviving_ids = [
+            app.state.workspaces[1].id.clone(),
+            app.state.workspaces[3].id.clone(),
+        ];
+
+        let response = app.handle_workspace_close(
+            "close-mid".to_string(),
+            WorkspaceTarget {
+                workspace_id: closing_workspace_id,
+            },
+        );
+        let decoded: SuccessResponse =
+            serde_json::from_str(&response).expect("workspace.close must succeed");
+        assert!(matches!(decoded.result, ResponseResult::Ok {}));
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            3,
+            "closing one mirrored workspace must remove exactly one, not the whole mount group"
+        );
+        for id in &surviving_ids {
+            assert!(
+                app.state.workspaces.iter().any(|ws| &ws.id == id),
+                "sibling workspace {id} of the same mount must survive"
+            );
+        }
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .filter(|ws| ws.worktree_space().is_some_and(|s| s.key == space_key))
+                .count(),
+            2,
+            "surviving siblings must keep their federation grouping"
+        );
+        assert!(
+            app.state.remote_mirrors.contains_key(&host_key),
+            "the mount must stay registered while it still owns workspaces"
+        );
+        assert!(
+            app.state.mount_drive_tasks.contains_key(&host_key),
+            "the mount's drive task must not be aborted while siblings still mirror it"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    /// The last-workspace case the original close path was written for: with
+    /// no sibling left, the mount itself must still be torn down.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_the_final_federated_workspace_of_a_mount_ends_it() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror_with_workspaces("remote-host", 1, 2);
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+        assert_eq!(app.state.workspaces.len(), 3);
+        app.state.ensure_test_terminals();
+        let host_key = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+
+        let first = app.public_workspace_id(1);
+        let response = app.handle_workspace_close(
+            "close-1".to_string(),
+            WorkspaceTarget {
+                workspace_id: first,
+            },
+        );
+        let decoded: SuccessResponse =
+            serde_json::from_str(&response).expect("workspace.close must succeed");
+        assert!(matches!(decoded.result, ResponseResult::Ok {}));
+        assert!(
+            app.state.remote_mirrors.contains_key(&host_key),
+            "one mirrored workspace still remains, so the mount must stay live"
+        );
+
+        let last = app.public_workspace_id(1);
+        let response = app.handle_workspace_close(
+            "close-2".to_string(),
+            WorkspaceTarget { workspace_id: last },
+        );
+        let decoded: SuccessResponse =
+            serde_json::from_str(&response).expect("workspace.close must succeed");
+        assert!(matches!(decoded.result, ResponseResult::Ok {}));
+
+        assert!(
+            app.state.remote_mirrors.is_empty(),
+            "closing the mount's last workspace must deregister the mount"
+        );
+        assert!(
+            app.state.mount_drive_tasks.is_empty(),
+            "closing the mount's last workspace must cancel its drive task"
+        );
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app
+            .state
+            .workspaces
+            .iter()
+            .all(|ws| ws.worktree_space().is_none()));
+        app.state.assert_invariants_for_test();
+    }
+
+    /// The resync indexes are per-workspace bookkeeping, so a close must
+    /// purge only the closing workspace's entries. Purging by mount group
+    /// (every workspace sharing `federation:<host_key>`) blinds the still-
+    /// mounted siblings to their own panes/tabs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_one_federated_workspace_purges_only_its_own_resync_entries() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror = test_federation_mirror_with_workspaces("remote-host", 1, 2);
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+        assert_eq!(app.state.workspaces.len(), 3);
+        app.state.ensure_test_terminals();
+        let host_key = crate::remote::federation::id::HostKey::new("remote-host", "s1");
+        // Mirrored entities are indexed under their mount-namespaced ids.
+        let ns = |raw: &str| format!("r:{}:{raw}", host_key.as_str());
+
+        // The mount indexes its own panes and tabs; the workspace index only
+        // holds host-announced workspaces awaiting materialization, so seed
+        // one entry per mirrored workspace by hand.
+        for raw in ["w1", "w2"] {
+            app.remote_resync_workspace_index.insert(
+                ns(raw),
+                crate::app::creation::RemoteWorkspaceRef {
+                    origin: host_key.clone(),
+                    label: format!("{raw} label"),
+                },
+            );
+        }
+        assert!(app.remote_resync_pane_index.contains_key(&ns("w1-p1")));
+        assert!(app.remote_resync_pane_index.contains_key(&ns("w2-p1")));
+        assert!(app.remote_resync_tab_index.contains_key(&ns("w1-tab")));
+        assert!(app.remote_resync_tab_index.contains_key(&ns("w2-tab")));
+
+        let closing_workspace_id = app.public_workspace_id(1);
+        let response = app.handle_workspace_close(
+            "close-1".to_string(),
+            WorkspaceTarget {
+                workspace_id: closing_workspace_id,
+            },
+        );
+        let decoded: SuccessResponse =
+            serde_json::from_str(&response).expect("workspace.close must succeed");
+        assert!(matches!(decoded.result, ResponseResult::Ok {}));
+
+        assert!(
+            !app.remote_resync_pane_index.contains_key(&ns("w1-p1")),
+            "the closed workspace's pane index entry must be purged"
+        );
+        assert!(
+            app.remote_resync_pane_index.contains_key(&ns("w2-p1")),
+            "a sibling workspace's pane index entry must survive"
+        );
+        assert!(
+            !app.remote_resync_tab_index.contains_key(&ns("w1-tab")),
+            "the closed workspace's tab index entry must be purged"
+        );
+        assert!(
+            app.remote_resync_tab_index.contains_key(&ns("w2-tab")),
+            "a sibling workspace's tab index entry must survive"
+        );
+        assert!(
+            !app.remote_resync_workspace_index.contains_key(&ns("w1")),
+            "the closed workspace's workspace index entry must be purged"
+        );
+        assert!(
+            app.remote_resync_workspace_index.contains_key(&ns("w2")),
+            "a sibling workspace's workspace index entry must survive"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    /// Guard against over-narrowing the federated close: a genuine shared
+    /// (non-linked) worktree space still closes as one group.
+    #[test]
+    fn api_workspace_close_still_closes_a_whole_shared_worktree_space_group() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![
+            Workspace::test_new("main"),
+            Workspace::test_new("sibling"),
+            Workspace::test_new("unrelated"),
+        ];
+        for idx in 0..2 {
+            app.state.workspaces[idx].worktree_space =
+                Some(crate::workspace::WorktreeSpaceMembership {
+                    key: "repo-key".into(),
+                    label: "herdr".into(),
+                    repo_root: "/repo/herdr".into(),
+                    checkout_path: "/repo/herdr".into(),
+                    is_linked_worktree: false,
+                });
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let unrelated_id = app.state.workspaces[2].id.clone();
+
+        let response = app.handle_workspace_close(
+            "req".into(),
+            WorkspaceTarget {
+                workspace_id: app.state.workspaces[0].id.clone(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "both members of the shared worktree space must close together"
+        );
+        assert_eq!(app.state.workspaces[0].id, unrelated_id);
+        app.state.assert_invariants_for_test();
     }
 
     #[cfg(unix)]

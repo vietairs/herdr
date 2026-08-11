@@ -699,19 +699,25 @@ pub(crate) async fn prepare_and_mount_federation_target(
         .manage_ssh_config;
 
     let prep_target = target.clone();
+    let prep_session_name = session_name.clone();
     // `remote_ssh` must stay alive across the dial: dropping it deletes the
     // managed ssh config dir, and the dial's `ssh -F/-S` flags point into it.
     let (remote_ssh, remote_herdr) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         let remote_ssh = RemoteSsh::new(prep_target, manage_ssh_config);
         let prepared_remote = prepare_remote_herdr(&remote_ssh, false)?;
+        // The dial serves `--session <name>`, so the readiness probe must
+        // inspect that session's server rather than the remote's default one.
+        let remote_herdr = prepared_remote
+            .remote_herdr
+            .with_session_name(&prep_session_name);
         ensure_remote_server_ready(
             &remote_ssh,
-            &prepared_remote.remote_herdr,
+            &remote_herdr,
             prepared_remote.installed_or_replaced,
             prepared_remote.stop_after_install_approved,
             false,
         )?;
-        Ok((remote_ssh, prepared_remote.remote_herdr))
+        Ok((remote_ssh, remote_herdr))
     })
     .await
     .map_err(|err| io::Error::other(format!("remote preparation task failed: {err}")))??;
@@ -849,6 +855,11 @@ pub(crate) struct RemoteHerdr {
     install_suffix: String,
     shell_path: String,
     platform: RemotePlatform,
+    /// Session this invocation targets, when it is not the default one.
+    /// Status probes must inspect the server they are about to attach to;
+    /// without this they always resolved the remote's default session, so a
+    /// named-session attach was gated on an unrelated session's protocol.
+    session_name: Option<String>,
 }
 
 impl RemoteHerdr {
@@ -859,12 +870,40 @@ impl RemoteHerdr {
             install_suffix,
             shell_path,
             platform,
+            session_name: None,
         }
     }
 
     fn with_shell_path(mut self, shell_path: String) -> Self {
         self.shell_path = shell_path;
         self
+    }
+
+    /// Binds status probes to `session_name`. The default session is left
+    /// implicit, matching `remote_bridge_command`'s existing convention of
+    /// only passing `--session` for a non-default name.
+    fn with_session_name(mut self, session_name: &str) -> Self {
+        self.session_name = if session_name == crate::session::DEFAULT_SESSION_NAME {
+            None
+        } else {
+            Some(session_name.to_string())
+        };
+        self
+    }
+
+    /// Remote `herdr` invocation prefix, carrying `--session` ahead of any
+    /// subcommand (the remote parses the flag before the subcommand).
+    fn invocation(&self) -> String {
+        match &self.session_name {
+            Some(session_name) => {
+                format!(
+                    "{} --session {}",
+                    self.shell_path,
+                    shell_quote(session_name)
+                )
+            }
+            None => self.shell_path.clone(),
+        }
     }
 }
 
@@ -1801,7 +1840,7 @@ fn remote_server_status(
     ssh: &RemoteSsh,
     remote_herdr: &RemoteHerdr,
 ) -> io::Result<RemoteServerStatus> {
-    let command = format!("{} status server --json", remote_herdr.shell_path);
+    let command = format!("{} status server --json", remote_herdr.invocation());
     let output = ssh.sh_output(&command)?;
     if !output.status.success() {
         return Err(command_failed("remote server status failed", &output));
