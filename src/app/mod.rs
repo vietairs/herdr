@@ -225,6 +225,14 @@ pub struct App {
     /// a split. Keyed the same way `RemoteMirror::tabs()` is, and populated
     /// by both mount-time materialization and resync.
     pub(crate) remote_resync_tab_index: HashMap<String, creation::RemoteTabRef>,
+    /// Workspace-level counterpart of `remote_resync_tab_index`: maps a
+    /// mirrored remote workspace's namespaced (public) id — which is also the
+    /// local `Workspace::id` once it materializes — to the metadata needed to
+    /// build the local workspace when its first pane arrives. Entries only
+    /// live here between a resync's workspace event and the pane event that
+    /// materializes it; a materialized workspace is found by `Workspace::id`
+    /// directly, not through this map.
+    pub(crate) remote_resync_workspace_index: HashMap<String, creation::RemoteWorkspaceRef>,
     pub(crate) local_terminal_notifications: bool,
     /// Whether this process applies `AppEvent::PrefixInputSource` to the host input source.
     /// The headless server sets this to false: the switch belongs to the foreground client,
@@ -928,6 +936,7 @@ impl App {
             remote_clipboard_image_reads_in_flight: std::collections::HashSet::new(),
             remote_resync_pane_index: HashMap::new(),
             remote_resync_tab_index: HashMap::new(),
+            remote_resync_workspace_index: HashMap::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
             config_reloaded_from_disk: false,

@@ -619,6 +619,24 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                 // (e.g. tests), same convention as `SplitPaneResponse::
                 // Created` above.
                 if let Some(ctx) = split_materialization {
+                    // Workspaces first, for the same staged reason tabs come
+                    // before panes: a local `Workspace` needs a tab, which
+                    // needs a pane. This only records the new remote
+                    // workspace's identity and label; the pane loop below is
+                    // what actually materializes it (`App::
+                    // handle_federation_resync_pane_created` creates a
+                    // workspace for a `workspace_id` it has no local
+                    // workspace for yet).
+                    for workspace in diff.created_workspaces {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationResyncWorkspaceCreated {
+                                origin: ctx.origin.clone(),
+                                workspace_id: workspace.workspace_id,
+                                label: workspace.label,
+                            })
+                            .await;
+                    }
                     // Tabs first: a local `Tab` needs a pane to exist, so
                     // this only records the new remote tab's identity and
                     // label; the pane loop right below is what actually
@@ -668,6 +686,19 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                             .send(crate::events::AppEvent::FederationResyncTabClosed {
                                 origin: ctx.origin.clone(),
                                 tab_id,
+                            })
+                            .await;
+                    }
+                    // Workspaces last, mirroring the tabs-last reasoning one
+                    // level up: the pane/tab removals above usually collapse
+                    // the local workspace already, so this mostly sweeps up
+                    // and prunes the index.
+                    for workspace_id in diff.removed_workspace_ids {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationResyncWorkspaceRemoved {
+                                origin: ctx.origin.clone(),
+                                workspace_id,
                             })
                             .await;
                     }
@@ -729,6 +760,61 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
             FederationMessage::SnapshotRequest(_) => {
                 tracing::debug!("federation client received a SnapshotRequest; ignoring");
             }
+            // `WorkspaceCreateRequest` is client->server only, same reasoning
+            // as `SplitPaneRequest` above.
+            FederationMessage::WorkspaceCreateRequest(_) => {
+                tracing::debug!("federation client received a WorkspaceCreateRequest; ignoring");
+            }
+            // The remote host already created (or refused) the real workspace
+            // by the time this arrives. Unlike `SplitPaneResponse::Created`,
+            // nothing is materialized from the response itself: the serving
+            // host's `workspace.created` event and the resync snapshot it
+            // triggers are the single materialization path for a remote
+            // workspace (`diff.created_workspaces`/`created_tabs`/
+            // `created_panes` above), so building a second one here would
+            // double-create the workspace unless the mirror were
+            // pre-registered for a workspace, a tab AND a pane. Requesting
+            // the resync immediately makes it prompt rather than dependent
+            // on the event frame's arrival, and it is idempotent: a snapshot
+            // whose entities the mirror already holds diffs to nothing.
+            FederationMessage::WorkspaceCreateResponse(response) => match response {
+                super::protocol::WorkspaceCreateResponse::Created {
+                    request_id,
+                    workspace_id,
+                    tab_id,
+                    pane_id,
+                    terminal_id,
+                } => {
+                    tracing::info!(
+                        request_id,
+                        %workspace_id,
+                        %tab_id,
+                        %pane_id,
+                        %terminal_id,
+                        "remote workspace created; resyncing to materialize it"
+                    );
+                    if !resync_in_flight {
+                        resync_in_flight = out_tx
+                            .send(FederationMessage::SnapshotRequest(
+                                super::protocol::SnapshotRequest,
+                            ))
+                            .is_ok();
+                    }
+                }
+                super::protocol::WorkspaceCreateResponse::Failed { request_id, reason } => {
+                    tracing::warn!(request_id, %reason, "remote workspace create failed");
+                    if let Some(ctx) = split_materialization {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationWorkspaceCreateFailed {
+                                request_id,
+                                reason,
+                                origin: ctx.origin.clone(),
+                            })
+                            .await;
+                    }
+                }
+            },
             // The remote host already performed the real split (see
             // `server::federation_actor::FederationCommand::SplitPane`) by
             // the time this arrives. This loop owns `router`/`out_tx` (the
@@ -1067,6 +1153,12 @@ fn is_structural_event_kind(kind: crate::api::schema::events::EventKind) -> bool
             | EventKind::TabCreated
             | EventKind::TabClosed
             | EventKind::TabMoved
+            // Multi-workspace federation: without these, a workspace created
+            // or closed out-of-band on the serving host never triggered a
+            // resync fetch at all, so the client only ever saw the workspace
+            // set it mounted with.
+            | EventKind::WorkspaceCreated
+            | EventKind::WorkspaceClosed
     )
 }
 

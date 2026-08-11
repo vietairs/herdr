@@ -12,6 +12,16 @@ use crate::app::ToastKind;
 use super::super::api_helpers::{normalize_metadata_source, normalize_metadata_ttl};
 use super::responses::{encode_error, encode_success};
 
+/// Mints a fresh, process-wide-unique `WorkspaceCreateRequest::request_id`.
+/// Its own counter, separate from the split/close ones in `api/panes.rs`, for
+/// the same reason those two are separate from each other: two kinds minted
+/// "at the same time" must never collide. A bare counter is enough because
+/// the response is fire-and-forget (see `App::dispatch_remote_workspace_create`).
+fn next_remote_workspace_create_request_id() -> u64 {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl App {
     /// REVISED Phase A (multi-remote federated workspace launch): mounts a
     /// federation target as server-daemon-owned state, spawned inside this
@@ -550,6 +560,7 @@ impl App {
         // route a resync pane-removal at a stale mapping.
         self.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
         self.purge_remote_resync_tab_index_for_workspaces(&closing_ids);
+        self.purge_remote_resync_workspace_index_for_workspaces(&closing_ids);
         self.purge_remote_image_paste_pane_state_for_workspaces(&closing_ids);
 
         self.state.selected = idx;
@@ -606,6 +617,25 @@ impl App {
         id: String,
         params: WorkspaceCreateParams,
     ) -> String {
+        // A plain "new workspace" performed while a mounted remote workspace
+        // is in focus grows the *mounted host's* workspace set, mirroring how
+        // `pane.split` inside a federated workspace splits on the remote
+        // (`dispatch_remote_pane_split`). Only when no `cwd` was requested:
+        // an explicit path is a deliberate local-directory choice, and the
+        // remote host's filesystem is a different namespace entirely.
+        if params.cwd.is_none() {
+            if let Some(source_ws_idx) = self.workspace_creation_source() {
+                if let Some(origin) = self.federation_host_key_for_workspace(source_ws_idx) {
+                    return self.dispatch_remote_workspace_create(
+                        id,
+                        source_ws_idx,
+                        origin,
+                        params.label,
+                    );
+                }
+            }
+        }
+
         let cwd = params.cwd.map(PathBuf::from).unwrap_or_else(|| {
             let follow_cwd = self.workspace_creation_source().and_then(|ws_idx| {
                 self.focused_pane_cwd_in_workspace(ws_idx)
@@ -634,6 +664,91 @@ impl App {
             }
             Err(err) => encode_error(id, "workspace_create_failed", err.to_string()),
         }
+    }
+
+    /// Sends a `WorkspaceCreateRequest` over `source_ws_idx`'s mount instead
+    /// of creating a workspace locally (see the caller). Fire-and-forget for
+    /// the same hard reason `dispatch_remote_pane_split` is: this JSON-API
+    /// handler runs synchronously inline with `App`'s own tick and cannot
+    /// await the `WorkspaceCreateResponse` the mount's async drive task will
+    /// eventually read. The new workspace materializes through the ordinary
+    /// resync path once the remote confirms
+    /// (`AppEvent::FederationResyncWorkspaceCreated` then the pane event that
+    /// builds it), so this acknowledges with `remote_workspace_create_pending`
+    /// rather than fabricating a `WorkspaceInfo` it cannot yet produce.
+    ///
+    /// Falls back to an error — never to a silent local workspace — when the
+    /// mount has no live link, so a stale/disconnected mount cannot quietly
+    /// produce a local workspace the user asked to be remote.
+    fn dispatch_remote_workspace_create(
+        &mut self,
+        id: String,
+        source_ws_idx: usize,
+        origin: crate::remote::federation::id::HostKey,
+        label: Option<String>,
+    ) -> String {
+        // Any live remote-backed pane in this workspace carries the mount's
+        // outbound handle; the request is workspace-scoped on the remote, so
+        // which one is irrelevant.
+        let pane_ids: Vec<crate::layout::PaneId> = self
+            .state
+            .workspaces
+            .get(source_ws_idx)
+            .map(|ws| {
+                ws.tabs
+                    .iter()
+                    .flat_map(|tab| tab.layout.pane_ids())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let out_tx = pane_ids
+            .into_iter()
+            .filter_map(|pane_id| {
+                let terminal_id = self
+                    .state
+                    .workspaces
+                    .get(source_ws_idx)?
+                    .terminal_id(pane_id)?
+                    .clone();
+                self.terminal_runtimes.get(&terminal_id)?.remote_out_tx()
+            })
+            .next();
+
+        let Some(out_tx) = out_tx else {
+            return encode_error(
+                id,
+                "remote_workspace_create_unsupported",
+                "creating a workspace on a remote-federated host requires a live mount; \
+                 this workspace's mount is not connected",
+            );
+        };
+
+        let request_id = next_remote_workspace_create_request_id();
+        let sent = out_tx.send(
+            crate::remote::federation::protocol::FederationMessage::WorkspaceCreateRequest(
+                crate::remote::federation::protocol::WorkspaceCreateRequest { request_id, label },
+            ),
+        );
+        if sent.is_err() {
+            return encode_error(
+                id,
+                "remote_workspace_create_unsupported",
+                "the remote mount's link is closing; the workspace-create request could not \
+                 be sent",
+            );
+        }
+        tracing::info!(
+            request_id,
+            %origin,
+            "sent a workspace-create request to a mounted remote host"
+        );
+
+        encode_error(
+            id,
+            "remote_workspace_create_pending",
+            "workspace-create request sent to the remote host; the new workspace appears \
+             once the remote host reports it",
+        )
     }
 
     pub(super) fn handle_workspace_focus(&mut self, id: String, target: WorkspaceTarget) -> String {
@@ -907,6 +1022,7 @@ impl App {
             self.purge_remote_image_paste_pane_state_for_workspaces(&closing_ids);
             self.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
             self.purge_remote_resync_tab_index_for_workspaces(&closing_ids);
+            self.purge_remote_resync_workspace_index_for_workspaces(&closing_ids);
             self.state.end_federation_mount(&host_key);
         }
 

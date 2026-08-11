@@ -320,6 +320,35 @@ mod tests {
         ));
     }
 
+    /// The `WorkspaceCreateRequest`/`Response` addition is wire-incompatible:
+    /// a peer still speaking the previously released version must be rejected
+    /// at the header, before any payload is touched, rather than hitting an
+    /// unknown-variant decode error mid-session.
+    #[test]
+    fn decode_rejects_a_peer_on_the_previous_federation_protocol_version() {
+        const {
+            assert!(
+                FEDERATION_PROTOCOL_VERSION >= 6,
+                "workspace-create shipped at federation protocol 6"
+            )
+        };
+        let msg = FederationMessage::WorkspaceCreateRequest(super::super::WorkspaceCreateRequest {
+            request_id: 1,
+            label: None,
+        });
+        let mut frame = encode(&msg).expect("encode should succeed");
+        frame[0..4].copy_from_slice(&(FEDERATION_PROTOCOL_VERSION - 1).to_le_bytes());
+
+        let err = decode::<FederationMessage>(&frame, Channel::Control.max_len())
+            .expect_err("a frame stamped with the previous version must be rejected");
+
+        assert!(matches!(
+            err,
+            CodecError::VersionSkew { local, remote }
+                if local == FEDERATION_PROTOCOL_VERSION && remote == FEDERATION_PROTOCOL_VERSION - 1
+        ));
+    }
+
     #[test]
     fn agent_status_frame_without_agent_field_decodes_with_none() {
         // Simulates a frame recorded before `AgentStatusMessage::agent`

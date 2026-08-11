@@ -236,6 +236,38 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::FederationResyncWorkspaceCreated {
+            origin,
+            workspace_id,
+            label,
+        } = ev
+        {
+            self.handle_federation_resync_workspace_created(origin, workspace_id, label);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationResyncWorkspaceRemoved {
+            origin,
+            workspace_id,
+        } = ev
+        {
+            self.handle_federation_resync_workspace_removed(origin, workspace_id);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationWorkspaceCreateFailed {
+            request_id,
+            reason,
+            origin,
+        } = ev
+        {
+            self.handle_federation_workspace_create_failed(request_id, reason, origin);
+            return;
+        }
+
+        #[cfg(unix)]
         if let AppEvent::FederationResyncTabCreated {
             origin,
             workspace_id,

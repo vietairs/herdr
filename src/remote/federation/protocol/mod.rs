@@ -53,7 +53,16 @@ use super::id::ServerInstanceId;
 /// discriminant; the bump converts it into a clean handshake reject instead of
 /// a mid-session frame error. v4 shipped in tags `v0.7.5-hvn.2` through
 /// `v0.7.5-hvn.6`, so it cannot be amended in place.
-pub const FEDERATION_PROTOCOL_VERSION: u32 = 5;
+///
+/// Bumped 5 -> 6 with the addition of
+/// `WorkspaceCreateRequest`/`WorkspaceCreateResponse` (multi-workspace
+/// federation: a mounting client asking the serving host to create a new
+/// workspace inside the existing mount). Same category as the `Fault` 1->2,
+/// `SplitPaneRequest` 2->3 and `ClosePaneRequest` 3->4 bumps — two new
+/// top-level `FederationMessage` variants a v5 peer cannot decode, not an
+/// additive field. v5 shipped in tags `v0.8.0-hvn.1`/`v0.8.0-hvn.2`, so it
+/// cannot be amended in place.
+pub const FEDERATION_PROTOCOL_VERSION: u32 = 6;
 
 /// An optional feature two federation peers may support. Modeled as an
 /// opaque name rather than a closed enum so an older peer can simply not
@@ -361,6 +370,46 @@ pub enum ClosePaneResponse {
     Failed { request_id: u64, reason: String },
 }
 
+/// Request to create a brand new workspace on the serving host, sent by a
+/// mounting client so a local "new workspace" action performed while a
+/// federated workspace is in focus grows the *mounted host's* own workspace
+/// set instead of spawning an unrelated local workspace. `request_id`
+/// correlates the eventual `WorkspaceCreateResponse`, mirroring
+/// `SplitPaneRequest`'s bare-u64 pairing rather than introducing an RPC
+/// framework.
+///
+/// Deliberately carries no `cwd`: the serving host's own
+/// `workspace.create` defaults decide where the new workspace's root pane
+/// starts, because a client-side path is meaningless on the remote
+/// filesystem. `label` is an optional client hint only — the serving host
+/// remains free to ignore or normalize it, exactly as it would for a local
+/// `workspace.create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreateRequest {
+    pub request_id: u64,
+    pub label: Option<String>,
+}
+
+/// Response to a `WorkspaceCreateRequest`: either the raw (un-namespaced)
+/// ids of the workspace the serving host just created — plus its root tab,
+/// root pane and that pane's terminal — or a reason it could not be created.
+/// The client re-namespaces every id under its own mount, the same way
+/// `App::build_remote_pane` namespaces mount-time panes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceCreateResponse {
+    Created {
+        request_id: u64,
+        workspace_id: String,
+        tab_id: String,
+        pane_id: String,
+        terminal_id: String,
+    },
+    Failed {
+        request_id: u64,
+        reason: String,
+    },
+}
+
 /// Request from a mounting client to write a file into the serving host's own
 /// staging directory, so a paste performed against a mirrored remote pane
 /// produces a path that resolves on the *remote* host rather than locally.
@@ -547,6 +596,8 @@ pub enum FederationMessage {
     SplitPaneResponse(SplitPaneResponse),
     ClosePaneRequest(ClosePaneRequest),
     ClosePaneResponse(ClosePaneResponse),
+    WorkspaceCreateRequest(WorkspaceCreateRequest),
+    WorkspaceCreateResponse(WorkspaceCreateResponse),
     SnapshotRequest(SnapshotRequest),
     /// Answer to a `SnapshotRequest`: a fresh atomic (snapshot, cursor) pair,
     /// same shape as the mount handshake's own `MountSnapshot` — the
@@ -570,6 +621,7 @@ impl FederationMessage {
             Self::Fault(_) => Channel::Control,
             Self::SplitPaneRequest(_) | Self::SplitPaneResponse(_) => Channel::Control,
             Self::ClosePaneRequest(_) | Self::ClosePaneResponse(_) => Channel::Control,
+            Self::WorkspaceCreateRequest(_) | Self::WorkspaceCreateResponse(_) => Channel::Control,
             Self::SnapshotRequest(_) => Channel::Control,
             // Carries a full `SessionSnapshot`, same payload shape/size as
             // the mount handshake's `MountSnapshot` — reuse its channel cap.
@@ -636,6 +688,58 @@ mod tests {
             request_id: 7,
             reason: "no such pane".to_string(),
         });
+        let encoded = codec::encode(&failed).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, failed);
+    }
+
+    #[test]
+    fn workspace_create_request_response_roundtrip_through_the_wire_codec() {
+        let request = FederationMessage::WorkspaceCreateRequest(WorkspaceCreateRequest {
+            request_id: 11,
+            label: Some("scratch".to_string()),
+        });
+        assert_eq!(request.channel(), Channel::Control);
+        let encoded = codec::encode(&request).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, request);
+
+        // A label-less request is the plain "new workspace" action: the
+        // serving host's own defaults name it.
+        let unlabelled = FederationMessage::WorkspaceCreateRequest(WorkspaceCreateRequest {
+            request_id: 12,
+            label: None,
+        });
+        let encoded = codec::encode(&unlabelled).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, unlabelled);
+
+        let created =
+            FederationMessage::WorkspaceCreateResponse(WorkspaceCreateResponse::Created {
+                request_id: 11,
+                workspace_id: "w2".to_string(),
+                tab_id: "w2:t1".to_string(),
+                pane_id: "w2:p1".to_string(),
+                terminal_id: "term_9".to_string(),
+            });
+        assert_eq!(created.channel(), Channel::Control);
+        let encoded = codec::encode(&created).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, created);
+
+        let failed = FederationMessage::WorkspaceCreateResponse(WorkspaceCreateResponse::Failed {
+            request_id: 11,
+            reason: "workspace_create_failed: disk full".to_string(),
+        });
+        assert_eq!(failed.channel(), Channel::Control);
         let encoded = codec::encode(&failed).expect("encode must succeed");
         let (decoded, _consumed) =
             codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())

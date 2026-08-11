@@ -50,7 +50,7 @@ use crate::remote::federation::protocol::{
     ClipboardStageResponse, ClosePaneRequest, ClosePaneResponse, EventChannelMessage, EventCursor,
     EventFrame, FaultMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot,
     ScrollbackReplay, SplitPaneRequest, SplitPaneResponse, TerminalChannelMessage,
-    FEDERATION_PROTOCOL_VERSION,
+    WorkspaceCreateRequest, WorkspaceCreateResponse, FEDERATION_PROTOCOL_VERSION,
 };
 use crate::remote::federation::tee;
 use crate::server::client_transport::ServerEvent;
@@ -543,6 +543,15 @@ fn reader_loop<S: Read>(
             Ok(Some(FederationMessage::ClosePaneRequest(request))) => {
                 handle_close_pane_request(request, out_tx, shutdown, first_cause, server_event_tx);
             }
+            Ok(Some(FederationMessage::WorkspaceCreateRequest(request))) => {
+                handle_workspace_create_request(
+                    request,
+                    out_tx,
+                    shutdown,
+                    first_cause,
+                    server_event_tx,
+                );
+            }
             Ok(Some(FederationMessage::ClipboardStageRequest(request))) => {
                 handle_clipboard_stage_request(request, staging, out_tx, shutdown, first_cause);
             }
@@ -661,6 +670,54 @@ fn handle_close_pane_request(
     let _ = enqueue_outbound(
         out_tx,
         FederationMessage::ClosePaneResponse(response),
+        first_cause,
+        shutdown,
+    );
+}
+
+/// Services one inbound `WorkspaceCreateRequest` (multi-workspace
+/// federation): a blocking round-trip through
+/// `FederationCommand::CreateWorkspace`, mirroring `handle_split_pane_request`
+/// exactly — replies with `WorkspaceCreateResponse::Created`/`Failed` on the
+/// shared outbound queue. A dropped/gone actor (server shutting down) replies
+/// `Failed` rather than silently dropping the peer's request.
+///
+/// Uncapped and unrated, matching the existing `SplitPaneRequest`/
+/// `ClosePaneRequest` handlers: a peer that reached this reader loop already
+/// cleared the handshake, and no other request kind here is metered either.
+fn handle_workspace_create_request(
+    request: WorkspaceCreateRequest,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) {
+    let WorkspaceCreateRequest { request_id, label } = request;
+
+    let (reply, rx) = oneshot::channel();
+    let sent = server_event_tx.blocking_send(ServerEvent::Federation(
+        FederationCommand::CreateWorkspace { label, reply },
+    ));
+    let outcome = if sent.is_err() {
+        Err("server event loop is gone".to_string())
+    } else {
+        rx.blocking_recv()
+            .unwrap_or_else(|_| Err("federation workspace-create reply dropped".to_string()))
+    };
+
+    let response = match outcome {
+        Ok((workspace_id, tab_id, pane_id, terminal_id)) => WorkspaceCreateResponse::Created {
+            request_id,
+            workspace_id,
+            tab_id,
+            pane_id,
+            terminal_id,
+        },
+        Err(reason) => WorkspaceCreateResponse::Failed { request_id, reason },
+    };
+    let _ = enqueue_outbound(
+        out_tx,
+        FederationMessage::WorkspaceCreateResponse(response),
         first_cause,
         shutdown,
     );
@@ -1829,6 +1886,145 @@ mod tests {
                 assert_eq!(new_terminal_id, "p1-split-term");
             }
             other => panic!("expected SplitPaneResponse::Created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reader_loop_routes_a_workspace_create_request_and_replies_created() {
+        // Mirrors `reader_loop_routes_a_split_pane_request_and_replies_
+        // created`: a mock actor loop answers
+        // `FederationCommand::CreateWorkspace` directly, so this asserts only
+        // the reader's frame -> command -> response routing.
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::CreateWorkspace {
+                    label,
+                    reply,
+                }) = ev
+                {
+                    let suffix = label.unwrap_or_else(|| "unnamed".to_string());
+                    let _ = reply.send(Ok((
+                        format!("w-{suffix}"),
+                        format!("t-{suffix}"),
+                        format!("p-{suffix}"),
+                        format!("term-{suffix}"),
+                    )));
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::WorkspaceCreateRequest(WorkspaceCreateRequest {
+                request_id: 21,
+                label: Some("scratch".to_string()),
+            }),
+        )
+        .expect("client writes workspace-create request");
+        drop(client); // EOF ends the reader after servicing the one frame
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            None,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let response = out_rx.try_recv().expect("a response was enqueued");
+        match response {
+            FederationMessage::WorkspaceCreateResponse(WorkspaceCreateResponse::Created {
+                request_id,
+                workspace_id,
+                tab_id,
+                pane_id,
+                terminal_id,
+            }) => {
+                assert_eq!(request_id, 21);
+                assert_eq!(workspace_id, "w-scratch");
+                assert_eq!(tab_id, "t-scratch");
+                assert_eq!(pane_id, "p-scratch");
+                assert_eq!(terminal_id, "term-scratch");
+            }
+            other => panic!("expected WorkspaceCreateResponse::Created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reader_loop_replies_failed_when_workspace_create_cannot_be_serviced() {
+        // The failure path must answer the peer, not drop its request: a
+        // gone/dropped actor is exactly what a shutting-down server looks
+        // like. Here the actor drops the reply channel without sending.
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::CreateWorkspace {
+                    reply, ..
+                }) = ev
+                {
+                    drop(reply);
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::WorkspaceCreateRequest(WorkspaceCreateRequest {
+                request_id: 22,
+                label: None,
+            }),
+        )
+        .expect("client writes workspace-create request");
+        drop(client);
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            None,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let response = out_rx.try_recv().expect("a response was enqueued");
+        match response {
+            FederationMessage::WorkspaceCreateResponse(WorkspaceCreateResponse::Failed {
+                request_id,
+                reason,
+            }) => {
+                assert_eq!(request_id, 22);
+                assert!(
+                    reason.contains("reply dropped"),
+                    "unexpected failure reason: {reason}"
+                );
+            }
+            other => panic!("expected WorkspaceCreateResponse::Failed, got {other:?}"),
         }
     }
 

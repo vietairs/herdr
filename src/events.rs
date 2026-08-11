@@ -313,6 +313,42 @@ pub enum AppEvent {
         origin: crate::remote::federation::id::HostKey,
         pane_id: String,
     },
+    /// A live mount's resync diff revealed a workspace the mirror had never
+    /// seen before — either created out-of-band on the serving host, or the
+    /// one this client just asked for with a `WorkspaceCreateRequest`. A
+    /// local `Workspace` cannot exist without a tab, and a `Tab` cannot exist
+    /// without a pane, so this carries no layout payload either: it records
+    /// the remote workspace's identity and label so the tab/pane events that
+    /// follow in the same diff materialize a correctly-labelled *new* local
+    /// workspace (same staged shape as `FederationResyncTabCreated` below).
+    #[cfg(unix)]
+    FederationResyncWorkspaceCreated {
+        origin: crate::remote::federation::id::HostKey,
+        /// Namespaced (public) workspace id (`RemoteMirror::workspaces()`'s
+        /// key) — becomes the local `Workspace::id` verbatim, which is what
+        /// the federation-origin classification reads.
+        workspace_id: String,
+        label: String,
+    },
+    /// A live mount's resync diff no longer reports a workspace the mirror
+    /// had previously mirrored. `workspace_id` is the namespaced (public) id
+    /// `RemoteMirror::workspaces()` used for it, which is also the local
+    /// `Workspace::id` the mount materialized.
+    #[cfg(unix)]
+    FederationResyncWorkspaceRemoved {
+        origin: crate::remote::federation::id::HostKey,
+        workspace_id: String,
+    },
+    /// The remote host rejected an earlier `WorkspaceCreateRequest`. Carries
+    /// no payload beyond the reason: nothing was created remotely, so there
+    /// is nothing local to reverse — same shape/reasoning as
+    /// `FederationClosePaneFailed`.
+    #[cfg(unix)]
+    FederationWorkspaceCreateFailed {
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    },
     /// A live mount's resync diff revealed a tab the mirror had never seen
     /// before. A local `Tab` cannot exist without at least one pane, so this
     /// carries no layout payload: it only records the remote tab's identity

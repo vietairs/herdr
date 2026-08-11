@@ -162,6 +162,25 @@ pub(crate) enum FederationCommand {
         target_pane_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Creates a brand new workspace on this host's own live session — the
+    /// serving-host half of multi-workspace federation: a mounting client's
+    /// "new workspace" action performed inside a mounted workspace must grow
+    /// the workspace set that actually lives here, not just the client's
+    /// local mirror. Reuses the same JSON-API method the local TUI/CLI
+    /// new-workspace action calls (`Method::WorkspaceCreate`), same reasoning
+    /// as `SplitPane`/`ClosePane` above.
+    ///
+    /// `label` is the client's optional hint; `cwd` is deliberately not
+    /// requestable (a client-side path is meaningless here), so this host's
+    /// own `workspace.create` defaults decide it. The reply carries the raw
+    /// (un-namespaced) `(workspace_id, tab_id, pane_id, terminal_id)` of the
+    /// new workspace's root pane.
+    CreateWorkspace {
+        label: Option<String>,
+        #[allow(clippy::type_complexity)]
+        // one tuple of four ids; a named struct would be single-use
+        reply: oneshot::Sender<Result<(String, String, String, String), String>>,
+    },
 }
 
 // `ServerEvent` derives `Debug`, so its `Federation` variant needs one — but the
@@ -206,6 +225,9 @@ impl std::fmt::Debug for FederationCommand {
             }
             FederationCommand::ClosePane { target_pane_id, .. } => {
                 write!(f, "ClosePane({target_pane_id})")
+            }
+            FederationCommand::CreateWorkspace { label, .. } => {
+                write!(f, "CreateWorkspace({label:?})")
             }
         }
     }
@@ -470,6 +492,59 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                     // text for "not found" — two independently-editable
                     // strings on either side of the wire that could
                     // otherwise drift out of sync.
+                    Err(format!("{code}: {message}"))
+                });
+            let _ = reply.send(outcome);
+        }
+        FederationCommand::CreateWorkspace { label, reply } => {
+            let response = app.handle_api_request_after_internal_events_drained(Request {
+                id: "federation-create-workspace".to_string(),
+                method: Method::WorkspaceCreate(crate::api::schema::WorkspaceCreateParams {
+                    // A mounting client's filesystem path is meaningless
+                    // here; let this host's own `workspace.create` defaults
+                    // pick the root pane's cwd.
+                    cwd: None,
+                    // Never steal this host's own focus for a remotely
+                    // requested workspace — the requesting client focuses
+                    // its own mirror of it, this host's user did not ask
+                    // for anything.
+                    focus: false,
+                    label,
+                    env: std::collections::HashMap::new(),
+                }),
+            });
+            let outcome = serde_json::from_str::<SuccessResponse>(&response)
+                .ok()
+                .and_then(|success| match success.result {
+                    ResponseResult::WorkspaceCreated {
+                        workspace,
+                        tab,
+                        root_pane,
+                    } => Some(Ok((
+                        workspace.workspace_id,
+                        tab.tab_id,
+                        root_pane.pane_id,
+                        root_pane.terminal_id,
+                    ))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    let error_value = serde_json::from_str::<serde_json::Value>(&response)
+                        .ok()
+                        .and_then(|value| value.get("error").cloned());
+                    let code = error_value
+                        .as_ref()
+                        .and_then(|error| error.get("code"))
+                        .and_then(|code| code.as_str())
+                        .unwrap_or("workspace_create_failed");
+                    let message = error_value
+                        .as_ref()
+                        .and_then(|error| error.get("message"))
+                        .and_then(|message| message.as_str())
+                        .unwrap_or("workspace create failed");
+                    // Same `code: message` shape `ClosePane` above replies
+                    // with, so the client end has one stable classification
+                    // format for every federation request failure.
                     Err(format!("{code}: {message}"))
                 });
             let _ = reply.send(outcome);
@@ -966,6 +1041,52 @@ mod tests {
         let (new_pane_id, new_terminal_id) = outcome.expect("split against a known pane succeeds");
         assert!(!new_pane_id.is_empty());
         assert!(!new_terminal_id.is_empty());
+    }
+
+    /// `CreateWorkspace` performs a real create against the live `App` (via
+    /// the same `Method::WorkspaceCreate` handler the local TUI/CLI
+    /// new-workspace action uses) and replies with the new workspace's raw
+    /// workspace/tab/pane/terminal ids.
+    #[tokio::test]
+    async fn create_workspace_creates_a_real_workspace_and_replies_with_its_ids() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("metadata")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let mut lease = FederationLease::new();
+        let before = app.state.workspaces.len();
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CreateWorkspace {
+                label: Some("from-remote".to_string()),
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        let (workspace_id, tab_id, pane_id, terminal_id) =
+            outcome.expect("workspace create on a healthy App succeeds");
+        assert!(!workspace_id.is_empty());
+        assert!(!tab_id.is_empty());
+        assert!(!pane_id.is_empty());
+        assert!(!terminal_id.is_empty());
+        assert_eq!(
+            app.state.workspaces.len(),
+            before + 1,
+            "the serving host really gained a workspace"
+        );
+        assert_eq!(
+            app.state.workspaces[before].display_name(),
+            "from-remote",
+            "the client's label hint reached the serving host's workspace"
+        );
+        assert_eq!(
+            app.state.active,
+            Some(0),
+            "a remotely requested workspace must not steal the serving host's own focus"
+        );
     }
 
     /// Root-cause regression for the client/server id-space mismatch: the
