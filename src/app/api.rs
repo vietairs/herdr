@@ -257,6 +257,17 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::FederationWorkspaceCreateAccepted {
+            request_id,
+            origin,
+            workspace_id,
+        } = ev
+        {
+            self.handle_federation_workspace_create_accepted(request_id, origin, workspace_id);
+            return;
+        }
+
+        #[cfg(unix)]
         if let AppEvent::FederationWorkspaceCreateFailed {
             request_id,
             reason,

@@ -233,6 +233,19 @@ pub struct App {
     /// materializes it; a materialized workspace is found by `Workspace::id`
     /// directly, not through this map.
     pub(crate) remote_resync_workspace_index: HashMap<String, creation::RemoteWorkspaceRef>,
+    /// `request_id`s of `WorkspaceCreateRequest`s this client sent that asked
+    /// for the new workspace to be focused (`WorkspaceCreateParams::focus`).
+    /// Cleared when the request is answered either way; a request that asked
+    /// for no focus is never recorded here at all.
+    pub(crate) pending_remote_workspace_create_focus: HashSet<u64>,
+    /// Namespaced workspace ids the remote host confirmed for one of those
+    /// focus-requesting creates but the resync has not materialized yet. The
+    /// workspace is focused the moment it appears, so pressing "new
+    /// workspace" inside a mounted workspace lands the user in the new one
+    /// exactly as a local create does. Ids only enter here from a
+    /// `WorkspaceCreateResponse` answering this client's own request, never
+    /// from an out-of-band remote create.
+    pub(crate) pending_remote_workspace_focus: HashSet<String>,
     pub(crate) local_terminal_notifications: bool,
     /// Whether this process applies `AppEvent::PrefixInputSource` to the host input source.
     /// The headless server sets this to false: the switch belongs to the foreground client,
@@ -687,6 +700,7 @@ impl App {
             creating_new_tab: false,
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
+            pending_workspace_create_source_workspace: None,
             rename_pane_target: None,
             worktree_create: None,
             worktree_open: None,
@@ -937,6 +951,8 @@ impl App {
             remote_resync_pane_index: HashMap::new(),
             remote_resync_tab_index: HashMap::new(),
             remote_resync_workspace_index: HashMap::new(),
+            pending_remote_workspace_create_focus: HashSet::new(),
+            pending_remote_workspace_focus: HashSet::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
             config_reloaded_from_disk: false,

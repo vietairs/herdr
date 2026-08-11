@@ -1568,6 +1568,13 @@ pub struct AppState {
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
     pub pending_workspace_create_cwd: Option<std::path::PathBuf>,
+    /// `Workspace::id` of the workspace an open workspace-create name dialog
+    /// was started from, pinned while the dialog is up. The dialog asks only
+    /// for a name, so the create it confirms must still resolve its cwd — and
+    /// its federation mount, if any — from that workspace rather than from
+    /// whatever the modal mode makes "current" at confirm time. Cleared
+    /// together with `pending_workspace_create_cwd`.
+    pub pending_workspace_create_source_workspace: Option<String>,
     pub rename_pane_target: Option<PaneId>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
@@ -2081,6 +2088,7 @@ impl AppState {
             creating_new_tab: false,
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
+            pending_workspace_create_source_workspace: None,
             rename_pane_target: None,
             worktree_create: None,
             worktree_open: None,

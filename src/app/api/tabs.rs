@@ -263,6 +263,50 @@ impl App {
             .map(|tab| tab.layout.pane_ids())
             .unwrap_or_default();
 
+        // Federation-mount awareness, the close-side counterpart of the
+        // `remote_tab_unsupported` refusal in `handle_tab_create` above. Every
+        // workspace one mount materializes shares that mount's single
+        // `federation:<host_key>` worktree space, so the group close below
+        // would take *all* of them down — the whole mirror of a still-live
+        // mount — for one workspace's last tab. Close exactly the one
+        // workspace instead, the same single teardown the federation resync
+        // handlers use. (The mount itself stays up; unmounting is
+        // `workspace.close` on the mount's own workspace group.)
+        let federated = matches!(
+            crate::remote::federation::id::classify(&workspace_id),
+            crate::remote::federation::id::IdClass::Remote(_)
+        );
+        if closes_workspace && federated {
+            let workspace = self.workspace_info(ws_idx);
+            let closing_ids: std::collections::HashSet<String> = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .map(|ws| ws.id.clone())
+                .into_iter()
+                .collect();
+            self.purge_federation_state_for_workspaces(&closing_ids);
+            self.close_single_workspace_at(ws_idx);
+            self.state.remove_plugin_pane_records(pane_ids);
+            self.shutdown_detached_terminal_runtimes();
+            self.schedule_session_save();
+            self.emit_event(EventEnvelope {
+                event: EventKind::TabClosed,
+                data: EventData::TabClosed {
+                    tab_id,
+                    workspace_id: workspace_id.clone(),
+                },
+            });
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceClosed,
+                data: EventData::WorkspaceClosed {
+                    workspace_id,
+                    workspace: Some(workspace),
+                },
+            });
+            return encode_success(id, ResponseResult::Ok {});
+        }
+
         if closes_workspace {
             if self.state.confirm_implicit_worktree_group_close(ws_idx) {
                 return encode_error(

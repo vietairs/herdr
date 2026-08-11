@@ -573,7 +573,17 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
     // `RemoteMirror::reconcile_by_diff` — the same resync primitive the
     // `Gap`/`Reset` path already uses. Coalesced: a burst of structural
     // frames while a request is already in flight sends only one.
+    //
+    // Coalescing must never *lose* a trigger, though. The serving host builds
+    // a snapshot at the moment it reads the request, so a workspace/tab/pane
+    // created after that read is in no diff the outstanding response can
+    // carry. Dropping the trigger that announced it would strand it: nothing
+    // retries, and a `WorkspaceCreateRequest` was already acknowledged to the
+    // user. `resync_dirty` records "a trigger arrived while a request was
+    // outstanding" so `SnapshotResponse` issues exactly one more request
+    // instead of clearing the flag on a snapshot that predates the change.
     let mut resync_in_flight = false;
+    let mut resync_dirty = false;
     loop {
         let Some(msg) = read_frame(reader).await? else {
             return Ok(DriveOutcome::LinkClosed);
@@ -583,12 +593,16 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                 match mirror.apply_event_message(&event_msg, generation) {
                     ReducerAction::RejectedStale | ReducerAction::Ignored => continue,
                     ReducerAction::Applied { kind, .. } => {
-                        if !resync_in_flight && is_structural_event_kind(kind) {
-                            resync_in_flight = out_tx
-                                .send(FederationMessage::SnapshotRequest(
-                                    super::protocol::SnapshotRequest,
-                                ))
-                                .is_ok();
+                        if is_structural_event_kind(kind) {
+                            if resync_in_flight {
+                                resync_dirty = true;
+                            } else {
+                                resync_in_flight = out_tx
+                                    .send(FederationMessage::SnapshotRequest(
+                                        super::protocol::SnapshotRequest,
+                                    ))
+                                    .is_ok();
+                            }
                         }
                         continue;
                     }
@@ -600,7 +614,18 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
             FederationMessage::SnapshotResponse(MountSnapshot {
                 snapshot, cursor, ..
             }) => {
-                resync_in_flight = false;
+                // Re-request before diffing when a trigger arrived while this
+                // snapshot was outstanding: this one was built before that
+                // change existed, so only a fresh snapshot can carry it.
+                resync_in_flight = if std::mem::take(&mut resync_dirty) {
+                    out_tx
+                        .send(FederationMessage::SnapshotRequest(
+                            super::protocol::SnapshotRequest,
+                        ))
+                        .is_ok()
+                } else {
+                    false
+                };
                 // `MountSnapshot` carries no per-message generation tag to
                 // fence against (only `TerminalChannelMessage`/
                 // `AgentStatusMessage` do); this drive task already only
@@ -793,7 +818,29 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                         %terminal_id,
                         "remote workspace created; resyncing to materialize it"
                     );
-                    if !resync_in_flight {
+                    // Only this client sends `WorkspaceCreateRequest` on this
+                    // link, so a `Created` response always answers a create
+                    // *this* client asked for — unlike a workspace the remote
+                    // user made, which only ever arrives as a structural
+                    // event. Reporting the namespaced id it will materialize
+                    // under is what lets `App` focus that one workspace on
+                    // arrival without ever stealing focus for an out-of-band
+                    // remote create.
+                    if let Some(ctx) = split_materialization {
+                        let local_workspace_id =
+                            super::id::map_in(workspace_id.clone(), mirror.mount()).to_public_id();
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationWorkspaceCreateAccepted {
+                                request_id,
+                                origin: ctx.origin.clone(),
+                                workspace_id: local_workspace_id,
+                            })
+                            .await;
+                    }
+                    if resync_in_flight {
+                        resync_dirty = true;
+                    } else {
                         resync_in_flight = out_tx
                             .send(FederationMessage::SnapshotRequest(
                                 super::protocol::SnapshotRequest,
@@ -1749,11 +1796,18 @@ mod tests {
 
     // Post-mount pane mirroring fix (plans/260722-1327): a burst of
     // structural `EventFrame`s (pane created) sent while a resync is
-    // already in flight must coalesce into exactly ONE outbound
-    // `SnapshotRequest`, and the eventual `SnapshotResponse` must diff
-    // into the mirror via `reconcile_by_diff` so a pane the mount never
-    // saw at mount time (or in an earlier `Frame`'s bare payload) becomes
-    // visible.
+    // already in flight must coalesce into ONE in-flight outbound
+    // `SnapshotRequest` (never one per frame), and the eventual
+    // `SnapshotResponse` must diff into the mirror via `reconcile_by_diff`
+    // so a pane the mount never saw at mount time (or in an earlier
+    // `Frame`'s bare payload) becomes visible.
+    //
+    // The whole burst collapses to two requests, not one: the serving host
+    // builds its snapshot when it reads the request, so the triggers that
+    // arrived afterwards may name entities that snapshot cannot contain.
+    // Dropping them outright is how a created workspace could be stranded
+    // forever, so a trigger seen during an in-flight request re-arms exactly
+    // one follow-up request when the response lands.
     // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
     #[cfg(unix)]
     #[tokio::test]
@@ -1885,8 +1939,9 @@ mod tests {
             }
         }
         assert_eq!(
-            snapshot_requests, 1,
-            "a burst of structural frames must coalesce into exactly one SnapshotRequest"
+            snapshot_requests, 2,
+            "a burst of structural frames must coalesce into one in-flight SnapshotRequest \
+             plus exactly one follow-up for the triggers the first snapshot could not cover"
         );
 
         assert_eq!(mirror.panes().len(), 1, "the resync must add the new pane");
@@ -1894,6 +1949,188 @@ mod tests {
             .panes()
             .values()
             .any(|pane| pane.terminal_id.ends_with(":term_new")));
+
+        fake_server.await.unwrap();
+    }
+
+    // A create confirmed while a snapshot is already outstanding must still
+    // materialize. The serving host builds a snapshot when it reads the
+    // request, so a workspace created after that read is in no diff that
+    // response can carry; dropping the trigger because a request happened to
+    // be in flight stranded the workspace forever, with the user already told
+    // the create was accepted. The follow-up request is what recovers it.
+    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_workspace_created_while_a_resync_is_in_flight_still_materializes() {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+        let fake_server = tokio::spawn(async move {
+            let Some(FederationMessage::Handshake(_)) =
+                read_frame(&mut server_reader).await.unwrap()
+            else {
+                panic!("expected a Handshake");
+            };
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                    agreed_capabilities: BTreeSet::new(),
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::MountSnapshot(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: crate::remote::federation::serve::empty_snapshot(),
+                    cursor: crate::remote::federation::protocol::EventCursor(0),
+                }),
+            )
+            .await
+            .unwrap();
+
+            // The client's own outbound frames go to its `out_tx` queue (a
+            // writer task pumps that in production), so this script never
+            // reads them; the drive loop processes inbound frames strictly in
+            // order, which is what makes the sequence below deterministic.
+            //
+            // An unrelated structural change puts a snapshot request in
+            // flight before the create is ever answered.
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::Event(
+                    crate::remote::federation::protocol::EventChannelMessage::Frame(
+                        crate::remote::federation::protocol::EventFrame {
+                            source_seq: 1,
+                            kind: crate::api::schema::events::EventKind::PaneCreated,
+                        },
+                    ),
+                ),
+            )
+            .await
+            .unwrap();
+            // The create lands *after* that snapshot was built.
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::WorkspaceCreateResponse(
+                    crate::remote::federation::protocol::WorkspaceCreateResponse::Created {
+                        request_id: 1,
+                        workspace_id: "w_new".to_string(),
+                        tab_id: "w_new-tab".to_string(),
+                        pane_id: "pane_new".to_string(),
+                        terminal_id: "term_new".to_string(),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            // ... so the answer to the first request cannot contain it.
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::SnapshotResponse(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: crate::remote::federation::serve::empty_snapshot(),
+                    cursor: crate::remote::federation::protocol::EventCursor(1),
+                }),
+            )
+            .await
+            .unwrap();
+
+            let mut snapshot = crate::remote::federation::serve::empty_snapshot();
+            snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+                pane_id: "pane_new".to_string(),
+                terminal_id: "term_new".to_string(),
+                workspace_id: "w_new".to_string(),
+                tab_id: "w_new-tab".to_string(),
+                focused: false,
+                cwd: None,
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Idle,
+                state_labels: Default::default(),
+                tokens: Default::default(),
+                agent_session: None,
+                scroll: None,
+                revision: 0,
+            });
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::SnapshotResponse(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot,
+                    cursor: crate::remote::federation::protocol::EventCursor(2),
+                }),
+            )
+            .await
+            .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+
+        let client = FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new());
+        let mounted = client
+            .connect_and_mount(client_reader, client_writer)
+            .await
+            .unwrap();
+        let generation = mounted.mirror.mount().mount_generation;
+        let MountedConnection {
+            mut mirror,
+            mut reader,
+            ..
+        } = mounted;
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let (clipboard_tx, _clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+        let (outbound_clip_tx, _outbound_clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let hub = EventHub::default();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            drive_mount_channel(
+                &mut reader,
+                &mut mirror,
+                generation,
+                &hub,
+                &mut router,
+                &clipboard_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                None,
+            ),
+        )
+        .await;
+
+        let mut snapshot_requests = 0;
+        while let Ok(msg) = out_rx.try_recv() {
+            if matches!(msg, FederationMessage::SnapshotRequest(_)) {
+                snapshot_requests += 1;
+            }
+        }
+        // The load-bearing assertion: the create arrived while a request was
+        // outstanding, so recovering it depends entirely on the client asking
+        // again. Before the deferred-resync fix this was 1 and the workspace
+        // was stranded. (This harness has no writer pump, so the script cannot
+        // gate the recovering snapshot on actually receiving that request.)
+        assert_eq!(
+            snapshot_requests, 2,
+            "a create confirmed during an in-flight resync must re-arm a snapshot request"
+        );
+        assert!(
+            mirror
+                .panes()
+                .values()
+                .any(|pane| pane.terminal_id.ends_with(":term_new")),
+            "the workspace created during an in-flight resync must still reach the mirror"
+        );
 
         fake_server.await.unwrap();
     }

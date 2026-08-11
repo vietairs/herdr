@@ -339,6 +339,22 @@ pub enum AppEvent {
         origin: crate::remote::federation::id::HostKey,
         workspace_id: String,
     },
+    /// The remote host accepted an earlier `WorkspaceCreateRequest` and named
+    /// the workspace it created. The workspace itself still materializes
+    /// through the ordinary resync path (`FederationResyncWorkspaceCreated`
+    /// plus the pane event that builds it) — this only correlates the
+    /// in-flight request with the workspace id it will land under, so the
+    /// requesting client can focus that workspace when it arrives. A workspace
+    /// the *remote* user created out of band never produces this event, so it
+    /// never takes the local user's focus.
+    #[cfg(unix)]
+    FederationWorkspaceCreateAccepted {
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+        /// Namespaced (public) workspace id — what the local `Workspace::id`
+        /// will be once the resync materializes it.
+        workspace_id: String,
+    },
     /// The remote host rejected an earlier `WorkspaceCreateRequest`. Carries
     /// no payload beyond the reason: nothing was created remotely, so there
     /// is nothing local to reverse — same shape/reasoning as

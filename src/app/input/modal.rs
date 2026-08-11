@@ -385,6 +385,7 @@ pub(super) fn open_rename_workspace(
     ws_idx: usize,
 ) {
     state.pending_workspace_create_cwd = None;
+    state.pending_workspace_create_source_workspace = None;
     state.selected = ws_idx;
     state.rename_pane_target = None;
     state.name_input =
@@ -393,11 +394,19 @@ pub(super) fn open_rename_workspace(
     state.mode = Mode::RenameWorkspace;
 }
 
-pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::PathBuf) {
+/// `cwd` seeds the suggested name only; `source_workspace_id` pins the
+/// workspace the create was started from so confirming resolves the real cwd
+/// (and the federation mount, if any) from that workspace.
+pub(crate) fn open_new_workspace_dialog(
+    state: &mut AppState,
+    cwd: std::path::PathBuf,
+    source_workspace_id: Option<String>,
+) {
     let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = Some(cwd);
+    state.pending_workspace_create_source_workspace = source_workspace_id;
     state.rename_pane_target = None;
     state.name_input = suggested_name;
     state.name_input_replace_on_type = true;
@@ -408,6 +417,7 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
+    state.pending_workspace_create_source_workspace = None;
     state.rename_pane_target = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
         if let Some(name) = ws.active_tab_display_name() {
@@ -429,6 +439,7 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
+    state.pending_workspace_create_source_workspace = None;
     state.rename_pane_target = Some(pane_id);
     state.name_input = terminal
         .and_then(|t| t.manual_label.clone())
@@ -454,6 +465,7 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.creating_new_tab = true;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
+    state.pending_workspace_create_source_workspace = None;
     state.rename_pane_target = None;
     state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
@@ -594,6 +606,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             }
             state.creating_new_tab = false;
             state.pending_workspace_create_cwd = None;
+            state.pending_workspace_create_source_workspace = None;
             state.rename_pane_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
@@ -607,6 +620,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.creating_new_tab = false;
             state.requested_new_tab_name = None;
             state.pending_workspace_create_cwd = None;
+            state.pending_workspace_create_source_workspace = None;
             state.rename_pane_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
@@ -1060,15 +1074,31 @@ impl App {
                 if let Some(cwd) = self.state.pending_workspace_create_cwd.take() {
                     let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
                     let label = workspace_create_label(&new_name, &suggested_name);
+                    // This dialog asks for a name, never a directory: the cwd
+                    // it captured when it opened was derived from the
+                    // workspace the create started in. For a local source
+                    // that capture is worth sending (it pins the path against
+                    // anything that changes while the user types), but for a
+                    // mirrored remote source it is a path on the *serving*
+                    // host, and sending it would read as a deliberate
+                    // local-directory choice and quietly build a local
+                    // workspace instead of one on the mount. Send no cwd
+                    // there, which is what routes the create over the mount.
+                    let targets_mount = self
+                        .workspace_creation_source()
+                        .and_then(|ws_idx| self.federation_host_key_for_workspace(ws_idx))
+                        .is_some();
+                    let cwd = (!targets_mount).then(|| cwd.display().to_string());
                     self.runtime_workspace_create(
                         "tui.workspace.create_named",
                         crate::api::schema::WorkspaceCreateParams {
-                            cwd: Some(cwd.display().to_string()),
+                            cwd,
                             focus: true,
                             label,
                             env: Default::default(),
                         },
                     );
+                    self.state.pending_workspace_create_source_workspace = None;
                 } else if !self.state.workspaces.is_empty() && !new_name.is_empty() {
                     let workspace_id = self.public_workspace_id(self.state.selected);
                     self.runtime_workspace_rename(
@@ -1443,6 +1473,7 @@ fn cancel_rename_modal(state: &mut AppState) {
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
+    state.pending_workspace_create_source_workspace = None;
     state.rename_pane_target = None;
     state.name_input.clear();
     state.name_input_replace_on_type = false;

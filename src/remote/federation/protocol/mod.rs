@@ -390,6 +390,31 @@ pub struct WorkspaceCreateRequest {
     pub label: Option<String>,
 }
 
+/// Upper bound on a `WorkspaceCreateRequest::label`, in `char`s.
+///
+/// Two independent reasons, both enforced by
+/// `clamp_workspace_label`: the frame travels on `Channel::Control`, whose
+/// `max_len()` is 4 KiB and whose receiver rejects anything larger
+/// (`codec::decode`'s `FrameTooLarge`), so an unbounded label silently loses
+/// the whole request; and the label is chrome text a sidebar row renders, so
+/// nothing near that ceiling is displayable anyway. No pre-existing local
+/// workspace-label limit exists to inherit (the closest sibling is
+/// `app/agent_view.rs`'s 32-char agent-view label, a different surface), so
+/// this is an explicit federation-only bound generous enough that no
+/// realistic human-typed name is touched.
+pub const MAX_WORKSPACE_LABEL_CHARS: usize = 128;
+
+/// Truncates a workspace label to [`MAX_WORKSPACE_LABEL_CHARS`] `char`s.
+/// Applied by the sender before framing and again by the serving host at
+/// ingress, so neither a hostile peer nor a future sender can push an
+/// oversized label past the control channel's ceiling.
+pub fn clamp_workspace_label(label: String) -> String {
+    if label.chars().count() <= MAX_WORKSPACE_LABEL_CHARS {
+        return label;
+    }
+    label.chars().take(MAX_WORKSPACE_LABEL_CHARS).collect()
+}
+
 /// Response to a `WorkspaceCreateRequest`: either the raw (un-namespaced)
 /// ids of the workspace the serving host just created — plus its root tab,
 /// root pane and that pane's terminal — or a reason it could not be created.

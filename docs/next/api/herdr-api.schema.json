@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 19,
+  "protocol": 20,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -8737,6 +8737,23 @@
               "required": [
                 "type",
                 "targets"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Acknowledges a `workspace.create` that targeted a mounted remote host\n(the request was made from a federated workspace, so it grows that\nhost's workspace set rather than this one's): the request was sent over\nthe mount named by `origin`. Does not imply the workspace exists yet —\nthe serving host answers asynchronously, and the new workspace appears\nthrough the same resync path a workspace created by the remote user\ntakes. Same \"requested, not completed\" contract as\n`WorkspaceMountRemoteRequested`.",
+              "properties": {
+                "origin": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "workspace_create_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "origin"
               ],
               "type": "object"
             },

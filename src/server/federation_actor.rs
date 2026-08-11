@@ -542,10 +542,22 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                         .and_then(|error| error.get("message"))
                         .and_then(|message| message.as_str())
                         .unwrap_or("workspace create failed");
+                    // The peer gets the machine-readable `code` and a fixed
+                    // message, never the API message itself: a failed create
+                    // is usually a PTY spawn or cwd error whose text names
+                    // this host's own filesystem (default shell path, home
+                    // directory). The detail stays here, in this host's logs.
                     // Same `code: message` shape `ClosePane` above replies
                     // with, so the client end has one stable classification
                     // format for every federation request failure.
-                    Err(format!("{code}: {message}"))
+                    tracing::warn!(
+                        %code,
+                        %message,
+                        "refusing a peer's federation workspace-create request"
+                    );
+                    Err(format!(
+                        "{code}: workspace could not be created on the remote host"
+                    ))
                 });
             let _ = reply.send(outcome);
         }

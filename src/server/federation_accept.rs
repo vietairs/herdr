@@ -694,6 +694,20 @@ fn handle_workspace_create_request(
 ) {
     let WorkspaceCreateRequest { request_id, label } = request;
 
+    // Trust boundary: `label` is peer-controlled free text and this is the
+    // first client->host chrome string federation accepts. It ends up in this
+    // host's own `Workspace::set_custom_name`, its sidebar rows, and its
+    // session save, so a raw ESC/OSC payload would let a mounting peer drive
+    // the *serving* user's terminal (OSC 52 clipboard writes, screen clears,
+    // concealed text). Neutralized here, at the earliest point the peer string
+    // enters this process, the same way an inbound peer filename is sanitized
+    // in `file_staging.rs` — never downstream, where the local user's own
+    // `workspace.create` shares the path and must keep taking labels verbatim.
+    // Clamped as well so an oversized label cannot exceed the control
+    // channel's frame ceiling on the way back through any relay.
+    let label = crate::remote::federation::sanitize::sanitize_remote_string_opt(label)
+        .map(crate::remote::federation::protocol::clamp_workspace_label);
+
     let (reply, rx) = oneshot::channel();
     let sent = server_event_tx.blocking_send(ServerEvent::Federation(
         FederationCommand::CreateWorkspace { label, reply },
@@ -1962,6 +1976,96 @@ mod tests {
             }
             other => panic!("expected WorkspaceCreateResponse::Created, got {other:?}"),
         }
+    }
+
+    /// Trust boundary: a peer's workspace label is free text that ends up in
+    /// this host's own workspace name, sidebar and session save. It must be
+    /// stripped of every terminal control sequence — an OSC 52 clipboard
+    /// write, a screen clear, a cursor jump — and bounded, *before* it
+    /// reaches the `App` at all. Asserted on the command the actor receives,
+    /// because that is the last point still inside this process's control.
+    #[test]
+    fn reader_loop_neutralizes_a_peer_supplied_workspace_label_before_the_app_sees_it() {
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let (observed_tx, observed_rx) = std_mpsc::channel::<Option<String>>();
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::CreateWorkspace {
+                    label,
+                    reply,
+                }) = ev
+                {
+                    let _ = observed_tx.send(label);
+                    let _ = reply.send(Ok((
+                        "w1".to_string(),
+                        "t1".to_string(),
+                        "p1".to_string(),
+                        "term1".to_string(),
+                    )));
+                }
+            }
+        });
+
+        let hostile = format!(
+            "ok\x1b]52;c;ZXZpbA==\x07\x1b[2J\x1b[8mhidden\x1b[0m{}",
+            // Over the label bound but under the control channel's frame cap:
+            // a frame past that cap never reaches this handler at all, it
+            // faults the whole link at `read_frame_blocking`, which is exactly
+            // why the *sending* side clamps too.
+            "A".repeat(512)
+        );
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::WorkspaceCreateRequest(WorkspaceCreateRequest {
+                request_id: 22,
+                label: Some(hostile),
+            }),
+        )
+        .expect("client writes workspace-create request");
+        drop(client);
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, _out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            None,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let label = observed_rx
+            .try_recv()
+            .expect("the create command reached the actor")
+            .expect("the label survived as text");
+        assert!(
+            !label.contains('\x1b') && !label.contains('\x07'),
+            "no escape or BEL byte may survive into host state: {label:?}"
+        );
+        assert!(
+            !label.chars().any(|ch| (ch as u32) < 0x20),
+            "no C0 control byte may survive into host state: {label:?}"
+        );
+        assert!(
+            label.starts_with("ok]52;c;ZXZpbA==[2J[8mhidden[0m"),
+            "the visible text must be preserved verbatim: {label:?}"
+        );
+        assert_eq!(
+            label.chars().count(),
+            crate::remote::federation::protocol::MAX_WORKSPACE_LABEL_CHARS,
+            "an oversized label must be clamped, not forwarded whole"
+        );
     }
 
     #[test]

@@ -622,7 +622,11 @@ impl App {
         // `pane.split` inside a federated workspace splits on the remote
         // (`dispatch_remote_pane_split`). Only when no `cwd` was requested:
         // an explicit path is a deliberate local-directory choice, and the
-        // remote host's filesystem is a different namespace entirely.
+        // remote host's filesystem is a different namespace entirely. Every
+        // TUI path sends no `cwd` — including the name-prompt dialog, which
+        // asks for a name only and lets this handler derive the path from
+        // `workspace_creation_source` — so only an API/CLI caller that named a
+        // directory itself is treated as having chosen one.
         if params.cwd.is_none() {
             if let Some(source_ws_idx) = self.workspace_creation_source() {
                 if let Some(origin) = self.federation_host_key_for_workspace(source_ws_idx) {
@@ -631,6 +635,7 @@ impl App {
                         source_ws_idx,
                         origin,
                         params.label,
+                        params.focus,
                     );
                 }
             }
@@ -674,8 +679,12 @@ impl App {
     /// eventually read. The new workspace materializes through the ordinary
     /// resync path once the remote confirms
     /// (`AppEvent::FederationResyncWorkspaceCreated` then the pane event that
-    /// builds it), so this acknowledges with `remote_workspace_create_pending`
-    /// rather than fabricating a `WorkspaceInfo` it cannot yet produce.
+    /// builds it), so this acknowledges with
+    /// `ResponseResult::WorkspaceCreateRequested` — a *success*, because the
+    /// request really was accepted and sent — rather than fabricating a
+    /// `WorkspaceInfo` it cannot yet produce. Same "requested, not yet done"
+    /// contract `workspace.mount_remote` already answers with
+    /// (`WorkspaceMountRemoteRequested`).
     ///
     /// Falls back to an error — never to a silent local workspace — when the
     /// mount has no live link, so a stale/disconnected mount cannot quietly
@@ -686,6 +695,7 @@ impl App {
         source_ws_idx: usize,
         origin: crate::remote::federation::id::HostKey,
         label: Option<String>,
+        focus: bool,
     ) -> String {
         // Any live remote-backed pane in this workspace carries the mount's
         // outbound handle; the request is workspace-scoped on the remote, so
@@ -724,6 +734,10 @@ impl App {
         };
 
         let request_id = next_remote_workspace_create_request_id();
+        // Bounded before framing: the control channel's receiver rejects a
+        // frame over its 4 KiB ceiling outright, which would lose the request
+        // with nothing to show the user for it.
+        let label = label.map(crate::remote::federation::protocol::clamp_workspace_label);
         let sent = out_tx.send(
             crate::remote::federation::protocol::FederationMessage::WorkspaceCreateRequest(
                 crate::remote::federation::protocol::WorkspaceCreateRequest { request_id, label },
@@ -742,12 +756,21 @@ impl App {
             %origin,
             "sent a workspace-create request to a mounted remote host"
         );
+        if focus {
+            // Claim the workspace this request creates, so the mirror focuses
+            // it when the resync materializes it instead of leaving the user
+            // where they were with no sign the keypress did anything. Only
+            // this request's own answer can redeem the claim
+            // (`App::handle_federation_workspace_create_accepted`).
+            self.pending_remote_workspace_create_focus
+                .insert(request_id);
+        }
 
-        encode_error(
+        encode_success(
             id,
-            "remote_workspace_create_pending",
-            "workspace-create request sent to the remote host; the new workspace appears \
-             once the remote host reports it",
+            ResponseResult::WorkspaceCreateRequested {
+                origin: origin.as_str().to_string(),
+            },
         )
     }
 

@@ -2938,6 +2938,8 @@ impl AppState {
             #[cfg(unix)]
             AppEvent::FederationResyncWorkspaceRemoved { .. } => Vec::new(),
             #[cfg(unix)]
+            AppEvent::FederationWorkspaceCreateAccepted { .. } => Vec::new(),
+            #[cfg(unix)]
             AppEvent::FederationWorkspaceCreateFailed { .. } => Vec::new(),
             #[cfg(unix)]
             AppEvent::FederationResyncTabCreated { .. } => Vec::new(),
