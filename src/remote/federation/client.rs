@@ -619,6 +619,23 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                 // (e.g. tests), same convention as `SplitPaneResponse::
                 // Created` above.
                 if let Some(ctx) = split_materialization {
+                    // Tabs first: a local `Tab` needs a pane to exist, so
+                    // this only records the new remote tab's identity and
+                    // label; the pane loop right below is what actually
+                    // materializes it (`App::
+                    // handle_federation_resync_pane_created` creates a tab
+                    // for a `tab_id` it has no local tab for yet).
+                    for tab in diff.created_tabs {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationResyncTabCreated {
+                                origin: ctx.origin.clone(),
+                                workspace_id: tab.workspace_id,
+                                tab_id: tab.tab_id,
+                                label: tab.label,
+                            })
+                            .await;
+                    }
                     for pane_info in diff.created_panes {
                         materialize_resync_pane(
                             &mount,
@@ -637,6 +654,20 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                             .send(crate::events::AppEvent::FederationResyncPaneRemoved {
                                 origin: ctx.origin.clone(),
                                 pane_id,
+                            })
+                            .await;
+                    }
+                    // Tabs last: a remote tab close usually also retires
+                    // every pane in it, and those pane removals above
+                    // already collapse the local tab (`Workspace::
+                    // close_pane` drops a tab once its last pane goes). This
+                    // sweeps up whatever is left and prunes the index.
+                    for tab_id in diff.removed_tab_ids {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationResyncTabClosed {
+                                origin: ctx.origin.clone(),
+                                tab_id,
                             })
                             .await;
                     }
@@ -993,6 +1024,7 @@ async fn materialize_resync_pane(
             let ready = crate::events::FederationResyncPaneCreated {
                 origin: ctx.origin.clone(),
                 workspace_id: pane_info.workspace_id,
+                tab_id: pane_info.tab_id,
                 pane_id: pane_info.pane_id,
                 local_pane_id: pane_id,
                 terminal_id,

@@ -379,22 +379,27 @@ impl RemoteMirror {
         hub: &EventHub,
     ) -> ReconcileDiff {
         reconcile_workspaces(&self.mount, &mut self.workspaces, &snapshot.workspaces, hub);
-        reconcile_tabs(&self.mount, &mut self.tabs, &snapshot.tabs, hub);
+        let (created_tabs, removed_tab_ids) =
+            reconcile_tabs(&self.mount, &mut self.tabs, &snapshot.tabs, hub);
         let (created_panes, removed_pane_ids) =
             reconcile_panes(&self.mount, &mut self.panes, &snapshot.panes, hub);
         self.cursor = cursor.0;
         ReconcileDiff {
+            created_tabs,
+            removed_tab_ids,
             created_panes,
             removed_pane_ids,
         }
     }
 }
 
-/// Panes created or removed by one [`RemoteMirror::reconcile_by_diff`] call.
-/// Every id is already namespaced (the same public form
-/// `RemoteMirror::panes()` exposes) — a caller never needs to re-derive a
-/// `FedRef` from this to place/tear down a pane.
+/// Tabs and panes created or removed by one
+/// [`RemoteMirror::reconcile_by_diff`] call. Every id is already namespaced
+/// (the same public form `RemoteMirror::tabs()`/`panes()` expose) — a caller
+/// never needs to re-derive a `FedRef` from this to place/tear one down.
 pub(crate) struct ReconcileDiff {
+    pub(crate) created_tabs: Vec<TabInfo>,
+    pub(crate) removed_tab_ids: Vec<String>,
     pub(crate) created_panes: Vec<PaneInfo>,
     pub(crate) removed_pane_ids: Vec<String>,
 }
@@ -514,13 +519,18 @@ fn reconcile_workspaces(
     }
 }
 
+/// Returns the tabs this diff created and the (namespaced) ids of the ones
+/// it retired, so `reconcile_by_diff`'s caller can materialize/tear down the
+/// real local `Tab`s — the `hub` pushes below only update mirror metadata and
+/// the sidebar-facing local event stream.
 fn reconcile_tabs(
     mount: &Mount,
     mirror: &mut HashMap<String, TabInfo>,
     incoming: &[TabInfo],
     hub: &EventHub,
-) {
+) -> (Vec<TabInfo>, Vec<String>) {
     let mut seen: HashSet<String> = HashSet::new();
+    let mut created: Vec<TabInfo> = Vec::new();
     for tab in incoming {
         let namespaced = namespace_tab(mount, tab);
         let id = namespaced.tab_id.clone();
@@ -542,6 +552,7 @@ fn reconcile_tabs(
             }
             None => {
                 mirror.insert(id, namespaced.clone());
+                created.push(namespaced.clone());
                 hub.push(EventEnvelope {
                     event: EventKind::TabCreated,
                     data: EventData::TabCreated { tab: namespaced },
@@ -554,8 +565,10 @@ fn reconcile_tabs(
         .filter(|tab| !seen.contains(&tab.tab_id))
         .cloned()
         .collect();
+    let mut removed_ids: Vec<String> = Vec::new();
     for tab in retired {
         mirror.remove(&tab.tab_id);
+        removed_ids.push(tab.tab_id.clone());
         hub.push(EventEnvelope {
             event: EventKind::TabClosed,
             data: EventData::TabClosed {
@@ -564,6 +577,7 @@ fn reconcile_tabs(
             },
         });
     }
+    (created, removed_ids)
 }
 
 fn reconcile_panes(

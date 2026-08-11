@@ -236,6 +236,24 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::FederationResyncTabCreated {
+            origin,
+            workspace_id,
+            tab_id,
+            label,
+        } = ev
+        {
+            self.handle_federation_resync_tab_created(origin, workspace_id, tab_id, label);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationResyncTabClosed { origin, tab_id } = ev {
+            self.handle_federation_resync_tab_removed(origin, tab_id);
+            return;
+        }
+
+        #[cfg(unix)]
         if let AppEvent::FederationClosePaneReady { request_id, origin } = ev {
             self.handle_federation_close_pane_ready(request_id, origin);
             return;

@@ -313,6 +313,32 @@ pub enum AppEvent {
         origin: crate::remote::federation::id::HostKey,
         pane_id: String,
     },
+    /// A live mount's resync diff revealed a tab the mirror had never seen
+    /// before. A local `Tab` cannot exist without at least one pane, so this
+    /// carries no layout payload: it only records the remote tab's identity
+    /// and label so the pane(s) that arrive for it in the same diff
+    /// (`FederationResyncPaneCreated`, emitted right after) materialize into
+    /// a correctly-labelled *new* local tab instead of being spliced into
+    /// whichever tab happened to be active.
+    #[cfg(unix)]
+    FederationResyncTabCreated {
+        origin: crate::remote::federation::id::HostKey,
+        /// Namespaced (public) workspace id — the already-materialized local
+        /// `Workspace` this tab belongs to.
+        workspace_id: String,
+        /// Namespaced (public) tab id (`RemoteMirror::tabs()`'s key).
+        tab_id: String,
+        label: String,
+    },
+    /// A live mount's resync diff no longer reports a tab the mirror had
+    /// previously mirrored. `tab_id` is the namespaced (public) id
+    /// `RemoteMirror::tabs()` used for it — the handler maps it back to the
+    /// local tab it materialized via `App::remote_resync_tab_index`.
+    #[cfg(unix)]
+    FederationResyncTabClosed {
+        origin: crate::remote::federation::id::HostKey,
+        tab_id: String,
+    },
     /// A live mount's drive task received a `ClosePaneResponse::Closed`
     /// answering an earlier `ClosePaneRequest` this mount sent (Gap A,
     /// plans/260724-1536-federation-pane-close-sync). Unlike
@@ -353,6 +379,13 @@ pub struct FederationResyncPaneCreated {
     /// key), used to find the already-materialized local `Workspace` this
     /// pane belongs to.
     pub workspace_id: String,
+    /// Namespaced (public) tab id (`RemoteMirror::tabs()`'s key) this pane
+    /// belongs to *on the remote*. Already on the wire as `PaneInfo.tab_id`;
+    /// carrying it here is what lets
+    /// `App::handle_federation_resync_pane_created` place the pane in its
+    /// real tab — or create that tab — instead of collapsing every
+    /// resync-discovered pane into the workspace's active tab as a split.
+    pub tab_id: String,
     /// Namespaced (public) pane id (`RemoteMirror::panes()`'s key) — the
     /// reverse-index key `App::remote_resync_pane_index` stores this pane's
     /// local `PaneId` under, so a later removal diff can find it again.

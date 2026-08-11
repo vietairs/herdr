@@ -218,6 +218,13 @@ pub struct App {
     /// diff only ever reports panes *this* index or the mount-time pass
     /// already knows about through `RemoteMirror::panes()` directly.
     pub(crate) remote_resync_pane_index: HashMap<String, crate::layout::PaneId>,
+    /// Tab-level counterpart of `remote_resync_pane_index`: maps a mirrored
+    /// remote tab's namespaced (public) id to the local tab materialized for
+    /// it. Without it a resync-discovered pane has no way to find its real
+    /// tab and every remote tab collapses into the workspace's active tab as
+    /// a split. Keyed the same way `RemoteMirror::tabs()` is, and populated
+    /// by both mount-time materialization and resync.
+    pub(crate) remote_resync_tab_index: HashMap<String, creation::RemoteTabRef>,
     pub(crate) local_terminal_notifications: bool,
     /// Whether this process applies `AppEvent::PrefixInputSource` to the host input source.
     /// The headless server sets this to false: the switch belongs to the foreground client,
@@ -920,6 +927,7 @@ impl App {
             #[cfg(unix)]
             remote_clipboard_image_reads_in_flight: std::collections::HashSet::new(),
             remote_resync_pane_index: HashMap::new(),
+            remote_resync_tab_index: HashMap::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
             config_reloaded_from_disk: false,

@@ -2934,6 +2934,10 @@ impl AppState {
             #[cfg(unix)]
             AppEvent::FederationResyncPaneRemoved { .. } => Vec::new(),
             #[cfg(unix)]
+            AppEvent::FederationResyncTabCreated { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationResyncTabClosed { .. } => Vec::new(),
+            #[cfg(unix)]
             AppEvent::FederationClosePaneReady { .. } => Vec::new(),
             #[cfg(unix)]
             AppEvent::FederationClosePaneFailed { .. } => Vec::new(),

@@ -694,6 +694,24 @@ impl App {
                 // creation event, so only a *subsequent* tab (index != 0)
                 // needs its own `TabCreated`/`PaneCreated` events here.
                 let created_this_tab = tab_idx != 0;
+                // Tab-identity index: without an entry here every pane a
+                // later resync reveals for this same remote tab is spliced
+                // into whichever local tab happens to be active, which is
+                // what collapsed an N-tab remote workspace into one tab with
+                // N splits. Mirrors the `remote_resync_pane_index` insert
+                // above — mount-time entities need indexing too, not just
+                // resync-created ones.
+                if let Some(local_ws) = self.state.workspaces.get(this_ws_idx) {
+                    let tab_number = local_ws.public_tab_number(tab_idx);
+                    self.remote_resync_tab_index.insert(
+                        tab_info.tab_id.clone(),
+                        RemoteTabRef {
+                            workspace_id: local_ws.id.clone(),
+                            tab_number,
+                            label: Some(tab_info.label.clone()),
+                        },
+                    );
+                }
 
                 let mut prev_pane_id = root_pane_id;
                 for pane_info in rest_panes {
@@ -924,6 +942,22 @@ impl App {
             .collect();
         self.remote_resync_pane_index
             .retain(|_, local_pane_id| !closing_pane_ids.contains(local_pane_id));
+    }
+
+    /// Tab-index sibling of `purge_remote_resync_pane_index_for_workspaces`:
+    /// drops `remote_resync_tab_index` entries pointing into one of the
+    /// given (closing) workspaces, so a remount to the same host cannot
+    /// resolve a resync tab id onto a workspace/tab that no longer exists.
+    /// Unlike the pane index these entries carry their workspace id
+    /// directly, so no pane walk is needed.
+    // Only reached from the `#[cfg(unix)]` federation response handlers below.
+    #[cfg(unix)]
+    pub(crate) fn purge_remote_resync_tab_index_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        self.remote_resync_tab_index
+            .retain(|_, tab_ref| !workspace_ids.contains(&tab_ref.workspace_id));
     }
 
     /// `AppEvent::FederationSplitPaneReady` handler: the drive task already
@@ -1262,14 +1296,15 @@ impl App {
 
     /// `AppEvent::FederationResyncPaneCreated` handler (post-mount pane
     /// mirroring, part 2 — plans/260722-1327): the drive task already built
-    /// the new pane's real `TerminalRuntime`; splice it into the already-
-    /// mounted workspace's active tab. Conservative-minimal by design: a
-    /// resync diff only reports created/removed *panes*, not a tab-level
-    /// diff, so this always targets the workspace's current active tab
-    /// (`Workspace::active_tab`) rather than trying to reproduce the
-    /// remote's exact tab placement — logged as the accepted compromise in
-    /// `implementation-notes.md` rather than balloon this into a full
-    /// tab-diff pass.
+    /// the new pane's real `TerminalRuntime`; place it in the already-mounted
+    /// workspace under the tab it actually belongs to on the remote.
+    ///
+    /// The pane's remote `tab_id` (already on the wire as `PaneInfo.tab_id`)
+    /// resolves through `remote_resync_tab_index`: a tab this mount already
+    /// materialized takes the pane as a split, an unseen tab gets a brand new
+    /// local `Tab`. The earlier behavior — always splitting into
+    /// `Workspace::active_tab` — is what made an N-tab remote workspace
+    /// render as one tab with N splits.
     #[cfg(unix)]
     pub(crate) fn handle_federation_resync_pane_created(
         &mut self,
@@ -1278,6 +1313,7 @@ impl App {
         let crate::events::FederationResyncPaneCreated {
             origin,
             workspace_id,
+            tab_id,
             pane_id,
             local_pane_id,
             terminal_id,
@@ -1299,11 +1335,7 @@ impl App {
             return;
         };
 
-        let space_key = format!("federation:{}", origin.as_str());
-        let origin_matches = self.state.workspaces[ws_idx]
-            .worktree_space()
-            .is_some_and(|space| space.key == space_key);
-        if !origin_matches {
+        if !self.workspace_matches_federation_origin(ws_idx, &origin) {
             tracing::warn!(
                 %workspace_id,
                 expected_origin = %origin,
@@ -1313,55 +1345,274 @@ impl App {
             return;
         }
 
-        let ws = &mut self.state.workspaces[ws_idx];
-        let tab_idx = ws.active_tab;
-        let Some(target_pane_id) = ws.focused_pane_id() else {
-            tracing::warn!(
-                %workspace_id,
-                "resync revealed a new remote pane but its workspace's active tab has no \
-                 pane to split from"
-            );
-            return;
-        };
+        // Resolve the remote tab to a live local tab index, if this mount
+        // already has one. A stale index entry (its tab was closed locally,
+        // so its number no longer resolves) degrades to the "unknown tab"
+        // branch and is overwritten below, so a closed tab can never leave
+        // the index pointing at an unrelated tab.
+        let known_tab = self
+            .remote_resync_tab_index
+            .get(&tab_id)
+            .and_then(|tab_ref| tab_ref.tab_number);
+        let existing_tab_idx = known_tab.and_then(|number| {
+            self.state.workspaces[ws_idx]
+                .tabs
+                .iter()
+                .position(|tab| tab.number == number)
+        });
 
         let moved = crate::workspace::MovedPane {
             pane_id: local_pane_id,
             pane_state,
         };
-        if ws
-            .insert_moved_pane_into_tab(
-                tab_idx,
-                target_pane_id,
-                moved,
-                ratatui::layout::Direction::Horizontal,
-                0.5,
-            )
-            .is_err()
-        {
-            tracing::warn!(
-                %workspace_id,
-                "resync revealed a new remote pane but it could not be inserted into its \
-                 workspace's active tab"
-            );
-            return;
-        }
+        let ws = &mut self.state.workspaces[ws_idx];
+        let (tab_idx, created_tab) = match existing_tab_idx {
+            Some(tab_idx) => {
+                // Split off the tab's own last pane, not the workspace's
+                // focused pane — the focused pane may well live in a
+                // different tab now that panes land in their real tab.
+                let Some(target_pane_id) = ws
+                    .tabs
+                    .get(tab_idx)
+                    .and_then(|tab| tab.layout.pane_ids().last().copied())
+                else {
+                    tracing::warn!(
+                        %workspace_id,
+                        %tab_id,
+                        "resync revealed a new remote pane but its target tab has no pane \
+                         to split from"
+                    );
+                    return;
+                };
+                if ws
+                    .insert_moved_pane_into_tab(
+                        tab_idx,
+                        target_pane_id,
+                        moved,
+                        ratatui::layout::Direction::Horizontal,
+                        0.5,
+                    )
+                    .is_err()
+                {
+                    tracing::warn!(
+                        %workspace_id,
+                        %tab_id,
+                        "resync revealed a new remote pane but it could not be inserted \
+                         into its tab"
+                    );
+                    return;
+                }
+                (tab_idx, false)
+            }
+            None => {
+                // Same primitive + event path mount-time materialization
+                // uses for a non-root remote tab, so a tab discovered after
+                // mount is indistinguishable from one present at mount.
+                let label = self
+                    .remote_resync_tab_index
+                    .get(&tab_id)
+                    .and_then(|tab_ref| tab_ref.label.clone());
+                let ws = &mut self.state.workspaces[ws_idx];
+                let tab_idx = ws.create_tab_from_existing_pane(
+                    moved,
+                    label,
+                    self.event_tx.clone(),
+                    self.render_notify.clone(),
+                    self.render_dirty.clone(),
+                );
+                (tab_idx, true)
+            }
+        };
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         self.state.terminals.insert(terminal_id, terminal);
         self.state.remove_alias_shadowed_by_new_pane(local_pane_id);
         self.remote_resync_pane_index.insert(pane_id, local_pane_id);
+        let tab_number = self.state.workspaces[ws_idx].public_tab_number(tab_idx);
+        let local_workspace_id = self.state.workspaces[ws_idx].id.clone();
+        let entry = self
+            .remote_resync_tab_index
+            .entry(tab_id)
+            .or_insert_with(|| RemoteTabRef {
+                workspace_id: local_workspace_id,
+                tab_number: None,
+                label: None,
+            });
+        entry.tab_number = tab_number;
         self.schedule_session_save();
 
-        if let Some(pane) = self.pane_info(ws_idx, local_pane_id) {
-            self.emit_event(EventEnvelope {
-                event: EventKind::PaneCreated,
-                data: EventData::PaneCreated { pane },
-            });
+        if created_tab {
+            // Emits TabCreated + PaneCreated + LayoutUpdated together.
+            self.emit_tab_created_events(ws_idx, tab_idx);
+        } else {
+            if let Some(pane) = self.pane_info(ws_idx, local_pane_id) {
+                self.emit_event(EventEnvelope {
+                    event: EventKind::PaneCreated,
+                    data: EventData::PaneCreated { pane },
+                });
+            }
+            self.emit_layout_updated_event(ws_idx, tab_idx);
         }
-        self.emit_layout_updated_event(ws_idx, tab_idx);
 
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationResyncTabCreated` handler: a resync diff revealed
+    /// a remote tab this mount has never seen. A local `Tab` cannot exist
+    /// without a pane, so this only records the tab's identity and label —
+    /// the pane events that follow in the same diff
+    /// (`handle_federation_resync_pane_created`) materialize the real tab and
+    /// fill in its local tab number. Idempotent: a tab already materialized
+    /// (by an out-of-order pane event, or at mount time) keeps its local
+    /// binding.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_resync_tab_created(
+        &mut self,
+        origin: crate::remote::federation::id::HostKey,
+        workspace_id: String,
+        tab_id: String,
+        label: String,
+    ) {
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == workspace_id)
+        else {
+            tracing::warn!(
+                %workspace_id,
+                %tab_id,
+                "resync revealed a new remote tab but its workspace is not materialized here"
+            );
+            return;
+        };
+        if !self.workspace_matches_federation_origin(ws_idx, &origin) {
+            tracing::warn!(
+                %workspace_id,
+                %tab_id,
+                expected_origin = %origin,
+                "dropping a resync-created tab whose mount origin does not match its \
+                 workspace's federation origin"
+            );
+            return;
+        }
+
+        let entry = self
+            .remote_resync_tab_index
+            .entry(tab_id)
+            .or_insert_with(|| RemoteTabRef {
+                workspace_id,
+                tab_number: None,
+                label: None,
+            });
+        entry.label = Some(label);
+    }
+
+    /// `AppEvent::FederationResyncTabClosed` handler: the remote no longer
+    /// reports a tab this mount materialized. Usually the tab's panes are
+    /// retired in the same diff and `handle_federation_resync_pane_removed`
+    /// has already collapsed the local tab (`Workspace::close_pane` drops a
+    /// tab with its last pane), so this is most often just an index prune —
+    /// but it also tears the tab down for its own sake when the pane
+    /// removals did not (e.g. panes this mount never indexed).
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_resync_tab_removed(
+        &mut self,
+        origin: crate::remote::federation::id::HostKey,
+        tab_id: String,
+    ) {
+        let Some(tab_ref) = self.remote_resync_tab_index.remove(&tab_id) else {
+            return;
+        };
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == tab_ref.workspace_id)
+        else {
+            return;
+        };
+        if !self.workspace_matches_federation_origin(ws_idx, &origin) {
+            tracing::warn!(
+                %tab_id,
+                expected_origin = %origin,
+                "dropping a resync tab removal whose mount origin does not match its \
+                 workspace's federation origin"
+            );
+            return;
+        }
+        let Some(tab_idx) = tab_ref.tab_number.and_then(|number| {
+            self.state.workspaces[ws_idx]
+                .tabs
+                .iter()
+                .position(|tab| tab.number == number)
+        }) else {
+            // Already gone (pane removals collapsed it) — the index prune
+            // above was the whole job.
+            return;
+        };
+        // A workspace must always keep at least one tab; closing the last
+        // one is a workspace close, which the pane-removal path already owns
+        // (`Workspace::close_pane` returning true). Leave it alone here.
+        if self.state.workspaces[ws_idx].tabs.len() <= 1 {
+            return;
+        }
+
+        let public_tab_id = self.public_tab_id(ws_idx, tab_idx);
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
+        let pane_ids: Vec<PaneId> = self.state.workspaces[ws_idx]
+            .tabs
+            .get(tab_idx)
+            .map(|tab| tab.layout.pane_ids())
+            .unwrap_or_default();
+
+        if !self.state.workspaces[ws_idx].close_tab(tab_idx) {
+            tracing::warn!(
+                %tab_id,
+                "resync reported a closed remote tab but the local tab could not be closed"
+            );
+            return;
+        }
+        let closed_pane_ids: std::collections::HashSet<PaneId> = pane_ids.iter().copied().collect();
+        self.remote_resync_pane_index
+            .retain(|_, local_pane_id| !closed_pane_ids.contains(local_pane_id));
+        self.state.remove_plugin_pane_records(pane_ids);
+        self.state.remove_unattached_terminal_ids(terminal_ids);
+        self.shutdown_detached_terminal_runtimes();
+        self.schedule_session_save();
+
+        if let Some(public_tab_id) = public_tab_id {
+            self.emit_event(EventEnvelope {
+                event: EventKind::TabClosed,
+                data: EventData::TabClosed {
+                    tab_id: public_tab_id,
+                    workspace_id,
+                },
+            });
+        }
+
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    /// Whether `ws_idx`'s workspace was materialized by a mount from
+    /// `origin`. Shared origin fence for the federation resync handlers: a
+    /// differently-mounted host must not be able to mutate another mount's
+    /// workspace by guessing its ids.
+    #[cfg(unix)]
+    fn workspace_matches_federation_origin(
+        &self,
+        ws_idx: usize,
+        origin: &crate::remote::federation::id::HostKey,
+    ) -> bool {
+        let space_key = format!("federation:{}", origin.as_str());
+        self.state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.worktree_space())
+            .is_some_and(|space| space.key == space_key)
     }
 
     /// `AppEvent::FederationResyncPaneRemoved` handler (post-mount pane
@@ -1389,11 +1640,7 @@ impl App {
             return;
         };
 
-        let space_key = format!("federation:{}", origin.as_str());
-        let origin_matches = self.state.workspaces[ws_idx]
-            .worktree_space()
-            .is_some_and(|space| space.key == space_key);
-        if !origin_matches {
+        if !self.workspace_matches_federation_origin(ws_idx, &origin) {
             tracing::warn!(
                 %pane_id,
                 expected_origin = %origin,
@@ -1489,6 +1736,28 @@ pub(crate) struct PendingRemoteSplit {
 /// Populated by the ungated dispatch path but only read by the
 /// `#[cfg(unix)]` federation response handlers, so every field is unread on a
 /// target without the federation mount primitives.
+/// Where a mirrored remote tab lives locally (`App::remote_resync_tab_index`
+/// value). Identifies the local tab by workspace id + *public tab number*
+/// rather than a `Vec` index because tab indices shift whenever any earlier
+/// tab in the same workspace closes, while `Tab::number` is stable for the
+/// life of the tab and never reused (`Workspace::next_public_tab_number` only
+/// ever increases) — the same reasoning `PendingRemoteSplit::workspace_id`
+/// records for workspaces.
+/// Only read by the `#[cfg(unix)]` federation resync handlers.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct RemoteTabRef {
+    /// Stable local `Workspace::id` (already the mirror's namespaced id for
+    /// a materialized federation workspace).
+    pub(crate) workspace_id: String,
+    /// `Tab::number` of the local tab, or `None` while the remote tab is
+    /// known (a resync reported it) but has no local tab yet because none of
+    /// its panes have materialized.
+    pub(crate) tab_number: Option<usize>,
+    /// Remote-supplied label, remembered so the local tab this remote tab
+    /// eventually materializes into is named like its remote counterpart.
+    pub(crate) label: Option<String>,
+}
+
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct PendingRemoteClose {
     /// Stable workspace id (`Workspace::id`), same reasoning as
@@ -1602,6 +1871,61 @@ mod federation_materialization_tests {
             agent_session: None,
             scroll: None,
             revision: 0,
+        }
+    }
+
+    /// The single mirrored tab's namespaced (public) id — the exact key
+    /// `App::remote_resync_tab_index` is keyed on, so a test can address the
+    /// already-materialized tab the way a real resync diff would.
+    fn only_tab_id(mirror: &RemoteMirror) -> String {
+        mirror
+            .tabs()
+            .keys()
+            .next()
+            .cloned()
+            .expect("the test mirror always holds exactly one tab")
+    }
+
+    fn tab_info_for(tab_id: &str, number: usize, label: &str) -> RemoteTabInfo {
+        RemoteTabInfo {
+            tab_id: tab_id.to_string(),
+            workspace_id: "w1".to_string(),
+            number,
+            label: label.to_string(),
+            focused: false,
+            pane_count: 1,
+            agent_status: AgentStatus::Idle,
+        }
+    }
+
+    fn pane_info_in_tab(pane_id: &str, terminal_id: &str, tab_id: &str) -> RemotePaneInfo {
+        let mut pane = pane_info(pane_id, terminal_id);
+        pane.tab_id = tab_id.to_string();
+        pane
+    }
+
+    /// Two remote tabs, one pane each — the shape that regressed into a
+    /// single local tab with two splits.
+    fn two_tab_snapshot() -> SessionSnapshot {
+        let mut workspace = workspace_info();
+        workspace.tab_count = 2;
+        SessionSnapshot {
+            version: "0.0.0-test".to_string(),
+            protocol: 1,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: vec![workspace],
+            tabs: vec![
+                tab_info_for("w1-tab", 1, "first remote tab"),
+                tab_info_for("w1-tab2", 2, "second remote tab"),
+            ],
+            panes: vec![
+                pane_info_in_tab("p1", "t1", "w1-tab"),
+                pane_info_in_tab("p2", "t2", "w1-tab2"),
+            ],
+            layouts: Vec::new(),
+            agents: Vec::new(),
         }
     }
 
@@ -2105,10 +2429,12 @@ mod federation_materialization_tests {
             crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
         let pane_state = crate::pane::PaneState::new(terminal_id.clone());
         let remote_pane_id = format!("{workspace_id}:p9");
+        let remote_tab_id = only_tab_id(&mirror);
 
         app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
             origin: mount.host_key.clone(),
             workspace_id: workspace_id.clone(),
+            tab_id: remote_tab_id.clone(),
             pane_id: remote_pane_id.clone(),
             local_pane_id,
             terminal_id,
@@ -2186,11 +2512,13 @@ mod federation_materialization_tests {
             crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
         let pane_state = crate::pane::PaneState::new(terminal_id.clone());
         let remote_pane_id = format!("{workspace_id}:p9");
+        let remote_tab_id = only_tab_id(&mirror);
         let spoofed_origin = crate::remote::federation::id::HostKey::new("evil-host", "s1");
 
         app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
             origin: spoofed_origin,
             workspace_id: workspace_id.clone(),
+            tab_id: remote_tab_id.clone(),
             pane_id: remote_pane_id.clone(),
             local_pane_id,
             terminal_id,
@@ -2266,10 +2594,12 @@ mod federation_materialization_tests {
             crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
         let pane_state = crate::pane::PaneState::new(terminal_id.clone());
         let remote_pane_id = format!("{workspace_id}:p9");
+        let remote_tab_id = only_tab_id(&mirror);
 
         app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
             origin: mount.host_key.clone(),
             workspace_id: workspace_id.clone(),
+            tab_id: remote_tab_id.clone(),
             pane_id: remote_pane_id.clone(),
             local_pane_id,
             terminal_id: terminal_id.clone(),
@@ -2472,10 +2802,12 @@ mod federation_materialization_tests {
             crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
         let pane_state = crate::pane::PaneState::new(terminal_id.clone());
         let remote_pane_id = format!("{workspace_id}:p9");
+        let remote_tab_id = only_tab_id(&mirror);
 
         app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
             origin: mount.host_key.clone(),
             workspace_id: workspace_id.clone(),
+            tab_id: remote_tab_id.clone(),
             pane_id: remote_pane_id.clone(),
             local_pane_id,
             terminal_id: terminal_id.clone(),
@@ -2492,6 +2824,267 @@ mod federation_materialization_tests {
         assert!(
             app.find_pane(local_pane_id).is_none(),
             "a resync-created pane's removal must still work unchanged after the Gap B fix"
+        );
+    }
+
+    /// Builds the fully-formed local pane payload a mount's drive task hands
+    /// back on `AppEvent::FederationResyncPaneCreated`, minus the routing
+    /// fields each caller sets. Same construction the older resync tests
+    /// spell out inline; factored out because the multi-tab tests below need
+    /// it repeatedly.
+    #[cfg(unix)]
+    fn resync_pane_payload() -> (
+        crate::layout::PaneId,
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+        crate::terminal::TerminalRuntime,
+        crate::pane::PaneState,
+    ) {
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel::<crate::events::AppEvent>(4);
+        let (rt_out_tx, _rt_out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
+        let (rt_clipboard_tx, _rt_clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let render_dirty = std::sync::Arc::new(crate::render_signal::RenderSignal::new());
+
+        let local_pane_id = crate::layout::PaneId::alloc();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote(
+            local_pane_id,
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            terminal_id.to_string(),
+            1,
+            rt_out_tx,
+            output_rx,
+            rt_clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        )
+        .expect("spawn_remote must succeed for a fresh channel pair");
+        let terminal =
+            crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
+        let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+        (local_pane_id, terminal_id, terminal, runtime, pane_state)
+    }
+
+    /// Mounts a two-tab mirror and returns the app plus the materialized
+    /// workspace index, its local id, and both namespaced remote tab ids in
+    /// remote tab-number order.
+    #[cfg(unix)]
+    fn mount_two_tab_mirror() -> (App, Mount, usize, String, Vec<String>) {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_tab_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        let mut tabs: Vec<_> = mirror.tabs().values().collect();
+        tabs.sort_by_key(|tab| tab.number);
+        let tab_ids = tabs.iter().map(|tab| tab.tab_id.clone()).collect();
+        (app, mount, ws_idx, workspace_id, tab_ids)
+    }
+
+    /// Regression guard for the reported collapse: a remote workspace with N
+    /// tabs must materialize as N local tabs, not one tab with N splits.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn multi_tab_mount_materializes_one_local_tab_per_remote_tab() {
+        let (app, _mount, ws_idx, _workspace_id, tab_ids) = mount_two_tab_mirror();
+
+        let ws = &app.state.workspaces[ws_idx];
+        ws.assert_invariants_for_test();
+        assert_eq!(ws.tabs.len(), 2, "each remote tab gets its own local tab");
+        for tab in &ws.tabs {
+            assert_eq!(
+                tab.panes.len(),
+                1,
+                "each remote tab's single pane must stay in its own tab, not become a split"
+            );
+        }
+        assert_eq!(
+            ws.tabs
+                .iter()
+                .map(|tab| tab.custom_name.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("first remote tab".to_string()),
+                Some("second remote tab".to_string())
+            ],
+            "each local tab carries its remote counterpart's label"
+        );
+
+        for tab_id in &tab_ids {
+            let tab_ref = app
+                .remote_resync_tab_index
+                .get(tab_id)
+                .expect("every mount-time tab must be indexed for later resyncs");
+            assert!(tab_ref.tab_number.is_some());
+        }
+    }
+
+    /// A resync pane whose remote tab this mount already materialized must
+    /// land in THAT tab — including when it is not the workspace's active
+    /// tab, which is exactly what the old `Workspace::active_tab` fallback
+    /// got wrong.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_pane_created_with_a_known_tab_id_lands_in_that_tab() {
+        let (mut app, mount, ws_idx, workspace_id, tab_ids) = mount_two_tab_mirror();
+        app.state.workspaces[ws_idx].active_tab = 0;
+
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: workspace_id.clone(),
+            tab_id: tab_ids[1].clone(),
+            pane_id: format!("{workspace_id}:p9"),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        let ws = &app.state.workspaces[ws_idx];
+        ws.assert_invariants_for_test();
+        assert_eq!(ws.tabs.len(), 2, "a known tab must not spawn another tab");
+        assert_eq!(
+            ws.find_tab_index_for_pane(local_pane_id),
+            Some(1),
+            "the pane must be spliced into its own remote tab, not the active one"
+        );
+        assert!(ws.public_pane_number(local_pane_id).is_some());
+    }
+
+    /// The reported bug, at the event level: a resync pane for a remote tab
+    /// this mount has never seen must create a new local tab instead of
+    /// splitting the active one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_pane_created_with_an_unknown_tab_id_creates_a_new_local_tab() {
+        let (mut app, mount, ws_idx, workspace_id, _tab_ids) = mount_two_tab_mirror();
+        let unknown_tab_id = format!("{workspace_id}:tab-new");
+        app.handle_federation_resync_tab_created(
+            mount.host_key.clone(),
+            workspace_id.clone(),
+            unknown_tab_id.clone(),
+            "third remote tab".to_string(),
+        );
+
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: workspace_id.clone(),
+            tab_id: unknown_tab_id.clone(),
+            pane_id: format!("{workspace_id}:p9"),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        let ws = &app.state.workspaces[ws_idx];
+        ws.assert_invariants_for_test();
+        assert_eq!(ws.tabs.len(), 3, "an unseen remote tab must create a tab");
+        let tab_idx = ws
+            .find_tab_index_for_pane(local_pane_id)
+            .expect("the new pane must be placed");
+        assert_eq!(tab_idx, 2);
+        assert_eq!(ws.tabs[tab_idx].panes.len(), 1, "it is not a split");
+        assert_eq!(
+            ws.tabs[tab_idx].custom_name.as_deref(),
+            Some("third remote tab"),
+            "the tab-created event's label must reach the materialized tab"
+        );
+        assert!(ws.public_pane_number(local_pane_id).is_some());
+        assert_eq!(
+            app.remote_resync_tab_index
+                .get(&unknown_tab_id)
+                .and_then(|tab_ref| tab_ref.tab_number),
+            ws.public_tab_number(tab_idx),
+            "the new tab must be indexed so its next pane splits into it"
+        );
+    }
+
+    /// Tab created then closed over resync: the local tab appears and then
+    /// goes away again, leaving no stale tab- or pane-index entries and a
+    /// still-valid workspace.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_tab_created_then_closed_round_trip_leaves_state_consistent() {
+        let (mut app, mount, ws_idx, workspace_id, _tab_ids) = mount_two_tab_mirror();
+        let new_tab_id = format!("{workspace_id}:tab-new");
+        let new_pane_id = format!("{workspace_id}:p9");
+        app.handle_federation_resync_tab_created(
+            mount.host_key.clone(),
+            workspace_id.clone(),
+            new_tab_id.clone(),
+            "third remote tab".to_string(),
+        );
+
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: workspace_id.clone(),
+            tab_id: new_tab_id.clone(),
+            pane_id: new_pane_id.clone(),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+        assert_eq!(app.state.workspaces[ws_idx].tabs.len(), 3);
+
+        app.handle_federation_resync_tab_removed(mount.host_key.clone(), new_tab_id.clone());
+
+        // `materialize_federation_mount` itself never focuses the workspace
+        // it creates (the mount caller does), so the App-level invariants —
+        // which require an active workspace — need that set first.
+        app.state.active = Some(ws_idx);
+        app.state.assert_invariants_for_test();
+        let ws = &app.state.workspaces[ws_idx];
+        ws.assert_invariants_for_test();
+        assert_eq!(ws.tabs.len(), 2, "the resync-created tab must be gone");
+        assert!(ws.pane_state(local_pane_id).is_none());
+        assert!(
+            !app.remote_resync_tab_index.contains_key(&new_tab_id),
+            "a closed remote tab must not leave a stale tab-index entry"
+        );
+        assert!(
+            !app.remote_resync_pane_index.contains_key(&new_pane_id),
+            "closing a tab must prune its panes from the pane index too"
+        );
+    }
+
+    /// A remote tab close from a host other than the one that mounted the
+    /// workspace must not tear the local tab down.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_tab_removed_from_the_wrong_origin_is_dropped() {
+        let (mut app, _mount, ws_idx, _workspace_id, tab_ids) = mount_two_tab_mirror();
+        let spoofed_origin = crate::remote::federation::id::HostKey::new("evil-host", "s1");
+
+        app.handle_federation_resync_tab_removed(spoofed_origin, tab_ids[1].clone());
+
+        assert_eq!(
+            app.state.workspaces[ws_idx].tabs.len(),
+            2,
+            "a foreign origin must not be able to close another mount's tab"
         );
     }
 }
