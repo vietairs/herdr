@@ -1317,7 +1317,11 @@ impl App {
     /// counterparts (`handle_federation_workspace_close_failed`,
     /// `handle_federation_tab_close_failed`) share the exact same delivery
     /// dispatch instead of re-deriving it.
-    #[cfg(unix)]
+    ///
+    /// Not gated to Unix, for the same reason as
+    /// [`Self::raise_remote_close_toast`]: the TUI close path raises this
+    /// rejection toast on every platform, so gating it breaks the Windows
+    /// build even though federation dispatch itself is Unix-only.
     pub(crate) fn raise_remote_close_failed_toast(&mut self, title: &str, reason: String) {
         self.raise_remote_close_toast(super::ToastKind::NeedsAttention, title, reason);
     }
