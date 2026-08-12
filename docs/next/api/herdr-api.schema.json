@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 19,
+  "protocol": 20,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -4722,6 +4722,23 @@
           "type": "object"
         },
         {
+          "description": "Forwards a close to the serving host of a federated workspace,\ndistinct from `workspace.close` (local mirror retire/unmount only,\nnever forwarded) — see `app/api/workspaces.rs::\ndispatch_remote_workspace_close`.",
+          "properties": {
+            "method": {
+              "const": "workspace.close_remote",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "method": {
               "const": "worktree.list",
@@ -4885,6 +4902,23 @@
           "properties": {
             "method": {
               "const": "tab.close",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TabTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Forwards a close to the serving host of a federated tab, distinct\nfrom `tab.close` (local mirror retire only, never forwarded) — see\n`app/api/tabs.rs::dispatch_remote_tab_close`.",
+          "properties": {
+            "method": {
+              "const": "tab.close_remote",
               "type": "string"
             },
             "params": {
@@ -8741,6 +8775,40 @@
               "type": "object"
             },
             {
+              "description": "Acknowledges a `workspace.create` that targeted a mounted remote host\n(the request was made from a federated workspace, so it grows that\nhost's workspace set rather than this one's): the request was sent over\nthe mount named by `origin`. Does not imply the workspace exists yet —\nthe serving host answers asynchronously, and the new workspace appears\nthrough the same resync path a workspace created by the remote user\ntakes. Same \"requested, not completed\" contract as\n`WorkspaceMountRemoteRequested`.",
+              "properties": {
+                "origin": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "workspace_create_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "origin"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Acknowledges a `workspace.close_remote`: the close request was sent\nover the mount named by `origin`. Does not imply the workspace is gone\n— the serving host answers asynchronously, and the local mirror\ndisappears only once that answer arrives. Same \"requested, not\ncompleted\" contract as `WorkspaceCreateRequested`.",
+              "properties": {
+                "origin": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "workspace_close_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "origin"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "source": {
                   "$ref": "#/schemas/success_response/$defs/WorktreeSourceInfo"
@@ -8899,6 +8967,23 @@
               "required": [
                 "type",
                 "tabs"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Tab counterpart of `WorkspaceCloseRequested`: acknowledges a\n`tab.close_remote` whose request was sent over the mount named by\n`origin`. The mirror tab disappears only once the serving host\nconfirms it closed its own tab.",
+              "properties": {
+                "origin": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "tab_close_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "origin"
               ],
               "type": "object"
             },

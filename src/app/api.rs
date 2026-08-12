@@ -236,6 +236,67 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::FederationResyncWorkspaceCreated {
+            origin,
+            workspace_id,
+            label,
+        } = ev
+        {
+            self.handle_federation_resync_workspace_created(origin, workspace_id, label);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationResyncWorkspaceRemoved {
+            origin,
+            workspace_id,
+        } = ev
+        {
+            self.handle_federation_resync_workspace_removed(origin, workspace_id);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationWorkspaceCreateAccepted {
+            request_id,
+            origin,
+            workspace_id,
+        } = ev
+        {
+            self.handle_federation_workspace_create_accepted(request_id, origin, workspace_id);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationWorkspaceCreateFailed {
+            request_id,
+            reason,
+            origin,
+        } = ev
+        {
+            self.handle_federation_workspace_create_failed(request_id, reason, origin);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationResyncTabCreated {
+            origin,
+            workspace_id,
+            tab_id,
+            label,
+        } = ev
+        {
+            self.handle_federation_resync_tab_created(origin, workspace_id, tab_id, label);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationResyncTabClosed { origin, tab_id } = ev {
+            self.handle_federation_resync_tab_removed(origin, tab_id);
+            return;
+        }
+
+        #[cfg(unix)]
         if let AppEvent::FederationClosePaneReady { request_id, origin } = ev {
             self.handle_federation_close_pane_ready(request_id, origin);
             return;
@@ -249,6 +310,40 @@ impl App {
         } = ev
         {
             self.handle_federation_close_pane_failed(request_id, reason, origin);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationWorkspaceCloseReady { request_id, origin } = ev {
+            self.handle_federation_workspace_close_ready(request_id, origin);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationWorkspaceCloseFailed {
+            request_id,
+            reason,
+            origin,
+        } = ev
+        {
+            self.handle_federation_workspace_close_failed(request_id, reason, origin);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationTabCloseReady { request_id, origin } = ev {
+            self.handle_federation_tab_close_ready(request_id, origin);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationTabCloseFailed {
+            request_id,
+            reason,
+            origin,
+        } = ev
+        {
+            self.handle_federation_tab_close_failed(request_id, reason, origin);
             return;
         }
 
@@ -1166,6 +1261,9 @@ impl App {
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target)
             }
+            Method::WorkspaceCloseRemote(target) => {
+                return self.handle_workspace_close_remote(request.id, target)
+            }
             Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
             Method::WorktreeCreate(params) => {
                 let _ = params;
@@ -1191,6 +1289,9 @@ impl App {
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
+            Method::TabCloseRemote(target) => {
+                return self.handle_tab_close_remote(request.id, target)
+            }
             Method::AgentList(_) => return self.handle_agent_list(request.id),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
             Method::AgentFocus(target) => return self.handle_agent_focus(request.id, target),

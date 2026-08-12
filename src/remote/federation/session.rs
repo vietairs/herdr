@@ -158,6 +158,12 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
         // has nothing to gate on the local platform. Whether a stage request
         // is ever sent is decided by what the *host* also advertised.
         Capability::new(Capability::FILE_STAGING),
+        // Gates `workspace.close_remote`/`tab.close_remote` forwarding
+        // (federation close forwarding for the multi-workspace/tab case).
+        // Advertised unconditionally: like `FILE_STAGING`, this side only
+        // ever sends the request and reads back a response, so there is
+        // nothing local to gate on.
+        Capability::new(Capability::WORKSPACE_TAB_CLOSE),
     ]
     .into_iter()
     .collect()

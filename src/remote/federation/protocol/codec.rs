@@ -133,8 +133,8 @@ mod tests {
         AgentStatusMessage, Capability, Channel, ClipboardMessage, ClosePaneRequest,
         ClosePaneResponse, EventChannelMessage, EventCursor, EventFrame, FaultMessage, FaultReason,
         FederationMessage, Handshake, HandshakeResponse, MountSnapshot, RejectReason,
-        ScrollbackReplay, SplitDirection, SplitPaneRequest, SplitPaneResponse,
-        TerminalChannelMessage,
+        ScrollbackReplay, SplitDirection, SplitPaneRequest, SplitPaneResponse, TabCloseRequest,
+        TabCloseResponse, TerminalChannelMessage, WorkspaceCloseRequest, WorkspaceCloseResponse,
     };
     use super::*;
     use crate::api::schema::common::AgentStatus;
@@ -252,6 +252,26 @@ mod tests {
                 request_id: 9,
                 reason: "no such pane".to_string(),
             }),
+            FederationMessage::WorkspaceCloseRequest(WorkspaceCloseRequest {
+                request_id: 13,
+                target_workspace_id: "w1".to_string(),
+            }),
+            FederationMessage::WorkspaceCloseResponse(WorkspaceCloseResponse::Closed {
+                request_id: 13,
+            }),
+            FederationMessage::WorkspaceCloseResponse(WorkspaceCloseResponse::Failed {
+                request_id: 13,
+                reason: "no such workspace".to_string(),
+            }),
+            FederationMessage::TabCloseRequest(TabCloseRequest {
+                request_id: 14,
+                target_tab_id: "w1:t1".to_string(),
+            }),
+            FederationMessage::TabCloseResponse(TabCloseResponse::Closed { request_id: 14 }),
+            FederationMessage::TabCloseResponse(TabCloseResponse::Failed {
+                request_id: 14,
+                reason: "no such tab".to_string(),
+            }),
         ]
     }
 
@@ -317,6 +337,35 @@ mod tests {
             err,
             CodecError::VersionSkew { local, remote }
                 if local == FEDERATION_PROTOCOL_VERSION && remote == FEDERATION_PROTOCOL_VERSION + 1
+        ));
+    }
+
+    /// The `WorkspaceCreateRequest`/`Response` addition is wire-incompatible:
+    /// a peer still speaking the previously released version must be rejected
+    /// at the header, before any payload is touched, rather than hitting an
+    /// unknown-variant decode error mid-session.
+    #[test]
+    fn decode_rejects_a_peer_on_the_previous_federation_protocol_version() {
+        const {
+            assert!(
+                FEDERATION_PROTOCOL_VERSION >= 6,
+                "workspace-create shipped at federation protocol 6"
+            )
+        };
+        let msg = FederationMessage::WorkspaceCreateRequest(super::super::WorkspaceCreateRequest {
+            request_id: 1,
+            label: None,
+        });
+        let mut frame = encode(&msg).expect("encode should succeed");
+        frame[0..4].copy_from_slice(&(FEDERATION_PROTOCOL_VERSION - 1).to_le_bytes());
+
+        let err = decode::<FederationMessage>(&frame, Channel::Control.max_len())
+            .expect_err("a frame stamped with the previous version must be rejected");
+
+        assert!(matches!(
+            err,
+            CodecError::VersionSkew { local, remote }
+                if local == FEDERATION_PROTOCOL_VERSION && remote == FEDERATION_PROTOCOL_VERSION - 1
         ));
     }
 

@@ -385,6 +385,7 @@ pub(super) fn open_rename_workspace(
     ws_idx: usize,
 ) {
     state.pending_workspace_create_cwd = None;
+    state.pending_workspace_create_source_workspace = None;
     state.selected = ws_idx;
     state.rename_pane_target = None;
     state.name_input =
@@ -393,11 +394,19 @@ pub(super) fn open_rename_workspace(
     state.mode = Mode::RenameWorkspace;
 }
 
-pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::PathBuf) {
+/// `cwd` seeds the suggested name only; `source_workspace_id` pins the
+/// workspace the create was started from so confirming resolves the real cwd
+/// (and the federation mount, if any) from that workspace.
+pub(crate) fn open_new_workspace_dialog(
+    state: &mut AppState,
+    cwd: std::path::PathBuf,
+    source_workspace_id: Option<String>,
+) {
     let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = Some(cwd);
+    state.pending_workspace_create_source_workspace = source_workspace_id;
     state.rename_pane_target = None;
     state.name_input = suggested_name;
     state.name_input_replace_on_type = true;
@@ -408,6 +417,7 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
+    state.pending_workspace_create_source_workspace = None;
     state.rename_pane_target = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
         if let Some(name) = ws.active_tab_display_name() {
@@ -429,6 +439,7 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
+    state.pending_workspace_create_source_workspace = None;
     state.rename_pane_target = Some(pane_id);
     state.name_input = terminal
         .and_then(|t| t.manual_label.clone())
@@ -454,6 +465,7 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.creating_new_tab = true;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
+    state.pending_workspace_create_source_workspace = None;
     state.rename_pane_target = None;
     state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
@@ -594,6 +606,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             }
             state.creating_new_tab = false;
             state.pending_workspace_create_cwd = None;
+            state.pending_workspace_create_source_workspace = None;
             state.rename_pane_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
@@ -607,6 +620,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.creating_new_tab = false;
             state.requested_new_tab_name = None;
             state.pending_workspace_create_cwd = None;
+            state.pending_workspace_create_source_workspace = None;
             state.rename_pane_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
@@ -1060,15 +1074,31 @@ impl App {
                 if let Some(cwd) = self.state.pending_workspace_create_cwd.take() {
                     let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
                     let label = workspace_create_label(&new_name, &suggested_name);
+                    // This dialog asks for a name, never a directory: the cwd
+                    // it captured when it opened was derived from the
+                    // workspace the create started in. For a local source
+                    // that capture is worth sending (it pins the path against
+                    // anything that changes while the user types), but for a
+                    // mirrored remote source it is a path on the *serving*
+                    // host, and sending it would read as a deliberate
+                    // local-directory choice and quietly build a local
+                    // workspace instead of one on the mount. Send no cwd
+                    // there, which is what routes the create over the mount.
+                    let targets_mount = self
+                        .workspace_creation_source()
+                        .and_then(|ws_idx| self.federation_host_key_for_workspace(ws_idx))
+                        .is_some();
+                    let cwd = (!targets_mount).then(|| cwd.display().to_string());
                     self.runtime_workspace_create(
                         "tui.workspace.create_named",
                         crate::api::schema::WorkspaceCreateParams {
-                            cwd: Some(cwd.display().to_string()),
+                            cwd,
                             focus: true,
                             label,
                             env: Default::default(),
                         },
                     );
+                    self.state.pending_workspace_create_source_workspace = None;
                 } else if !self.state.workspaces.is_empty() && !new_name.is_empty() {
                     let workspace_id = self.public_workspace_id(self.state.selected);
                     self.runtime_workspace_rename(
@@ -1240,7 +1270,12 @@ impl App {
 
     pub(crate) fn apply_context_menu_action_via_api(&mut self, menu: ContextMenuState, idx: usize) {
         let item = menu.items().get(idx).copied();
-        match (menu.kind, item) {
+        let ContextMenuState {
+            kind,
+            remote_close_target,
+            ..
+        } = menu;
+        match (kind, item) {
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
                 self.state.request_new_linked_worktree = Some(ws_idx);
                 leave_modal(&mut self.state);
@@ -1293,6 +1328,22 @@ impl App {
                     self.state.mode = Mode::Navigate;
                 }
             }
+            (
+                ContextMenuKind::Workspace { .. } | ContextMenuKind::GitWorkspace { .. },
+                Some("Close on host"),
+            ) => {
+                // Asks the serving host to close its own workspace; never
+                // goes through the local confirm-close dialog, since this
+                // isn't a local mirror teardown (see
+                // `close_workspace_remote_via_api`'s doc comment). Resolved
+                // by the id snapshotted with the menu, never by `ws_idx`,
+                // which a remote resync can have shifted onto another
+                // workspace by now.
+                if let Some(target) = remote_close_target {
+                    self.close_workspace_remote_via_api(target.workspace_id);
+                }
+                leave_modal(&mut self.state);
+            }
             (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("New tab")) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
@@ -1309,6 +1360,17 @@ impl App {
                 if !self.close_active_tab_via_api_requires_confirmation() {
                     leave_modal(&mut self.state);
                 }
+            }
+            (ContextMenuKind::Tab { .. }, Some("Close on host")) => {
+                // Asks the serving host to close its own tab; never goes
+                // through the local confirm-close dialog (see
+                // `close_tab_remote_via_api`'s doc comment). Resolved by the
+                // snapshotted tab id, not the menu's indices, for the same
+                // reason the workspace arm above is.
+                if let Some(tab_id) = remote_close_target.and_then(|target| target.tab_id) {
+                    self.close_tab_remote_via_api(tab_id);
+                }
+                leave_modal(&mut self.state);
             }
             (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
                 open_rename_pane(&mut self.state, pane_id);
@@ -1443,6 +1505,7 @@ fn cancel_rename_modal(state: &mut AppState) {
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
+    state.pending_workspace_create_source_workspace = None;
     state.rename_pane_target = None;
     state.name_input.clear();
     state.name_input_replace_on_type = false;
@@ -2318,6 +2381,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         };
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
 
@@ -2364,6 +2428,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         };
         let idx = menu
             .items()
@@ -2395,6 +2460,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         };
         let idx = menu
             .items()
@@ -2430,6 +2496,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         };
         let close_idx = menu
             .items()
@@ -2445,6 +2512,177 @@ mod tests {
         assert_eq!(app.state.mode, Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert!(app.state.context_menu.is_none());
+    }
+
+    /// "Close on host" asks the SERVING host to close its own workspace
+    /// (`workspace.close_remote`); it must never route through the local
+    /// confirm-close dialog the plain "Close" item uses, since it isn't
+    /// tearing down the local mirror itself — see
+    /// `close_workspace_idx_remote_via_api`'s doc comment. With no live
+    /// federation mount behind this test workspace, the request is refused
+    /// synchronously (`remote_close_unsupported`) rather than sent, but the
+    /// no-confirm-dialog contract holds either way.
+    #[test]
+    fn context_menu_close_workspace_on_host_via_api_skips_confirm_dialog() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1:w1".to_string();
+        app.state.confirm_close = true;
+        app.state.mode = Mode::ContextMenu;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: app.state.remote_close_menu_target(0, None),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close on host")
+            .expect("close on host item");
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_ne!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "close_remote must not remove the local mirror; only the serving host's \
+             eventual confirmation does"
+        );
+    }
+
+    /// A remote resync can remove a mirrored workspace while its context menu
+    /// is open, shifting the next workspace into the index the menu recorded.
+    /// "Close on host" must resolve the workspace the menu was opened over by
+    /// id, so a shifted list refuses the close instead of asking the serving
+    /// host to close whichever workspace now occupies that slot.
+    #[test]
+    fn context_menu_close_workspace_on_host_via_api_refuses_a_shifted_index() {
+        let mut app = app_with_test_workspaces(&["mirrored", "neighbour"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1:w1".to_string();
+        app.state.workspaces[1].id = "r:alice@10.0.0.1:w2".to_string();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.mode = Mode::ContextMenu;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: app.state.remote_close_menu_target(0, None),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close on host")
+            .expect("close on host item");
+
+        // The resync lands while the menu is up: the menu's workspace is gone
+        // and its neighbour now sits at index 0.
+        app.state.workspaces.remove(0);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        let toast = app
+            .state
+            .toast
+            .expect("a stale close target raises a toast");
+        assert_eq!(
+            toast.context, "that workspace is no longer here",
+            "the close must be refused, not redirected onto the shifted-in workspace"
+        );
+        assert!(
+            app.state
+                .workspaces
+                .iter()
+                .any(|ws| ws.id == "r:alice@10.0.0.1:w2"),
+            "the neighbour workspace must be untouched"
+        );
+    }
+
+    /// Tab counterpart of the shifted-index regression above: a resync that
+    /// removes the mirrored tab the menu was opened over must not let "Close
+    /// on host" fall onto the tab that shifted into its index.
+    #[test]
+    fn context_menu_close_tab_on_host_via_api_refuses_a_shifted_index() {
+        let mut app = app_with_test_workspaces(&["mirrored"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1:w1".to_string();
+        app.state.workspaces[0].test_add_tab(Some("second"));
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.mode = Mode::ContextMenu;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: app.state.remote_close_menu_target(0, Some(0)),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close on host")
+            .expect("close on host item");
+
+        app.state.workspaces[0].tabs.remove(0);
+        app.state.workspaces[0].switch_tab(0);
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        let toast = app
+            .state
+            .toast
+            .expect("a stale close target raises a toast");
+        assert_eq!(
+            toast.context, "that tab is no longer here",
+            "the close must be refused, not redirected onto the shifted-in tab"
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            1,
+            "the surviving tab must be untouched"
+        );
+    }
+
+    /// Tab counterpart of the workspace test above: "Close on host"
+    /// (`tab.close_remote`) must never route through the confirm-close
+    /// dialog either, even for the last tab in a workspace (where the plain
+    /// "Close" item would).
+    #[test]
+    fn context_menu_close_tab_on_host_via_api_skips_confirm_dialog() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1:w1".to_string();
+        app.state.confirm_close = true;
+        app.state.mode = Mode::ContextMenu;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: app.state.remote_close_menu_target(0, Some(0)),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close on host")
+            .expect("close on host item");
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_ne!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            1,
+            "close_remote must not remove the local mirror tab; only the serving host's \
+             eventual confirmation does"
+        );
     }
 
     fn pane_menu(
@@ -2473,6 +2711,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         }
     }
 

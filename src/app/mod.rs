@@ -159,13 +159,20 @@ pub struct App {
     /// eventual `SplitPaneResponse`'s materialized pane into the right spot
     /// (`App::handle_federation_split_pane_ready`, `app/creation.rs`).
     pub(crate) pending_remote_splits: HashMap<u64, creation::PendingRemoteSplit>,
-    /// Correlates an in-flight `ClosePaneRequest::request_id`
-    /// (`app/api/panes.rs::dispatch_remote_pane_close`, Gap A —
-    /// plans/260724-1536-federation-pane-close-sync) to the local layout
-    /// context (workspace/pane) needed to tear the mirror pane down once the
-    /// eventual `ClosePaneResponse` arrives
-    /// (`App::handle_federation_close_pane_ready`, `app/creation.rs`). Same
-    /// shape/reasoning as `pending_remote_splits`.
+    /// Correlates an in-flight close request's `request_id` —
+    /// `ClosePaneRequest` (`app/api/panes.rs::dispatch_remote_pane_close`),
+    /// `WorkspaceCloseRequest` (`app/api/workspaces.rs::
+    /// dispatch_remote_workspace_close`), or `TabCloseRequest`
+    /// (`app/api/tabs.rs::dispatch_remote_tab_close`) — to the local target
+    /// (`creation::RemoteCloseTarget`) needed to tear the mirror down once
+    /// the matching response arrives (`App::handle_federation_close_pane_
+    /// ready`/`handle_federation_workspace_close_ready`/
+    /// `handle_federation_tab_close_ready`, `app/creation.rs`). All three
+    /// kinds mint their `request_id` from the SAME
+    /// `next_remote_close_request_id` counter and share this ONE map —
+    /// a second counter would start at 1 and collide with an id already in
+    /// flight here, popping the wrong pending entry (see that function's own
+    /// doc comment). Same shape/reasoning as `pending_remote_splits`.
     pub(crate) pending_remote_closes: HashMap<u64, creation::PendingRemoteClose>,
     /// Correlates an in-flight `ClipboardStageRequest::request_id`
     /// (`app/remote_clipboard_stage.rs::begin_remote_clipboard_stage`) to the
@@ -218,6 +225,40 @@ pub struct App {
     /// diff only ever reports panes *this* index or the mount-time pass
     /// already knows about through `RemoteMirror::panes()` directly.
     pub(crate) remote_resync_pane_index: HashMap<String, crate::layout::PaneId>,
+    /// Tab-level counterpart of `remote_resync_pane_index`: maps a mirrored
+    /// remote tab's namespaced (public) id to the local tab materialized for
+    /// it. Without it a resync-discovered pane has no way to find its real
+    /// tab and every remote tab collapses into the workspace's active tab as
+    /// a split. Keyed the same way `RemoteMirror::tabs()` is, and populated
+    /// by both mount-time materialization and resync.
+    pub(crate) remote_resync_tab_index: HashMap<String, creation::RemoteTabRef>,
+    /// Workspace-level counterpart of `remote_resync_tab_index`: maps a
+    /// mirrored remote workspace's namespaced (public) id — which is also the
+    /// local `Workspace::id` once it materializes — to the metadata needed to
+    /// build the local workspace when its first pane arrives. Entries only
+    /// live here between a resync's workspace event and the pane event that
+    /// materializes it; a materialized workspace is found by `Workspace::id`
+    /// directly, not through this map.
+    /// Every reader and writer lives in the Unix-only federation client path,
+    /// so the field itself is Unix-only too.
+    #[cfg(unix)]
+    pub(crate) remote_resync_workspace_index: HashMap<String, creation::RemoteWorkspaceRef>,
+    /// `request_id`s of `WorkspaceCreateRequest`s this client sent that asked
+    /// for the new workspace to be focused (`WorkspaceCreateParams::focus`).
+    /// Cleared when the request is answered either way; a request that asked
+    /// for no focus is never recorded here at all.
+    pub(crate) pending_remote_workspace_create_focus: HashSet<u64>,
+    /// Namespaced workspace ids the remote host confirmed for one of those
+    /// focus-requesting creates but the resync has not materialized yet. The
+    /// workspace is focused the moment it appears, so pressing "new
+    /// workspace" inside a mounted workspace lands the user in the new one
+    /// exactly as a local create does. Ids only enter here from a
+    /// `WorkspaceCreateResponse` answering this client's own request, never
+    /// from an out-of-band remote create.
+    /// Every reader and writer lives in the Unix-only federation client path,
+    /// so the field itself is Unix-only too.
+    #[cfg(unix)]
+    pub(crate) pending_remote_workspace_focus: HashSet<String>,
     pub(crate) local_terminal_notifications: bool,
     /// Whether this process applies `AppEvent::PrefixInputSource` to the host input source.
     /// The headless server sets this to false: the switch belongs to the foreground client,
@@ -672,6 +713,7 @@ impl App {
             creating_new_tab: false,
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
+            pending_workspace_create_source_workspace: None,
             rename_pane_target: None,
             worktree_create: None,
             worktree_open: None,
@@ -920,6 +962,12 @@ impl App {
             #[cfg(unix)]
             remote_clipboard_image_reads_in_flight: std::collections::HashSet::new(),
             remote_resync_pane_index: HashMap::new(),
+            remote_resync_tab_index: HashMap::new(),
+            #[cfg(unix)]
+            remote_resync_workspace_index: HashMap::new(),
+            pending_remote_workspace_create_focus: HashSet::new(),
+            #[cfg(unix)]
+            pending_remote_workspace_focus: HashSet::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
             config_reloaded_from_disk: false,
@@ -6383,6 +6431,7 @@ last_pane = "prefix+tab"
             x: 2,
             y: 2,
             list: state::MenuListState::new(1),
+            remote_close_target: None,
         });
         app.state.mode = Mode::ContextMenu;
 

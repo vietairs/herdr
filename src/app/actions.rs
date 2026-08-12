@@ -2934,9 +2934,29 @@ impl AppState {
             #[cfg(unix)]
             AppEvent::FederationResyncPaneRemoved { .. } => Vec::new(),
             #[cfg(unix)]
+            AppEvent::FederationResyncWorkspaceCreated { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationResyncWorkspaceRemoved { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationWorkspaceCreateAccepted { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationWorkspaceCreateFailed { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationResyncTabCreated { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationResyncTabClosed { .. } => Vec::new(),
+            #[cfg(unix)]
             AppEvent::FederationClosePaneReady { .. } => Vec::new(),
             #[cfg(unix)]
             AppEvent::FederationClosePaneFailed { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationWorkspaceCloseReady { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationWorkspaceCloseFailed { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationTabCloseReady { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::FederationTabCloseFailed { .. } => Vec::new(),
             #[cfg(unix)]
             AppEvent::FederationClipboardStageReady { .. } => Vec::new(),
             #[cfg(unix)]

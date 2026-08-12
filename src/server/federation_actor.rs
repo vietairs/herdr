@@ -162,6 +162,59 @@ pub(crate) enum FederationCommand {
         target_pane_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Closes exactly one LOCAL workspace on this host's own live session —
+    /// the serving-host half of close forwarding for the multi-workspace
+    /// case: a mounting client's workspace-close action must tear down the
+    /// workspace that actually lives here, never the mount's whole worktree
+    /// group. Gated on `(epoch, connid)` being the mounted controller,
+    /// unlike `SplitPane`/`ClosePane` above (a pre-existing gap those arms do
+    /// not close; this arm does not repeat it). Reuses
+    /// `App::close_federation_target_workspace`, which detaches the target
+    /// from its worktree-space membership before closing so a sibling
+    /// workspace sharing that membership is never touched.
+    CloseWorkspaceRemote {
+        epoch: AcceptEpoch,
+        connid: ConnId,
+        target_workspace_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Closes exactly one LOCAL tab on this host's own live session — the
+    /// serving-host half of close forwarding for the multi-tab case. Gated
+    /// on `(epoch, connid)` being the mounted controller, same reasoning as
+    /// `CloseWorkspaceRemote`. Reuses `App::close_federation_target_tab`,
+    /// which never routes through the confirm-gated worktree-group close
+    /// path, so a remote peer's request can never pop this host's own
+    /// confirmation UI.
+    CloseTabRemote {
+        epoch: AcceptEpoch,
+        connid: ConnId,
+        target_tab_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Creates a brand new workspace on this host's own live session — the
+    /// serving-host half of multi-workspace federation: a mounting client's
+    /// "new workspace" action performed inside a mounted workspace must grow
+    /// the workspace set that actually lives here, not just the client's
+    /// local mirror. Reuses the same JSON-API method the local TUI/CLI
+    /// new-workspace action calls (`Method::WorkspaceCreate`).
+    ///
+    /// Gated on `(epoch, connid)` being the mounted controller, same as
+    /// `CloseWorkspaceRemote`/`CloseTabRemote`: only the peer that actually
+    /// holds the mount may grow this host's workspace set.
+    ///
+    /// `label` is the client's optional hint; `cwd` is deliberately not
+    /// requestable (a client-side path is meaningless here), so this host's
+    /// own `workspace.create` defaults decide it. The reply carries the raw
+    /// (un-namespaced) `(workspace_id, tab_id, pane_id, terminal_id)` of the
+    /// new workspace's root pane.
+    CreateWorkspace {
+        epoch: AcceptEpoch,
+        connid: ConnId,
+        label: Option<String>,
+        #[allow(clippy::type_complexity)]
+        // one tuple of four ids; a named struct would be single-use
+        reply: oneshot::Sender<Result<(String, String, String, String), String>>,
+    },
 }
 
 // `ServerEvent` derives `Debug`, so its `Federation` variant needs one — but the
@@ -206,6 +259,18 @@ impl std::fmt::Debug for FederationCommand {
             }
             FederationCommand::ClosePane { target_pane_id, .. } => {
                 write!(f, "ClosePane({target_pane_id})")
+            }
+            FederationCommand::CloseWorkspaceRemote {
+                target_workspace_id,
+                ..
+            } => {
+                write!(f, "CloseWorkspaceRemote({target_workspace_id})")
+            }
+            FederationCommand::CloseTabRemote { target_tab_id, .. } => {
+                write!(f, "CloseTabRemote({target_tab_id})")
+            }
+            FederationCommand::CreateWorkspace { label, .. } => {
+                write!(f, "CreateWorkspace({label:?})")
             }
         }
     }
@@ -471,6 +536,147 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                     // strings on either side of the wire that could
                     // otherwise drift out of sync.
                     Err(format!("{code}: {message}"))
+                });
+            let _ = reply.send(outcome);
+        }
+        FederationCommand::CloseWorkspaceRemote {
+            epoch,
+            connid,
+            target_workspace_id,
+            reply,
+        } => {
+            // Only the mounted controller may close a workspace on this
+            // host. Unlike `ClosePane`/`SplitPane`/`CreateWorkspace` above,
+            // this is a newly added arm with no pre-existing gap to inherit.
+            if !lease.is_mounted_controller(epoch, connid) {
+                let _ = reply.send(Err("not the mounted controller".to_string()));
+                return;
+            }
+            let outcome = app.close_federation_target_workspace(&target_workspace_id);
+            let _ = reply.send(outcome);
+        }
+        FederationCommand::CloseTabRemote {
+            epoch,
+            connid,
+            target_tab_id,
+            reply,
+        } => {
+            if !lease.is_mounted_controller(epoch, connid) {
+                let _ = reply.send(Err("not the mounted controller".to_string()));
+                return;
+            }
+            let outcome = app.close_federation_target_tab(&target_tab_id);
+            let _ = reply.send(outcome);
+        }
+        FederationCommand::CreateWorkspace {
+            epoch,
+            connid,
+            label,
+            reply,
+        } => {
+            // Only the mounted controller may create a workspace on this host.
+            if !lease.is_mounted_controller(epoch, connid) {
+                let _ = reply.send(Err("not the mounted controller".to_string()));
+                return;
+            }
+            let response = app.handle_api_request_after_internal_events_drained(Request {
+                id: "federation-create-workspace".to_string(),
+                method: Method::WorkspaceCreate(crate::api::schema::WorkspaceCreateParams {
+                    // A mounting client's filesystem path is meaningless
+                    // here; let this host's own `workspace.create` defaults
+                    // pick the root pane's cwd.
+                    cwd: None,
+                    // Never steal this host's own focus for a remotely
+                    // requested workspace — the requesting client focuses
+                    // its own mirror of it, this host's user did not ask
+                    // for anything.
+                    focus: false,
+                    label,
+                    env: std::collections::HashMap::new(),
+                }),
+            });
+            let outcome = serde_json::from_str::<SuccessResponse>(&response)
+                .ok()
+                .map(|success| match success.result {
+                    ResponseResult::WorkspaceCreated {
+                        workspace,
+                        tab,
+                        root_pane,
+                    } => Ok((
+                        workspace.workspace_id,
+                        tab.tab_id,
+                        root_pane.pane_id,
+                        root_pane.terminal_id,
+                    )),
+                    // This host answered its own `workspace.create` by
+                    // redirecting it onto a host *it* has mounted (the
+                    // no-`cwd` redirect in `handle_workspace_create`), so no
+                    // workspace was created here and none ever will be: what
+                    // the peer asked for — a workspace on THIS host — did not
+                    // happen, and the workspace that does appear lives on a
+                    // third host the peer never addressed. Reported under its
+                    // own code so it is never confused with a real create
+                    // failure, which is what the generic error path below
+                    // used to call it.
+                    ResponseResult::WorkspaceCreateRequested { origin } => {
+                        tracing::warn!(
+                            %origin,
+                            "a peer's federation workspace-create was redirected onto a \
+                             host this one mounts; refusing it instead of reporting a \
+                             workspace the peer cannot reach"
+                        );
+                        Err(
+                            "workspace_create_redirected: this host redirected the create \
+                             onto a host it mounts, so no workspace was created here"
+                                .to_string(),
+                        )
+                    }
+                    // No other success shape can carry the ids the peer needs.
+                    // Reported distinctly rather than as a create failure: the
+                    // create's real outcome is unknown to this reply path.
+                    other => {
+                        tracing::warn!(
+                            ?other,
+                            "unexpected success result for a peer's federation \
+                             workspace-create request"
+                        );
+                        Err(
+                            "workspace_create_unexpected_result: this host answered the \
+                             create with a result carrying no workspace ids"
+                                .to_string(),
+                        )
+                    }
+                })
+                .unwrap_or_else(|| {
+                    let error_value = serde_json::from_str::<serde_json::Value>(&response)
+                        .ok()
+                        .and_then(|value| value.get("error").cloned());
+                    let code = error_value
+                        .as_ref()
+                        .and_then(|error| error.get("code"))
+                        .and_then(|code| code.as_str())
+                        .unwrap_or("workspace_create_failed");
+                    let message = error_value
+                        .as_ref()
+                        .and_then(|error| error.get("message"))
+                        .and_then(|message| message.as_str())
+                        .unwrap_or("workspace create failed");
+                    // The peer gets the machine-readable `code` and a fixed
+                    // message, never the API message itself: a failed create
+                    // is usually a PTY spawn or cwd error whose text names
+                    // this host's own filesystem (default shell path, home
+                    // directory). The detail stays here, in this host's logs.
+                    // Same `code: message` shape `ClosePane` above replies
+                    // with, so the client end has one stable classification
+                    // format for every federation request failure.
+                    tracing::warn!(
+                        %code,
+                        %message,
+                        "refusing a peer's federation workspace-create request"
+                    );
+                    Err(format!(
+                        "{code}: workspace could not be created on the remote host"
+                    ))
                 });
             let _ = reply.send(outcome);
         }
@@ -968,6 +1174,55 @@ mod tests {
         assert!(!new_terminal_id.is_empty());
     }
 
+    /// `CreateWorkspace` performs a real create against the live `App` (via
+    /// the same `Method::WorkspaceCreate` handler the local TUI/CLI
+    /// new-workspace action uses) and replies with the new workspace's raw
+    /// workspace/tab/pane/terminal ids.
+    #[tokio::test]
+    async fn create_workspace_creates_a_real_workspace_and_replies_with_its_ids() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("metadata")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        let before = app.state.workspaces.len();
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CreateWorkspace {
+                epoch,
+                connid: 1,
+                label: Some("from-remote".to_string()),
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        let (workspace_id, tab_id, pane_id, terminal_id) =
+            outcome.expect("workspace create on a healthy App succeeds");
+        assert!(!workspace_id.is_empty());
+        assert!(!tab_id.is_empty());
+        assert!(!pane_id.is_empty());
+        assert!(!terminal_id.is_empty());
+        assert_eq!(
+            app.state.workspaces.len(),
+            before + 1,
+            "the serving host really gained a workspace"
+        );
+        assert_eq!(
+            app.state.workspaces[before].display_name(),
+            "from-remote",
+            "the client's label hint reached the serving host's workspace"
+        );
+        assert_eq!(
+            app.state.active,
+            Some(0),
+            "a remotely requested workspace must not steal the serving host's own focus"
+        );
+    }
+
     /// Root-cause regression for the client/server id-space mismatch: the
     /// federation client only ever knows a pane's raw `terminal_id`
     /// (`app/api/panes.rs::dispatch_remote_pane_split` sends
@@ -1091,6 +1346,421 @@ mod tests {
         assert!(
             outcome.is_err(),
             "an unknown target pane must fail, not misfile"
+        );
+    }
+
+    /// The raw (canonical) tab id of a seeded workspace's first tab, fetched
+    /// through `Method::TabList` — `ids.rs`'s `public_tab_id` is
+    /// `pub(super)` (visible only inside the `app` module), so this test
+    /// module, which lives in `server`, goes through the JSON API instead,
+    /// the same way `close_pane_against_a_known_target_pane_...` above
+    /// fetches its target pane id through `Method::PaneCurrent`.
+    fn tab_id_for_workspace(app: &mut App, workspace_id: &str) -> String {
+        let response = app.handle_api_request_after_internal_events_drained(Request {
+            id: "seed-tab-lookup".to_string(),
+            method: Method::TabList(crate::api::schema::TabListParams {
+                workspace_id: Some(workspace_id.to_string()),
+            }),
+        });
+        serde_json::from_str::<SuccessResponse>(&response)
+            .ok()
+            .and_then(|success| match success.result {
+                ResponseResult::TabList { tabs } => tabs.into_iter().next(),
+                _ => None,
+            })
+            .expect("the seeded workspace has one tab")
+            .tab_id
+    }
+
+    /// A `WorktreeSpaceMembership` shared by two seeded workspaces, so
+    /// `AppState::close_indices_for` would otherwise group-close both of
+    /// them for a single close request — exactly the destructive branch
+    /// `close_federation_target_workspace`/`close_federation_target_tab`
+    /// must never take.
+    fn shared_worktree_space(key: &str) -> crate::workspace::WorktreeSpaceMembership {
+        crate::workspace::WorktreeSpaceMembership {
+            key: key.to_string(),
+            label: "space".to_string(),
+            repo_root: std::path::PathBuf::from("/repo"),
+            checkout_path: std::path::PathBuf::from("/repo"),
+            is_linked_worktree: false,
+        }
+    }
+
+    /// `CloseWorkspaceRemote` against one of two workspaces sharing a
+    /// worktree-group key must close only the targeted workspace — the
+    /// sibling must survive. This is the regression `handle_workspace_close`
+    /// (the JSON-API `workspace.close` path) would NOT catch on this host,
+    /// because a federation-originated target is always a LOCAL workspace,
+    /// so its `federation_host_key_for_workspace` lookup returns `None` and
+    /// it falls into `AppState::close_selected_workspace()`'s group close.
+    #[tokio::test]
+    async fn close_workspace_remote_closes_exactly_one_workspace_sibling_survives() {
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("target"),
+            crate::workspace::Workspace::test_new("sibling"),
+        ];
+        let space = shared_worktree_space("shared-space");
+        app.state.workspaces[0].worktree_space = Some(space.clone());
+        app.state.workspaces[1].worktree_space = Some(space);
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let target_id = app.state.workspaces[0].id.clone();
+        let sibling_id = app.state.workspaces[1].id.clone();
+
+        // Captured rather than hardcoded: this asserts the command left the
+        // host's UI mode exactly as it found it, whatever the fixture starts in.
+        let mode_before = app.state.mode;
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CloseWorkspaceRemote {
+                epoch,
+                connid: 1,
+                target_workspace_id: target_id,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(
+            outcome.is_ok(),
+            "closing a known local workspace must succeed"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "exactly one workspace closes, never the whole worktree group"
+        );
+        assert_eq!(
+            app.state.workspaces[0].id, sibling_id,
+            "the sibling sharing the worktree group survives a single remote close"
+        );
+        // Surviving is not enough: the target is detached from the group
+        // before it closes, so a bug that detached the wrong workspace would
+        // still leave two ids present. The surviving sibling must also still
+        // BE in the worktree group it started in.
+        assert_eq!(
+            app.state.workspaces[0].worktree_space.as_ref(),
+            Some(&shared_worktree_space("shared-space")),
+            "the survivor must keep its worktree-group membership, not just exist"
+        );
+        assert_eq!(
+            app.state.mode, mode_before,
+            "a remote close must never pop this host's own confirmation UI"
+        );
+    }
+
+    /// `CloseTabRemote` against the LAST tab of a workspace that shares a
+    /// worktree-group key with a sibling must close only that one workspace
+    /// (via the tab-closes-workspace branch) — the sibling must survive, and
+    /// this host's own confirmation UI must never be triggered. This is the
+    /// regression `handle_tab_close` (the JSON-API `tab.close` path) would
+    /// NOT catch: its `AppState::confirm_implicit_worktree_group_close`
+    /// mutates `mode`/`selected` before refusing, exactly the mutation a
+    /// federation-originated request must never cause.
+    #[tokio::test]
+    async fn close_tab_remote_closes_exactly_one_workspace_sibling_survives() {
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("target"),
+            crate::workspace::Workspace::test_new("sibling"),
+        ];
+        let space = shared_worktree_space("shared-space");
+        app.state.workspaces[0].worktree_space = Some(space.clone());
+        app.state.workspaces[1].worktree_space = Some(space);
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        // `confirm_close` defaults true; leaving it on proves this path never
+        // reaches `confirm_implicit_worktree_group_close`.
+        assert!(app.state.confirm_close);
+        let target_workspace_id = app.state.workspaces[0].id.clone();
+        let sibling_id = app.state.workspaces[1].id.clone();
+        let target_tab_id = tab_id_for_workspace(&mut app, &target_workspace_id);
+
+        // Captured rather than hardcoded: this asserts the command left the
+        // host's UI mode exactly as it found it, whatever the fixture starts in.
+        let mode_before = app.state.mode;
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CloseTabRemote {
+                epoch,
+                connid: 1,
+                target_tab_id,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(
+            outcome.is_ok(),
+            "closing a known local tab must succeed: {outcome:?}"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "closing the last tab closes exactly one workspace, never the group"
+        );
+        assert_eq!(
+            app.state.workspaces[0].id, sibling_id,
+            "the sibling sharing the worktree group survives a single remote close"
+        );
+        // Surviving is not enough: the target is detached from the group
+        // before it closes, so a bug that detached the wrong workspace would
+        // still leave two ids present. The surviving sibling must also still
+        // BE in the worktree group it started in.
+        assert_eq!(
+            app.state.workspaces[0].worktree_space.as_ref(),
+            Some(&shared_worktree_space("shared-space")),
+            "the survivor must keep its worktree-group membership, not just exist"
+        );
+        assert_eq!(
+            app.state.mode, mode_before,
+            "a remote close must never pop this host's own confirmation UI, even though \
+             closing this tab would trigger `confirm_implicit_worktree_group_close` on the \
+             local `tab.close` JSON-API path"
+        );
+    }
+
+    /// Both new close commands are refused for a stale-epoch (non-mounted)
+    /// caller, mirroring `input_and_resize_are_dropped_unless_the_caller_is_
+    /// the_mounted_controller` — and refusal must not mutate the App at all.
+    #[tokio::test]
+    async fn close_workspace_and_tab_remote_are_refused_for_a_non_controller_connid() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("only")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let tab_id = tab_id_for_workspace(&mut app, &workspace_id);
+
+        // Captured rather than hardcoded: this asserts the command left the
+        // host's UI mode exactly as it found it, whatever the fixture starts in.
+        let mode_before = app.state.mode;
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CloseWorkspaceRemote {
+                epoch,
+                connid: 999,
+                target_workspace_id: workspace_id,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(
+            outcome.is_err(),
+            "a non-controller connid must be refused, not serviced"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "a refused close must not touch the workspace set"
+        );
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CloseTabRemote {
+                epoch,
+                connid: 999,
+                target_tab_id: tab_id,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(
+            outcome.is_err(),
+            "a non-controller connid must be refused, not serviced"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "a refused close must not touch the workspace set"
+        );
+        assert_eq!(
+            app.state.mode, mode_before,
+            "a refusal must never mutate this host's UI mode"
+        );
+    }
+
+    /// Creating a workspace on this host is a controller-only action: a
+    /// connection that is not the mounted controller must be refused, and the
+    /// refusal must not grow the host's workspace set.
+    #[tokio::test]
+    async fn create_workspace_is_refused_for_a_non_controller_connid() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("only")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+
+        // Captured rather than hardcoded: this asserts the command left the
+        // host's UI mode exactly as it found it, whatever the fixture starts in.
+        let mode_before = app.state.mode;
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        let before = app.state.workspaces.len();
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CreateWorkspace {
+                epoch,
+                connid: 999,
+                label: Some("from-an-impostor".to_string()),
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(
+            outcome.is_err(),
+            "a non-controller connid must be refused, not serviced"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            before,
+            "a refused create must not touch the workspace set"
+        );
+        assert_eq!(
+            app.state.mode, mode_before,
+            "a refusal must never mutate this host's UI mode"
+        );
+    }
+
+    /// A target that does not exist on this host reports `Failed`, never a
+    /// silent drop, and never mutates the host's `mode`.
+    #[tokio::test]
+    async fn close_workspace_and_tab_remote_against_unknown_targets_report_failed_without_mutation()
+    {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("only")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+
+        // Captured rather than hardcoded: this asserts the command left the
+        // host's UI mode exactly as it found it, whatever the fixture starts in.
+        let mode_before = app.state.mode;
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CloseWorkspaceRemote {
+                epoch,
+                connid: 1,
+                target_workspace_id: "no-such-workspace".to_string(),
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(
+            outcome.is_err(),
+            "an unknown workspace must fail, not misfile"
+        );
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CloseTabRemote {
+                epoch,
+                connid: 1,
+                target_tab_id: "no-such-tab".to_string(),
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(outcome.is_err(), "an unknown tab must fail, not misfile");
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "a failed close must not touch the workspace set"
+        );
+        assert_eq!(
+            app.state.mode, mode_before,
+            "a failed close must never mutate this host's UI mode"
+        );
+    }
+
+    /// A positional id (`"1"`, `"w_1"`, `"t_1_1"`) is CLI shorthand for a
+    /// human at a terminal, never something this host handed to a peer. It
+    /// must be refused over the wire rather than silently resolving to
+    /// whatever workspace currently occupies that slot: the peer would be
+    /// closing an object it was never told about, and which one it hits would
+    /// depend on the host's current ordering.
+    #[tokio::test]
+    async fn close_workspace_and_tab_remote_refuse_positional_index_shorthand() {
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("first"),
+            crate::workspace::Workspace::test_new("second"),
+        ];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let workspaces_before = app.state.workspaces.len();
+
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+
+        for shorthand in ["1", "w_1"] {
+            let (tx, mut rx) = oneshot::channel();
+            dispatch(
+                &mut app,
+                &mut lease,
+                FederationCommand::CloseWorkspaceRemote {
+                    epoch,
+                    connid: 1,
+                    target_workspace_id: shorthand.to_string(),
+                    reply: tx,
+                },
+            );
+            let outcome = rx.try_recv().expect("reply delivered");
+            assert!(
+                outcome.is_err(),
+                "positional workspace shorthand {shorthand:?} must be refused over the wire"
+            );
+        }
+
+        for shorthand in ["t_1_1", "1:1"] {
+            let (tx, mut rx) = oneshot::channel();
+            dispatch(
+                &mut app,
+                &mut lease,
+                FederationCommand::CloseTabRemote {
+                    epoch,
+                    connid: 1,
+                    target_tab_id: shorthand.to_string(),
+                    reply: tx,
+                },
+            );
+            let outcome = rx.try_recv().expect("reply delivered");
+            assert!(
+                outcome.is_err(),
+                "positional tab shorthand {shorthand:?} must be refused over the wire"
+            );
+        }
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            workspaces_before,
+            "a refused positional id must never close anything"
         );
     }
 }

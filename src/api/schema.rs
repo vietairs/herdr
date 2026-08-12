@@ -83,6 +83,12 @@ pub enum Method {
     WorkspaceReportMetadata(WorkspaceReportMetadataParams),
     #[serde(rename = "workspace.close")]
     WorkspaceClose(WorkspaceTarget),
+    /// Forwards a close to the serving host of a federated workspace,
+    /// distinct from `workspace.close` (local mirror retire/unmount only,
+    /// never forwarded) — see `app/api/workspaces.rs::
+    /// dispatch_remote_workspace_close`.
+    #[serde(rename = "workspace.close_remote")]
+    WorkspaceCloseRemote(WorkspaceTarget),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]
@@ -105,6 +111,11 @@ pub enum Method {
     TabMove(TabMoveParams),
     #[serde(rename = "tab.close")]
     TabClose(TabTarget),
+    /// Forwards a close to the serving host of a federated tab, distinct
+    /// from `tab.close` (local mirror retire only, never forwarded) — see
+    /// `app/api/tabs.rs::dispatch_remote_tab_close`.
+    #[serde(rename = "tab.close_remote")]
+    TabCloseRemote(TabTarget),
     #[serde(rename = "agent.list")]
     AgentList(EmptyParams),
     #[serde(rename = "agent.get")]

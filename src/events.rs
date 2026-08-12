@@ -313,6 +313,84 @@ pub enum AppEvent {
         origin: crate::remote::federation::id::HostKey,
         pane_id: String,
     },
+    /// A live mount's resync diff revealed a workspace the mirror had never
+    /// seen before — either created out-of-band on the serving host, or the
+    /// one this client just asked for with a `WorkspaceCreateRequest`. A
+    /// local `Workspace` cannot exist without a tab, and a `Tab` cannot exist
+    /// without a pane, so this carries no layout payload either: it records
+    /// the remote workspace's identity and label so the tab/pane events that
+    /// follow in the same diff materialize a correctly-labelled *new* local
+    /// workspace (same staged shape as `FederationResyncTabCreated` below).
+    #[cfg(unix)]
+    FederationResyncWorkspaceCreated {
+        origin: crate::remote::federation::id::HostKey,
+        /// Namespaced (public) workspace id (`RemoteMirror::workspaces()`'s
+        /// key) — becomes the local `Workspace::id` verbatim, which is what
+        /// the federation-origin classification reads.
+        workspace_id: String,
+        label: String,
+    },
+    /// A live mount's resync diff no longer reports a workspace the mirror
+    /// had previously mirrored. `workspace_id` is the namespaced (public) id
+    /// `RemoteMirror::workspaces()` used for it, which is also the local
+    /// `Workspace::id` the mount materialized.
+    #[cfg(unix)]
+    FederationResyncWorkspaceRemoved {
+        origin: crate::remote::federation::id::HostKey,
+        workspace_id: String,
+    },
+    /// The remote host accepted an earlier `WorkspaceCreateRequest` and named
+    /// the workspace it created. The workspace itself still materializes
+    /// through the ordinary resync path (`FederationResyncWorkspaceCreated`
+    /// plus the pane event that builds it) — this only correlates the
+    /// in-flight request with the workspace id it will land under, so the
+    /// requesting client can focus that workspace when it arrives. A workspace
+    /// the *remote* user created out of band never produces this event, so it
+    /// never takes the local user's focus.
+    #[cfg(unix)]
+    FederationWorkspaceCreateAccepted {
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+        /// Namespaced (public) workspace id — what the local `Workspace::id`
+        /// will be once the resync materializes it.
+        workspace_id: String,
+    },
+    /// The remote host rejected an earlier `WorkspaceCreateRequest`. Carries
+    /// no payload beyond the reason: nothing was created remotely, so there
+    /// is nothing local to reverse — same shape/reasoning as
+    /// `FederationClosePaneFailed`.
+    #[cfg(unix)]
+    FederationWorkspaceCreateFailed {
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    },
+    /// A live mount's resync diff revealed a tab the mirror had never seen
+    /// before. A local `Tab` cannot exist without at least one pane, so this
+    /// carries no layout payload: it only records the remote tab's identity
+    /// and label so the pane(s) that arrive for it in the same diff
+    /// (`FederationResyncPaneCreated`, emitted right after) materialize into
+    /// a correctly-labelled *new* local tab instead of being spliced into
+    /// whichever tab happened to be active.
+    #[cfg(unix)]
+    FederationResyncTabCreated {
+        origin: crate::remote::federation::id::HostKey,
+        /// Namespaced (public) workspace id — the already-materialized local
+        /// `Workspace` this tab belongs to.
+        workspace_id: String,
+        /// Namespaced (public) tab id (`RemoteMirror::tabs()`'s key).
+        tab_id: String,
+        label: String,
+    },
+    /// A live mount's resync diff no longer reports a tab the mirror had
+    /// previously mirrored. `tab_id` is the namespaced (public) id
+    /// `RemoteMirror::tabs()` used for it — the handler maps it back to the
+    /// local tab it materialized via `App::remote_resync_tab_index`.
+    #[cfg(unix)]
+    FederationResyncTabClosed {
+        origin: crate::remote::federation::id::HostKey,
+        tab_id: String,
+    },
     /// A live mount's drive task received a `ClosePaneResponse::Closed`
     /// answering an earlier `ClosePaneRequest` this mount sent (Gap A,
     /// plans/260724-1536-federation-pane-close-sync). Unlike
@@ -335,6 +413,40 @@ pub enum AppEvent {
         reason: String,
         origin: crate::remote::federation::id::HostKey,
     },
+    /// A live mount's drive task received a `WorkspaceCloseResponse::Closed`
+    /// answering an earlier `WorkspaceCloseRequest` this mount sent
+    /// (`workspace.close_remote`). Same shape/reasoning as
+    /// `FederationClosePaneReady`.
+    #[cfg(unix)]
+    FederationWorkspaceCloseReady {
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+    },
+    /// The remote host rejected an earlier `WorkspaceCloseRequest`. Same
+    /// shape/reasoning as `FederationClosePaneFailed`.
+    #[cfg(unix)]
+    FederationWorkspaceCloseFailed {
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    },
+    /// A live mount's drive task received a `TabCloseResponse::Closed`
+    /// answering an earlier `TabCloseRequest` this mount sent
+    /// (`tab.close_remote`). Same shape/reasoning as
+    /// `FederationClosePaneReady`.
+    #[cfg(unix)]
+    FederationTabCloseReady {
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+    },
+    /// The remote host rejected an earlier `TabCloseRequest`. Same
+    /// shape/reasoning as `FederationClosePaneFailed`.
+    #[cfg(unix)]
+    FederationTabCloseFailed {
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    },
 }
 
 /// Payload for [`AppEvent::FederationResyncPaneCreated`] — the fully-built
@@ -353,6 +465,13 @@ pub struct FederationResyncPaneCreated {
     /// key), used to find the already-materialized local `Workspace` this
     /// pane belongs to.
     pub workspace_id: String,
+    /// Namespaced (public) tab id (`RemoteMirror::tabs()`'s key) this pane
+    /// belongs to *on the remote*. Already on the wire as `PaneInfo.tab_id`;
+    /// carrying it here is what lets
+    /// `App::handle_federation_resync_pane_created` place the pane in its
+    /// real tab — or create that tab — instead of collapsing every
+    /// resync-discovered pane into the workspace's active tab as a split.
+    pub tab_id: String,
     /// Namespaced (public) pane id (`RemoteMirror::panes()`'s key) — the
     /// reverse-index key `App::remote_resync_pane_index` stores this pane's
     /// local `PaneId` under, so a later removal diff can find it again.

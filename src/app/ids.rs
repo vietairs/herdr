@@ -66,6 +66,43 @@ impl App {
             .or_else(|| id.parse::<usize>().ok()?.checked_sub(1))
     }
 
+    /// Resolves a workspace id that arrived over the federation link, by
+    /// EXACT id only.
+    ///
+    /// [`Self::parse_workspace_id`] deliberately falls back to a positional
+    /// index (`"3"`, `"w_3"`) as CLI shorthand for a human at a terminal. That
+    /// shorthand is unsafe for wire input: a real id never looks like a bare
+    /// number, so any stale, malformed, or hostile numeric id from a peer
+    /// would silently resolve to whatever workspace currently occupies that
+    /// slot and close it, instead of failing. A serving host must only ever
+    /// act on an id it actually issued.
+    #[cfg(unix)]
+    pub(super) fn parse_federation_workspace_id(&self, id: &str) -> Option<usize> {
+        self.state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == id)
+    }
+
+    /// Tab counterpart of [`Self::parse_federation_workspace_id`], accepting
+    /// only the canonical `<workspace_id>:t<encoded_number>` form: the
+    /// workspace half must match an id exactly, and the tab half must be a
+    /// real encoded tab number rather than a position.
+    #[cfg(unix)]
+    pub(super) fn parse_federation_tab_id(&self, id: &str) -> Option<(usize, usize)> {
+        let (ws_raw, tab_raw) = id.rsplit_once(':')?;
+        let ws_idx = self.parse_federation_workspace_id(ws_raw)?;
+        let tab_number = crate::workspace::decode_public_number(tab_raw.strip_prefix('t')?)?;
+        let tab_idx = self
+            .state
+            .workspaces
+            .get(ws_idx)?
+            .tabs
+            .iter()
+            .position(|tab| tab.number == tab_number)?;
+        Some((ws_idx, tab_idx))
+    }
+
     pub(super) fn parse_tab_id(&self, id: &str) -> Option<(usize, usize)> {
         if let Some(rest) = id.strip_prefix("t_") {
             let (ws_raw, tab_raw) = rest.rsplit_once('_')?;
@@ -140,6 +177,16 @@ impl App {
             .iter()
             .find_map(|(pane_id, number)| (*number == pane_number).then_some(*pane_id))?;
         Some((ws_idx, pane_id))
+    }
+
+    /// Resolves a tab id only if it is still the tab's *current* canonical
+    /// public id, rejecting the positional shorthands `parse_tab_id` accepts
+    /// for humans. Callers holding an id snapshotted earlier (a context
+    /// menu's close target, say) need this: a shorthand like `w1:2` would
+    /// resolve to whatever tab now sits in that slot.
+    pub(crate) fn parse_current_public_tab_id(&self, id: &str) -> Option<(usize, usize)> {
+        let (ws_idx, tab_idx) = self.parse_tab_id(id)?;
+        (self.public_tab_id(ws_idx, tab_idx).as_deref() == Some(id)).then_some((ws_idx, tab_idx))
     }
 
     pub(crate) fn parse_current_public_pane_id(

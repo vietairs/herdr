@@ -1343,54 +1343,112 @@ pub enum ContextMenuKind {
     },
 }
 
+/// Stable public ids of a context menu's federated (remote-mirrored) target,
+/// snapshotted when the menu opens.
+///
+/// The menu's `ws_idx`/`tab_idx` are positions, and a remote resync can
+/// reorder or shrink the workspace list while the menu is open — it is not
+/// gated on the menu being closed. Acting on a stale position would send
+/// `close_remote` for whatever item now occupies that slot, on the serving
+/// host. Ids are stable, so the "Close on host" actions resolve through these
+/// instead and simply fail to resolve when the target is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteCloseMenuTarget {
+    pub workspace_id: String,
+    /// `Some` for a tab menu, `None` for a workspace menu.
+    pub tab_id: Option<String>,
+}
+
 /// Right-click context menu state.
 pub struct ContextMenuState {
     pub kind: ContextMenuKind,
     pub x: u16,
     pub y: u16,
     pub list: MenuListState,
+    /// `Some` when the menu's workspace/tab target is a federated
+    /// (remote-mirrored) item, carrying the ids the "Close on host" action
+    /// resolves through; `None` otherwise, which also hides that item.
+    /// Snapshotted at menu-open time, mirroring how
+    /// `ContextMenuKind::Pane`'s `auto_resize_enabled` already snapshots
+    /// state instead of re-deriving it from `AppState` inside `items()`,
+    /// which only has `&self`.
+    pub remote_close_target: Option<RemoteCloseMenuTarget>,
 }
 
 impl ContextMenuState {
     pub fn items(&self) -> Vec<&'static str> {
         match self.kind {
-            ContextMenuKind::Workspace { .. } => ["Rename", "Close"].to_vec(),
+            ContextMenuKind::Workspace { .. } => {
+                let mut items = vec!["Rename", "Close"];
+                if self.remote_close_target.is_some() {
+                    items.push("Close on host");
+                }
+                items
+            }
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => ["Rename", "Close", "New worktree", "Open worktree..."].to_vec(),
+            } => {
+                let mut items = vec!["Rename", "Close", "New worktree", "Open worktree..."];
+                if self.remote_close_target.is_some() {
+                    items.push("Close on host");
+                }
+                items
+            }
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
-            } => ["Rename", "Close", "Delete worktree checkout..."].to_vec(),
+            } => {
+                let mut items = vec!["Rename", "Close", "Delete worktree checkout..."];
+                if self.remote_close_target.is_some() {
+                    items.push("Close on host");
+                }
+                items
+            }
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: true,
                 ..
-            } => [
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                "Expand",
-            ]
-            .to_vec(),
+            } => {
+                let mut items = vec![
+                    "Rename",
+                    "Close group",
+                    "New worktree",
+                    "Open worktree...",
+                    "Expand",
+                ];
+                if self.remote_close_target.is_some() {
+                    items.push("Close on host");
+                }
+                items
+            }
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
                 ..
-            } => [
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                "Collapse",
-            ]
-            .to_vec(),
-            ContextMenuKind::Tab { .. } => ["New tab", "Rename", "Close"].to_vec(),
+            } => {
+                let mut items = vec![
+                    "Rename",
+                    "Close group",
+                    "New worktree",
+                    "Open worktree...",
+                    "Collapse",
+                ];
+                if self.remote_close_target.is_some() {
+                    items.push("Close on host");
+                }
+                items
+            }
+            ContextMenuKind::Tab { .. } => {
+                let mut items = vec!["New tab", "Rename", "Close"];
+                if self.remote_close_target.is_some() {
+                    items.push("Close on host");
+                }
+                items
+            }
             ContextMenuKind::Pane {
                 has_manual_label,
                 source_pane_id,
@@ -1568,6 +1626,13 @@ pub struct AppState {
     pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
     pub pending_workspace_create_cwd: Option<std::path::PathBuf>,
+    /// `Workspace::id` of the workspace an open workspace-create name dialog
+    /// was started from, pinned while the dialog is up. The dialog asks only
+    /// for a name, so the create it confirms must still resolve its cwd — and
+    /// its federation mount, if any — from that workspace rather than from
+    /// whatever the modal mode makes "current" at confirm time. Cleared
+    /// together with `pending_workspace_create_cwd`.
+    pub pending_workspace_create_source_workspace: Option<String>,
     pub rename_pane_target: Option<PaneId>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
@@ -2081,6 +2146,7 @@ impl AppState {
             creating_new_tab: false,
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
+            pending_workspace_create_source_workspace: None,
             rename_pane_target: None,
             worktree_create: None,
             worktree_open: None,
@@ -3055,6 +3121,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         };
 
         assert_eq!(
@@ -3075,6 +3142,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         };
 
         assert_eq!(
@@ -3095,6 +3163,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         };
 
         assert_eq!(
@@ -3126,6 +3195,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         }
     }
 
@@ -3218,6 +3288,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         };
         assert_eq!(workspace_menu.items(), vec!["Rename", "Close"]);
 
@@ -3229,6 +3300,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         };
         assert_eq!(tab_menu.items(), vec!["New tab", "Rename", "Close"]);
 
@@ -3242,11 +3314,102 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            remote_close_target: None,
         };
         assert_eq!(
             git_menu.items(),
             vec!["Rename", "Close", "New worktree", "Open worktree..."]
         );
+    }
+
+    fn remote_target(tab_id: Option<&str>) -> RemoteCloseMenuTarget {
+        RemoteCloseMenuTarget {
+            workspace_id: "r:alice@10.0.0.1:w1".to_string(),
+            tab_id: tab_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn federated_workspace_and_git_workspace_context_menus_add_close_on_host() {
+        let workspace_menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: Some(remote_target(None)),
+        };
+        assert_eq!(
+            workspace_menu.items(),
+            vec!["Rename", "Close", "Close on host"]
+        );
+
+        let git_menu = ContextMenuState {
+            kind: ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: false,
+                has_worktree_children: false,
+                collapsed: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: Some(remote_target(None)),
+        };
+        assert_eq!(
+            git_menu.items(),
+            vec![
+                "Rename",
+                "Close",
+                "New worktree",
+                "Open worktree...",
+                "Close on host"
+            ]
+        );
+    }
+
+    #[test]
+    fn non_federated_workspace_context_menu_omits_close_on_host() {
+        let workspace_menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: None,
+        };
+        assert!(!workspace_menu.items().contains(&"Close on host"));
+    }
+
+    #[test]
+    fn federated_tab_context_menu_adds_close_on_host() {
+        let tab_menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: Some(remote_target(Some("r:alice@10.0.0.1:w1:t1"))),
+        };
+        assert_eq!(
+            tab_menu.items(),
+            vec!["New tab", "Rename", "Close", "Close on host"]
+        );
+    }
+
+    #[test]
+    fn non_federated_tab_context_menu_omits_close_on_host() {
+        let tab_menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: None,
+        };
+        assert!(!tab_menu.items().contains(&"Close on host"));
     }
 
     #[test]

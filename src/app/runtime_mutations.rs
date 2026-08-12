@@ -77,6 +77,17 @@ impl App {
         self.dispatch_runtime_mutation(id, Method::WorkspaceClose(WorkspaceTarget { workspace_id }))
     }
 
+    pub(crate) fn runtime_workspace_close_remote(
+        &mut self,
+        id: &'static str,
+        workspace_id: String,
+    ) -> String {
+        self.dispatch_runtime_mutation(
+            id,
+            Method::WorkspaceCloseRemote(WorkspaceTarget { workspace_id }),
+        )
+    }
+
     pub(crate) fn runtime_tab_create(
         &mut self,
         id: &'static str,
@@ -103,6 +114,10 @@ impl App {
 
     pub(crate) fn runtime_tab_close(&mut self, id: &'static str, tab_id: String) -> String {
         self.dispatch_runtime_mutation(id, Method::TabClose(TabTarget { tab_id }))
+    }
+
+    pub(crate) fn runtime_tab_close_remote(&mut self, id: &'static str, tab_id: String) -> String {
+        self.dispatch_runtime_mutation(id, Method::TabCloseRemote(TabTarget { tab_id }))
     }
 
     pub(crate) fn runtime_server_reload_config(&mut self, id: &'static str) -> String {

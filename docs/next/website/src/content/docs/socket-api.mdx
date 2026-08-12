@@ -100,9 +100,9 @@ Raw socket method names use dot notation:
 | Notification | `notification.show` |
 | Client | `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
-| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
+| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close`, `workspace.close_remote` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
-| Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
+| Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close`, `tab.close_remote` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.prompt`, `agent.wait`, `agent.send_keys`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -113,6 +113,10 @@ Raw socket method names use dot notation:
 Some CLI commands are conveniences around these methods. For example, `herdr agent wait` resolves an agent target and then subscribes to pane agent state events.
 
 `workspace.move_block` atomically moves the ordered `workspace_ids` before `before_workspace_id`; omit the anchor to move the block to the end. The ids must be unique and the anchor cannot be part of the block. The response contains the authoritative ordered workspace list.
+
+`workspace.create` is federation-aware when `cwd` is omitted. Herdr resolves the workspace the create starts from — the sidebar-selected workspace while the TUI is in navigate mode, otherwise the active workspace (a create confirmed from the name dialog stays pinned to the workspace focused when the dialog opened) — and if that workspace belongs to a live remote mount, the create is sent to the serving host instead of performed locally. This applies to every caller, including the CLI and scripts. The response is then `workspace_create_requested` with the `origin` mount key rather than `workspace_created`: it carries no workspace, tab, or pane ids, since the workspace does not exist yet; it materializes locally through that mount's normal resync, exactly like a workspace the remote user created. Passing an explicit `cwd` is always treated as a deliberate local-directory choice and is never redirected. When the source workspace's mount has no live link, the request fails with `remote_workspace_create_unsupported` instead of silently creating a local workspace.
+
+`workspace.close` and `tab.close` only ever remove your local mirror of a federated (remote-mounted) workspace or tab; they never reach the federation link, so the copy on the serving host keeps running. `workspace.close_remote` and `tab.close_remote` are the distinct opt-in verbs that ask the serving host to close its own workspace or tab. Because that answer arrives asynchronously over the federation link, they cannot report the finished close: they succeed with `workspace_close_requested` / `tab_close_requested` (each carrying the `origin` mount the request went out over) as soon as the request has been sent, and the local mirror disappears later, once the host confirms it closed. They return `remote_close_unsupported` when the target is not federated, its mount has no live link, or the peer never agreed to the close capability.
 
 `session.snapshot` returns a one-time bootstrap snapshot for clients that keep
 their own local runtime cache. The response includes version/protocol metadata,

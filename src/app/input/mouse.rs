@@ -6,8 +6,8 @@ use tracing::warn;
 use crate::{
     app::state::{
         AgentPanelSort, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        MenuListState, Mode, RemoteCloseMenuTarget, RightClickPassthroughGesture, TabPressState,
+        ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -1097,11 +1097,13 @@ impl AppState {
                             })
                         })
                         .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
+                    let remote_close_target = self.remote_close_menu_target(idx, None);
                     self.context_menu = Some(ContextMenuState {
                         kind,
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
+                        remote_close_target,
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -1114,11 +1116,13 @@ impl AppState {
                 if let (Some(ws_idx), Some(tab_idx)) =
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
+                    let remote_close_target = self.remote_close_menu_target(ws_idx, Some(tab_idx));
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Tab { ws_idx, tab_idx },
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
+                        remote_close_target,
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -1156,6 +1160,7 @@ impl AppState {
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
+                        remote_close_target: None,
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -1888,6 +1893,36 @@ impl AppState {
             row,
             grab_row_offset,
         ))
+    }
+
+    /// Snapshots the stable ids a context menu's "Close on host" action needs,
+    /// or `None` when `ws_idx` is not a federated (remote-mirrored) workspace
+    /// — which is also what hides that menu item. `tab_idx` is `Some` for a
+    /// tab menu; a tab whose public number cannot be resolved yields `None`,
+    /// since there is no stable id to close by.
+    pub(crate) fn remote_close_menu_target(
+        &self,
+        ws_idx: usize,
+        tab_idx: Option<usize>,
+    ) -> Option<RemoteCloseMenuTarget> {
+        let ws = self.workspaces.get(ws_idx)?;
+        if !matches!(
+            crate::remote::federation::id::classify(&ws.id),
+            crate::remote::federation::id::IdClass::Remote(_)
+        ) {
+            return None;
+        }
+        let tab_id = match tab_idx {
+            Some(tab_idx) => Some(crate::workspace::public_tab_id_for_number(
+                &ws.id,
+                ws.public_tab_number(tab_idx)?,
+            )),
+            None => None,
+        };
+        Some(RemoteCloseMenuTarget {
+            workspace_id: ws.id.clone(),
+            tab_id,
+        })
     }
 }
 
@@ -2660,6 +2695,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(0),
+            remote_close_target: None,
         });
         app.state.mode = Mode::ContextMenu;
 
@@ -2954,6 +2990,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(1),
+            remote_close_target: None,
         });
         app.state.mode = Mode::ContextMenu;
         handle_context_menu_key(
@@ -2994,6 +3031,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(1),
+            remote_close_target: None,
         });
         app.state.mode = Mode::ContextMenu;
 
@@ -3048,6 +3086,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(1),
+            remote_close_target: None,
         });
         app.state.mode = Mode::ContextMenu;
 

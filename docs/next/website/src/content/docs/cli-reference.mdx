@@ -122,6 +122,7 @@ herdr workspace focus <workspace_id>
 herdr workspace rename <workspace_id> <label>
 herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
 herdr workspace close <workspace_id>
+herdr workspace close-remote <workspace_id>
 ```
 
 Create a workspace without stealing focus:
@@ -131,6 +132,10 @@ herdr workspace create --cwd ~/project --label api --no-focus
 ```
 
 A workspace is the top-level project or work context. Creating one also creates its first tab and root pane. The JSON response exposes their IDs as `.result.workspace.workspace_id`, `.result.tab.tab_id`, and `.result.root_pane.pane_id`.
+
+`workspace create` without `--cwd` follows the session's current workspace, and that includes federation: when the workspace the create starts from is a mounted remote workspace, the new workspace is created **on that serving host**, not locally — the same way splitting a pane inside a federated workspace splits on the remote. The create starts from the sidebar-selected workspace in navigate mode, otherwise the active workspace. Because the serving host answers asynchronously, the response is `workspace_create_requested` with the `origin` mount instead of `workspace_created`: it carries no workspace, tab, or pane IDs, and the new workspace appears locally a moment later through the mount's normal resync. Scripts that need a local workspace, or need IDs back in the same response, must pass `--cwd`; an explicit path is always taken as a deliberate local-directory choice and never redirected. If the mount is not connected, the command fails with `remote_workspace_create_unsupported` rather than quietly creating a local workspace.
+
+For a federated (remote-mounted) workspace, `workspace close` only removes your local mirror; the copy on the serving host keeps running. `workspace close-remote` asks the serving host to close its own workspace instead. It cannot report the finished close — the request goes out over the federation link and the host answers later — so it succeeds immediately with a `workspace_close_requested` result naming the mount the request went out over, exits 0, and your local mirror disappears once the host confirms the close. It returns `remote_close_unsupported` for a non-federated workspace, when the mount has no live link, or when the serving host never agreed to the close capability.
 
 ## Worktrees
 
@@ -154,9 +159,12 @@ herdr tab get <tab_id>
 herdr tab focus <tab_id>
 herdr tab rename <tab_id> <label>
 herdr tab close <tab_id>
+herdr tab close-remote <tab_id>
 ```
 
 A tab is another terminal layout inside a workspace. Without `--workspace`, `tab create` uses the active workspace and fails if none exists. Its JSON response exposes `.result.tab.tab_id` and `.result.root_pane.pane_id`. Closing a workspace's last tab also closes the workspace, matching the TUI close-tab action; when `confirm_close` is enabled and that would also close a whole worktree group, `tab close` returns a `confirmation_required` error instead.
+
+Same distinction as `workspace close` / `workspace close-remote`: for a federated tab, `tab close` only removes your local mirror tab, leaving the host's copy running, while `tab close-remote` asks the serving host to close its own tab. It succeeds immediately with a `tab_close_requested` result naming the mount the request went out over (exit 0) and the local mirror tab disappears once the host confirms; it returns `remote_close_unsupported` for a non-federated tab, a dead mount, or a peer that never agreed to the close capability.
 
 Workspace and tab creation, and pane splitting, leave focus unchanged by default. `--focus` selects the new layout; `--no-focus` states the default explicitly. Without `--cwd`, new terminals follow the configured `terminal.new_cwd` policy, which follows the source pane or workspace by default. Each `--env KEY=VALUE` adds or replaces that variable in the new root shell.
 

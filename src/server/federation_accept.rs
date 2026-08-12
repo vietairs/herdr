@@ -49,8 +49,9 @@ use crate::remote::federation::protocol::{
     AgentStatusMessage, Capability, Channel, ClipboardStageFailure, ClipboardStageRequest,
     ClipboardStageResponse, ClosePaneRequest, ClosePaneResponse, EventChannelMessage, EventCursor,
     EventFrame, FaultMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot,
-    ScrollbackReplay, SplitPaneRequest, SplitPaneResponse, TerminalChannelMessage,
-    FEDERATION_PROTOCOL_VERSION,
+    ScrollbackReplay, SplitPaneRequest, SplitPaneResponse, TabCloseRequest, TabCloseResponse,
+    TerminalChannelMessage, WorkspaceCloseRequest, WorkspaceCloseResponse, WorkspaceCreateRequest,
+    WorkspaceCreateResponse, FEDERATION_PROTOCOL_VERSION,
 };
 use crate::remote::federation::tee;
 use crate::server::client_transport::ServerEvent;
@@ -98,6 +99,9 @@ fn federation_capabilities() -> BTreeSet<Capability> {
         // so is the staging module behind this capability, so the two can
         // never disagree about which targets can honour a stage request.
         Capability::new(Capability::FILE_STAGING),
+        // Gates `WorkspaceCloseRequest`/`TabCloseRequest`; see the constant's
+        // doc comment for why this needs no protocol-version bump.
+        Capability::new(Capability::WORKSPACE_TAB_CLOSE),
     ]
     .into_iter()
     .collect()
@@ -543,6 +547,39 @@ fn reader_loop<S: Read>(
             Ok(Some(FederationMessage::ClosePaneRequest(request))) => {
                 handle_close_pane_request(request, out_tx, shutdown, first_cause, server_event_tx);
             }
+            Ok(Some(FederationMessage::WorkspaceCloseRequest(request))) => {
+                handle_workspace_close_request(
+                    request,
+                    epoch,
+                    connid,
+                    out_tx,
+                    shutdown,
+                    first_cause,
+                    server_event_tx,
+                );
+            }
+            Ok(Some(FederationMessage::TabCloseRequest(request))) => {
+                handle_tab_close_request(
+                    request,
+                    epoch,
+                    connid,
+                    out_tx,
+                    shutdown,
+                    first_cause,
+                    server_event_tx,
+                );
+            }
+            Ok(Some(FederationMessage::WorkspaceCreateRequest(request))) => {
+                handle_workspace_create_request(
+                    request,
+                    epoch,
+                    connid,
+                    out_tx,
+                    shutdown,
+                    first_cause,
+                    server_event_tx,
+                );
+            }
             Ok(Some(FederationMessage::ClipboardStageRequest(request))) => {
                 handle_clipboard_stage_request(request, staging, out_tx, shutdown, first_cause);
             }
@@ -661,6 +698,181 @@ fn handle_close_pane_request(
     let _ = enqueue_outbound(
         out_tx,
         FederationMessage::ClosePaneResponse(response),
+        first_cause,
+        shutdown,
+    );
+}
+
+/// Services one inbound `WorkspaceCloseRequest` (federation close forwarding
+/// for the multi-workspace case): a blocking round-trip through
+/// `FederationCommand::CloseWorkspaceRemote`, mirroring
+/// `handle_close_pane_request` exactly — replies with `WorkspaceCloseResponse::
+/// Closed`/`Failed` on the shared outbound queue. Unlike `ClosePane`, this
+/// carries `(epoch, connid)` through to the actor: the actor gates it on
+/// `FederationLease::is_mounted_controller`, refusing a stale/superseded
+/// connection's close (a gap the pre-existing `SplitPane`/`ClosePane` arms
+/// have and this one deliberately does not repeat). A
+/// dropped/gone actor (server shutting down) replies `Failed` rather than
+/// silently dropping the peer's request.
+fn handle_workspace_close_request(
+    request: WorkspaceCloseRequest,
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) {
+    let WorkspaceCloseRequest {
+        request_id,
+        target_workspace_id,
+    } = request;
+
+    let (reply, rx) = oneshot::channel();
+    let sent = server_event_tx.blocking_send(ServerEvent::Federation(
+        FederationCommand::CloseWorkspaceRemote {
+            epoch,
+            connid,
+            target_workspace_id,
+            reply,
+        },
+    ));
+    let outcome = if sent.is_err() {
+        Err("server event loop is gone".to_string())
+    } else {
+        rx.blocking_recv()
+            .unwrap_or_else(|_| Err("federation close-workspace reply dropped".to_string()))
+    };
+
+    let response = match outcome {
+        Ok(()) => WorkspaceCloseResponse::Closed { request_id },
+        Err(reason) => WorkspaceCloseResponse::Failed { request_id, reason },
+    };
+    let _ = enqueue_outbound(
+        out_tx,
+        FederationMessage::WorkspaceCloseResponse(response),
+        first_cause,
+        shutdown,
+    );
+}
+
+/// Services one inbound `TabCloseRequest` (federation close forwarding for
+/// the multi-tab case): a blocking round-trip through
+/// `FederationCommand::CloseTabRemote`, mirroring
+/// `handle_workspace_close_request` exactly — replies with
+/// `TabCloseResponse::Closed`/`Failed` on the shared outbound queue. Carries
+/// `(epoch, connid)` for the same lease-gate reason. A dropped/gone actor
+/// (server shutting down) replies `Failed` rather than silently dropping the
+/// peer's request.
+fn handle_tab_close_request(
+    request: TabCloseRequest,
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) {
+    let TabCloseRequest {
+        request_id,
+        target_tab_id,
+    } = request;
+
+    let (reply, rx) = oneshot::channel();
+    let sent =
+        server_event_tx.blocking_send(ServerEvent::Federation(FederationCommand::CloseTabRemote {
+            epoch,
+            connid,
+            target_tab_id,
+            reply,
+        }));
+    let outcome = if sent.is_err() {
+        Err("server event loop is gone".to_string())
+    } else {
+        rx.blocking_recv()
+            .unwrap_or_else(|_| Err("federation close-tab reply dropped".to_string()))
+    };
+
+    let response = match outcome {
+        Ok(()) => TabCloseResponse::Closed { request_id },
+        Err(reason) => TabCloseResponse::Failed { request_id, reason },
+    };
+    let _ = enqueue_outbound(
+        out_tx,
+        FederationMessage::TabCloseResponse(response),
+        first_cause,
+        shutdown,
+    );
+}
+
+/// Services one inbound `WorkspaceCreateRequest` (multi-workspace
+/// federation): a blocking round-trip through
+/// `FederationCommand::CreateWorkspace`, mirroring `handle_split_pane_request`
+/// exactly — replies with `WorkspaceCreateResponse::Created`/`Failed` on the
+/// shared outbound queue. A dropped/gone actor (server shutting down) replies
+/// `Failed` rather than silently dropping the peer's request.
+///
+/// Carries `(epoch, connid)` through to the actor, which gates the create on
+/// `FederationLease::is_mounted_controller` exactly as the close handlers do:
+/// only the peer holding the mount may grow this host's workspace set.
+///
+/// Uncapped and unrated, matching the existing `SplitPaneRequest`/
+/// `ClosePaneRequest` handlers: a peer that reached this reader loop already
+/// cleared the handshake, and no other request kind here is metered either.
+fn handle_workspace_create_request(
+    request: WorkspaceCreateRequest,
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) {
+    let WorkspaceCreateRequest { request_id, label } = request;
+
+    // Trust boundary: `label` is peer-controlled free text and this is the
+    // first client->host chrome string federation accepts. It ends up in this
+    // host's own `Workspace::set_custom_name`, its sidebar rows, and its
+    // session save, so a raw ESC/OSC payload would let a mounting peer drive
+    // the *serving* user's terminal (OSC 52 clipboard writes, screen clears,
+    // concealed text). Neutralized here, at the earliest point the peer string
+    // enters this process, the same way an inbound peer filename is sanitized
+    // in `file_staging.rs` — never downstream, where the local user's own
+    // `workspace.create` shares the path and must keep taking labels verbatim.
+    // Clamped as well so an oversized label cannot exceed the control
+    // channel's frame ceiling on the way back through any relay.
+    let label = crate::remote::federation::sanitize::sanitize_remote_string_opt(label)
+        .map(crate::remote::federation::protocol::clamp_workspace_label);
+
+    let (reply, rx) = oneshot::channel();
+    let sent = server_event_tx.blocking_send(ServerEvent::Federation(
+        FederationCommand::CreateWorkspace {
+            epoch,
+            connid,
+            label,
+            reply,
+        },
+    ));
+    let outcome = if sent.is_err() {
+        Err("server event loop is gone".to_string())
+    } else {
+        rx.blocking_recv()
+            .unwrap_or_else(|_| Err("federation workspace-create reply dropped".to_string()))
+    };
+
+    let response = match outcome {
+        Ok((workspace_id, tab_id, pane_id, terminal_id)) => WorkspaceCreateResponse::Created {
+            request_id,
+            workspace_id,
+            tab_id,
+            pane_id,
+            terminal_id,
+        },
+        Err(reason) => WorkspaceCreateResponse::Failed { request_id, reason },
+    };
+    let _ = enqueue_outbound(
+        out_tx,
+        FederationMessage::WorkspaceCreateResponse(response),
         first_cause,
         shutdown,
     );
@@ -1829,6 +2041,237 @@ mod tests {
                 assert_eq!(new_terminal_id, "p1-split-term");
             }
             other => panic!("expected SplitPaneResponse::Created, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reader_loop_routes_a_workspace_create_request_and_replies_created() {
+        // Mirrors `reader_loop_routes_a_split_pane_request_and_replies_
+        // created`: a mock actor loop answers
+        // `FederationCommand::CreateWorkspace` directly, so this asserts only
+        // the reader's frame -> command -> response routing.
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::CreateWorkspace {
+                    label,
+                    reply,
+                    ..
+                }) = ev
+                {
+                    let suffix = label.unwrap_or_else(|| "unnamed".to_string());
+                    let _ = reply.send(Ok((
+                        format!("w-{suffix}"),
+                        format!("t-{suffix}"),
+                        format!("p-{suffix}"),
+                        format!("term-{suffix}"),
+                    )));
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::WorkspaceCreateRequest(WorkspaceCreateRequest {
+                request_id: 21,
+                label: Some("scratch".to_string()),
+            }),
+        )
+        .expect("client writes workspace-create request");
+        drop(client); // EOF ends the reader after servicing the one frame
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            None,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let response = out_rx.try_recv().expect("a response was enqueued");
+        match response {
+            FederationMessage::WorkspaceCreateResponse(WorkspaceCreateResponse::Created {
+                request_id,
+                workspace_id,
+                tab_id,
+                pane_id,
+                terminal_id,
+            }) => {
+                assert_eq!(request_id, 21);
+                assert_eq!(workspace_id, "w-scratch");
+                assert_eq!(tab_id, "t-scratch");
+                assert_eq!(pane_id, "p-scratch");
+                assert_eq!(terminal_id, "term-scratch");
+            }
+            other => panic!("expected WorkspaceCreateResponse::Created, got {other:?}"),
+        }
+    }
+
+    /// Trust boundary: a peer's workspace label is free text that ends up in
+    /// this host's own workspace name, sidebar and session save. It must be
+    /// stripped of every terminal control sequence — an OSC 52 clipboard
+    /// write, a screen clear, a cursor jump — and bounded, *before* it
+    /// reaches the `App` at all. Asserted on the command the actor receives,
+    /// because that is the last point still inside this process's control.
+    #[test]
+    fn reader_loop_neutralizes_a_peer_supplied_workspace_label_before_the_app_sees_it() {
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let (observed_tx, observed_rx) = std_mpsc::channel::<Option<String>>();
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::CreateWorkspace {
+                    label,
+                    reply,
+                    ..
+                }) = ev
+                {
+                    let _ = observed_tx.send(label);
+                    let _ = reply.send(Ok((
+                        "w1".to_string(),
+                        "t1".to_string(),
+                        "p1".to_string(),
+                        "term1".to_string(),
+                    )));
+                }
+            }
+        });
+
+        let hostile = format!(
+            "ok\x1b]52;c;ZXZpbA==\x07\x1b[2J\x1b[8mhidden\x1b[0m{}",
+            // Over the label bound but under the control channel's frame cap:
+            // a frame past that cap never reaches this handler at all, it
+            // faults the whole link at `read_frame_blocking`, which is exactly
+            // why the *sending* side clamps too.
+            "A".repeat(512)
+        );
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::WorkspaceCreateRequest(WorkspaceCreateRequest {
+                request_id: 22,
+                label: Some(hostile),
+            }),
+        )
+        .expect("client writes workspace-create request");
+        drop(client);
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, _out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            None,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let label = observed_rx
+            .try_recv()
+            .expect("the create command reached the actor")
+            .expect("the label survived as text");
+        assert!(
+            !label.contains('\x1b') && !label.contains('\x07'),
+            "no escape or BEL byte may survive into host state: {label:?}"
+        );
+        assert!(
+            !label.chars().any(|ch| (ch as u32) < 0x20),
+            "no C0 control byte may survive into host state: {label:?}"
+        );
+        assert!(
+            label.starts_with("ok]52;c;ZXZpbA==[2J[8mhidden[0m"),
+            "the visible text must be preserved verbatim: {label:?}"
+        );
+        assert_eq!(
+            label.chars().count(),
+            crate::remote::federation::protocol::MAX_WORKSPACE_LABEL_CHARS,
+            "an oversized label must be clamped, not forwarded whole"
+        );
+    }
+
+    #[test]
+    fn reader_loop_replies_failed_when_workspace_create_cannot_be_serviced() {
+        // The failure path must answer the peer, not drop its request: a
+        // gone/dropped actor is exactly what a shutting-down server looks
+        // like. Here the actor drops the reply channel without sending.
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::CreateWorkspace {
+                    reply, ..
+                }) = ev
+                {
+                    drop(reply);
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::WorkspaceCreateRequest(WorkspaceCreateRequest {
+                request_id: 22,
+                label: None,
+            }),
+        )
+        .expect("client writes workspace-create request");
+        drop(client);
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            None,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let response = out_rx.try_recv().expect("a response was enqueued");
+        match response {
+            FederationMessage::WorkspaceCreateResponse(WorkspaceCreateResponse::Failed {
+                request_id,
+                reason,
+            }) => {
+                assert_eq!(request_id, 22);
+                assert!(
+                    reason.contains("reply dropped"),
+                    "unexpected failure reason: {reason}"
+                );
+            }
+            other => panic!("expected WorkspaceCreateResponse::Failed, got {other:?}"),
         }
     }
 

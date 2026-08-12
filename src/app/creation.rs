@@ -94,6 +94,19 @@ impl App {
     }
 
     pub(super) fn workspace_creation_source(&self) -> Option<usize> {
+        // A create confirmed from the name dialog belongs to the workspace
+        // that was in focus when the dialog opened. Recomputing it at confirm
+        // time would read `Mode::RenameWorkspace` — the modal's own mode — and
+        // fall through to `active`, which is not the sidebar-selected
+        // workspace the user started the create from. Pinned by id, not index,
+        // because a resync can add or remove workspaces while the dialog is
+        // open.
+        if let Some(pinned) = &self.state.pending_workspace_create_source_workspace {
+            if let Some(idx) = self.state.workspaces.iter().position(|ws| &ws.id == pinned) {
+                return Some(idx);
+            }
+        }
+
         if self.state.mode == Mode::Navigate
             && self.state.workspaces.get(self.state.selected).is_some()
         {
@@ -110,12 +123,19 @@ impl App {
 
     pub(super) fn begin_tui_workspace_create(&mut self, request_id: &'static str) {
         if self.state.prompt_new_workspace_name {
-            let follow_cwd = self.workspace_creation_source().and_then(|ws_idx| {
+            let source_ws_idx = self.workspace_creation_source();
+            let follow_cwd = source_ws_idx.and_then(|ws_idx| {
                 self.focused_pane_cwd_in_workspace(ws_idx)
                     .or_else(|| self.seed_cwd_from_workspace(ws_idx))
             });
             let cwd = self.resolve_new_terminal_cwd(follow_cwd);
-            super::input::open_new_workspace_dialog(&mut self.state, cwd);
+            // Pin the source so confirming the dialog creates from the same
+            // workspace the user started on — including deciding whether the
+            // create goes out over that workspace's mount.
+            let source_workspace_id = source_ws_idx
+                .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
+                .map(|ws| ws.id.clone());
+            super::input::open_new_workspace_dialog(&mut self.state, cwd, source_workspace_id);
             return;
         }
 
@@ -694,6 +714,24 @@ impl App {
                 // creation event, so only a *subsequent* tab (index != 0)
                 // needs its own `TabCreated`/`PaneCreated` events here.
                 let created_this_tab = tab_idx != 0;
+                // Tab-identity index: without an entry here every pane a
+                // later resync reveals for this same remote tab is spliced
+                // into whichever local tab happens to be active, which is
+                // what collapsed an N-tab remote workspace into one tab with
+                // N splits. Mirrors the `remote_resync_pane_index` insert
+                // above — mount-time entities need indexing too, not just
+                // resync-created ones.
+                if let Some(local_ws) = self.state.workspaces.get(this_ws_idx) {
+                    let tab_number = local_ws.public_tab_number(tab_idx);
+                    self.remote_resync_tab_index.insert(
+                        tab_info.tab_id.clone(),
+                        RemoteTabRef {
+                            workspace_id: local_ws.id.clone(),
+                            tab_number,
+                            label: Some(tab_info.label.clone()),
+                        },
+                    );
+                }
 
                 let mut prev_pane_id = root_pane_id;
                 for pane_info in rest_panes {
@@ -926,6 +964,36 @@ impl App {
             .retain(|_, local_pane_id| !closing_pane_ids.contains(local_pane_id));
     }
 
+    /// Tab-index sibling of `purge_remote_resync_pane_index_for_workspaces`:
+    /// drops `remote_resync_tab_index` entries pointing into one of the
+    /// given (closing) workspaces, so a remount to the same host cannot
+    /// resolve a resync tab id onto a workspace/tab that no longer exists.
+    /// Unlike the pane index these entries carry their workspace id
+    /// directly, so no pane walk is needed.
+    // Only reached from the `#[cfg(unix)]` federation response handlers below.
+    #[cfg(unix)]
+    pub(crate) fn purge_remote_resync_tab_index_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        self.remote_resync_tab_index
+            .retain(|_, tab_ref| !workspace_ids.contains(&tab_ref.workspace_id));
+    }
+
+    /// Workspace-level sibling of the two purge helpers above: drops
+    /// `remote_resync_workspace_index` entries for one of the given
+    /// (closing) workspaces. Keyed by the namespaced remote workspace id,
+    /// which is exactly the local `Workspace::id` those sets carry.
+    // Only reached from the `#[cfg(unix)]` federation response handlers below.
+    #[cfg(unix)]
+    pub(crate) fn purge_remote_resync_workspace_index_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        self.remote_resync_workspace_index
+            .retain(|workspace_id, _| !workspace_ids.contains(workspace_id));
+    }
+
     /// `AppEvent::FederationSplitPaneReady` handler: the drive task already
     /// built the new pane's real `TerminalRuntime` (it owns the mount's
     /// `TerminalChannelRouter`/out-tx, which this handler does not); this
@@ -1142,7 +1210,15 @@ impl App {
             return;
         };
 
-        let Some((ws_idx, _)) = self.find_pane(pending.pane_id) else {
+        let RemoteCloseTarget::Pane(pane_id) = pending.target else {
+            tracing::warn!(
+                request_id,
+                "a ClosePaneResponse answered a pending entry that was not a pane close"
+            );
+            return;
+        };
+
+        let Some((ws_idx, _)) = self.find_pane(pane_id) else {
             // Already gone — e.g. a resync
             // (`handle_federation_resync_pane_removed`) tore it down first
             // while this response was in flight. Idempotent success, not an
@@ -1151,22 +1227,22 @@ impl App {
         };
 
         let workspace_id = self.public_workspace_id(ws_idx);
-        let public_pane_id = self.public_pane_id(ws_idx, pending.pane_id);
-        let layout_update_target =
-            self.layout_update_target_after_pane_removal(ws_idx, pending.pane_id);
-        let terminal_id = self.state.terminal_id_for_pane(ws_idx, pending.pane_id);
+        let public_pane_id = self.public_pane_id(ws_idx, pane_id);
+        let layout_update_target = self.layout_update_target_after_pane_removal(ws_idx, pane_id);
+        let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
 
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return;
             };
-            ws.close_pane(pending.pane_id)
+            ws.close_pane(pane_id)
         };
-        self.state.remove_plugin_pane_records([pending.pane_id]);
+        self.state.remove_plugin_pane_records([pane_id]);
 
         if should_close_workspace {
-            self.state.selected = ws_idx;
-            self.state.close_selected_workspace();
+            // One workspace, not the mount's whole federation group — see
+            // `close_single_workspace_at`.
+            self.close_single_workspace_at(ws_idx);
             self.shutdown_detached_terminal_runtimes();
             if let Some(public_pane_id) = public_pane_id {
                 self.emit_event(EventEnvelope {
@@ -1230,11 +1306,45 @@ impl App {
         }
         self.take_pending_remote_close(request_id);
         tracing::warn!(request_id, %reason, "remote close failed");
+        self.raise_remote_close_failed_toast("remote close failed", reason);
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    /// Raises a "remote close failed" toast/notification, following the
+    /// user's configured `ToastDelivery`. Extracted from
+    /// `handle_federation_close_pane_failed` so its workspace/tab
+    /// counterparts (`handle_federation_workspace_close_failed`,
+    /// `handle_federation_tab_close_failed`) share the exact same delivery
+    /// dispatch instead of re-deriving it.
+    ///
+    /// Not gated to Unix, for the same reason as
+    /// [`Self::raise_remote_close_toast`]: the TUI close path raises this
+    /// rejection toast on every platform, so gating it breaks the Windows
+    /// build even though federation dispatch itself is Unix-only.
+    pub(crate) fn raise_remote_close_failed_toast(&mut self, title: &str, reason: String) {
+        self.raise_remote_close_toast(super::ToastKind::NeedsAttention, title, reason);
+    }
+
+    /// Delivery dispatch shared by every remote-close toast. The only thing
+    /// that varies between them is the [`ToastKind`] and the title: the
+    /// request-accepted notice is informational, the rejection needs
+    /// attention, and both must honour the same configured delivery channel.
+    ///
+    /// Not gated to Unix even though federation dispatch is: the
+    /// request-accepted toast is raised from the platform-neutral TUI close
+    /// path, and nothing in this delivery dispatch is Unix-specific.
+    pub(crate) fn raise_remote_close_toast(
+        &mut self,
+        kind: super::ToastKind,
+        title: &str,
+        reason: String,
+    ) {
         match self.state.toast_config.delivery {
             crate::config::ToastDelivery::Herdr => {
                 self.state.toast = Some(crate::app::state::ToastNotification {
-                    kind: super::ToastKind::NeedsAttention,
-                    title: "remote close failed".to_string(),
+                    kind,
+                    title: title.to_string(),
                     context: reason,
                     position: None,
                     target: None,
@@ -1252,24 +1362,335 @@ impl App {
                     }
                     _ => unreachable!("toast delivery was matched above"),
                 };
-                let _ = notify("remote close failed", Some(&reason));
+                let _ = notify(title, Some(&reason));
             }
             _ => {}
         }
+    }
+
+    /// `AppEvent::FederationWorkspaceCloseReady` handler
+    /// (`workspace.close_remote`): the serving host confirmed it closed the
+    /// workspace this mount asked it to close (`WorkspaceCloseRequest` ->
+    /// `WorkspaceCloseResponse::Closed`); tear the local mirror workspace
+    /// down. Idempotent, same reasoning as
+    /// `handle_federation_close_pane_ready`: if the workspace was already
+    /// retired locally by the time this arrives (e.g. a racing resync, or
+    /// `handle_federation_mount_ended`), the id lookup below finds nothing
+    /// and this is a silent no-op rather than a panic or a double
+    /// `WorkspaceClosed` emission.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_workspace_close_ready(
+        &mut self,
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+    ) {
+        // Both mismatch checks peek before taking: evicting the pending entry
+        // first would drop an unrelated in-flight close, whose genuine
+        // response then finds nothing and leaves its mirror behind forever.
+        if let Some(pending) = self.pending_remote_closes.get(&request_id) {
+            if pending.origin != origin {
+                tracing::warn!(
+                    request_id,
+                    expected_origin = %pending.origin,
+                    got_origin = %origin,
+                    "dropping a workspace-close response from a mount that did not \
+                     originate this request"
+                );
+                return;
+            }
+            if !matches!(pending.target, RemoteCloseTarget::Workspace) {
+                tracing::warn!(
+                    request_id,
+                    "a WorkspaceCloseResponse answered a pending entry that was not a workspace \
+                     close"
+                );
+                return;
+            }
+        }
+
+        let Some(pending) = self.take_pending_remote_close(request_id) else {
+            tracing::warn!(
+                request_id,
+                "remote workspace close confirmed for an unknown/stale request; nothing to \
+                 tear down"
+            );
+            return;
+        };
+
+        let workspace_id = pending.workspace_id;
+        let mount_origin = pending.origin;
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == workspace_id)
+        else {
+            // Already gone — idempotent success, not an error. Still settle
+            // the mount: whatever removed the workspace first may have been
+            // a path that does not end an emptied mount.
+            self.end_federation_mount_if_no_mirrors_remain(&mount_origin);
+            return;
+        };
+
+        let workspace = self.workspace_info(ws_idx);
+        let pane_ids: Vec<PaneId> = self.state.workspaces[ws_idx]
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.layout.pane_ids())
+            .collect();
+        let closing_ids: std::collections::HashSet<String> =
+            std::iter::once(workspace_id.clone()).collect();
+        self.purge_federation_state_for_workspaces(&closing_ids);
+        self.close_single_workspace_at(ws_idx);
+        self.state.remove_plugin_pane_records(pane_ids);
+        self.shutdown_detached_terminal_runtimes();
+        self.end_federation_mount_if_no_mirrors_remain(&mount_origin);
+        self.schedule_session_save();
+        self.emit_event(EventEnvelope {
+            event: EventKind::WorkspaceClosed,
+            data: EventData::WorkspaceClosed {
+                workspace_id,
+                workspace: Some(workspace),
+            },
+        });
+
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
 
+    /// `AppEvent::FederationWorkspaceCloseFailed` handler: the remote host
+    /// rejected an earlier `WorkspaceCloseRequest` — drop the pending
+    /// context and surface it, without touching layout. Same shape/reasoning
+    /// as `handle_federation_close_pane_failed`.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_workspace_close_failed(
+        &mut self,
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    ) {
+        if let Some(pending) = self.pending_remote_closes.get(&request_id) {
+            if pending.origin != origin {
+                tracing::warn!(
+                    request_id,
+                    expected_origin = %pending.origin,
+                    got_origin = %origin,
+                    "dropping a workspace-close failure from a mount that did not \
+                     originate this request"
+                );
+                return;
+            }
+        }
+        self.take_pending_remote_close(request_id);
+        tracing::warn!(request_id, %reason, "remote workspace close failed");
+        self.raise_remote_close_failed_toast("remote workspace close failed", reason);
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationTabCloseReady` handler (`tab.close_remote`): the
+    /// serving host confirmed it closed the tab this mount asked it to close
+    /// (`TabCloseRequest` -> `TabCloseResponse::Closed`); tear the local
+    /// mirror tab down. If it was the workspace's last tab, closing it
+    /// closes the whole workspace — the same fallback `handle_tab_close`
+    /// uses for a locally initiated close of a non-federated workspace's
+    /// last tab. Idempotent: if the tab was already retired locally by the
+    /// time this arrives (a racing resync, or the whole workspace already
+    /// gone), `parse_tab_id` finds nothing and this is a silent no-op.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_tab_close_ready(
+        &mut self,
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+    ) {
+        // Both mismatch checks peek before taking: evicting the pending entry
+        // first would drop an unrelated in-flight close, whose genuine
+        // response then finds nothing and leaves its mirror behind forever.
+        if let Some(pending) = self.pending_remote_closes.get(&request_id) {
+            if pending.origin != origin {
+                tracing::warn!(
+                    request_id,
+                    expected_origin = %pending.origin,
+                    got_origin = %origin,
+                    "dropping a tab-close response from a mount that did not originate this \
+                     request"
+                );
+                return;
+            }
+            if !matches!(pending.target, RemoteCloseTarget::Tab(_)) {
+                tracing::warn!(
+                    request_id,
+                    "a TabCloseResponse answered a pending entry that was not a tab close"
+                );
+                return;
+            }
+        }
+
+        let Some(pending) = self.take_pending_remote_close(request_id) else {
+            tracing::warn!(
+                request_id,
+                "remote tab close confirmed for an unknown/stale request; nothing to tear down"
+            );
+            return;
+        };
+
+        let mount_origin = pending.origin;
+        let RemoteCloseTarget::Tab(tab_id) = pending.target else {
+            tracing::warn!(
+                request_id,
+                "a TabCloseResponse answered a pending entry that was not a tab close"
+            );
+            return;
+        };
+
+        let Some((ws_idx, tab_idx)) = self.parse_tab_id(&tab_id) else {
+            // Already gone — idempotent success, not an error. Still settle
+            // the mount, exactly as the workspace-close twin does: whatever
+            // removed the tab (and possibly its workspace) first may have been
+            // a path that does not end an emptied mount.
+            self.end_federation_mount_if_no_mirrors_remain(&mount_origin);
+            return;
+        };
+
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let pane_ids: Vec<PaneId> = self.state.workspaces[ws_idx]
+            .tabs
+            .get(tab_idx)
+            .map(|tab| tab.layout.pane_ids())
+            .unwrap_or_default();
+        let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
+        // Prune the mirror-namespaced `remote_resync_tab_index` entry the
+        // same way `handle_federation_resync_tab_removed` does, computed
+        // before `close_tab` below invalidates `tab_idx` — otherwise a
+        // later resync pane for this now-closed remote tab would resolve
+        // through the stale entry and rebuild a duplicate local tab.
+        if let Some(tab_number) = self.state.workspaces[ws_idx].public_tab_number(tab_idx) {
+            self.remote_resync_tab_index.retain(|_, tab_ref| {
+                !(tab_ref.workspace_id == workspace_id && tab_ref.tab_number == Some(tab_number))
+            });
+        }
+
+        let closed = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .is_some_and(|ws| ws.close_tab(tab_idx));
+
+        if closed {
+            self.state.remove_plugin_pane_records(pane_ids);
+            self.state.remove_unattached_terminal_ids(terminal_ids);
+            self.shutdown_detached_terminal_runtimes();
+            self.schedule_session_save();
+            self.emit_event(EventEnvelope {
+                event: EventKind::TabClosed,
+                data: EventData::TabClosed {
+                    tab_id,
+                    workspace_id,
+                },
+            });
+        } else {
+            // `close_tab` only refuses on the last tab (the tab_idx above
+            // was already validated by `parse_tab_id`) — the workspace-close
+            // fallback, mirroring `handle_tab_close`'s own last-tab branch.
+            let workspace = self.workspace_info(ws_idx);
+            let closing_ids: std::collections::HashSet<String> =
+                std::iter::once(workspace_id.clone()).collect();
+            self.purge_federation_state_for_workspaces(&closing_ids);
+            self.close_single_workspace_at(ws_idx);
+            self.state.remove_plugin_pane_records(pane_ids);
+            self.shutdown_detached_terminal_runtimes();
+            // The last tab took its workspace with it, so this may have been
+            // the mount's last mirror.
+            self.end_federation_mount_if_no_mirrors_remain(&mount_origin);
+            self.schedule_session_save();
+            self.emit_event(EventEnvelope {
+                event: EventKind::TabClosed,
+                data: EventData::TabClosed {
+                    tab_id,
+                    workspace_id: workspace_id.clone(),
+                },
+            });
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceClosed,
+                data: EventData::WorkspaceClosed {
+                    workspace_id,
+                    workspace: Some(workspace),
+                },
+            });
+        }
+
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationTabCloseFailed` handler: the remote host
+    /// rejected an earlier `TabCloseRequest` — drop the pending context and
+    /// surface it, without touching layout. Same shape/reasoning as
+    /// `handle_federation_close_pane_failed`.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_tab_close_failed(
+        &mut self,
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    ) {
+        if let Some(pending) = self.pending_remote_closes.get(&request_id) {
+            if pending.origin != origin {
+                tracing::warn!(
+                    request_id,
+                    expected_origin = %pending.origin,
+                    got_origin = %origin,
+                    "dropping a tab-close failure from a mount that did not originate this \
+                     request"
+                );
+                return;
+            }
+        }
+        self.take_pending_remote_close(request_id);
+        tracing::warn!(request_id, %reason, "remote tab close failed");
+        self.raise_remote_close_failed_toast("remote tab close failed", reason);
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    /// Drops a pending remote tab-close registration targeting `tab_id`
+    /// (the canonical public tab id stored in `RemoteCloseTarget::Tab`).
+    /// Purge-gap fix: `purge_federation_state_for_workspaces` keys on
+    /// WORKSPACE id, so a single tab removed WITHOUT its workspace closing
+    /// purges no pending tab close there. Call this whenever a tab is
+    /// retired that way — `handle_federation_resync_tab_removed` (a racing
+    /// resync beat the ack) and `app/api/tabs.rs::handle_tab_close` (a plain
+    /// LOCAL close on a mirror beat the ack; `tab.close_remote` is a
+    /// separate opt-in verb, so nothing stops both being in flight for the
+    /// same tab) — so a late/never-arriving `TabCloseResponse` for a
+    /// torn-down tab can no longer act on whatever later reuses the same
+    /// slot. `pub(crate)` (not module-private) so `app/api/tabs.rs` can call
+    /// it too; `#[cfg(not(unix))]` gets a no-op twin below so that call site
+    /// stays ungated, mirroring `purge_federation_state_for_workspaces`.
+    #[cfg(unix)]
+    pub(crate) fn purge_pending_remote_close_for_tab(&mut self, tab_id: &str) {
+        self.pending_remote_closes.retain(|_, pending| {
+            !matches!(&pending.target, RemoteCloseTarget::Tab(pending_tab_id) if pending_tab_id == tab_id)
+        });
+    }
+
+    /// No mount can exist on a target without the federation mount
+    /// primitives, so there is never any pending remote close to purge
+    /// there. See the `#[cfg(unix)]` twin above.
+    #[cfg(not(unix))]
+    pub(crate) fn purge_pending_remote_close_for_tab(&mut self, _tab_id: &str) {}
+
     /// `AppEvent::FederationResyncPaneCreated` handler (post-mount pane
     /// mirroring, part 2 — plans/260722-1327): the drive task already built
-    /// the new pane's real `TerminalRuntime`; splice it into the already-
-    /// mounted workspace's active tab. Conservative-minimal by design: a
-    /// resync diff only reports created/removed *panes*, not a tab-level
-    /// diff, so this always targets the workspace's current active tab
-    /// (`Workspace::active_tab`) rather than trying to reproduce the
-    /// remote's exact tab placement — logged as the accepted compromise in
-    /// `implementation-notes.md` rather than balloon this into a full
-    /// tab-diff pass.
+    /// the new pane's real `TerminalRuntime`; place it in the already-mounted
+    /// workspace under the tab it actually belongs to on the remote.
+    ///
+    /// The pane's remote `tab_id` (already on the wire as `PaneInfo.tab_id`)
+    /// resolves through `remote_resync_tab_index`: a tab this mount already
+    /// materialized takes the pane as a split, an unseen tab gets a brand new
+    /// local `Tab`. The earlier behavior — always splitting into
+    /// `Workspace::active_tab` — is what made an N-tab remote workspace
+    /// render as one tab with N splits.
     #[cfg(unix)]
     pub(crate) fn handle_federation_resync_pane_created(
         &mut self,
@@ -1278,6 +1699,7 @@ impl App {
         let crate::events::FederationResyncPaneCreated {
             origin,
             workspace_id,
+            tab_id,
             pane_id,
             local_pane_id,
             terminal_id,
@@ -1292,18 +1714,27 @@ impl App {
             .iter()
             .position(|ws| ws.id == workspace_id)
         else {
-            tracing::warn!(
-                %workspace_id,
-                "resync revealed a new remote pane but its workspace no longer exists"
+            // The pane may belong to a remote workspace this mount has never
+            // materialized — one created on the serving host after mount, or
+            // by this client's own `WorkspaceCreateRequest`. A local
+            // `Workspace` needs a pane to exist, so this first pane is what
+            // brings it into being (the same staged shape the tab branch
+            // below uses one level down).
+            self.materialize_resync_workspace_from_pane(
+                origin,
+                workspace_id,
+                tab_id,
+                pane_id,
+                local_pane_id,
+                terminal_id,
+                terminal,
+                runtime,
+                pane_state,
             );
             return;
         };
 
-        let space_key = format!("federation:{}", origin.as_str());
-        let origin_matches = self.state.workspaces[ws_idx]
-            .worktree_space()
-            .is_some_and(|space| space.key == space_key);
-        if !origin_matches {
+        if !self.workspace_matches_federation_origin(ws_idx, &origin) {
             tracing::warn!(
                 %workspace_id,
                 expected_origin = %origin,
@@ -1313,55 +1744,916 @@ impl App {
             return;
         }
 
-        let ws = &mut self.state.workspaces[ws_idx];
-        let tab_idx = ws.active_tab;
-        let Some(target_pane_id) = ws.focused_pane_id() else {
-            tracing::warn!(
-                %workspace_id,
-                "resync revealed a new remote pane but its workspace's active tab has no \
-                 pane to split from"
-            );
-            return;
-        };
+        // Resolve the remote tab to a live local tab index, if this mount
+        // already has one. A stale index entry (its tab was closed locally,
+        // so its number no longer resolves) degrades to the "unknown tab"
+        // branch and is overwritten below, so a closed tab can never leave
+        // the index pointing at an unrelated tab.
+        let known_tab = self
+            .remote_resync_tab_index
+            .get(&tab_id)
+            .and_then(|tab_ref| tab_ref.tab_number);
+        let existing_tab_idx = known_tab.and_then(|number| {
+            self.state.workspaces[ws_idx]
+                .tabs
+                .iter()
+                .position(|tab| tab.number == number)
+        });
 
         let moved = crate::workspace::MovedPane {
             pane_id: local_pane_id,
             pane_state,
         };
-        if ws
-            .insert_moved_pane_into_tab(
-                tab_idx,
-                target_pane_id,
-                moved,
-                ratatui::layout::Direction::Horizontal,
-                0.5,
-            )
-            .is_err()
-        {
-            tracing::warn!(
-                %workspace_id,
-                "resync revealed a new remote pane but it could not be inserted into its \
-                 workspace's active tab"
-            );
-            return;
-        }
+        let ws = &mut self.state.workspaces[ws_idx];
+        let (tab_idx, created_tab) = match existing_tab_idx {
+            Some(tab_idx) => {
+                // Split off the tab's own last pane, not the workspace's
+                // focused pane — the focused pane may well live in a
+                // different tab now that panes land in their real tab.
+                let Some(target_pane_id) = ws
+                    .tabs
+                    .get(tab_idx)
+                    .and_then(|tab| tab.layout.pane_ids().last().copied())
+                else {
+                    tracing::warn!(
+                        %workspace_id,
+                        %tab_id,
+                        "resync revealed a new remote pane but its target tab has no pane \
+                         to split from"
+                    );
+                    return;
+                };
+                if ws
+                    .insert_moved_pane_into_tab(
+                        tab_idx,
+                        target_pane_id,
+                        moved,
+                        ratatui::layout::Direction::Horizontal,
+                        0.5,
+                    )
+                    .is_err()
+                {
+                    tracing::warn!(
+                        %workspace_id,
+                        %tab_id,
+                        "resync revealed a new remote pane but it could not be inserted \
+                         into its tab"
+                    );
+                    return;
+                }
+                (tab_idx, false)
+            }
+            None => {
+                // Same primitive + event path mount-time materialization
+                // uses for a non-root remote tab, so a tab discovered after
+                // mount is indistinguishable from one present at mount.
+                let label = self
+                    .remote_resync_tab_index
+                    .get(&tab_id)
+                    .and_then(|tab_ref| tab_ref.label.clone());
+                let ws = &mut self.state.workspaces[ws_idx];
+                let tab_idx = ws.create_tab_from_existing_pane(
+                    moved,
+                    label,
+                    self.event_tx.clone(),
+                    self.render_notify.clone(),
+                    self.render_dirty.clone(),
+                );
+                (tab_idx, true)
+            }
+        };
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         self.state.terminals.insert(terminal_id, terminal);
         self.state.remove_alias_shadowed_by_new_pane(local_pane_id);
         self.remote_resync_pane_index.insert(pane_id, local_pane_id);
+        let tab_number = self.state.workspaces[ws_idx].public_tab_number(tab_idx);
+        let local_workspace_id = self.state.workspaces[ws_idx].id.clone();
+        let entry = self
+            .remote_resync_tab_index
+            .entry(tab_id)
+            .or_insert_with(|| RemoteTabRef {
+                workspace_id: local_workspace_id,
+                tab_number: None,
+                label: None,
+            });
+        entry.tab_number = tab_number;
         self.schedule_session_save();
 
-        if let Some(pane) = self.pane_info(ws_idx, local_pane_id) {
-            self.emit_event(EventEnvelope {
-                event: EventKind::PaneCreated,
-                data: EventData::PaneCreated { pane },
-            });
+        if created_tab {
+            // Emits TabCreated + PaneCreated + LayoutUpdated together.
+            self.emit_tab_created_events(ws_idx, tab_idx);
+        } else {
+            if let Some(pane) = self.pane_info(ws_idx, local_pane_id) {
+                self.emit_event(EventEnvelope {
+                    event: EventKind::PaneCreated,
+                    data: EventData::PaneCreated { pane },
+                });
+            }
+            self.emit_layout_updated_event(ws_idx, tab_idx);
         }
-        self.emit_layout_updated_event(ws_idx, tab_idx);
 
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
+    }
+
+    /// Builds a brand new local `Workspace` around the first pane a resync
+    /// reported for a remote workspace this mount has never materialized.
+    /// Split out of `handle_federation_resync_pane_created` because
+    /// `Workspace::from_existing_pane` consumes the `MovedPane`, so the
+    /// new-workspace case cannot fall through into the existing-workspace
+    /// one.
+    ///
+    /// Deliberately reuses exactly what `materialize_federation_mount` uses
+    /// for a mount-time workspace — `Workspace::from_existing_pane`, the
+    /// mirror's own namespaced id as `Workspace::id`, the
+    /// `federation:<host_key>` `worktree_space` membership, and
+    /// `emit_workspace_open_events` — so a workspace discovered after mount
+    /// is indistinguishable from one present at mount, including to the
+    /// federation-origin classification that reads `Workspace::id`.
+    #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)] // the destructured `FederationResyncPaneCreated` payload, minus the fields the caller already consumed
+    fn materialize_resync_workspace_from_pane(
+        &mut self,
+        origin: crate::remote::federation::id::HostKey,
+        workspace_id: String,
+        tab_id: String,
+        pane_id: String,
+        local_pane_id: PaneId,
+        terminal_id: crate::terminal::TerminalId,
+        terminal: crate::terminal::TerminalState,
+        runtime: crate::terminal::TerminalRuntime,
+        pane_state: crate::pane::PaneState,
+    ) {
+        let Some(workspace_ref) = self.remote_resync_workspace_index.get(&workspace_id) else {
+            tracing::warn!(
+                %workspace_id,
+                "resync revealed a new remote pane but its workspace is neither materialized \
+                 nor announced"
+            );
+            return;
+        };
+        if workspace_ref.origin != origin {
+            tracing::warn!(
+                %workspace_id,
+                expected_origin = %workspace_ref.origin,
+                got_origin = %origin,
+                "dropping a resync-created pane whose mount origin does not match the mount \
+                 that announced its workspace"
+            );
+            return;
+        }
+        let workspace_label = workspace_ref.label.clone();
+        let tab_label = self
+            .remote_resync_tab_index
+            .get(&tab_id)
+            .and_then(|tab_ref| tab_ref.label.clone());
+
+        let moved = crate::workspace::MovedPane {
+            pane_id: local_pane_id,
+            pane_state,
+        };
+        let mut workspace = Workspace::from_existing_pane(
+            Some(workspace_label),
+            tab_label,
+            terminal.cwd.clone(),
+            moved,
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+        );
+        // Same reasoning as `materialize_federation_mount`: the federation
+        // badge/grouping classifies purely from `Workspace::id`'s
+        // `r:<host_key>:` prefix, so the mirror's namespaced id must survive
+        // verbatim rather than the fresh local id `from_existing_pane` mints.
+        workspace.id = workspace_id.clone();
+        workspace.worktree_space = Some(WorktreeSpaceMembership {
+            key: format!("federation:{}", origin.as_str()),
+            label: origin.as_str().to_string(),
+            repo_root: PathBuf::new(),
+            checkout_path: PathBuf::new(),
+            is_linked_worktree: false,
+        });
+        self.state.workspaces.push(workspace);
+        let ws_idx = self.state.workspaces.len() - 1;
+
+        self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        self.state.terminals.insert(terminal_id, terminal);
+        self.state.remove_alias_shadowed_by_new_pane(local_pane_id);
+        self.remote_resync_pane_index.insert(pane_id, local_pane_id);
+        // `from_existing_pane` always seeds exactly one tab at index 0.
+        let tab_number = self.state.workspaces[ws_idx].public_tab_number(0);
+        let entry = self
+            .remote_resync_tab_index
+            .entry(tab_id)
+            .or_insert_with(|| RemoteTabRef {
+                workspace_id: workspace_id.clone(),
+                tab_number: None,
+                label: None,
+            });
+        entry.workspace_id = workspace_id.clone();
+        entry.tab_number = tab_number;
+        // The announcement did its job; the live `Workspace` is now the
+        // record, found by id.
+        self.remote_resync_workspace_index.remove(&workspace_id);
+
+        self.emit_workspace_open_events(ws_idx);
+        // Focus it only if this client asked the remote host to create it and
+        // asked for focus (`App::handle_federation_workspace_create_accepted`
+        // is the only writer of this set). A workspace the remote user created
+        // out of band arrives through exactly this path and must never pull
+        // the local user out of what they were doing.
+        if self.pending_remote_workspace_focus.remove(&workspace_id) {
+            self.state.switch_workspace(ws_idx);
+        }
+        self.schedule_session_save();
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    /// Closes exactly one workspace, never its worktree/federation group.
+    ///
+    /// `AppState::close_selected_workspace` deliberately closes every
+    /// workspace sharing the selected one's `worktree_space` key
+    /// (`AppState::close_indices_for`), which is right for a repo's worktree
+    /// group and for a whole-mount teardown. But every workspace one
+    /// federation mount materializes shares that mount's single
+    /// `federation:<host_key>` space key, so retiring one remote workspace —
+    /// or its last pane — would otherwise take every other workspace of the
+    /// same mount down with it. Detaching the doomed workspace from its space
+    /// first makes `close_indices_for` fall back to the single index; the
+    /// membership dies with the workspace either way.
+    ///
+    /// Ungated for the same reason `dispatch_remote_workspace_create` is: the
+    /// `tab.close` caller in `api/tabs.rs` is ungated, and on a target without
+    /// the mount primitives no workspace ever carries a `federation:` space
+    /// key, so that caller never reaches this.
+    pub(crate) fn close_single_workspace_at(&mut self, ws_idx: usize) {
+        // Validate before moving the selection: an out-of-range index must
+        // leave `selected` pointing where it already did, never at a slot that
+        // does not exist.
+        let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+            return;
+        };
+        ws.worktree_space = None;
+        self.state.selected = ws_idx;
+        self.state.close_selected_workspace();
+    }
+
+    /// Ends a federation mount once none of its mirrored workspaces remain.
+    ///
+    /// The mount is what owns the link, the drive task and the
+    /// `remote_mirrors` entry; retiring the last workspace that used it
+    /// without ending it leaves all three alive with nothing visible behind
+    /// them, and a later remount reports the host as already live. The local
+    /// `workspace.close` verb does this inline; the confirmed-close handlers
+    /// must do the same, or the two verbs diverge on their last workspace.
+    #[cfg(unix)]
+    fn end_federation_mount_if_no_mirrors_remain(
+        &mut self,
+        host_key: &crate::remote::federation::id::HostKey,
+    ) {
+        let mirrors_remain = (0..self.state.workspaces.len())
+            .any(|idx| self.federation_host_key_for_workspace(idx).as_ref() == Some(host_key));
+        if !mirrors_remain {
+            self.state.end_federation_mount(host_key);
+        }
+    }
+
+    /// Windows counterparts of the two federation close helpers below.
+    /// `server::federation_actor` is compiled on every platform (unlike
+    /// `federation_accept`, which is Unix-only), so its command arms must
+    /// resolve these names on Windows too. Federation never actually serves
+    /// there, so nothing can reach them; they refuse rather than pretend to
+    /// close something. Same shape as `nudge_child_redraw`'s cfg pair in that
+    /// module.
+    #[cfg(not(unix))]
+    pub(crate) fn close_federation_target_workspace(
+        &mut self,
+        _target_workspace_id: &str,
+    ) -> Result<(), String> {
+        Err("federation is not supported on this platform".to_string())
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn close_federation_target_tab(
+        &mut self,
+        _target_tab_id: &str,
+    ) -> Result<(), String> {
+        Err("federation is not supported on this platform".to_string())
+    }
+
+    /// Closes exactly one LOCAL workspace on this host in response to a
+    /// federated peer's `WorkspaceCloseRequest` — the serving-host half of
+    /// close forwarding for the multi-workspace case. Deliberately does NOT
+    /// go through the `workspace.close` JSON-API method
+    /// (`handle_workspace_close`): on this host the target is always a
+    /// workspace it owns locally, so that handler's `federation_host_key_for_workspace`
+    /// lookup returns `None`, `retire_one_only` is `false`, and it falls into
+    /// `AppState::close_selected_workspace()`'s worktree-group close — which
+    /// would take down every sibling workspace sharing the target's
+    /// `worktree_space` key for one remote peer's single-workspace request.
+    /// Uses `close_single_workspace_at` instead, which detaches the target
+    /// from its worktree-space membership before closing so exactly one
+    /// workspace ever comes down, mirroring the resync handlers below
+    /// (`handle_federation_resync_workspace_removed`) rather than the local
+    /// JSON-API close path.
+    ///
+    /// Stronger than `ClosePane`'s fixed-internal-request-id trust boundary:
+    /// this never goes through `handle_api_request` at all, so there is no
+    /// request id for a remote peer's close to be mistaken for a local user
+    /// gesture, and no confirmation prompt it could trigger on this host's
+    /// own session.
+    #[cfg(unix)]
+    pub(crate) fn close_federation_target_workspace(
+        &mut self,
+        target_workspace_id: &str,
+    ) -> Result<(), String> {
+        let Some(ws_idx) = self.parse_federation_workspace_id(target_workspace_id) else {
+            return Err("workspace not found".to_string());
+        };
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let workspace = self.workspace_info(ws_idx);
+        let pane_ids = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|ws| {
+                ws.tabs
+                    .iter()
+                    .flat_map(|tab| tab.layout.pane_ids())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let closing_ids: std::collections::HashSet<String> =
+            std::iter::once(workspace_id.clone()).collect();
+        self.purge_federation_state_for_workspaces(&closing_ids);
+
+        self.close_single_workspace_at(ws_idx);
+        self.state.remove_plugin_pane_records(pane_ids);
+        self.shutdown_detached_terminal_runtimes();
+        self.schedule_session_save();
+        self.emit_event(EventEnvelope {
+            event: EventKind::WorkspaceClosed,
+            data: EventData::WorkspaceClosed {
+                workspace_id,
+                workspace: Some(workspace),
+            },
+        });
+        Ok(())
+    }
+
+    /// Closes exactly one LOCAL tab on this host in response to a federated
+    /// peer's `TabCloseRequest` — the serving-host half of close forwarding
+    /// for the multi-tab case. Deliberately does NOT go through the
+    /// `tab.close` JSON-API method (`handle_tab_close`): when the target is
+    /// its workspace's last tab and that workspace shares a worktree-group
+    /// with a sibling, that handler's `AppState::confirm_implicit_worktree_group_close`
+    /// sets `mode = Mode::ConfirmClose` (and `selected`) BEFORE refusing —
+    /// mutating this host's own UI state in response to a remote peer's
+    /// request, which the fixed internal request id below exists precisely
+    /// to prevent. This path always retires exactly the target tab (or, when
+    /// it is the last tab, exactly the target workspace via
+    /// `close_single_workspace_at`) and never asks for confirmation.
+    #[cfg(unix)]
+    pub(crate) fn close_federation_target_tab(
+        &mut self,
+        target_tab_id: &str,
+    ) -> Result<(), String> {
+        let Some((ws_idx, tab_idx)) = self.parse_federation_tab_id(target_tab_id) else {
+            return Err("tab not found".to_string());
+        };
+        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return Err("tab not found".to_string());
+        };
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return Err("workspace not found".to_string());
+        };
+        let closes_workspace = ws.tabs.len() <= 1;
+        let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
+        let pane_ids = ws
+            .tabs
+            .get(tab_idx)
+            .map(|tab| tab.layout.pane_ids())
+            .unwrap_or_default();
+
+        if closes_workspace {
+            let closing_ids: std::collections::HashSet<String> =
+                std::iter::once(workspace_id.clone()).collect();
+            self.purge_federation_state_for_workspaces(&closing_ids);
+            let workspace = self.workspace_info(ws_idx);
+            self.close_single_workspace_at(ws_idx);
+            self.state.remove_plugin_pane_records(pane_ids);
+            self.shutdown_detached_terminal_runtimes();
+            self.schedule_session_save();
+            self.emit_event(EventEnvelope {
+                event: EventKind::TabClosed,
+                data: EventData::TabClosed {
+                    tab_id,
+                    workspace_id: workspace_id.clone(),
+                },
+            });
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceClosed,
+                data: EventData::WorkspaceClosed {
+                    workspace_id,
+                    workspace: Some(workspace),
+                },
+            });
+            return Ok(());
+        }
+
+        let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+            return Err("workspace not found".to_string());
+        };
+        if !ws.close_tab(tab_idx) {
+            return Err(format!("tab {target_tab_id} could not be closed"));
+        }
+        self.state.remove_plugin_pane_records(pane_ids);
+        self.state.remove_unattached_terminal_ids(terminal_ids);
+        self.shutdown_detached_terminal_runtimes();
+        self.schedule_session_save();
+        self.emit_event(EventEnvelope {
+            event: EventKind::TabClosed,
+            data: EventData::TabClosed {
+                tab_id,
+                workspace_id,
+            },
+        });
+        Ok(())
+    }
+
+    /// Drops every per-mount bookkeeping entry belonging to the given
+    /// (closing) workspace ids. Grouping the purge helpers behind one ungated
+    /// entry point lets the ungated close paths (`api/tabs.rs`'s `tab.close`)
+    /// stay free of `#[cfg]` while the helpers keep their Unix gating.
+    #[cfg(unix)]
+    pub(crate) fn purge_federation_state_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        self.purge_pending_remote_splits_for_workspaces(workspace_ids);
+        self.purge_pending_remote_closes_for_workspaces(workspace_ids);
+        self.purge_remote_resync_pane_index_for_workspaces(workspace_ids);
+        self.purge_remote_resync_tab_index_for_workspaces(workspace_ids);
+        self.purge_remote_resync_workspace_index_for_workspaces(workspace_ids);
+        self.purge_remote_image_paste_pane_state_for_workspaces(workspace_ids);
+        self.purge_pending_remote_clipboard_stages_for_workspaces(workspace_ids);
+        self.pending_remote_workspace_focus
+            .retain(|workspace_id| !workspace_ids.contains(workspace_id));
+    }
+
+    /// No mount can exist on a target without the federation mount
+    /// primitives, so there is never any per-mount state to purge there.
+    #[cfg(not(unix))]
+    pub(crate) fn purge_federation_state_for_workspaces(
+        &mut self,
+        _workspace_ids: &std::collections::HashSet<String>,
+    ) {
+    }
+
+    /// `AppEvent::FederationWorkspaceCreateAccepted` handler: the remote host
+    /// confirmed the workspace this client asked it to create and named the
+    /// id it will materialize under. Nothing is built here — the resync the
+    /// same response triggers remains the single materialization path — this
+    /// only remembers that *this* client owns the new workspace, so
+    /// `materialize_resync_workspace_from_pane` can focus it on arrival.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_workspace_create_accepted(
+        &mut self,
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+        workspace_id: String,
+    ) {
+        // Origin fence, same shape as the resync handlers: the id must be
+        // namespaced under the mount that reported it.
+        match crate::remote::federation::id::classify(&workspace_id) {
+            crate::remote::federation::id::IdClass::Remote(host_key) if host_key == origin => {}
+            _ => {
+                tracing::warn!(
+                    request_id,
+                    %workspace_id,
+                    expected_origin = %origin,
+                    "dropping a workspace-create acceptance whose id is not namespaced under \
+                     the mount that reported it"
+                );
+                return;
+            }
+        }
+        if !self
+            .pending_remote_workspace_create_focus
+            .remove(&request_id)
+        {
+            // The request did not ask for focus (or was already answered);
+            // the workspace still materializes, it just does not take focus.
+            return;
+        }
+        // Already materialized (a structural event beat the response): focus
+        // it now instead of waiting for a create that already happened.
+        if let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == workspace_id)
+        {
+            self.state.switch_workspace(ws_idx);
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+            return;
+        }
+        self.pending_remote_workspace_focus.insert(workspace_id);
+    }
+
+    /// `AppEvent::FederationResyncWorkspaceCreated` handler: a resync diff
+    /// revealed a remote workspace this mount has never seen. A local
+    /// `Workspace` cannot exist without a tab, and a `Tab` cannot exist
+    /// without a pane, so this only records the workspace's identity and
+    /// label — the pane event that follows in the same diff
+    /// (`materialize_resync_workspace_from_pane`) builds the real workspace.
+    /// Idempotent: an already-materialized workspace keeps its live state.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_resync_workspace_created(
+        &mut self,
+        origin: crate::remote::federation::id::HostKey,
+        workspace_id: String,
+        label: String,
+    ) {
+        // Origin fence before anything is recorded. There is no local
+        // workspace to check `worktree_space` against yet, but the namespaced
+        // id itself names the mount that owns it, so a differently-mounted
+        // host still cannot register a workspace under another mount's
+        // namespace.
+        match crate::remote::federation::id::classify(&workspace_id) {
+            crate::remote::federation::id::IdClass::Remote(host_key) if host_key == origin => {}
+            _ => {
+                tracing::warn!(
+                    %workspace_id,
+                    expected_origin = %origin,
+                    "dropping a resync-created workspace whose id is not namespaced under the \
+                     mount that reported it"
+                );
+                return;
+            }
+        }
+        if self.state.workspaces.iter().any(|ws| ws.id == workspace_id) {
+            return;
+        }
+        let entry = self
+            .remote_resync_workspace_index
+            .entry(workspace_id)
+            .or_insert_with(|| RemoteWorkspaceRef {
+                origin,
+                label: String::new(),
+            });
+        entry.label = label;
+    }
+
+    /// `AppEvent::FederationResyncWorkspaceRemoved` handler: the remote no
+    /// longer reports a workspace this mount materialized. The pane removals
+    /// in the same diff usually collapsed it already (`Workspace::close_pane`
+    /// returning `true` closes the workspace with its last pane), so this is
+    /// most often just an index prune — but it also tears the workspace down
+    /// for its own sake when the pane removals did not (e.g. panes this mount
+    /// never indexed).
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_resync_workspace_removed(
+        &mut self,
+        origin: crate::remote::federation::id::HostKey,
+        workspace_id: String,
+    ) {
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == workspace_id)
+        else {
+            // Not materialized. It may still be a pending announcement, which
+            // only the mount that made it may retract — a second mount must
+            // not be able to wipe another mount's pending workspace and strand
+            // the pane event that would have materialized it.
+            match self.remote_resync_workspace_index.get(&workspace_id) {
+                Some(workspace_ref) if workspace_ref.origin != origin => {
+                    tracing::warn!(
+                        %workspace_id,
+                        expected_origin = %workspace_ref.origin,
+                        got_origin = %origin,
+                        "dropping a resync workspace removal whose mount origin does not match \
+                         the mount that announced its workspace"
+                    );
+                }
+                _ => {
+                    self.remote_resync_workspace_index.remove(&workspace_id);
+                }
+            }
+            return;
+        };
+        // Authorize before mutating: an origin mismatch must leave the index
+        // exactly as it found it, not evict a legitimate entry on the way to
+        // refusing the removal.
+        if !self.workspace_matches_federation_origin(ws_idx, &origin) {
+            tracing::warn!(
+                %workspace_id,
+                expected_origin = %origin,
+                "dropping a resync workspace removal whose mount origin does not match the \
+                 workspace's federation origin"
+            );
+            return;
+        }
+        self.remote_resync_workspace_index.remove(&workspace_id);
+
+        let closing_ids: std::collections::HashSet<String> =
+            std::iter::once(workspace_id).collect();
+        self.purge_federation_state_for_workspaces(&closing_ids);
+
+        let public_workspace_id = self.public_workspace_id(ws_idx);
+        let workspace_info = self.workspace_info(ws_idx);
+        self.close_single_workspace_at(ws_idx);
+        self.shutdown_detached_terminal_runtimes();
+        // The remote-initiated removal is just as capable of taking down a
+        // mount's last mirror as the client-initiated close is; without this
+        // the link, its drive task and the `remote_mirrors` entry survive with
+        // nothing visible behind them and a remount is refused as already live.
+        self.end_federation_mount_if_no_mirrors_remain(&origin);
+        self.schedule_session_save();
+
+        self.emit_event(EventEnvelope {
+            event: EventKind::WorkspaceClosed,
+            data: EventData::WorkspaceClosed {
+                workspace_id: public_workspace_id,
+                workspace: Some(workspace_info),
+            },
+        });
+
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationWorkspaceCreateFailed` handler: the remote host
+    /// refused an earlier `WorkspaceCreateRequest`. Nothing was created
+    /// remotely, so there is nothing local to reverse — surface the reason
+    /// the same way a refused remote pane close does.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_workspace_create_failed(
+        &mut self,
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    ) {
+        tracing::warn!(request_id, %reason, %origin, "remote workspace create failed");
+        // Nothing will ever materialize for this request; drop its focus claim
+        // so a later create cannot inherit it.
+        self.pending_remote_workspace_create_focus
+            .remove(&request_id);
+        match self.state.toast_config.delivery {
+            crate::config::ToastDelivery::Herdr => {
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: super::ToastKind::NeedsAttention,
+                    title: "remote workspace create failed".to_string(),
+                    context: reason,
+                    position: None,
+                    target: None,
+                });
+            }
+            crate::config::ToastDelivery::Terminal | crate::config::ToastDelivery::System
+                if self.local_terminal_notifications =>
+            {
+                let notify = match self.state.toast_config.delivery {
+                    crate::config::ToastDelivery::Terminal => {
+                        crate::terminal_notify::show_notification
+                    }
+                    crate::config::ToastDelivery::System => {
+                        crate::platform::show_desktop_notification
+                    }
+                    // Unreachable: the two arms above are the only deliveries
+                    // this match guard admits.
+                    _ => return,
+                };
+                let _ = notify("remote workspace create failed", Some(&reason));
+            }
+            _ => {}
+        }
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    /// `AppEvent::FederationResyncTabCreated` handler: a resync diff revealed
+    /// a remote tab this mount has never seen. A local `Tab` cannot exist
+    /// without a pane, so this only records the tab's identity and label —
+    /// the pane events that follow in the same diff
+    /// (`handle_federation_resync_pane_created`) materialize the real tab and
+    /// fill in its local tab number. Idempotent: a tab already materialized
+    /// (by an out-of-order pane event, or at mount time) keeps its local
+    /// binding.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_resync_tab_created(
+        &mut self,
+        origin: crate::remote::federation::id::HostKey,
+        workspace_id: String,
+        tab_id: String,
+        label: String,
+    ) {
+        match self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == workspace_id)
+        {
+            Some(ws_idx) => {
+                if !self.workspace_matches_federation_origin(ws_idx, &origin) {
+                    tracing::warn!(
+                        %workspace_id,
+                        %tab_id,
+                        expected_origin = %origin,
+                        "dropping a resync-created tab whose mount origin does not match its \
+                         workspace's federation origin"
+                    );
+                    return;
+                }
+            }
+            // The workspace itself may still be pending: a diff that creates
+            // a whole remote workspace announces the workspace, then its
+            // tabs, then the panes that materialize both. Recording the tab's
+            // label now is what lets the pane event name the root tab.
+            None => match self.remote_resync_workspace_index.get(&workspace_id) {
+                Some(workspace_ref) if workspace_ref.origin == origin => {}
+                Some(workspace_ref) => {
+                    tracing::warn!(
+                        %workspace_id,
+                        %tab_id,
+                        expected_origin = %workspace_ref.origin,
+                        got_origin = %origin,
+                        "dropping a resync-created tab whose mount origin does not match the \
+                         mount that announced its workspace"
+                    );
+                    return;
+                }
+                None => {
+                    tracing::warn!(
+                        %workspace_id,
+                        %tab_id,
+                        "resync revealed a new remote tab but its workspace is neither \
+                         materialized nor announced"
+                    );
+                    return;
+                }
+            },
+        }
+
+        let entry = self
+            .remote_resync_tab_index
+            .entry(tab_id)
+            .or_insert_with(|| RemoteTabRef {
+                workspace_id,
+                tab_number: None,
+                label: None,
+            });
+        entry.label = Some(label);
+    }
+
+    /// `AppEvent::FederationResyncTabClosed` handler: the remote no longer
+    /// reports a tab this mount materialized. Usually the tab's panes are
+    /// retired in the same diff and `handle_federation_resync_pane_removed`
+    /// has already collapsed the local tab (`Workspace::close_pane` drops a
+    /// tab with its last pane), so this is most often just an index prune —
+    /// but it also tears the tab down for its own sake when the pane
+    /// removals did not (e.g. panes this mount never indexed).
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_resync_tab_removed(
+        &mut self,
+        origin: crate::remote::federation::id::HostKey,
+        tab_id: String,
+    ) {
+        // Authorize before mutating. Removing the entry first would let a
+        // second mount's stray removal evict a live tab's index entry while
+        // the fence below correctly refuses the removal itself — after which
+        // the next resync pane for that still-live remote tab would build a
+        // duplicate local tab beside the real one.
+        let Some(tab_ref) = self.remote_resync_tab_index.get(&tab_id) else {
+            return;
+        };
+        let indexed_workspace_id = tab_ref.workspace_id.clone();
+        let tab_number = tab_ref.tab_number;
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == indexed_workspace_id)
+        else {
+            // The tab's workspace is gone locally, so the entry is dead
+            // bookkeeping either way — but only the mount that owns the id's
+            // namespace may retire it.
+            match crate::remote::federation::id::classify(&indexed_workspace_id) {
+                crate::remote::federation::id::IdClass::Remote(host_key) if host_key == origin => {
+                    self.remote_resync_tab_index.remove(&tab_id);
+                }
+                _ => {
+                    tracing::warn!(
+                        %tab_id,
+                        workspace_id = %indexed_workspace_id,
+                        expected_origin = %origin,
+                        "dropping a resync tab removal whose mount origin does not own its \
+                         workspace's id namespace"
+                    );
+                }
+            }
+            return;
+        };
+        if !self.workspace_matches_federation_origin(ws_idx, &origin) {
+            tracing::warn!(
+                %tab_id,
+                expected_origin = %origin,
+                "dropping a resync tab removal whose mount origin does not match its \
+                 workspace's federation origin"
+            );
+            return;
+        }
+        let Some(tab_idx) = tab_number.and_then(|number| {
+            self.state.workspaces[ws_idx]
+                .tabs
+                .iter()
+                .position(|tab| tab.number == number)
+        }) else {
+            // Already gone (pane removals collapsed it) — pruning the index
+            // is the whole job.
+            self.remote_resync_tab_index.remove(&tab_id);
+            return;
+        };
+        // A workspace must always keep at least one tab; closing the last
+        // one is a workspace close, which the pane-removal path already owns
+        // (`Workspace::close_pane` returning true). Leave it alone here — and
+        // leave its index entry alone too, so the still-live local tab keeps
+        // resolving instead of having later panes build a duplicate beside it.
+        if self.state.workspaces[ws_idx].tabs.len() <= 1 {
+            return;
+        }
+        self.remote_resync_tab_index.remove(&tab_id);
+
+        let public_tab_id = self.public_tab_id(ws_idx, tab_idx);
+        // Purge-gap fix: `public_tab_id` is the same canonical id
+        // `dispatch_remote_tab_close` stores in `RemoteCloseTarget::Tab`
+        // (never the mirror-namespaced `tab_id` parameter above, a different
+        // id scheme) — compute it before `close_tab` below invalidates
+        // `tab_idx`, so a pending tab-close response arriving after this
+        // resync removal can no longer act on whatever later reuses the
+        // same tab slot.
+        if let Some(public_tab_id) = public_tab_id.as_deref() {
+            self.purge_pending_remote_close_for_tab(public_tab_id);
+        }
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
+        let pane_ids: Vec<PaneId> = self.state.workspaces[ws_idx]
+            .tabs
+            .get(tab_idx)
+            .map(|tab| tab.layout.pane_ids())
+            .unwrap_or_default();
+
+        if !self.state.workspaces[ws_idx].close_tab(tab_idx) {
+            tracing::warn!(
+                %tab_id,
+                "resync reported a closed remote tab but the local tab could not be closed"
+            );
+            return;
+        }
+        let closed_pane_ids: std::collections::HashSet<PaneId> = pane_ids.iter().copied().collect();
+        self.remote_resync_pane_index
+            .retain(|_, local_pane_id| !closed_pane_ids.contains(local_pane_id));
+        self.state.remove_plugin_pane_records(pane_ids);
+        self.state.remove_unattached_terminal_ids(terminal_ids);
+        self.shutdown_detached_terminal_runtimes();
+        self.schedule_session_save();
+
+        if let Some(public_tab_id) = public_tab_id {
+            self.emit_event(EventEnvelope {
+                event: EventKind::TabClosed,
+                data: EventData::TabClosed {
+                    tab_id: public_tab_id,
+                    workspace_id,
+                },
+            });
+        }
+
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    /// Whether `ws_idx`'s workspace was materialized by a mount from
+    /// `origin`. Shared origin fence for the federation resync handlers: a
+    /// differently-mounted host must not be able to mutate another mount's
+    /// workspace by guessing its ids.
+    #[cfg(unix)]
+    fn workspace_matches_federation_origin(
+        &self,
+        ws_idx: usize,
+        origin: &crate::remote::federation::id::HostKey,
+    ) -> bool {
+        let space_key = format!("federation:{}", origin.as_str());
+        self.state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.worktree_space())
+            .is_some_and(|space| space.key == space_key)
     }
 
     /// `AppEvent::FederationResyncPaneRemoved` handler (post-mount pane
@@ -1389,11 +2681,7 @@ impl App {
             return;
         };
 
-        let space_key = format!("federation:{}", origin.as_str());
-        let origin_matches = self.state.workspaces[ws_idx]
-            .worktree_space()
-            .is_some_and(|space| space.key == space_key);
-        if !origin_matches {
+        if !self.workspace_matches_federation_origin(ws_idx, &origin) {
             tracing::warn!(
                 %pane_id,
                 expected_origin = %origin,
@@ -1409,6 +2697,11 @@ impl App {
             self.layout_update_target_after_pane_removal(ws_idx, local_pane_id);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, local_pane_id);
 
+        // Captured while the workspace is still present: the last pane's
+        // removal below can take the whole workspace with it, and the purge
+        // afterwards is keyed by this local id.
+        let local_workspace_id = self.state.workspaces.get(ws_idx).map(|ws| ws.id.clone());
+
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return;
@@ -1418,9 +2711,21 @@ impl App {
         self.state.remove_plugin_pane_records([local_pane_id]);
 
         if should_close_workspace {
-            self.state.selected = ws_idx;
-            self.state.close_selected_workspace();
+            // The last pane took its workspace with it, so this removal is a
+            // workspace removal too: drop the federation bookkeeping keyed on
+            // it and settle the mount, exactly as the workspace-level handlers
+            // do. Otherwise the link, its drive task and the `remote_mirrors`
+            // entry outlive the last visible mirror and block a remount.
+            if let Some(local_workspace_id) = local_workspace_id {
+                let closing_ids: std::collections::HashSet<String> =
+                    std::iter::once(local_workspace_id).collect();
+                self.purge_federation_state_for_workspaces(&closing_ids);
+            }
+            // One workspace, not the mount's whole federation group — see
+            // `close_single_workspace_at`.
+            self.close_single_workspace_at(ws_idx);
             self.shutdown_detached_terminal_runtimes();
+            self.end_federation_mount_if_no_mirrors_remain(&origin);
             if let Some(public_pane_id) = public_pane_id {
                 self.emit_event(EventEnvelope {
                     event: EventKind::PaneClosed,
@@ -1489,16 +2794,76 @@ pub(crate) struct PendingRemoteSplit {
 /// Populated by the ungated dispatch path but only read by the
 /// `#[cfg(unix)]` federation response handlers, so every field is unread on a
 /// target without the federation mount primitives.
+/// Where a mirrored remote tab lives locally (`App::remote_resync_tab_index`
+/// value). Identifies the local tab by workspace id + *public tab number*
+/// rather than a `Vec` index because tab indices shift whenever any earlier
+/// tab in the same workspace closes, while `Tab::number` is stable for the
+/// life of the tab and never reused (`Workspace::next_public_tab_number` only
+/// ever increases) — the same reasoning `PendingRemoteSplit::workspace_id`
+/// records for workspaces.
+/// Only read by the `#[cfg(unix)]` federation resync handlers.
+/// A mirrored remote workspace a resync has announced but whose local
+/// `Workspace` does not exist yet (`App::remote_resync_workspace_index`
+/// value). Holds only what building that workspace needs once its first pane
+/// arrives; a materialized workspace is looked up by `Workspace::id`
+/// directly, so entries here are short-lived.
+/// Only read by the `#[cfg(unix)]` federation resync handlers.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct RemoteWorkspaceRef {
+    /// The mount that announced this workspace. Re-checked against the
+    /// origin of the pane event that materializes it, so a second mount
+    /// cannot complete another mount's pending workspace.
+    pub(crate) origin: crate::remote::federation::id::HostKey,
+    /// Remote-supplied label, remembered so the local workspace is named
+    /// like its remote counterpart.
+    pub(crate) label: String,
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct RemoteTabRef {
+    /// Stable local `Workspace::id` (already the mirror's namespaced id for
+    /// a materialized federation workspace).
+    pub(crate) workspace_id: String,
+    /// `Tab::number` of the local tab, or `None` while the remote tab is
+    /// known (a resync reported it) but has no local tab yet because none of
+    /// its panes have materialized.
+    pub(crate) tab_number: Option<usize>,
+    /// Remote-supplied label, remembered so the local tab this remote tab
+    /// eventually materializes into is named like its remote counterpart.
+    pub(crate) label: Option<String>,
+}
+
+/// What a `PendingRemoteClose` entry is waiting to tear down once its
+/// response arrives. All three kinds share ONE map and ONE `request_id`
+/// counter (`next_remote_close_request_id`, `app/api/panes.rs`) — see
+/// `App::pending_remote_closes`'s own doc comment for why a second counter
+/// would be unsafe.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) enum RemoteCloseTarget {
+    /// `ClosePaneRequest`.
+    Pane(PaneId),
+    /// `TabCloseRequest` (`tab.close_remote`). Carries the CANONICAL public
+    /// tab id (`App::public_tab_id`), never the caller-supplied target
+    /// string: `App::parse_tab_id`'s `t_<ws>_<idx>` form is positional, so a
+    /// neighbour tab closing and renumbering before the ack arrives could
+    /// otherwise redirect the teardown onto a live tab that reused the same
+    /// index.
+    Tab(String),
+    /// `WorkspaceCloseRequest` (`workspace.close_remote`). No extra payload
+    /// beyond `workspace_id` below — that already identifies the target.
+    Workspace,
+}
+
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct PendingRemoteClose {
     /// Stable workspace id (`Workspace::id`), same reasoning as
     /// `PendingRemoteSplit::workspace_id`.
     pub(crate) workspace_id: String,
-    pub(crate) pane_id: PaneId,
     /// The mount this close request was actually sent to
     /// (`App::federation_host_key_for_workspace` at mint time), same
     /// origin-fencing reasoning as `PendingRemoteSplit::origin`.
     pub(crate) origin: crate::remote::federation::id::HostKey,
+    pub(crate) target: RemoteCloseTarget,
 }
 
 fn terminal_agent_session_info(
@@ -1602,6 +2967,61 @@ mod federation_materialization_tests {
             agent_session: None,
             scroll: None,
             revision: 0,
+        }
+    }
+
+    /// The single mirrored tab's namespaced (public) id — the exact key
+    /// `App::remote_resync_tab_index` is keyed on, so a test can address the
+    /// already-materialized tab the way a real resync diff would.
+    fn only_tab_id(mirror: &RemoteMirror) -> String {
+        mirror
+            .tabs()
+            .keys()
+            .next()
+            .cloned()
+            .expect("the test mirror always holds exactly one tab")
+    }
+
+    fn tab_info_for(tab_id: &str, number: usize, label: &str) -> RemoteTabInfo {
+        RemoteTabInfo {
+            tab_id: tab_id.to_string(),
+            workspace_id: "w1".to_string(),
+            number,
+            label: label.to_string(),
+            focused: false,
+            pane_count: 1,
+            agent_status: AgentStatus::Idle,
+        }
+    }
+
+    fn pane_info_in_tab(pane_id: &str, terminal_id: &str, tab_id: &str) -> RemotePaneInfo {
+        let mut pane = pane_info(pane_id, terminal_id);
+        pane.tab_id = tab_id.to_string();
+        pane
+    }
+
+    /// Two remote tabs, one pane each — the shape that regressed into a
+    /// single local tab with two splits.
+    fn two_tab_snapshot() -> SessionSnapshot {
+        let mut workspace = workspace_info();
+        workspace.tab_count = 2;
+        SessionSnapshot {
+            version: "0.0.0-test".to_string(),
+            protocol: 1,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: vec![workspace],
+            tabs: vec![
+                tab_info_for("w1-tab", 1, "first remote tab"),
+                tab_info_for("w1-tab2", 2, "second remote tab"),
+            ],
+            panes: vec![
+                pane_info_in_tab("p1", "t1", "w1-tab"),
+                pane_info_in_tab("p2", "t2", "w1-tab2"),
+            ],
+            layouts: Vec::new(),
+            agents: Vec::new(),
         }
     }
 
@@ -1909,8 +3329,8 @@ mod federation_materialization_tests {
             request_id,
             PendingRemoteClose {
                 workspace_id,
-                pane_id,
                 origin: origin.clone(),
+                target: RemoteCloseTarget::Pane(pane_id),
             },
         );
 
@@ -1942,8 +3362,8 @@ mod federation_materialization_tests {
             request_id,
             PendingRemoteClose {
                 workspace_id,
-                pane_id,
                 origin: real_origin,
+                target: RemoteCloseTarget::Pane(pane_id),
             },
         );
 
@@ -1990,8 +3410,8 @@ mod federation_materialization_tests {
             request_id,
             PendingRemoteClose {
                 workspace_id,
-                pane_id: root_pane_id,
                 origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Pane(root_pane_id),
             },
         );
 
@@ -2039,8 +3459,8 @@ mod federation_materialization_tests {
             request_id,
             PendingRemoteClose {
                 workspace_id,
-                pane_id,
                 origin: origin.clone(),
+                target: RemoteCloseTarget::Pane(pane_id),
             },
         );
 
@@ -2050,6 +3470,470 @@ mod federation_materialization_tests {
         assert!(
             app.find_pane(pane_id).is_some(),
             "a close failure must not touch the local pane"
+        );
+    }
+
+    /// `AppEvent::FederationWorkspaceCloseReady` handler
+    /// (`workspace.close_remote`): a `WorkspaceCloseResponse::Closed` must
+    /// tear the pending workspace down, mirroring
+    /// `close_pane_ready_tears_down_the_pending_pane`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_close_ready_tears_down_the_pending_workspace() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        let request_id = 60u64;
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id: workspace_id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Workspace,
+            },
+        );
+
+        app.handle_federation_workspace_close_ready(request_id, mount.host_key.clone());
+
+        assert!(
+            !app.state.workspaces.iter().any(|ws| ws.id == workspace_id),
+            "a WorkspaceCloseResponse::Closed must tear the pending workspace down"
+        );
+        assert!(!app.pending_remote_closes.contains_key(&request_id));
+    }
+
+    /// Retiring a mount's LAST mirrored workspace must also end the mount.
+    /// The mount owns the link, the drive task and the `remote_mirrors`
+    /// entry; leaving it registered with nothing visible behind it strands
+    /// all three, and a later remount of the same host reports it as already
+    /// live. The local `workspace.close` verb ends it inline, so the
+    /// confirmed-close path has to as well or the two verbs disagree.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_close_ready_ends_a_mount_whose_last_mirror_it_retired() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        assert_eq!(
+            created.len(),
+            1,
+            "this fixture mounts exactly one workspace, so closing it empties the mount"
+        );
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        app.state
+            .begin_federation_mount(mirror)
+            .expect("registering the mount must succeed");
+
+        let request_id = 61u64;
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id: workspace_id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Workspace,
+            },
+        );
+        app.handle_federation_workspace_close_ready(request_id, mount.host_key.clone());
+
+        assert!(
+            !app.state.workspaces.iter().any(|ws| ws.id == workspace_id),
+            "the confirmed close must still retire the workspace"
+        );
+        assert!(
+            !app.state.remote_mirrors.contains_key(&mount.host_key),
+            "retiring the mount's last mirrored workspace must end the mount, not strand it"
+        );
+    }
+
+    /// The remote-initiated removal must settle the mount exactly as the
+    /// client-initiated close does. This is the normal flow when the OTHER
+    /// user closes the last mirrored workspace: nothing local was clicked, so
+    /// only the resync handler can notice the mount just went empty. Leaving
+    /// it registered strands the link, the drive task and the `remote_mirrors`
+    /// entry with nothing visible behind them, and a remount of the same host
+    /// is refused as already live until the server restarts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_workspace_removed_ends_a_mount_whose_last_mirror_it_retired() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        assert_eq!(
+            created.len(),
+            1,
+            "this fixture mounts exactly one workspace, so removing it empties the mount"
+        );
+        let workspace_id = app.state.workspaces[created[0]].id.clone();
+        app.state
+            .begin_federation_mount(mirror)
+            .expect("registering the mount must succeed");
+
+        app.handle_federation_resync_workspace_removed(
+            mount.host_key.clone(),
+            workspace_id.clone(),
+        );
+
+        assert!(
+            !app.state.workspaces.iter().any(|ws| ws.id == workspace_id),
+            "the remote's removal must still retire the workspace locally"
+        );
+        assert!(
+            !app.state.remote_mirrors.contains_key(&mount.host_key),
+            "retiring the mount's last mirrored workspace must end the mount, not strand it"
+        );
+    }
+
+    /// Origin-check counterpart, mirroring
+    /// `close_pane_ready_from_a_different_mount_than_the_request_is_ignored`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_close_ready_from_a_different_mount_than_the_request_is_ignored() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        let request_id = 61u64;
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id: workspace_id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Workspace,
+            },
+        );
+
+        let spoofed_origin = HostKey::new("evil-host", "s1");
+        app.handle_federation_workspace_close_ready(request_id, spoofed_origin);
+
+        assert!(
+            app.pending_remote_closes.contains_key(&request_id),
+            "a response from the wrong origin must not consume the pending entry"
+        );
+        assert!(
+            app.state.workspaces.iter().any(|ws| ws.id == workspace_id),
+            "a response from the wrong origin must not tear the workspace down"
+        );
+    }
+
+    /// Workspace counterpart of the pane retry/duplicate-click safety: an ack that arrives after a
+    /// racing resync already removed the workspace must not panic and must
+    /// remain an idempotent no-op, mirroring
+    /// `close_pane_ready_after_the_pane_was_already_resync_removed_is_a_no_op`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_close_ready_after_a_racing_resync_removal_is_idempotent() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        let request_id = 62u64;
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id: workspace_id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Workspace,
+            },
+        );
+
+        // A racing resync tears the workspace down first (its own
+        // `WorkspaceCloseResponse` has not arrived yet from this test's
+        // point of view).
+        app.handle_federation_resync_workspace_removed(
+            mount.host_key.clone(),
+            workspace_id.clone(),
+        );
+        assert!(!app.state.workspaces.iter().any(|ws| ws.id == workspace_id));
+
+        // The (now-late) `WorkspaceCloseResponse::Closed` must not panic and
+        // must not double-tear-down an already-gone workspace.
+        app.handle_federation_workspace_close_ready(request_id, mount.host_key.clone());
+
+        assert!(
+            !app.state.workspaces.iter().any(|ws| ws.id == workspace_id),
+            "the workspace must remain gone; no re-creation or panic"
+        );
+    }
+
+    /// `AppEvent::FederationWorkspaceCloseFailed` handler: drops the pending
+    /// entry and does not touch layout, mirroring
+    /// `close_pane_failed_drops_the_pending_entry_without_touching_layout`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_close_failed_drops_the_pending_entry_without_touching_layout() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        let request_id = 63u64;
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id: workspace_id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Workspace,
+            },
+        );
+
+        app.handle_federation_workspace_close_failed(
+            request_id,
+            "refused".to_string(),
+            mount.host_key.clone(),
+        );
+
+        assert!(!app.pending_remote_closes.contains_key(&request_id));
+        assert!(
+            app.state.workspaces.iter().any(|ws| ws.id == workspace_id),
+            "a close failure must not touch the local workspace"
+        );
+    }
+
+    /// `AppEvent::FederationTabCloseReady` handler (`tab.close_remote`): a
+    /// `TabCloseResponse::Closed` for a NON-last tab must close only that
+    /// tab, leaving its sibling(s) alive.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tab_close_ready_tears_down_the_pending_tab() {
+        let (mut app, mount, ws_idx, _workspace_id, tab_ids) = mount_two_tab_mirror();
+        let tab_id_to_close = app.public_tab_id(ws_idx, 1).unwrap();
+
+        let request_id = 70u64;
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id: app.state.workspaces[ws_idx].id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Tab(tab_id_to_close.clone()),
+            },
+        );
+
+        app.handle_federation_tab_close_ready(request_id, mount.host_key.clone());
+
+        assert_eq!(
+            app.state.workspaces[ws_idx].tabs.len(),
+            1,
+            "closing the non-last tab must leave the workspace's other tab alive"
+        );
+        assert!(!app.pending_remote_closes.contains_key(&request_id));
+        assert!(
+            !app.remote_resync_tab_index.contains_key(&tab_ids[1]),
+            "the closed tab's resync index entry must be pruned too"
+        );
+    }
+
+    /// Origin-check counterpart, mirroring
+    /// `close_pane_ready_from_a_different_mount_than_the_request_is_ignored`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tab_close_ready_from_a_different_mount_than_the_request_is_ignored() {
+        let (mut app, mount, ws_idx, _workspace_id, _tab_ids) = mount_two_tab_mirror();
+        let tab_id_to_close = app.public_tab_id(ws_idx, 1).unwrap();
+
+        let request_id = 71u64;
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id: app.state.workspaces[ws_idx].id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Tab(tab_id_to_close),
+            },
+        );
+
+        let spoofed_origin = HostKey::new("evil-host", "s1");
+        app.handle_federation_tab_close_ready(request_id, spoofed_origin);
+
+        assert!(
+            app.pending_remote_closes.contains_key(&request_id),
+            "a response from the wrong origin must not consume the pending entry"
+        );
+        assert_eq!(
+            app.state.workspaces[ws_idx].tabs.len(),
+            2,
+            "a response from the wrong origin must not tear any tab down"
+        );
+    }
+
+    /// `AppEvent::FederationTabCloseFailed` handler: drops the pending entry
+    /// and does not touch layout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tab_close_failed_drops_the_pending_entry_without_touching_layout() {
+        let (mut app, mount, ws_idx, _workspace_id, _tab_ids) = mount_two_tab_mirror();
+        let tab_id_to_close = app.public_tab_id(ws_idx, 1).unwrap();
+
+        let request_id = 72u64;
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id: app.state.workspaces[ws_idx].id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Tab(tab_id_to_close),
+            },
+        );
+
+        app.handle_federation_tab_close_failed(
+            request_id,
+            "refused".to_string(),
+            mount.host_key.clone(),
+        );
+
+        assert!(!app.pending_remote_closes.contains_key(&request_id));
+        assert_eq!(
+            app.state.workspaces[ws_idx].tabs.len(),
+            2,
+            "a close failure must not touch the local tabs"
+        );
+    }
+
+    /// Purge-gap fix: a pending tab close must be dropped when its tab is
+    /// removed by a resync BEFORE the ack arrives, so a late/never-arriving
+    /// `TabCloseResponse` cannot act on whatever later reuses the same slot.
+    /// `purge_federation_state_for_workspaces` alone would miss this — it
+    /// keys on WORKSPACE id, and this workspace stays up (only one of its
+    /// two tabs is removed).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pending_tab_close_is_purged_when_the_tab_is_removed_by_resync() {
+        let (mut app, mount, ws_idx, _workspace_id, tab_ids) = mount_two_tab_mirror();
+        let tab_id_to_close = app.public_tab_id(ws_idx, 1).unwrap();
+
+        let request_id = 73u64;
+        app.register_pending_remote_close(
+            request_id,
+            PendingRemoteClose {
+                workspace_id: app.state.workspaces[ws_idx].id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Tab(tab_id_to_close),
+            },
+        );
+        assert!(app.pending_remote_closes.contains_key(&request_id));
+
+        // The resync path removes the same tab first — a plausible race
+        // between a resync poll and this test's slower `TabCloseResponse`.
+        app.handle_federation_resync_tab_removed(mount.host_key.clone(), tab_ids[1].clone());
+
+        assert!(
+            !app.pending_remote_closes.contains_key(&request_id),
+            "the pending tab close must be purged once its tab is gone, not left to act \
+             on a later slot reuse"
+        );
+    }
+
+    /// Every close kind mints its `request_id`
+    /// from the SAME counter (`next_remote_close_request_id`,
+    /// `app/api/panes.rs`) precisely because they all correlate through this
+    /// ONE `pending_remote_closes` map — see that function's own doc comment
+    /// for why a second counter would be unsafe. Pins the actual invariant
+    /// that protects: a pane close and a tab close registered back to back
+    /// must occupy two DISTINCT entries, and delivering the pane's ack must
+    /// tear down only the pane, leaving the tab's own still-pending entry
+    /// untouched. The origin check alone cannot catch a collision here — two
+    /// closes on the SAME mount share the identical `HostKey`, so only
+    /// distinct `request_id`s (and thus distinct map entries) keep them
+    /// apart.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pane_close_and_a_tab_close_registered_together_occupy_distinct_pending_entries() {
+        let (mut app, mount, ws_idx, workspace_id, _tab_ids) = mount_two_tab_mirror();
+        let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        let tab_id_to_close = app.public_tab_id(ws_idx, 1).unwrap();
+
+        let pane_request_id = 80u64;
+        let tab_request_id = 81u64;
+        app.register_pending_remote_close(
+            pane_request_id,
+            PendingRemoteClose {
+                workspace_id: workspace_id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Pane(pane_id),
+            },
+        );
+        app.register_pending_remote_close(
+            tab_request_id,
+            PendingRemoteClose {
+                workspace_id: workspace_id.clone(),
+                origin: mount.host_key.clone(),
+                target: RemoteCloseTarget::Tab(tab_id_to_close),
+            },
+        );
+        assert_eq!(
+            app.pending_remote_closes.len(),
+            2,
+            "a pane close and a tab close registered together must occupy two distinct entries"
+        );
+
+        app.handle_federation_close_pane_ready(pane_request_id, mount.host_key.clone());
+
+        assert!(
+            app.find_pane(pane_id).is_none(),
+            "the pane's own ack must tear the pane down"
+        );
+        assert!(
+            !app.pending_remote_closes.contains_key(&pane_request_id),
+            "the pane's pending entry must be consumed by its own ack"
+        );
+        assert!(
+            app.pending_remote_closes.contains_key(&tab_request_id),
+            "a colliding-looking id space must not let the pane's ack pop the tab's still-\
+             pending entry — they are different entries entirely, not a shared one"
+        );
+        assert_eq!(
+            app.state.workspaces[ws_idx].tabs.len(),
+            1,
+            "the pane's ack closed its own (now-empty) tab, not the sibling tab whose close \
+             is still pending"
         );
     }
 
@@ -2105,10 +3989,12 @@ mod federation_materialization_tests {
             crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
         let pane_state = crate::pane::PaneState::new(terminal_id.clone());
         let remote_pane_id = format!("{workspace_id}:p9");
+        let remote_tab_id = only_tab_id(&mirror);
 
         app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
             origin: mount.host_key.clone(),
             workspace_id: workspace_id.clone(),
+            tab_id: remote_tab_id.clone(),
             pane_id: remote_pane_id.clone(),
             local_pane_id,
             terminal_id,
@@ -2186,11 +4072,13 @@ mod federation_materialization_tests {
             crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
         let pane_state = crate::pane::PaneState::new(terminal_id.clone());
         let remote_pane_id = format!("{workspace_id}:p9");
+        let remote_tab_id = only_tab_id(&mirror);
         let spoofed_origin = crate::remote::federation::id::HostKey::new("evil-host", "s1");
 
         app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
             origin: spoofed_origin,
             workspace_id: workspace_id.clone(),
+            tab_id: remote_tab_id.clone(),
             pane_id: remote_pane_id.clone(),
             local_pane_id,
             terminal_id,
@@ -2266,10 +4154,12 @@ mod federation_materialization_tests {
             crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
         let pane_state = crate::pane::PaneState::new(terminal_id.clone());
         let remote_pane_id = format!("{workspace_id}:p9");
+        let remote_tab_id = only_tab_id(&mirror);
 
         app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
             origin: mount.host_key.clone(),
             workspace_id: workspace_id.clone(),
+            tab_id: remote_tab_id.clone(),
             pane_id: remote_pane_id.clone(),
             local_pane_id,
             terminal_id: terminal_id.clone(),
@@ -2472,10 +4362,12 @@ mod federation_materialization_tests {
             crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
         let pane_state = crate::pane::PaneState::new(terminal_id.clone());
         let remote_pane_id = format!("{workspace_id}:p9");
+        let remote_tab_id = only_tab_id(&mirror);
 
         app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
             origin: mount.host_key.clone(),
             workspace_id: workspace_id.clone(),
+            tab_id: remote_tab_id.clone(),
             pane_id: remote_pane_id.clone(),
             local_pane_id,
             terminal_id: terminal_id.clone(),
@@ -2493,5 +4385,962 @@ mod federation_materialization_tests {
             app.find_pane(local_pane_id).is_none(),
             "a resync-created pane's removal must still work unchanged after the Gap B fix"
         );
+    }
+
+    /// Builds the fully-formed local pane payload a mount's drive task hands
+    /// back on `AppEvent::FederationResyncPaneCreated`, minus the routing
+    /// fields each caller sets. Same construction the older resync tests
+    /// spell out inline; factored out because the multi-tab tests below need
+    /// it repeatedly.
+    #[cfg(unix)]
+    fn resync_pane_payload() -> (
+        crate::layout::PaneId,
+        crate::terminal::TerminalId,
+        crate::terminal::TerminalState,
+        crate::terminal::TerminalRuntime,
+        crate::pane::PaneState,
+    ) {
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel::<crate::events::AppEvent>(4);
+        let (rt_out_tx, _rt_out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(4);
+        let (rt_clipboard_tx, _rt_clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let render_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let render_dirty = std::sync::Arc::new(crate::render_signal::RenderSignal::new());
+
+        let local_pane_id = crate::layout::PaneId::alloc();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let runtime = crate::terminal::TerminalRuntime::spawn_remote(
+            local_pane_id,
+            24,
+            80,
+            1 << 16,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            terminal_id.to_string(),
+            1,
+            rt_out_tx,
+            output_rx,
+            rt_clipboard_tx,
+            events_tx,
+            render_notify,
+            render_dirty,
+        )
+        .expect("spawn_remote must succeed for a fresh channel pair");
+        let terminal =
+            crate::terminal::TerminalState::new(terminal_id.clone(), std::path::PathBuf::from("/"));
+        let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+        (local_pane_id, terminal_id, terminal, runtime, pane_state)
+    }
+
+    /// Mounts a two-tab mirror and returns the app plus the materialized
+    /// workspace index, its local id, and both namespaced remote tab ids in
+    /// remote tab-number order.
+    #[cfg(unix)]
+    fn mount_two_tab_mirror() -> (App, Mount, usize, String, Vec<String>) {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_tab_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        let mut tabs: Vec<_> = mirror.tabs().values().collect();
+        tabs.sort_by_key(|tab| tab.number);
+        let tab_ids = tabs.iter().map(|tab| tab.tab_id.clone()).collect();
+        (app, mount, ws_idx, workspace_id, tab_ids)
+    }
+
+    /// Regression guard for the reported collapse: a remote workspace with N
+    /// tabs must materialize as N local tabs, not one tab with N splits.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn multi_tab_mount_materializes_one_local_tab_per_remote_tab() {
+        let (app, _mount, ws_idx, _workspace_id, tab_ids) = mount_two_tab_mirror();
+
+        let ws = &app.state.workspaces[ws_idx];
+        ws.assert_invariants_for_test();
+        assert_eq!(ws.tabs.len(), 2, "each remote tab gets its own local tab");
+        for tab in &ws.tabs {
+            assert_eq!(
+                tab.panes.len(),
+                1,
+                "each remote tab's single pane must stay in its own tab, not become a split"
+            );
+        }
+        assert_eq!(
+            ws.tabs
+                .iter()
+                .map(|tab| tab.custom_name.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("first remote tab".to_string()),
+                Some("second remote tab".to_string())
+            ],
+            "each local tab carries its remote counterpart's label"
+        );
+
+        for tab_id in &tab_ids {
+            let tab_ref = app
+                .remote_resync_tab_index
+                .get(tab_id)
+                .expect("every mount-time tab must be indexed for later resyncs");
+            assert!(tab_ref.tab_number.is_some());
+        }
+    }
+
+    /// A resync pane whose remote tab this mount already materialized must
+    /// land in THAT tab — including when it is not the workspace's active
+    /// tab, which is exactly what the old `Workspace::active_tab` fallback
+    /// got wrong.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_pane_created_with_a_known_tab_id_lands_in_that_tab() {
+        let (mut app, mount, ws_idx, workspace_id, tab_ids) = mount_two_tab_mirror();
+        app.state.workspaces[ws_idx].active_tab = 0;
+
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: workspace_id.clone(),
+            tab_id: tab_ids[1].clone(),
+            pane_id: format!("{workspace_id}:p9"),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        let ws = &app.state.workspaces[ws_idx];
+        ws.assert_invariants_for_test();
+        assert_eq!(ws.tabs.len(), 2, "a known tab must not spawn another tab");
+        assert_eq!(
+            ws.find_tab_index_for_pane(local_pane_id),
+            Some(1),
+            "the pane must be spliced into its own remote tab, not the active one"
+        );
+        assert!(ws.public_pane_number(local_pane_id).is_some());
+    }
+
+    /// The reported bug, at the event level: a resync pane for a remote tab
+    /// this mount has never seen must create a new local tab instead of
+    /// splitting the active one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_pane_created_with_an_unknown_tab_id_creates_a_new_local_tab() {
+        let (mut app, mount, ws_idx, workspace_id, _tab_ids) = mount_two_tab_mirror();
+        let unknown_tab_id = format!("{workspace_id}:tab-new");
+        app.handle_federation_resync_tab_created(
+            mount.host_key.clone(),
+            workspace_id.clone(),
+            unknown_tab_id.clone(),
+            "third remote tab".to_string(),
+        );
+
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: workspace_id.clone(),
+            tab_id: unknown_tab_id.clone(),
+            pane_id: format!("{workspace_id}:p9"),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        let ws = &app.state.workspaces[ws_idx];
+        ws.assert_invariants_for_test();
+        assert_eq!(ws.tabs.len(), 3, "an unseen remote tab must create a tab");
+        let tab_idx = ws
+            .find_tab_index_for_pane(local_pane_id)
+            .expect("the new pane must be placed");
+        assert_eq!(tab_idx, 2);
+        assert_eq!(ws.tabs[tab_idx].panes.len(), 1, "it is not a split");
+        assert_eq!(
+            ws.tabs[tab_idx].custom_name.as_deref(),
+            Some("third remote tab"),
+            "the tab-created event's label must reach the materialized tab"
+        );
+        assert!(ws.public_pane_number(local_pane_id).is_some());
+        assert_eq!(
+            app.remote_resync_tab_index
+                .get(&unknown_tab_id)
+                .and_then(|tab_ref| tab_ref.tab_number),
+            ws.public_tab_number(tab_idx),
+            "the new tab must be indexed so its next pane splits into it"
+        );
+    }
+
+    /// Tab created then closed over resync: the local tab appears and then
+    /// goes away again, leaving no stale tab- or pane-index entries and a
+    /// still-valid workspace.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_tab_created_then_closed_round_trip_leaves_state_consistent() {
+        let (mut app, mount, ws_idx, workspace_id, _tab_ids) = mount_two_tab_mirror();
+        let new_tab_id = format!("{workspace_id}:tab-new");
+        let new_pane_id = format!("{workspace_id}:p9");
+        app.handle_federation_resync_tab_created(
+            mount.host_key.clone(),
+            workspace_id.clone(),
+            new_tab_id.clone(),
+            "third remote tab".to_string(),
+        );
+
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: workspace_id.clone(),
+            tab_id: new_tab_id.clone(),
+            pane_id: new_pane_id.clone(),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+        assert_eq!(app.state.workspaces[ws_idx].tabs.len(), 3);
+
+        app.handle_federation_resync_tab_removed(mount.host_key.clone(), new_tab_id.clone());
+
+        // `materialize_federation_mount` itself never focuses the workspace
+        // it creates (the mount caller does), so the App-level invariants —
+        // which require an active workspace — need that set first.
+        app.state.active = Some(ws_idx);
+        app.state.assert_invariants_for_test();
+        let ws = &app.state.workspaces[ws_idx];
+        ws.assert_invariants_for_test();
+        assert_eq!(ws.tabs.len(), 2, "the resync-created tab must be gone");
+        assert!(ws.pane_state(local_pane_id).is_none());
+        assert!(
+            !app.remote_resync_tab_index.contains_key(&new_tab_id),
+            "a closed remote tab must not leave a stale tab-index entry"
+        );
+        assert!(
+            !app.remote_resync_pane_index.contains_key(&new_pane_id),
+            "closing a tab must prune its panes from the pane index too"
+        );
+    }
+
+    /// A remote tab close from a host other than the one that mounted the
+    /// workspace must not tear the local tab down — and must not evict its
+    /// index entry on the way to refusing. Authorization has to happen before
+    /// the mutation: a wiped entry sends the next resync pane for that live
+    /// remote tab down the "unknown tab" branch, building a duplicate local
+    /// tab beside the real one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_tab_removed_from_the_wrong_origin_is_dropped_and_keeps_the_index() {
+        let (mut app, _mount, ws_idx, _workspace_id, tab_ids) = mount_two_tab_mirror();
+        let spoofed_origin = crate::remote::federation::id::HostKey::new("evil-host", "s1");
+        let before = app
+            .remote_resync_tab_index
+            .get(&tab_ids[1])
+            .map(|tab_ref| (tab_ref.workspace_id.clone(), tab_ref.tab_number))
+            .expect("a mounted tab is indexed");
+
+        app.handle_federation_resync_tab_removed(spoofed_origin, tab_ids[1].clone());
+
+        assert_eq!(
+            app.state.workspaces[ws_idx].tabs.len(),
+            2,
+            "a foreign origin must not be able to close another mount's tab"
+        );
+        let after = app
+            .remote_resync_tab_index
+            .get(&tab_ids[1])
+            .map(|tab_ref| (tab_ref.workspace_id.clone(), tab_ref.tab_number));
+        assert_eq!(
+            after,
+            Some(before),
+            "a refused removal must leave the tab index exactly as it found it"
+        );
+    }
+
+    /// The multi-workspace acceptance criterion: a workspace that appears on
+    /// the mounted host after mount — because the serving host created one,
+    /// or because this client asked it to with a `WorkspaceCreateRequest` —
+    /// must materialize as a real *second* local workspace carrying the
+    /// mirror's namespaced id and the mount's federation membership, so the
+    /// federation-origin classification groups it with the first.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_workspace_created_materializes_a_second_federated_workspace() {
+        let (mut app, mount, first_ws_idx, first_workspace_id, _tab_ids) = mount_two_tab_mirror();
+        let new_workspace_id = format!("r:{}:w2", mount.host_key.as_str());
+        let new_tab_id = format!("r:{}:w2-tab", mount.host_key.as_str());
+        let new_pane_id = format!("r:{}:w2p1", mount.host_key.as_str());
+
+        app.handle_federation_resync_workspace_created(
+            mount.host_key.clone(),
+            new_workspace_id.clone(),
+            "second remote workspace".to_string(),
+        );
+        app.handle_federation_resync_tab_created(
+            mount.host_key.clone(),
+            new_workspace_id.clone(),
+            new_tab_id.clone(),
+            "w2 root tab".to_string(),
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "the announcement alone must not create a workspace: a Tab needs a pane"
+        );
+
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: new_workspace_id.clone(),
+            tab_id: new_tab_id.clone(),
+            pane_id: new_pane_id.clone(),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        assert_eq!(app.state.workspaces.len(), 2, "a second workspace exists");
+        let new_ws_idx = app
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == new_workspace_id)
+            .expect("the new workspace carries the mirror's namespaced id verbatim");
+        assert_ne!(new_ws_idx, first_ws_idx);
+        assert_ne!(new_workspace_id, first_workspace_id);
+
+        let ws = &app.state.workspaces[new_ws_idx];
+        ws.assert_invariants_for_test();
+        // The exact primitive `ui::sidebar::workspace_federation_origin` is
+        // built on — the badge/grouping must classify this as federated.
+        assert!(matches!(classify(&ws.id), IdClass::Remote(host) if host == mount.host_key));
+        assert_eq!(
+            ws.worktree_space().map(|space| space.key.clone()),
+            Some(format!("federation:{}", mount.host_key.as_str())),
+            "the new workspace joins the same mount's federation group"
+        );
+        assert_eq!(ws.display_name(), "second remote workspace");
+        assert_eq!(ws.tabs.len(), 1);
+        assert_eq!(
+            ws.tabs[0].custom_name.as_deref(),
+            Some("w2 root tab"),
+            "the announced tab label reaches the materialized root tab"
+        );
+        assert!(ws.public_pane_number(local_pane_id).is_some());
+
+        assert_eq!(
+            app.remote_resync_pane_index.get(&new_pane_id),
+            Some(&local_pane_id),
+            "the new workspace's pane is indexed for later resync removals"
+        );
+        assert!(
+            app.remote_resync_tab_index
+                .get(&new_tab_id)
+                .and_then(|tab_ref| tab_ref.tab_number)
+                .is_some(),
+            "the new workspace's tab is bound to a live local tab number"
+        );
+        assert!(
+            !app.remote_resync_workspace_index
+                .contains_key(&new_workspace_id),
+            "the pending announcement is consumed once the workspace is real"
+        );
+        // `materialize_federation_mount` never focuses what it creates, and
+        // the whole-state invariants require an active workspace — set it.
+        app.state.active = Some(first_ws_idx);
+        app.state.assert_invariants_for_test();
+    }
+
+    /// Removal is the mirror image: the workspace disappears and every index
+    /// entry pointing into it is pruned, so a later remount cannot resolve a
+    /// stale id onto a dead workspace/tab/pane.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_workspace_removed_prunes_the_workspace_and_its_index_entries() {
+        let (mut app, mount, _ws_idx, _first_workspace_id, _tab_ids) = mount_two_tab_mirror();
+        let new_workspace_id = format!("r:{}:w2", mount.host_key.as_str());
+        let new_tab_id = format!("r:{}:w2-tab", mount.host_key.as_str());
+        let new_pane_id = format!("r:{}:w2p1", mount.host_key.as_str());
+
+        app.handle_federation_resync_workspace_created(
+            mount.host_key.clone(),
+            new_workspace_id.clone(),
+            "second remote workspace".to_string(),
+        );
+        app.handle_federation_resync_tab_created(
+            mount.host_key.clone(),
+            new_workspace_id.clone(),
+            new_tab_id.clone(),
+            "w2 root tab".to_string(),
+        );
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: new_workspace_id.clone(),
+            tab_id: new_tab_id.clone(),
+            pane_id: new_pane_id.clone(),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+        assert_eq!(app.state.workspaces.len(), 2);
+
+        app.handle_federation_resync_workspace_removed(
+            mount.host_key.clone(),
+            new_workspace_id.clone(),
+        );
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "the retired remote workspace is gone locally"
+        );
+        assert!(app
+            .state
+            .workspaces
+            .iter()
+            .all(|ws| ws.id != new_workspace_id));
+        assert!(!app.remote_resync_pane_index.contains_key(&new_pane_id));
+        assert!(!app.remote_resync_tab_index.contains_key(&new_tab_id));
+        assert!(!app
+            .remote_resync_workspace_index
+            .contains_key(&new_workspace_id));
+        app.state.active = Some(0);
+        app.state.assert_invariants_for_test();
+        for ws in &app.state.workspaces {
+            ws.assert_invariants_for_test();
+        }
+    }
+
+    /// Origin fence, both halves: a second mount must be able neither to
+    /// announce a workspace under another mount's namespace nor to close a
+    /// workspace that mount materialized.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_workspace_events_from_the_wrong_origin_are_dropped() {
+        let (mut app, mount, _ws_idx, first_workspace_id, _tab_ids) = mount_two_tab_mirror();
+        let spoofed_origin = crate::remote::federation::id::HostKey::new("evil-host", "s1");
+        let victim_workspace_id = format!("r:{}:w2", mount.host_key.as_str());
+
+        app.handle_federation_resync_workspace_created(
+            spoofed_origin.clone(),
+            victim_workspace_id.clone(),
+            "smuggled".to_string(),
+        );
+        assert!(
+            !app.remote_resync_workspace_index
+                .contains_key(&victim_workspace_id),
+            "a foreign origin must not announce a workspace under another mount's namespace"
+        );
+
+        // A pending announcement made by the real mount must survive a foreign
+        // mount's removal for the same id: wiping it would strand the pane
+        // event that was going to materialize that workspace, with no repair
+        // path.
+        let pending_id = format!("r:{}:w3", mount.host_key.as_str());
+        app.handle_federation_resync_workspace_created(
+            mount.host_key.clone(),
+            pending_id.clone(),
+            "announced".to_string(),
+        );
+        app.handle_federation_resync_workspace_removed(spoofed_origin.clone(), pending_id.clone());
+        assert!(
+            app.remote_resync_workspace_index.contains_key(&pending_id),
+            "a refused removal must not evict another mount's pending announcement"
+        );
+
+        app.handle_federation_resync_workspace_removed(spoofed_origin, first_workspace_id.clone());
+        assert!(
+            app.state
+                .workspaces
+                .iter()
+                .any(|ws| ws.id == first_workspace_id),
+            "a foreign origin must not be able to close another mount's workspace"
+        );
+        // The materialized workspace's own tab entries must be untouched too:
+        // the removal handler purges the tab index for the workspaces it
+        // closes, and a refused removal closes nothing.
+        assert!(
+            app.remote_resync_tab_index
+                .values()
+                .any(|tab_ref| tab_ref.workspace_id == first_workspace_id),
+            "a refused workspace removal must not purge that workspace's index entries"
+        );
+    }
+
+    /// The client-triggered half: a plain `workspace.create` — the method
+    /// every live "new workspace" path funnels into
+    /// (`App::begin_tui_workspace_create`, `App::run`'s
+    /// `request_new_workspace` drain, and the CLI/JSON API, all via
+    /// `runtime_workspace_create`) — must go out over the mount as a
+    /// `WorkspaceCreateRequest` when the workspace it is created from is
+    /// federation-owned, instead of spawning a local workspace. The
+    /// name-prompt dialog's own route is covered separately by
+    /// `named_workspace_create_inside_a_federated_workspace_goes_out_over_the_mount`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_create_inside_a_federated_workspace_goes_out_over_the_mount() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_tab_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        // `federation_host_key_for_workspace` resolves the mount through the
+        // live mirror registry, the same way the production mount path
+        // registers it.
+        app.state
+            .remote_mirrors
+            .insert(mount.host_key.clone(), mirror);
+        app.state.active = Some(ws_idx);
+        app.state.selected = ws_idx;
+        // Drain the frames materialization itself emitted (terminal opens).
+        while out_rx.try_recv().is_ok() {}
+        let before = app.state.workspaces.len();
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "tui.workspace.create".to_string(),
+                method: crate::api::schema::Method::WorkspaceCreate(
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: None,
+                        focus: true,
+                        label: Some("remote scratch".to_string()),
+                        env: Default::default(),
+                    },
+                ),
+            });
+
+        let value: serde_json::Value =
+            serde_json::from_str(&response).expect("the API always answers valid JSON");
+        // A sent request is a success, not a failure: the create really was
+        // accepted and dispatched, it just completes asynchronously.
+        assert_eq!(
+            value
+                .get("result")
+                .and_then(|result| result.get("type"))
+                .and_then(|kind| kind.as_str()),
+            Some("workspace_create_requested"),
+            "unexpected response: {response}"
+        );
+        assert_eq!(
+            value
+                .get("result")
+                .and_then(|result| result.get("origin"))
+                .and_then(|origin| origin.as_str()),
+            Some(mount.host_key.as_str()),
+            "the acknowledgement must name the mount it was sent over: {response}"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            before,
+            "no local workspace may be spawned for a remote-targeted create"
+        );
+
+        let mut sent_label = None;
+        while let Ok(frame) = out_rx.try_recv() {
+            if let FederationMessage::WorkspaceCreateRequest(request) = frame {
+                sent_label = Some(request.label);
+            }
+        }
+        assert_eq!(
+            sent_label,
+            Some(Some("remote scratch".to_string())),
+            "the mount must have received a WorkspaceCreateRequest carrying the label hint"
+        );
+    }
+
+    /// The fence on that routing: an explicit `cwd` is a deliberate
+    /// local-directory choice (the remote host's filesystem is a different
+    /// namespace), so it must still create a local workspace even while a
+    /// federated workspace is in focus.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_create_with_an_explicit_cwd_stays_local_inside_a_federated_workspace() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_tab_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        app.state
+            .remote_mirrors
+            .insert(mount.host_key.clone(), mirror);
+        app.state.active = Some(ws_idx);
+        app.state.selected = ws_idx;
+        let before = app.state.workspaces.len();
+
+        let temp = std::env::temp_dir();
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "tui.workspace.create_cwd".to_string(),
+                method: crate::api::schema::Method::WorkspaceCreate(
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: Some(temp.display().to_string()),
+                        focus: true,
+                        label: None,
+                        env: Default::default(),
+                    },
+                ),
+            });
+
+        assert!(
+            !response.contains("workspace_create_requested"),
+            "an explicit cwd must not be routed to the remote host: {response}"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            before + 1,
+            "an explicit cwd creates a real local workspace"
+        );
+    }
+
+    /// Mounts a two-tab mirror, registers it in the live mirror registry and
+    /// focuses it, returning the app, the mount, the mirrored workspace index
+    /// and the mount's outbound frame receiver. The registry entry is what
+    /// `federation_host_key_for_workspace` resolves a mount through, exactly
+    /// as the production mount path registers it.
+    #[cfg(unix)]
+    fn mounted_and_focused_mirror() -> (
+        App,
+        Mount,
+        usize,
+        tokio::sync::mpsc::UnboundedReceiver<FederationMessage>,
+    ) {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_tab_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        app.state
+            .remote_mirrors
+            .insert(mount.host_key.clone(), mirror);
+        app.state.active = Some(ws_idx);
+        app.state.selected = ws_idx;
+        // Drain the frames materialization itself emitted (terminal opens).
+        while out_rx.try_recv().is_ok() {}
+        (app, mount, ws_idx, out_rx)
+    }
+
+    /// Regression guard for the configuration that silently disabled the whole
+    /// feature: with `ui.prompt_new_workspace_name` on, "new workspace" opens
+    /// a name dialog whose confirm used to always send a locally-resolved
+    /// `cwd`, which the redirect read as a deliberate local-directory choice.
+    /// A user on that config got a local workspace seeded from a path that
+    /// only exists on the serving host. The dialog asks for a name, never a
+    /// directory, so its create must reach the wire — carrying the typed name
+    /// as the label, the only route by which a label reaches the wire at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn named_workspace_create_inside_a_federated_workspace_goes_out_over_the_mount() {
+        let (mut app, _mount, _ws_idx, mut out_rx) = mounted_and_focused_mirror();
+        app.state.prompt_new_workspace_name = true;
+        let before = app.state.workspaces.len();
+
+        app.begin_tui_workspace_create("tui.workspace.create");
+        assert_eq!(
+            app.state.mode,
+            Mode::RenameWorkspace,
+            "the prompt config must open the name dialog"
+        );
+        app.state.name_input = "remote scratch".to_string();
+        app.handle_rename_key_via_api(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            before,
+            "the named create must not spawn a local workspace from a remote-only path"
+        );
+        let mut sent_label = None;
+        while let Ok(frame) = out_rx.try_recv() {
+            if let FederationMessage::WorkspaceCreateRequest(request) = frame {
+                sent_label = Some(request.label);
+            }
+        }
+        assert_eq!(
+            sent_label,
+            Some(Some("remote scratch".to_string())),
+            "the mount must have received a WorkspaceCreateRequest carrying the typed name"
+        );
+    }
+
+    /// The same dialog on a plain local workspace must still create locally,
+    /// at the directory it captured when it opened.
+    #[tokio::test]
+    async fn named_workspace_create_outside_a_mount_still_creates_locally() {
+        let mut app = test_app();
+        let cwd = std::env::temp_dir();
+        app.state.new_terminal_cwd =
+            crate::config::NewTerminalCwdConfig::Path(cwd.display().to_string());
+        app.state.prompt_new_workspace_name = true;
+        let before = app.state.workspaces.len();
+
+        app.begin_tui_workspace_create("tui.workspace.create");
+        app.state.name_input = "local scratch".to_string();
+        app.handle_rename_key_via_api(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            before + 1,
+            "a non-federated named create is still a local create"
+        );
+        assert_eq!(
+            app.state.workspaces[before].custom_name.as_deref(),
+            Some("local scratch")
+        );
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    /// The remote workspace this client asked for must arrive focused —
+    /// otherwise the keypress looks like it did nothing — while a workspace
+    /// the *remote* user created out of band must never pull the local user
+    /// out of what they were doing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_client_requested_remote_workspace_takes_focus_and_a_remote_originated_one_does_not()
+    {
+        let (mut app, mount, ws_idx, _out_rx) = mounted_and_focused_mirror();
+        let origin = mount.host_key.clone();
+
+        // Out-of-band first: the remote user made this one, so nothing
+        // correlates it with a local request.
+        let foreign_id = format!("r:{}:w-foreign", origin.as_str());
+        app.handle_federation_resync_workspace_created(
+            origin.clone(),
+            foreign_id.clone(),
+            "made by the other user".to_string(),
+        );
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: origin.clone(),
+            workspace_id: foreign_id.clone(),
+            tab_id: format!("r:{}:t-foreign", origin.as_str()),
+            pane_id: format!("r:{}:p-foreign", origin.as_str()),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+        assert!(
+            app.state.workspaces.iter().any(|ws| ws.id == foreign_id),
+            "the out-of-band workspace must still materialize"
+        );
+        assert_eq!(
+            app.state.active,
+            Some(ws_idx),
+            "a workspace the remote user created must not steal focus"
+        );
+
+        // Now one this client asked for, with `focus: true`.
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "tui.workspace.create".to_string(),
+                method: crate::api::schema::Method::WorkspaceCreate(
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: None,
+                        focus: true,
+                        label: None,
+                        env: Default::default(),
+                    },
+                ),
+            });
+        assert!(
+            response.contains("workspace_create_requested"),
+            "unexpected response: {response}"
+        );
+        let request_id = *app
+            .pending_remote_workspace_create_focus
+            .iter()
+            .next()
+            .expect("a focus-requesting create must claim its request id");
+
+        let requested_id = format!("r:{}:w-requested", origin.as_str());
+        app.handle_federation_workspace_create_accepted(
+            request_id,
+            origin.clone(),
+            requested_id.clone(),
+        );
+        app.handle_federation_resync_workspace_created(
+            origin.clone(),
+            requested_id.clone(),
+            "asked for by this client".to_string(),
+        );
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: origin.clone(),
+            workspace_id: requested_id.clone(),
+            tab_id: format!("r:{}:t-requested", origin.as_str()),
+            pane_id: format!("r:{}:p-requested", origin.as_str()),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        let requested_idx = app
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == requested_id)
+            .expect("the requested workspace must materialize");
+        assert_eq!(
+            app.state.active,
+            Some(requested_idx),
+            "the workspace this client asked for must arrive focused"
+        );
+        assert!(
+            app.pending_remote_workspace_focus.is_empty()
+                && app.pending_remote_workspace_create_focus.is_empty(),
+            "the focus claim must be consumed, not left to catch a later create"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    /// Closing the last tab of one mirrored workspace must retire exactly that
+    /// workspace. Every workspace a mount materializes shares the mount's one
+    /// `federation:<host_key>` worktree space, so the ordinary group close
+    /// would take the whole mirror down while the mount stayed live.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_a_mirrored_workspaces_last_tab_leaves_the_mounts_other_workspaces_alive() {
+        let (mut app, mount, first_ws_idx, _out_rx) = mounted_and_focused_mirror();
+        let origin = mount.host_key.clone();
+        let first_workspace_id = app.state.workspaces[first_ws_idx].id.clone();
+
+        let second_id = format!("r:{}:w-second", origin.as_str());
+        app.handle_federation_resync_workspace_created(
+            origin.clone(),
+            second_id.clone(),
+            "second remote workspace".to_string(),
+        );
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: origin.clone(),
+            workspace_id: second_id.clone(),
+            tab_id: format!("r:{}:t-second", origin.as_str()),
+            pane_id: format!("r:{}:p-second", origin.as_str()),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+        let second_ws_idx = app
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == second_id)
+            .expect("the second mirrored workspace must materialize");
+        assert_eq!(
+            app.state.workspaces[second_ws_idx].tabs.len(),
+            1,
+            "this test needs the second workspace to have exactly one tab"
+        );
+        let tab_id = app
+            .public_tab_id(second_ws_idx, 0)
+            .expect("the mirrored tab has a public id");
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "tab.close".to_string(),
+                method: crate::api::schema::Method::TabClose(crate::api::schema::TabTarget {
+                    tab_id,
+                }),
+            });
+        assert!(
+            response.contains("\"result\""),
+            "closing a mirrored last tab must succeed: {response}"
+        );
+
+        assert!(
+            !app.state.workspaces.iter().any(|ws| ws.id == second_id),
+            "the closed workspace must be gone"
+        );
+        assert!(
+            app.state
+                .workspaces
+                .iter()
+                .any(|ws| ws.id == first_workspace_id),
+            "the mount's other mirrored workspace must survive its sibling's last-tab close"
+        );
+        assert!(
+            !app.remote_resync_workspace_index.contains_key(&second_id),
+            "the closed workspace's federation bookkeeping must be purged"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    /// Identity/state guard required for workspace-identity changes: the new
+    /// handlers must be inert against adversarial identity state rather than
+    /// panicking or corrupting invariants.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_workspace_handlers_leave_adversarial_identity_state_intact() {
+        let mut app = test_app();
+        app.state = crate::app::AppState::test_with_adversarial_identity_state();
+        let before = app.state.workspaces.len();
+        let origin = crate::remote::federation::id::HostKey::new("alice@10.0.0.1", "s1");
+
+        // An announcement for a workspace nothing has materialized, then a
+        // removal for one that does not exist: both must no-op.
+        app.handle_federation_resync_workspace_created(
+            origin.clone(),
+            format!("r:{}:ghost", origin.as_str()),
+            "ghost".to_string(),
+        );
+        app.handle_federation_resync_workspace_removed(
+            origin.clone(),
+            format!("r:{}:ghost", origin.as_str()),
+        );
+        // A local (non-namespaced) id must be refused outright.
+        app.handle_federation_resync_workspace_created(
+            origin,
+            "w1".to_string(),
+            "not namespaced".to_string(),
+        );
+
+        assert_eq!(app.state.workspaces.len(), before);
+        assert!(app.remote_resync_workspace_index.is_empty());
+        app.state.assert_invariants_for_test();
     }
 }
