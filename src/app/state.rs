@@ -1343,18 +1343,36 @@ pub enum ContextMenuKind {
     },
 }
 
+/// Stable public ids of a context menu's federated (remote-mirrored) target,
+/// snapshotted when the menu opens.
+///
+/// The menu's `ws_idx`/`tab_idx` are positions, and a remote resync can
+/// reorder or shrink the workspace list while the menu is open — it is not
+/// gated on the menu being closed. Acting on a stale position would send
+/// `close_remote` for whatever item now occupies that slot, on the serving
+/// host. Ids are stable, so the "Close on host" actions resolve through these
+/// instead and simply fail to resolve when the target is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteCloseMenuTarget {
+    pub workspace_id: String,
+    /// `Some` for a tab menu, `None` for a workspace menu.
+    pub tab_id: Option<String>,
+}
+
 /// Right-click context menu state.
 pub struct ContextMenuState {
     pub kind: ContextMenuKind,
     pub x: u16,
     pub y: u16,
     pub list: MenuListState,
-    /// Snapshot of whether the menu's workspace/tab target is a federated
-    /// (remote-mirrored) item, taken at menu-open time. Mirrors how
+    /// `Some` when the menu's workspace/tab target is a federated
+    /// (remote-mirrored) item, carrying the ids the "Close on host" action
+    /// resolves through; `None` otherwise, which also hides that item.
+    /// Snapshotted at menu-open time, mirroring how
     /// `ContextMenuKind::Pane`'s `auto_resize_enabled` already snapshots
     /// state instead of re-deriving it from `AppState` inside `items()`,
     /// which only has `&self`.
-    pub federated: bool,
+    pub remote_close_target: Option<RemoteCloseMenuTarget>,
 }
 
 impl ContextMenuState {
@@ -1362,7 +1380,7 @@ impl ContextMenuState {
         match self.kind {
             ContextMenuKind::Workspace { .. } => {
                 let mut items = vec!["Rename", "Close"];
-                if self.federated {
+                if self.remote_close_target.is_some() {
                     items.push("Close on host");
                 }
                 items
@@ -1373,7 +1391,7 @@ impl ContextMenuState {
                 ..
             } => {
                 let mut items = vec!["Rename", "Close", "New worktree", "Open worktree..."];
-                if self.federated {
+                if self.remote_close_target.is_some() {
                     items.push("Close on host");
                 }
                 items
@@ -1383,7 +1401,7 @@ impl ContextMenuState {
                 ..
             } => {
                 let mut items = vec!["Rename", "Close", "Delete worktree checkout..."];
-                if self.federated {
+                if self.remote_close_target.is_some() {
                     items.push("Close on host");
                 }
                 items
@@ -1401,7 +1419,7 @@ impl ContextMenuState {
                     "Open worktree...",
                     "Expand",
                 ];
-                if self.federated {
+                if self.remote_close_target.is_some() {
                     items.push("Close on host");
                 }
                 items
@@ -1419,14 +1437,14 @@ impl ContextMenuState {
                     "Open worktree...",
                     "Collapse",
                 ];
-                if self.federated {
+                if self.remote_close_target.is_some() {
                     items.push("Close on host");
                 }
                 items
             }
             ContextMenuKind::Tab { .. } => {
                 let mut items = vec!["New tab", "Rename", "Close"];
-                if self.federated {
+                if self.remote_close_target.is_some() {
                     items.push("Close on host");
                 }
                 items
@@ -3103,7 +3121,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
 
         assert_eq!(
@@ -3124,7 +3142,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
 
         assert_eq!(
@@ -3145,7 +3163,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
 
         assert_eq!(
@@ -3177,7 +3195,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         }
     }
 
@@ -3270,7 +3288,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
         assert_eq!(workspace_menu.items(), vec!["Rename", "Close"]);
 
@@ -3282,7 +3300,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
         assert_eq!(tab_menu.items(), vec!["New tab", "Rename", "Close"]);
 
@@ -3296,12 +3314,19 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
         assert_eq!(
             git_menu.items(),
             vec!["Rename", "Close", "New worktree", "Open worktree..."]
         );
+    }
+
+    fn remote_target(tab_id: Option<&str>) -> RemoteCloseMenuTarget {
+        RemoteCloseMenuTarget {
+            workspace_id: "r:alice@10.0.0.1:w1".to_string(),
+            tab_id: tab_id.map(str::to_string),
+        }
     }
 
     #[test]
@@ -3311,7 +3336,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: true,
+            remote_close_target: Some(remote_target(None)),
         };
         assert_eq!(
             workspace_menu.items(),
@@ -3328,7 +3353,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: true,
+            remote_close_target: Some(remote_target(None)),
         };
         assert_eq!(
             git_menu.items(),
@@ -3349,7 +3374,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
         assert!(!workspace_menu.items().contains(&"Close on host"));
     }
@@ -3364,7 +3389,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: true,
+            remote_close_target: Some(remote_target(Some("r:alice@10.0.0.1:w1:t1"))),
         };
         assert_eq!(
             tab_menu.items(),
@@ -3382,7 +3407,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
         assert!(!tab_menu.items().contains(&"Close on host"));
     }

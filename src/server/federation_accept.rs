@@ -572,6 +572,8 @@ fn reader_loop<S: Read>(
             Ok(Some(FederationMessage::WorkspaceCreateRequest(request))) => {
                 handle_workspace_create_request(
                     request,
+                    epoch,
+                    connid,
                     out_tx,
                     shutdown,
                     first_cause,
@@ -708,8 +710,8 @@ fn handle_close_pane_request(
 /// Closed`/`Failed` on the shared outbound queue. Unlike `ClosePane`, this
 /// carries `(epoch, connid)` through to the actor: the actor gates it on
 /// `FederationLease::is_mounted_controller`, refusing a stale/superseded
-/// connection's close (a gap the pre-existing `SplitPane`/`ClosePane`/
-/// `CreateWorkspace` arms have and this one deliberately does not repeat). A
+/// connection's close (a gap the pre-existing `SplitPane`/`ClosePane` arms
+/// have and this one deliberately does not repeat). A
 /// dropped/gone actor (server shutting down) replies `Failed` rather than
 /// silently dropping the peer's request.
 fn handle_workspace_close_request(
@@ -810,11 +812,17 @@ fn handle_tab_close_request(
 /// shared outbound queue. A dropped/gone actor (server shutting down) replies
 /// `Failed` rather than silently dropping the peer's request.
 ///
+/// Carries `(epoch, connid)` through to the actor, which gates the create on
+/// `FederationLease::is_mounted_controller` exactly as the close handlers do:
+/// only the peer holding the mount may grow this host's workspace set.
+///
 /// Uncapped and unrated, matching the existing `SplitPaneRequest`/
 /// `ClosePaneRequest` handlers: a peer that reached this reader loop already
 /// cleared the handshake, and no other request kind here is metered either.
 fn handle_workspace_create_request(
     request: WorkspaceCreateRequest,
+    epoch: AcceptEpoch,
+    connid: ConnId,
     out_tx: &std_mpsc::SyncSender<FederationMessage>,
     shutdown: &Arc<AtomicBool>,
     first_cause: &Arc<FirstCauseCell>,
@@ -838,7 +846,12 @@ fn handle_workspace_create_request(
 
     let (reply, rx) = oneshot::channel();
     let sent = server_event_tx.blocking_send(ServerEvent::Federation(
-        FederationCommand::CreateWorkspace { label, reply },
+        FederationCommand::CreateWorkspace {
+            epoch,
+            connid,
+            label,
+            reply,
+        },
     ));
     let outcome = if sent.is_err() {
         Err("server event loop is gone".to_string())
@@ -2043,6 +2056,7 @@ mod tests {
                 if let ServerEvent::Federation(FederationCommand::CreateWorkspace {
                     label,
                     reply,
+                    ..
                 }) = ev
                 {
                     let suffix = label.unwrap_or_else(|| "unnamed".to_string());
@@ -2121,6 +2135,7 @@ mod tests {
                 if let ServerEvent::Federation(FederationCommand::CreateWorkspace {
                     label,
                     reply,
+                    ..
                 }) = ev
                 {
                     let _ = observed_tx.send(label);

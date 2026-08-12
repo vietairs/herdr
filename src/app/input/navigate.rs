@@ -458,8 +458,21 @@ impl App {
     /// never removes the local mirror itself — the response is the only
     /// feedback the user gets, so it is parsed and surfaced as a toast (see
     /// `surface_remote_close_response`).
-    pub(crate) fn close_workspace_idx_remote_via_api(&mut self, ws_idx: usize) {
-        let workspace_id = self.public_workspace_id(ws_idx);
+    ///
+    /// Takes the workspace's stable public id, not the context menu's
+    /// snapshotted index: a remote resync can reorder or shrink the workspace
+    /// list while the menu is open (it is not gated on the menu being
+    /// closed), and a shifted index would close a DIFFERENT workspace on the
+    /// serving host. A workspace that has since disappeared no longer matches
+    /// any id, so the request is refused instead of misdirected.
+    pub(crate) fn close_workspace_remote_via_api(&mut self, workspace_id: String) {
+        if self.state.workspaces.iter().all(|ws| ws.id != workspace_id) {
+            self.raise_remote_close_failed_toast(
+                "remote workspace close failed",
+                "that workspace is no longer here".to_string(),
+            );
+            return;
+        }
         let response =
             self.runtime_workspace_close_remote("tui.workspace.close_remote", workspace_id);
         self.surface_remote_close_response(&response);
@@ -522,34 +535,61 @@ impl App {
     /// only feedback the user gets, so it is parsed and surfaced as a toast
     /// (see `surface_remote_close_response`). Returns `false` (as the plain
     /// path's `Some(tab_id)` branch does) when there is nothing to send.
-    pub(crate) fn close_tab_idx_remote_via_api(&mut self, ws_idx: usize, tab_idx: usize) -> bool {
-        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+    ///
+    /// Takes the tab's stable public id for the same reason
+    /// `close_workspace_remote_via_api` does: the context menu's indices are
+    /// snapshots a remote resync can shift while the menu is open, and a
+    /// shifted pair would close a different tab on the serving host. A tab
+    /// that no longer resolves is reported to the user rather than skipped:
+    /// every other outcome on this path raises a toast, and the modal caller
+    /// discards the returned bool, so staying silent would just close the
+    /// menu and do nothing visible.
+    pub(crate) fn close_tab_remote_via_api(&mut self, tab_id: String) -> bool {
+        if self.parse_current_public_tab_id(&tab_id).is_none() {
+            self.raise_remote_close_failed_toast(
+                "remote tab close failed",
+                "that tab is no longer here".to_string(),
+            );
             return false;
-        };
+        }
         let response = self.runtime_tab_close_remote("tui.tab.close_remote", tab_id);
         self.surface_remote_close_response(&response);
         true
     }
 
     /// Parses a `workspace.close_remote` / `tab.close_remote` JSON response
-    /// and surfaces it to the user via toast. `remote_close_pending` is the
-    /// normal accepted-and-sent outcome for these fire-and-forget verbs, so
-    /// it gets an informational toast explaining the item disappears once
-    /// the serving host confirms; any other error code (`remote_close_unsupported`,
+    /// and surfaces it to the user via toast. The accepted-and-sent outcome
+    /// of these fire-and-forget verbs is a success envelope
+    /// (`workspace_close_requested` / `tab_close_requested`), so it gets an
+    /// informational toast explaining the item disappears once the serving
+    /// host confirms; an error code (`remote_close_unsupported`,
     /// `workspace_not_found`, `tab_not_found`, ...) reuses
     /// `App::raise_remote_close_failed_toast`, the same attention-toast path
-    /// federation's async close-failure handlers already use. A bare success
-    /// envelope (not expected from these verbs, but a legal shape) raises
-    /// nothing.
+    /// federation's async close-failure handlers already use. Any other
+    /// success shape (not produced by these verbs, but a legal envelope)
+    /// raises nothing.
     fn surface_remote_close_response(&mut self, response: &str) {
+        if let Ok(success) = serde_json::from_str::<crate::api::schema::SuccessResponse>(response) {
+            let sent = match success.result {
+                crate::api::schema::ResponseResult::WorkspaceCloseRequested { .. } => Some(
+                    "close request sent to the remote host; the workspace will disappear \
+                     once the remote host confirms it is gone",
+                ),
+                crate::api::schema::ResponseResult::TabCloseRequested { .. } => Some(
+                    "close request sent to the remote host; the tab will disappear once \
+                     the remote host confirms it is gone",
+                ),
+                _ => None,
+            };
+            if let Some(sent) = sent {
+                self.raise_remote_close_pending_toast(sent.to_string());
+            }
+            return;
+        }
         let Ok(envelope) = serde_json::from_str::<crate::api::schema::ErrorResponse>(response)
         else {
             return;
         };
-        if envelope.error.code == "remote_close_pending" {
-            self.raise_remote_close_pending_toast(envelope.error.message);
-            return;
-        }
         // Every other code is a real failure the user must see, on every
         // platform. Besides `remote_close_unsupported` (the only one a
         // non-Unix build can produce, since federation dispatch is Unix-only)

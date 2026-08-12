@@ -505,6 +505,7 @@ impl App {
             return encode_error(id, "remote_close_unsupported", message);
         }
 
+        let origin_label = origin.as_str().to_string();
         self.register_pending_remote_close(
             request_id,
             crate::app::creation::PendingRemoteClose {
@@ -514,11 +515,11 @@ impl App {
             },
         );
 
-        encode_error(
+        encode_success(
             id,
-            "remote_close_pending",
-            "close request sent to the remote host; the tab will disappear once the \
-             remote host confirms it is gone",
+            ResponseResult::TabCloseRequested {
+                origin: origin_label,
+            },
         )
     }
 
@@ -912,7 +913,7 @@ mod tests {
     /// `dispatch_remote_tab_close`: closing a NON-last federated tab via
     /// `tab.close_remote` must send a `TabCloseRequest` over the mount's
     /// link, register a pending-close entry keyed by the CANONICAL public
-    /// tab id, acknowledge with `remote_close_pending`, and NOT remove the
+    /// tab id, acknowledge with the `tab_close_requested` success, and NOT remove the
     /// local mirror tab. Closing a non-last tab is the originally reported
     /// failure, and it exercises the reverse-index lookup into
     /// `remote_resync_tab_index`, not just the trivial single-tab case.
@@ -931,8 +932,11 @@ mod tests {
             },
         );
 
-        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
-        assert_eq!(error.error.code, "remote_close_pending");
+        let success: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(
+            matches!(success.result, ResponseResult::TabCloseRequested { .. }),
+            "close_remote must answer with a success, not an error envelope: {response}"
+        );
         assert_eq!(
             app.state.workspaces[ws_idx].tabs.len(),
             tabs_before,
@@ -1037,8 +1041,7 @@ mod tests {
                 tab_id: tab_id.clone(),
             },
         );
-        let _: crate::api::schema::ErrorResponse =
-            serde_json::from_str(&dispatch_response).unwrap();
+        let _: SuccessResponse = serde_json::from_str(&dispatch_response).unwrap();
         assert_eq!(app.pending_remote_closes.len(), 1);
         let (&request_id, pending) = app.pending_remote_closes.iter().next().unwrap();
         let origin = pending.origin.clone();

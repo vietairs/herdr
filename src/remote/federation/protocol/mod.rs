@@ -129,9 +129,14 @@ impl Capability {
     /// speaks these variants — so do not read this as the receive-gated
     /// arrangement `FILE_STAGING` uses via its channel sentinel.
     ///
-    /// This is why these variants need no protocol-version bump: version
-    /// negotiation is all-or-nothing, capabilities are additive, and an older
-    /// peer simply drops an unrecognized capability name from the agreed set.
+    /// This capability is what makes the close RPCs *usable* against a peer
+    /// that speaks the same protocol version but was built without them; it
+    /// does NOT replace the version bump. New `FederationMessage` variants
+    /// always need one, because a peer on an older version cannot decode the
+    /// frame at all. These four variants ride the 5 -> 6 bump documented on
+    /// `FEDERATION_PROTOCOL_VERSION`; the capability then gates sends within
+    /// v6 itself, where negotiation is additive and an older v6 peer simply
+    /// drops an unrecognized capability name from the agreed set.
     // Federation only negotiates capabilities on Unix, so this constant has
     // no reader in a Windows build; matches `SCROLLBACK_REPLAY` above.
     #[cfg_attr(not(unix), allow(dead_code))]

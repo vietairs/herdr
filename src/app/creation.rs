@@ -1380,6 +1380,9 @@ impl App {
         request_id: u64,
         origin: crate::remote::federation::id::HostKey,
     ) {
+        // Both mismatch checks peek before taking: evicting the pending entry
+        // first would drop an unrelated in-flight close, whose genuine
+        // response then finds nothing and leaves its mirror behind forever.
         if let Some(pending) = self.pending_remote_closes.get(&request_id) {
             if pending.origin != origin {
                 tracing::warn!(
@@ -1388,6 +1391,14 @@ impl App {
                     got_origin = %origin,
                     "dropping a workspace-close response from a mount that did not \
                      originate this request"
+                );
+                return;
+            }
+            if !matches!(pending.target, RemoteCloseTarget::Workspace) {
+                tracing::warn!(
+                    request_id,
+                    "a WorkspaceCloseResponse answered a pending entry that was not a workspace \
+                     close"
                 );
                 return;
             }
@@ -1401,15 +1412,6 @@ impl App {
             );
             return;
         };
-
-        if !matches!(pending.target, RemoteCloseTarget::Workspace) {
-            tracing::warn!(
-                request_id,
-                "a WorkspaceCloseResponse answered a pending entry that was not a workspace \
-                 close"
-            );
-            return;
-        }
 
         let workspace_id = pending.workspace_id;
         let mount_origin = pending.origin;
@@ -1497,6 +1499,9 @@ impl App {
         request_id: u64,
         origin: crate::remote::federation::id::HostKey,
     ) {
+        // Both mismatch checks peek before taking: evicting the pending entry
+        // first would drop an unrelated in-flight close, whose genuine
+        // response then finds nothing and leaves its mirror behind forever.
         if let Some(pending) = self.pending_remote_closes.get(&request_id) {
             if pending.origin != origin {
                 tracing::warn!(
@@ -1505,6 +1510,13 @@ impl App {
                     got_origin = %origin,
                     "dropping a tab-close response from a mount that did not originate this \
                      request"
+                );
+                return;
+            }
+            if !matches!(pending.target, RemoteCloseTarget::Tab(_)) {
+                tracing::warn!(
+                    request_id,
+                    "a TabCloseResponse answered a pending entry that was not a tab close"
                 );
                 return;
             }
@@ -1528,7 +1540,11 @@ impl App {
         };
 
         let Some((ws_idx, tab_idx)) = self.parse_tab_id(&tab_id) else {
-            // Already gone — idempotent success, not an error.
+            // Already gone — idempotent success, not an error. Still settle
+            // the mount, exactly as the workspace-close twin does: whatever
+            // removed the tab (and possibly its workspace) first may have been
+            // a path that does not end an emptied mount.
+            self.end_federation_mount_if_no_mirrors_remain(&mount_origin);
             return;
         };
 
@@ -1969,29 +1985,17 @@ impl App {
     /// the mount primitives no workspace ever carries a `federation:` space
     /// key, so that caller never reaches this.
     pub(crate) fn close_single_workspace_at(&mut self, ws_idx: usize) {
-        if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
-            ws.worktree_space = None;
-        }
+        // Validate before moving the selection: an out-of-range index must
+        // leave `selected` pointing where it already did, never at a slot that
+        // does not exist.
+        let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+            return;
+        };
+        ws.worktree_space = None;
         self.state.selected = ws_idx;
         self.state.close_selected_workspace();
     }
 
-    /// Closes exactly one LOCAL workspace on this host in response to a
-    /// federated peer's `WorkspaceCloseRequest` — the serving-host half of
-    /// close forwarding for the multi-workspace case. Deliberately does NOT
-    /// go through the `workspace.close` JSON-API method
-    /// (`handle_workspace_close`): on this host the target is always a
-    /// workspace it owns locally, so that handler's `federation_host_key_for_workspace`
-    /// lookup returns `None`, `retire_one_only` is `false`, and it falls into
-    /// `AppState::close_selected_workspace()`'s worktree-group close — which
-    /// would take down every sibling workspace sharing the target's
-    /// `worktree_space` key for one remote peer's single-workspace request.
-    /// Uses `close_single_workspace_at` instead, which detaches the target
-    /// from its worktree-space membership before closing so exactly one
-    /// workspace ever comes down, mirroring the resync handlers below
-    /// (`handle_federation_resync_workspace_removed`) rather than the local
-    /// JSON-API close path.
-    ///
     /// Ends a federation mount once none of its mirrored workspaces remain.
     ///
     /// The mount is what owns the link, the drive task and the
@@ -2035,6 +2039,22 @@ impl App {
         Err("federation is not supported on this platform".to_string())
     }
 
+    /// Closes exactly one LOCAL workspace on this host in response to a
+    /// federated peer's `WorkspaceCloseRequest` — the serving-host half of
+    /// close forwarding for the multi-workspace case. Deliberately does NOT
+    /// go through the `workspace.close` JSON-API method
+    /// (`handle_workspace_close`): on this host the target is always a
+    /// workspace it owns locally, so that handler's `federation_host_key_for_workspace`
+    /// lookup returns `None`, `retire_one_only` is `false`, and it falls into
+    /// `AppState::close_selected_workspace()`'s worktree-group close — which
+    /// would take down every sibling workspace sharing the target's
+    /// `worktree_space` key for one remote peer's single-workspace request.
+    /// Uses `close_single_workspace_at` instead, which detaches the target
+    /// from its worktree-space membership before closing so exactly one
+    /// workspace ever comes down, mirroring the resync handlers below
+    /// (`handle_federation_resync_workspace_removed`) rather than the local
+    /// JSON-API close path.
+    ///
     /// Stronger than `ClosePane`'s fixed-internal-request-id trust boundary:
     /// this never goes through `handle_api_request` at all, so there is no
     /// request id for a remote peer's close to be mistaken for a local user
@@ -2347,6 +2367,11 @@ impl App {
         let workspace_info = self.workspace_info(ws_idx);
         self.close_single_workspace_at(ws_idx);
         self.shutdown_detached_terminal_runtimes();
+        // The remote-initiated removal is just as capable of taking down a
+        // mount's last mirror as the client-initiated close is; without this
+        // the link, its drive task and the `remote_mirrors` entry survive with
+        // nothing visible behind them and a remount is refused as already live.
+        self.end_federation_mount_if_no_mirrors_remain(&origin);
         self.schedule_session_save();
 
         self.emit_event(EventEnvelope {
@@ -2668,6 +2693,11 @@ impl App {
             self.layout_update_target_after_pane_removal(ws_idx, local_pane_id);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, local_pane_id);
 
+        // Captured while the workspace is still present: the last pane's
+        // removal below can take the whole workspace with it, and the purge
+        // afterwards is keyed by this local id.
+        let local_workspace_id = self.state.workspaces.get(ws_idx).map(|ws| ws.id.clone());
+
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return;
@@ -2677,10 +2707,21 @@ impl App {
         self.state.remove_plugin_pane_records([local_pane_id]);
 
         if should_close_workspace {
+            // The last pane took its workspace with it, so this removal is a
+            // workspace removal too: drop the federation bookkeeping keyed on
+            // it and settle the mount, exactly as the workspace-level handlers
+            // do. Otherwise the link, its drive task and the `remote_mirrors`
+            // entry outlive the last visible mirror and block a remount.
+            if let Some(local_workspace_id) = local_workspace_id {
+                let closing_ids: std::collections::HashSet<String> =
+                    std::iter::once(local_workspace_id).collect();
+                self.purge_federation_state_for_workspaces(&closing_ids);
+            }
             // One workspace, not the mount's whole federation group — see
             // `close_single_workspace_at`.
             self.close_single_workspace_at(ws_idx);
             self.shutdown_detached_terminal_runtimes();
+            self.end_federation_mount_if_no_mirrors_remain(&origin);
             if let Some(public_pane_id) = public_pane_id {
                 self.emit_event(EventEnvelope {
                     event: EventKind::PaneClosed,
@@ -3511,6 +3552,51 @@ mod federation_materialization_tests {
         assert!(
             !app.state.workspaces.iter().any(|ws| ws.id == workspace_id),
             "the confirmed close must still retire the workspace"
+        );
+        assert!(
+            !app.state.remote_mirrors.contains_key(&mount.host_key),
+            "retiring the mount's last mirrored workspace must end the mount, not strand it"
+        );
+    }
+
+    /// The remote-initiated removal must settle the mount exactly as the
+    /// client-initiated close does. This is the normal flow when the OTHER
+    /// user closes the last mirrored workspace: nothing local was clicked, so
+    /// only the resync handler can notice the mount just went empty. Leaving
+    /// it registered strands the link, the drive task and the `remote_mirrors`
+    /// entry with nothing visible behind them, and a remount of the same host
+    /// is refused as already live until the server restarts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_workspace_removed_ends_a_mount_whose_last_mirror_it_retired() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        assert_eq!(
+            created.len(),
+            1,
+            "this fixture mounts exactly one workspace, so removing it empties the mount"
+        );
+        let workspace_id = app.state.workspaces[created[0]].id.clone();
+        app.state
+            .begin_federation_mount(mirror)
+            .expect("registering the mount must succeed");
+
+        app.handle_federation_resync_workspace_removed(
+            mount.host_key.clone(),
+            workspace_id.clone(),
+        );
+
+        assert!(
+            !app.state.workspaces.iter().any(|ws| ws.id == workspace_id),
+            "the remote's removal must still retire the workspace locally"
         );
         assert!(
             !app.state.remote_mirrors.contains_key(&mount.host_key),

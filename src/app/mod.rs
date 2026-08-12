@@ -239,6 +239,9 @@ pub struct App {
     /// live here between a resync's workspace event and the pane event that
     /// materializes it; a materialized workspace is found by `Workspace::id`
     /// directly, not through this map.
+    /// Every reader and writer lives in the Unix-only federation client path,
+    /// so the field itself is Unix-only too.
+    #[cfg(unix)]
     pub(crate) remote_resync_workspace_index: HashMap<String, creation::RemoteWorkspaceRef>,
     /// `request_id`s of `WorkspaceCreateRequest`s this client sent that asked
     /// for the new workspace to be focused (`WorkspaceCreateParams::focus`).
@@ -252,6 +255,9 @@ pub struct App {
     /// exactly as a local create does. Ids only enter here from a
     /// `WorkspaceCreateResponse` answering this client's own request, never
     /// from an out-of-band remote create.
+    /// Every reader and writer lives in the Unix-only federation client path,
+    /// so the field itself is Unix-only too.
+    #[cfg(unix)]
     pub(crate) pending_remote_workspace_focus: HashSet<String>,
     pub(crate) local_terminal_notifications: bool,
     /// Whether this process applies `AppEvent::PrefixInputSource` to the host input source.
@@ -957,8 +963,10 @@ impl App {
             remote_clipboard_image_reads_in_flight: std::collections::HashSet::new(),
             remote_resync_pane_index: HashMap::new(),
             remote_resync_tab_index: HashMap::new(),
+            #[cfg(unix)]
             remote_resync_workspace_index: HashMap::new(),
             pending_remote_workspace_create_focus: HashSet::new(),
+            #[cfg(unix)]
             pending_remote_workspace_focus: HashSet::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
@@ -6423,7 +6431,7 @@ last_pane = "prefix+tab"
             x: 2,
             y: 2,
             list: state::MenuListState::new(1),
-            federated: false,
+            remote_close_target: None,
         });
         app.state.mode = Mode::ContextMenu;
 

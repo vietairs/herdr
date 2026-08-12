@@ -81,6 +81,14 @@ pub enum ResponseResult {
     WorkspaceCreateRequested {
         origin: String,
     },
+    /// Acknowledges a `workspace.close_remote`: the close request was sent
+    /// over the mount named by `origin`. Does not imply the workspace is gone
+    /// — the serving host answers asynchronously, and the local mirror
+    /// disappears only once that answer arrives. Same "requested, not
+    /// completed" contract as `WorkspaceCreateRequested`.
+    WorkspaceCloseRequested {
+        origin: String,
+    },
     WorktreeList {
         source: WorktreeSourceInfo,
         worktrees: Vec<WorktreeInfo>,
@@ -112,6 +120,13 @@ pub enum ResponseResult {
     },
     TabList {
         tabs: Vec<TabInfo>,
+    },
+    /// Tab counterpart of `WorkspaceCloseRequested`: acknowledges a
+    /// `tab.close_remote` whose request was sent over the mount named by
+    /// `origin`. The mirror tab disappears only once the serving host
+    /// confirms it closed its own tab.
+    TabCloseRequested {
+        origin: String,
     },
     AgentInfo {
         agent: AgentInfo,

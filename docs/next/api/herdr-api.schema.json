@@ -8792,6 +8792,23 @@
               "type": "object"
             },
             {
+              "description": "Acknowledges a `workspace.close_remote`: the close request was sent\nover the mount named by `origin`. Does not imply the workspace is gone\n— the serving host answers asynchronously, and the local mirror\ndisappears only once that answer arrives. Same \"requested, not\ncompleted\" contract as `WorkspaceCreateRequested`.",
+              "properties": {
+                "origin": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "workspace_close_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "origin"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "source": {
                   "$ref": "#/schemas/success_response/$defs/WorktreeSourceInfo"
@@ -8950,6 +8967,23 @@
               "required": [
                 "type",
                 "tabs"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Tab counterpart of `WorkspaceCloseRequested`: acknowledges a\n`tab.close_remote` whose request was sent over the mount named by\n`origin`. The mirror tab disappears only once the serving host\nconfirms it closed its own tab.",
+              "properties": {
+                "origin": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "tab_close_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "origin"
               ],
               "type": "object"
             },

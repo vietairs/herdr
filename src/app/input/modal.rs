@@ -1270,7 +1270,12 @@ impl App {
 
     pub(crate) fn apply_context_menu_action_via_api(&mut self, menu: ContextMenuState, idx: usize) {
         let item = menu.items().get(idx).copied();
-        match (menu.kind, item) {
+        let ContextMenuState {
+            kind,
+            remote_close_target,
+            ..
+        } = menu;
+        match (kind, item) {
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
                 self.state.request_new_linked_worktree = Some(ws_idx);
                 leave_modal(&mut self.state);
@@ -1324,15 +1329,19 @@ impl App {
                 }
             }
             (
-                ContextMenuKind::Workspace { ws_idx }
-                | ContextMenuKind::GitWorkspace { ws_idx, .. },
+                ContextMenuKind::Workspace { .. } | ContextMenuKind::GitWorkspace { .. },
                 Some("Close on host"),
             ) => {
                 // Asks the serving host to close its own workspace; never
                 // goes through the local confirm-close dialog, since this
                 // isn't a local mirror teardown (see
-                // `close_workspace_idx_remote_via_api`'s doc comment).
-                self.close_workspace_idx_remote_via_api(ws_idx);
+                // `close_workspace_remote_via_api`'s doc comment). Resolved
+                // by the id snapshotted with the menu, never by `ws_idx`,
+                // which a remote resync can have shifted onto another
+                // workspace by now.
+                if let Some(target) = remote_close_target {
+                    self.close_workspace_remote_via_api(target.workspace_id);
+                }
                 leave_modal(&mut self.state);
             }
             (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("New tab")) => {
@@ -1352,11 +1361,15 @@ impl App {
                     leave_modal(&mut self.state);
                 }
             }
-            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close on host")) => {
+            (ContextMenuKind::Tab { .. }, Some("Close on host")) => {
                 // Asks the serving host to close its own tab; never goes
                 // through the local confirm-close dialog (see
-                // `close_tab_idx_remote_via_api`'s doc comment).
-                self.close_tab_idx_remote_via_api(ws_idx, tab_idx);
+                // `close_tab_remote_via_api`'s doc comment). Resolved by the
+                // snapshotted tab id, not the menu's indices, for the same
+                // reason the workspace arm above is.
+                if let Some(tab_id) = remote_close_target.and_then(|target| target.tab_id) {
+                    self.close_tab_remote_via_api(tab_id);
+                }
                 leave_modal(&mut self.state);
             }
             (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
@@ -2368,7 +2381,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
 
@@ -2415,7 +2428,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
         let idx = menu
             .items()
@@ -2447,7 +2460,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
         let idx = menu
             .items()
@@ -2483,7 +2496,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         };
         let close_idx = menu
             .items()
@@ -2520,7 +2533,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: true,
+            remote_close_target: app.state.remote_close_menu_target(0, None),
         };
         let idx = menu
             .items()
@@ -2536,6 +2549,102 @@ mod tests {
             1,
             "close_remote must not remove the local mirror; only the serving host's \
              eventual confirmation does"
+        );
+    }
+
+    /// A remote resync can remove a mirrored workspace while its context menu
+    /// is open, shifting the next workspace into the index the menu recorded.
+    /// "Close on host" must resolve the workspace the menu was opened over by
+    /// id, so a shifted list refuses the close instead of asking the serving
+    /// host to close whichever workspace now occupies that slot.
+    #[test]
+    fn context_menu_close_workspace_on_host_via_api_refuses_a_shifted_index() {
+        let mut app = app_with_test_workspaces(&["mirrored", "neighbour"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1:w1".to_string();
+        app.state.workspaces[1].id = "r:alice@10.0.0.1:w2".to_string();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.mode = Mode::ContextMenu;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: app.state.remote_close_menu_target(0, None),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close on host")
+            .expect("close on host item");
+
+        // The resync lands while the menu is up: the menu's workspace is gone
+        // and its neighbour now sits at index 0.
+        app.state.workspaces.remove(0);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        let toast = app
+            .state
+            .toast
+            .expect("a stale close target raises a toast");
+        assert_eq!(
+            toast.context, "that workspace is no longer here",
+            "the close must be refused, not redirected onto the shifted-in workspace"
+        );
+        assert!(
+            app.state
+                .workspaces
+                .iter()
+                .any(|ws| ws.id == "r:alice@10.0.0.1:w2"),
+            "the neighbour workspace must be untouched"
+        );
+    }
+
+    /// Tab counterpart of the shifted-index regression above: a resync that
+    /// removes the mirrored tab the menu was opened over must not let "Close
+    /// on host" fall onto the tab that shifted into its index.
+    #[test]
+    fn context_menu_close_tab_on_host_via_api_refuses_a_shifted_index() {
+        let mut app = app_with_test_workspaces(&["mirrored"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1:w1".to_string();
+        app.state.workspaces[0].test_add_tab(Some("second"));
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.mode = Mode::ContextMenu;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            remote_close_target: app.state.remote_close_menu_target(0, Some(0)),
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close on host")
+            .expect("close on host item");
+
+        app.state.workspaces[0].tabs.remove(0);
+        app.state.workspaces[0].switch_tab(0);
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        let toast = app
+            .state
+            .toast
+            .expect("a stale close target raises a toast");
+        assert_eq!(
+            toast.context, "that tab is no longer here",
+            "the close must be refused, not redirected onto the shifted-in tab"
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            1,
+            "the surviving tab must be untouched"
         );
     }
 
@@ -2557,7 +2666,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: true,
+            remote_close_target: app.state.remote_close_menu_target(0, Some(0)),
         };
         let idx = menu
             .items()
@@ -2602,7 +2711,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
-            federated: false,
+            remote_close_target: None,
         }
     }
 

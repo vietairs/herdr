@@ -734,14 +734,12 @@ impl App {
         };
 
         let request_id = next_remote_workspace_create_request_id();
-        // Bounded before framing: the control channel's receiver rejects a
-        // frame over its 4 KiB ceiling outright, which would lose the request
-        // with nothing to show the user for it.
-        let label = label.map(crate::remote::federation::protocol::clamp_workspace_label);
-        let sent = out_tx.send(
-            crate::remote::federation::protocol::FederationMessage::WorkspaceCreateRequest(
-                crate::remote::federation::protocol::WorkspaceCreateRequest { request_id, label },
-            ),
+        // Routed through the single gated send point that owns this variant's
+        // wire invariants (including the label clamp), the same discipline the
+        // close requests follow.
+        let sent = crate::remote::federation::client::send_workspace_create_request(
+            &out_tx,
+            crate::remote::federation::protocol::WorkspaceCreateRequest { request_id, label },
         );
         if sent.is_err() {
             return encode_error(
@@ -1088,8 +1086,9 @@ impl App {
     /// distinct opt-in verb for that). Mirrors `dispatch_remote_pane_close`
     /// (`api/panes.rs`)'s exact shape/reasoning: this JSON-API handler runs
     /// synchronously and cannot await the eventual `WorkspaceCloseResponse`,
-    /// so it sends the request now and acknowledges with
-    /// `remote_close_pending`. Falls back to `remote_close_unsupported` when
+    /// so it sends the request now and acknowledges the send with the
+    /// `workspace_close_requested` success. Falls back to
+    /// `remote_close_unsupported` when
     /// the target is not a federated workspace, has no live mount, or the
     /// mount's peer never agreed `WORKSPACE_TAB_CLOSE`.
     pub(super) fn handle_workspace_close_remote(
@@ -1197,6 +1196,7 @@ impl App {
             return encode_error(id, "remote_close_unsupported", message);
         }
 
+        let origin_label = origin.as_str().to_string();
         self.register_pending_remote_close(
             request_id,
             crate::app::creation::PendingRemoteClose {
@@ -1206,11 +1206,11 @@ impl App {
             },
         );
 
-        encode_error(
+        encode_success(
             id,
-            "remote_close_pending",
-            "close request sent to the remote host; the workspace will disappear once \
-             the remote host confirms it is gone",
+            ResponseResult::WorkspaceCloseRequested {
+                origin: origin_label,
+            },
         )
     }
 
@@ -1781,8 +1781,8 @@ mod tests {
 
     /// `dispatch_remote_workspace_close`: closing a federated workspace via
     /// `workspace.close_remote` must send a `WorkspaceCloseRequest` over the
-    /// mount's link, register a pending-close entry, acknowledge with
-    /// `remote_close_pending`, and NOT remove the local mirror workspace —
+    /// mount's link, register a pending-close entry, acknowledge with the
+    /// `workspace_close_requested` success, and NOT remove the local mirror workspace —
     /// the real close decision belongs to the serving host, answered
     /// asynchronously by `App::handle_federation_workspace_close_ready`.
     #[cfg(unix)]
@@ -1799,8 +1799,14 @@ mod tests {
             },
         );
 
-        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
-        assert_eq!(error.error.code, "remote_close_pending");
+        let success: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(
+            matches!(
+                success.result,
+                ResponseResult::WorkspaceCloseRequested { .. }
+            ),
+            "close_remote must answer with a success, not an error envelope: {response}"
+        );
         assert!(
             app.state.workspaces.iter().any(|ws| ws.id == workspace_id),
             "dispatching a remote close must not remove the local mirror workspace; only \

@@ -167,8 +167,8 @@ pub(crate) enum FederationCommand {
     /// case: a mounting client's workspace-close action must tear down the
     /// workspace that actually lives here, never the mount's whole worktree
     /// group. Gated on `(epoch, connid)` being the mounted controller,
-    /// unlike `SplitPane`/`ClosePane`/`CreateWorkspace` above (a pre-existing
-    /// gap those arms do not close; this new arm does not repeat it). Reuses
+    /// unlike `SplitPane`/`ClosePane` above (a pre-existing gap those arms do
+    /// not close; this arm does not repeat it). Reuses
     /// `App::close_federation_target_workspace`, which detaches the target
     /// from its worktree-space membership before closing so a sibling
     /// workspace sharing that membership is never touched.
@@ -196,8 +196,11 @@ pub(crate) enum FederationCommand {
     /// "new workspace" action performed inside a mounted workspace must grow
     /// the workspace set that actually lives here, not just the client's
     /// local mirror. Reuses the same JSON-API method the local TUI/CLI
-    /// new-workspace action calls (`Method::WorkspaceCreate`), same reasoning
-    /// as `SplitPane`/`ClosePane` above.
+    /// new-workspace action calls (`Method::WorkspaceCreate`).
+    ///
+    /// Gated on `(epoch, connid)` being the mounted controller, same as
+    /// `CloseWorkspaceRemote`/`CloseTabRemote`: only the peer that actually
+    /// holds the mount may grow this host's workspace set.
     ///
     /// `label` is the client's optional hint; `cwd` is deliberately not
     /// requestable (a client-side path is meaningless here), so this host's
@@ -205,6 +208,8 @@ pub(crate) enum FederationCommand {
     /// (un-namespaced) `(workspace_id, tab_id, pane_id, terminal_id)` of the
     /// new workspace's root pane.
     CreateWorkspace {
+        epoch: AcceptEpoch,
+        connid: ConnId,
         label: Option<String>,
         #[allow(clippy::type_complexity)]
         // one tuple of four ids; a named struct would be single-use
@@ -563,7 +568,17 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
             let outcome = app.close_federation_target_tab(&target_tab_id);
             let _ = reply.send(outcome);
         }
-        FederationCommand::CreateWorkspace { label, reply } => {
+        FederationCommand::CreateWorkspace {
+            epoch,
+            connid,
+            label,
+            reply,
+        } => {
+            // Only the mounted controller may create a workspace on this host.
+            if !lease.is_mounted_controller(epoch, connid) {
+                let _ = reply.send(Err("not the mounted controller".to_string()));
+                return;
+            }
             let response = app.handle_api_request_after_internal_events_drained(Request {
                 id: "federation-create-workspace".to_string(),
                 method: Method::WorkspaceCreate(crate::api::schema::WorkspaceCreateParams {
@@ -582,18 +597,55 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
             });
             let outcome = serde_json::from_str::<SuccessResponse>(&response)
                 .ok()
-                .and_then(|success| match success.result {
+                .map(|success| match success.result {
                     ResponseResult::WorkspaceCreated {
                         workspace,
                         tab,
                         root_pane,
-                    } => Some(Ok((
+                    } => Ok((
                         workspace.workspace_id,
                         tab.tab_id,
                         root_pane.pane_id,
                         root_pane.terminal_id,
-                    ))),
-                    _ => None,
+                    )),
+                    // This host answered its own `workspace.create` by
+                    // redirecting it onto a host *it* has mounted (the
+                    // no-`cwd` redirect in `handle_workspace_create`), so no
+                    // workspace was created here and none ever will be: what
+                    // the peer asked for — a workspace on THIS host — did not
+                    // happen, and the workspace that does appear lives on a
+                    // third host the peer never addressed. Reported under its
+                    // own code so it is never confused with a real create
+                    // failure, which is what the generic error path below
+                    // used to call it.
+                    ResponseResult::WorkspaceCreateRequested { origin } => {
+                        tracing::warn!(
+                            %origin,
+                            "a peer's federation workspace-create was redirected onto a \
+                             host this one mounts; refusing it instead of reporting a \
+                             workspace the peer cannot reach"
+                        );
+                        Err(
+                            "workspace_create_redirected: this host redirected the create \
+                             onto a host it mounts, so no workspace was created here"
+                                .to_string(),
+                        )
+                    }
+                    // No other success shape can carry the ids the peer needs.
+                    // Reported distinctly rather than as a create failure: the
+                    // create's real outcome is unknown to this reply path.
+                    other => {
+                        tracing::warn!(
+                            ?other,
+                            "unexpected success result for a peer's federation \
+                             workspace-create request"
+                        );
+                        Err(
+                            "workspace_create_unexpected_result: this host answered the \
+                             create with a result carrying no workspace ids"
+                                .to_string(),
+                        )
+                    }
                 })
                 .unwrap_or_else(|| {
                     let error_value = serde_json::from_str::<serde_json::Value>(&response)
@@ -1133,6 +1185,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
         let before = app.state.workspaces.len();
 
         let (tx, mut rx) = oneshot::channel();
@@ -1140,6 +1193,8 @@ mod tests {
             &mut app,
             &mut lease,
             FederationCommand::CreateWorkspace {
+                epoch,
+                connid: 1,
                 label: Some("from-remote".to_string()),
                 reply: tx,
             },
@@ -1535,6 +1590,50 @@ mod tests {
             app.state.workspaces.len(),
             1,
             "a refused close must not touch the workspace set"
+        );
+        assert_eq!(
+            app.state.mode, mode_before,
+            "a refusal must never mutate this host's UI mode"
+        );
+    }
+
+    /// Creating a workspace on this host is a controller-only action: a
+    /// connection that is not the mounted controller must be refused, and the
+    /// refusal must not grow the host's workspace set.
+    #[tokio::test]
+    async fn create_workspace_is_refused_for_a_non_controller_connid() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("only")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+
+        // Captured rather than hardcoded: this asserts the command left the
+        // host's UI mode exactly as it found it, whatever the fixture starts in.
+        let mode_before = app.state.mode;
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        let before = app.state.workspaces.len();
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CreateWorkspace {
+                epoch,
+                connid: 999,
+                label: Some("from-an-impostor".to_string()),
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert!(
+            outcome.is_err(),
+            "a non-controller connid must be refused, not serviced"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            before,
+            "a refused create must not touch the workspace set"
         );
         assert_eq!(
             app.state.mode, mode_before,

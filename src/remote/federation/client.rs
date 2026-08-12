@@ -41,7 +41,8 @@ use super::id::{HostKey, Mount, ServerInstanceId};
 use super::protocol::{
     Capability, ClipboardMessage, ClipboardStageRequest, FaultReason, FederationMessage, Handshake,
     HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, TabCloseRequest,
-    TerminalChannelMessage, WorkspaceCloseRequest, FEDERATION_PROTOCOL_VERSION,
+    TerminalChannelMessage, WorkspaceCloseRequest, WorkspaceCreateRequest,
+    FEDERATION_PROTOCOL_VERSION,
 };
 // Only the stage-response arm names this type, and that arm is Unix-only
 // because the events it raises are.
@@ -206,6 +207,44 @@ pub(crate) fn send_tab_close_request(
     out_tx
         .send(FederationMessage::TabCloseRequest(request))
         .map_err(|_| CloseRequestSendError::LinkClosed)
+}
+
+/// Why a `WorkspaceCreateRequest` was not put on the wire. Unlike the close
+/// RPCs there is no `CapabilityNotAgreed` case: see
+/// `send_workspace_create_request`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreateRequestSendError {
+    /// The mount's outbound channel is already closed.
+    LinkClosed,
+}
+
+/// The ONE place a `WorkspaceCreateRequest` may reach the wire.
+///
+/// No capability gate, deliberately: `WorkspaceCreateRequest` arrived with the
+/// federation protocol bump to v6 itself, and version negotiation is
+/// all-or-nothing (a mismatch rejects the handshake), so any peer this mount
+/// is connected to necessarily decodes the variant. The close RPCs need their
+/// capability because they were added *within* an already-negotiated version.
+///
+/// The helper exists for the same single-send-point discipline anyway: the
+/// wire-size clamp on the peer-visible label lives here rather than at each
+/// caller, and a future gate has exactly one place to go.
+pub(crate) fn send_workspace_create_request(
+    out_tx: &mpsc::UnboundedSender<FederationMessage>,
+    request: WorkspaceCreateRequest,
+) -> Result<(), CreateRequestSendError> {
+    // Bounded before framing: the control channel's receiver rejects a frame
+    // over its 4 KiB ceiling outright, which would lose the request with
+    // nothing to show the user for it.
+    let request = WorkspaceCreateRequest {
+        label: request
+            .label
+            .map(crate::remote::federation::protocol::clamp_workspace_label),
+        ..request
+    };
+    out_tx
+        .send(FederationMessage::WorkspaceCreateRequest(request))
+        .map_err(|_| CreateRequestSendError::LinkClosed)
 }
 
 /// Successful outcome of `connect_and_mount`: a live [`RemoteMirror`]

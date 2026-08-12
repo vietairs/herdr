@@ -5,6 +5,9 @@
 ### Added
 - Pasting a clipboard image into a pane of a mounted remote workspace now also works from a host terminal that reports an image paste as an empty bracketed paste, so `Cmd+V` stages the image on hosts such as Warp. Terminals that substitute a temporary file path, such as cmux, continue to work unchanged. Apple Terminal sends nothing at all for an image-only clipboard, so `keys.remote_image_paste` (`Ctrl+V` by default) remains the way to paste there. A side effect on such terminals: pasting an empty clipboard into a pane of a mounted remote workspace now reports "no image on the clipboard" instead of doing nothing. Setting `keys.remote_image_paste` to an empty string turns the whole feature off, including this trigger.
 
+### Changed
+- The server/client protocol version moved from 19 to 20. After upgrading, restart the Herdr server (`herdr server stop`, then start Herdr again) so the running server and the installed CLI speak the same protocol; until then CLI commands report a client/server version mismatch.
+
 ### Fixed
 - `keys.remote_image_paste` now works on a pane of a mounted remote workspace in a normal session, not only in `herdr --remote`. Holding the key starts one clipboard read per press instead of one per key repeat, and a mount whose remote Herdr is too old to stage files reports that once and still delivers the key to the pane app.
 

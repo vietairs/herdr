@@ -179,6 +179,16 @@ impl App {
         Some((ws_idx, pane_id))
     }
 
+    /// Resolves a tab id only if it is still the tab's *current* canonical
+    /// public id, rejecting the positional shorthands `parse_tab_id` accepts
+    /// for humans. Callers holding an id snapshotted earlier (a context
+    /// menu's close target, say) need this: a shorthand like `w1:2` would
+    /// resolve to whatever tab now sits in that slot.
+    pub(crate) fn parse_current_public_tab_id(&self, id: &str) -> Option<(usize, usize)> {
+        let (ws_idx, tab_idx) = self.parse_tab_id(id)?;
+        (self.public_tab_id(ws_idx, tab_idx).as_deref() == Some(id)).then_some((ws_idx, tab_idx))
+    }
+
     pub(crate) fn parse_current_public_pane_id(
         &self,
         id: &str,
