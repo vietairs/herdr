@@ -1,1 +1,11 @@
 - 260724-1536-federation-pane-close-sync — COMPLETE 2026-07-24 — shipped as PR #7 (merge 46316fde): bidirectional federation pane-close sync, protocol v3→4; live-verified on vm-100/105
+- 260721-1403-multi-remote-federated-workspace-launch — COMPLETE 2026-07-21 — multi-remote federation launch; ship-gate PASSED, merge handover left to user
+- 260721-1830-federation-link-cleanup-toast-visibility — COMPLETE 2026-07-21 — link-close teardown race + headless toast forwarding; commits 6d36a5e + e71547f
+- 260721-2353-federation-agents-sidebar-remote-detection — COMPLETE 2026-07-22 — agent-status relay, resize-replay gate, remote split protocol; ship-gate --auto PASS, diff left uncommitted
+- 260722-1240-remote-agents-sidebar-still-missing — COMPLETE 2026-07-22 — remote agent identity relay fix; commit 29fe7b6, live-verified
+- 260722-1424-merge-upstream-v0.7.5 — COMPLETE 2026-07-22 — fork master merged to upstream v0.7.5; fast-forwarded to 5ec2a10
+- 260722-1638-remote-workspace-resize-rerender — COMPLETE 2026-07-23 — post-resize nudge clobber fix; PR #2 merged as 6058ce53
+- 260722-1915-option-prefix-auto-resize-splits — COMPLETE 2026-07-22 — split balance + auto-resize toggle; PR #4 merged as 9e8ada16
+- 260724-1213-cmux-clipboard-over-ssh-study — COMPLETE 2026-07-24 — recon/comparison only, no code change warranted
+- 260802-2301-herdr-perf-and-mount-recents — COMPLETE 2026-08-03 — mount-dialog recents feature + resync-purge leak fix; PR #9, commits cd21be84 + 3a489601
+- 260807-0041-federation-ui-labels — COMPLETE 2026-08-07 — federation badge-width fix stacked on PR #10; PR #11 merged as 83d23438
