@@ -1,0 +1,109 @@
+<title>Ship gate — clipboard image paste to a mounted remote workspace</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1a1a1a; --bg:#fdfdfc; --muted:#5c5c57; --line:#e0dfd9;
+          --ok:#1a7f4b; --warn:#a9611a; --bad:#b3261e; --code:#f4f3ef; --accent:#2a5db0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e8e6e1; --bg:#161614; --muted:#9c9a93; --line:#33322e;
+            --ok:#4ec98a; --warn:#e0a55c; --bad:#f2857c; --code:#212120; --accent:#7aa5e8; }
+  }
+  :root[data-theme="dark"] { --fg:#e8e6e1; --bg:#161614; --muted:#9c9a93; --line:#33322e;
+            --ok:#4ec98a; --warn:#e0a55c; --bad:#f2857c; --code:#212120; --accent:#7aa5e8; }
+  :root[data-theme="light"] { --fg:#1a1a1a; --bg:#fdfdfc; --muted:#5c5c57; --line:#e0dfd9;
+          --ok:#1a7f4b; --warn:#a9611a; --bad:#b3261e; --code:#f4f3ef; --accent:#2a5db0; }
+  body { background:var(--bg); color:var(--fg); margin:0; padding:2.5rem 1.25rem 6rem;
+         font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
+  main { max-width: 62rem; margin:0 auto; }
+  h1 { font-size:1.6rem; line-height:1.25; margin:0 0 .35rem; letter-spacing:-.01em; }
+  h2 { font-size:1.05rem; margin:2.4rem 0 .7rem; padding-bottom:.3rem;
+       border-bottom:1px solid var(--line); letter-spacing:.02em; text-transform:uppercase; }
+  .sub { color:var(--muted); margin:0 0 2rem; font-size:.9rem; }
+  code { background:var(--code); padding:.12em .35em; border-radius:3px;
+         font:.86em ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .scroll { overflow-x:auto; margin:1rem 0; }
+  table { border-collapse:collapse; width:100%; font-size:.88rem; min-width:44rem; }
+  th,td { text-align:left; vertical-align:top; padding:.55rem .7rem; border-bottom:1px solid var(--line); }
+  th { font-size:.74rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .ok{color:var(--ok);font-weight:600} .warn{color:var(--warn);font-weight:600} .bad{color:var(--bad);font-weight:600}
+  .note { border-left:1px solid var(--line); padding:.1rem 0 .1rem .9rem; color:var(--muted); margin:1rem 0; }
+  .flag { background:var(--code); border:1px solid var(--line); border-radius:5px;
+          padding:.9rem 1.1rem; margin:1.2rem 0; }
+  .flag p:first-child { margin-top:0; } .flag p:last-child { margin-bottom:0; }
+  .kicker { font-size:.74rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  ul { padding-left:1.15rem; } li { margin:.3rem 0; }
+</style>
+
+<main>
+<p class="kicker">Ship gate · 2026-08-07</p>
+<h1>Clipboard image paste into a mounted remote workspace</h1>
+<p class="sub">Branch <code>fix/terminal-clipboard-image-paste</code> · base <code>f934965b</code> · 8 files, +1073/−126 · <strong>uncommitted</strong></p>
+
+<h2>TL;DR</h2>
+<p>Pressing <code>Ctrl+V</code> to paste a clipboard image into a pane of a mounted remote workspace did nothing at all — no image, no error. The feature was wired into a key dispatcher that does not run in a normal session. This wires it into the one that does, and additionally bridges the empty-bracketed-paste shape so <code>Cmd+V</code> works on Warp. Four fix rounds and three reviews; the last review is clean apart from one item that needs your decision.</p>
+
+<h2>Context</h2>
+<p>You reported that image paste into a mounted workspace worked only when herdr ran inside cmux — not Apple Terminal, not Warp. The route was a bug with an unknown cause, so it opened with a debug stage rather than a plan; there is no <code>plan.md</code> and no phase files, and intent lives in the root-cause report plus each round's stated scope.</p>
+<p>Root cause: herdr has <strong>two</strong> key/paste dispatchers. <code>remote_image_paste_decision</code> was reachable only from the legacy <code>handle_key</code>, whose input channel the headless server nulls at startup. The live dispatcher never called it, so the key fell through to the raw PTY — which is why there was no toast either: no branch on that path could raise one. The sibling bracketed-paste handler <em>had</em> been ported, which is exactly why cmux worked and nothing else did.</p>
+
+<h2>Intuition</h2>
+<p>Three terminals, three different things happen when you hit <code>Cmd+V</code> with a screenshot on the clipboard. This was measured with a hexdump probe, not assumed:</p>
+<div class="scroll">
+<table>
+  <tr><th>Terminal</th><th>Bytes emitted</th><th>Result</th></tr>
+  <tr><td>Apple Terminal</td><td><em>nothing at all</em></td><td>Cmd+V is unreachable by any program. <code>Ctrl+V</code> is the only route — and that is the path this fix restores.</td></tr>
+  <tr><td>Warp</td><td><code>ESC[200~ESC[201~</code> (empty bracketed paste)</td><td>Newly bridged: an empty paste on a federated pane is read as "an image is on the clipboard, go get it".</td></tr>
+  <tr><td>cmux</td><td><code>ESC[200~/var/folders/…/T/clipboard-….png ESC[201~</code></td><td>Already worked; untouched. The temp path passes the existing <code>temp_dir()</code> trust gate.</td></tr>
+</table>
+</div>
+<p>Both triggers now funnel through one shared helper rather than two copies, and one config key — <code>keys.remote_image_paste</code> — governs both. Setting it to an empty string turns the whole thing off.</p>
+
+<h2>Blast Radius</h2>
+<ul>
+  <li><strong>Local (non-remote) panes:</strong> <code>Ctrl+V</code> must still reach the pane app as <code>0x16</code> — readline quoted-insert, vim visual-block. Covered by test; the intercept only fires on a federated pane.</li>
+  <li><strong>Held key:</strong> previously would have started one clipboard read per key <em>repeat</em>. Gated to <code>KeyEventKind::Press</code>, plus a per-pane in-flight flag. Both mutation-verified.</li>
+  <li><strong>Wedge risk:</strong> the in-flight flag is released as the first statement of the handler, ahead of every exit — a missed release would permanently disable paste on that pane. Verified by enumerating the return paths, not by accepting the claim.</li>
+  <li><strong>Workspace close:</strong> two <code>PaneId</code>-keyed sets are purged at both close sites, and — the part that mattered — <em>before</em> the workspace is dropped. After it, the id list is empty and the purge is a silent no-op.</li>
+  <li><strong>Old remotes:</strong> a mount whose remote herdr cannot stage files reports that once per pane and still delivers the key to the pane app.</li>
+  <li><strong>Protocol:</strong> unchanged. No wire version bump. Deliberate — see the open decision below.</li>
+  <li><strong>Scanned and clean:</strong> no secrets or credentials in the diff, and no text resembling instructions aimed at an agent.</li>
+</ul>
+
+<h2>Predicted vs Actual</h2>
+<p class="note">Skipped — no <code>/ak-predict</code> report exists for this route. No risks invented to fill the table.</p>
+
+<h2>Plan vs Shipped</h2>
+<p class="note">Degraded: no <code>plan.md</code> or phase files (bug route). Intent taken from the root-cause report, each round's stated scope, and every review finding. Verdicts below are grounded in the saved diff at <code>reports/ship-gate-diff-terminal-clipboard-image-paste.txt</code>.</p>
+<div class="scroll">
+<table>
+  <tr><th>Intent item</th><th>Status</th><th>Evidence</th></tr>
+  <tr><td>Root cause: wire the key into the live dispatcher</td><td class="ok">shipped</td><td><code>src/app/input/terminal.rs:77-128</code> — intercept inside <code>prepare_terminal_key_forward</code>, above every forwarding branch</td></tr>
+  <tr><td>R2 · key-repeat gate (<code>KeyEventKind::Press</code>)</td><td class="ok">shipped</td><td><code>input/mod.rs:1077-1088</code>; mutation-verified (6 reads without it)</td></tr>
+  <tr><td>R2 · unsupported mount toasts once, still delivers key</td><td class="ok">shipped</td><td>per-pane <code>HashSet</code> notice guard; test asserts <code>0x16</code> still on the wire</td></tr>
+  <tr><td>R2 · stale docs corrected</td><td class="ok">shipped</td><td><code>src/main.rs:193</code>, <code>config-reference.json</code></td></tr>
+  <tr><td>R2 · clipboard-reader test seam</td><td class="ok">shipped</td><td><code>clipboard_image_reader()</code>, cfg-split real vs <code>|| None</code></td></tr>
+  <tr><td>R3 · shared helper, ~80 lines of duplication removed</td><td class="ok">shipped</td><td><code>dispatch_bracketed_paste_image</code> called from both paste arms</td></tr>
+  <tr><td>R3 · empty-bracket bridge → Cmd+V on Warp</td><td class="ok">shipped</td><td><code>dispatch_empty_bracketed_paste</code>; measured Warp bytes asserted by test</td></tr>
+  <tr><td>R4 · M1 off switch governs both triggers</td><td class="ok">shipped</td><td>server side <code>input/mod.rs:1372</code>; <strong>client side fixed after the round-4 review</strong> — <code>client/mod.rs</code>, binding check moved above the empty-shape check (diff L1367-1375)</td></tr>
+  <tr><td>R4 · M2 remote client must not read the host clipboard</td><td class="warn">partial — logged</td><td>empty shape closed client-side via <code>suppress_unbridged_clipboard_image_trigger</code>. <strong>Configured-key shape still open</strong> — see decision below</td></tr>
+  <tr><td>R4 · M3 per-pane in-flight guard</td><td class="ok">shipped</td><td><code>remote_clipboard_image_reads_in_flight</code>; release is first statement, all exits covered</td></tr>
+  <tr><td>R4 · Q5 purge pane state on workspace close</td><td class="ok">shipped</td><td><code>api/workspaces.rs</code> both sites, both sets, before the close</td></tr>
+  <tr><td>Changelog + config reference</td><td class="ok">shipped</td><td>documents Warp Cmd+V, Apple Terminal's limitation, the empty-clipboard toast side effect, and the off switch</td></tr>
+  <tr><td>Nit · <code>spawn_blocking</code> is uncancellable</td><td class="warn">accepted</td><td>a timed-out clipboard read outlives its released flag. Bounded, not a wedge</td></tr>
+  <tr><td>Nit · purge tested directly, not through the close path</td><td class="warn">accepted</td><td>the wiring itself is unprotected by test</td></tr>
+</table>
+</div>
+<p><strong>12 shipped-as-planned · 1 partial (logged, needs your decision) · 2 accepted nits · 0 silently divergent · 0 dropped.</strong></p>
+
+<div class="flag">
+<p><strong>Two cross-check rows were corrected by hand.</strong> The delegated reconciliation reported M1 as still open and the changelog clause as missing. Both were fixed after the review it was reading, and both are present in the diff. It reconciled against the reports rather than the diff — the failure mode the evidence rule exists to catch. Verdicts above were re-derived from the diff directly.</p>
+</div>
+
+<h2>Decision you need to make</h2>
+<div class="flag">
+<p><strong>Is <code>herdr --remote</code> ever cross-user?</strong> On a remote client, <code>Ctrl+V</code> with no image on the operator's own clipboard forwards <code>0x16</code>; the server then reads the <strong>host</strong> clipboard and stages that image into the pane the remote operator is watching. Rounds 1–3 are what made this reachable.</p>
+<p>The empty-paste shape was closable client-side because it carries no payload. The configured key is not — it also reaches non-federated panes, where it is an ordinary keystroke a pane app expects. Closing it properly requires the server to know the client is remote: a <code>ClientMessage::Hello</code> field, i.e. a wire-protocol bump, deliberately out of scope for a fix branch.</p>
+<p>Low severity <em>if</em> federation is only ever self-attach between your own machines — which is the assumption currently carrying it, and which is exactly what needs confirming rather than presuming.</p>
+</div>
+
+<h2>Not yet done</h2>
+<p><strong>Nobody has pressed these keys against a real mount.</strong> 3394 tests pass and three reviews are clean, but this fix exists because a code path was never exercised at runtime — which is precisely the class of bug tests did not catch the first time. The recipe is in the handoff, and it requires restarting the server: a long-running <code>herdr server</code> does not pick up a reinstalled binary.</p>
+</main>
