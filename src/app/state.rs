@@ -1349,48 +1349,88 @@ pub struct ContextMenuState {
     pub x: u16,
     pub y: u16,
     pub list: MenuListState,
+    /// Snapshot of whether the menu's workspace/tab target is a federated
+    /// (remote-mirrored) item, taken at menu-open time. Mirrors how
+    /// `ContextMenuKind::Pane`'s `auto_resize_enabled` already snapshots
+    /// state instead of re-deriving it from `AppState` inside `items()`,
+    /// which only has `&self`.
+    pub federated: bool,
 }
 
 impl ContextMenuState {
     pub fn items(&self) -> Vec<&'static str> {
         match self.kind {
-            ContextMenuKind::Workspace { .. } => ["Rename", "Close"].to_vec(),
+            ContextMenuKind::Workspace { .. } => {
+                let mut items = vec!["Rename", "Close"];
+                if self.federated {
+                    items.push("Close on host");
+                }
+                items
+            }
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => ["Rename", "Close", "New worktree", "Open worktree..."].to_vec(),
+            } => {
+                let mut items = vec!["Rename", "Close", "New worktree", "Open worktree..."];
+                if self.federated {
+                    items.push("Close on host");
+                }
+                items
+            }
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
-            } => ["Rename", "Close", "Delete worktree checkout..."].to_vec(),
+            } => {
+                let mut items = vec!["Rename", "Close", "Delete worktree checkout..."];
+                if self.federated {
+                    items.push("Close on host");
+                }
+                items
+            }
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: true,
                 ..
-            } => [
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                "Expand",
-            ]
-            .to_vec(),
+            } => {
+                let mut items = vec![
+                    "Rename",
+                    "Close group",
+                    "New worktree",
+                    "Open worktree...",
+                    "Expand",
+                ];
+                if self.federated {
+                    items.push("Close on host");
+                }
+                items
+            }
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
                 ..
-            } => [
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                "Collapse",
-            ]
-            .to_vec(),
-            ContextMenuKind::Tab { .. } => ["New tab", "Rename", "Close"].to_vec(),
+            } => {
+                let mut items = vec![
+                    "Rename",
+                    "Close group",
+                    "New worktree",
+                    "Open worktree...",
+                    "Collapse",
+                ];
+                if self.federated {
+                    items.push("Close on host");
+                }
+                items
+            }
+            ContextMenuKind::Tab { .. } => {
+                let mut items = vec!["New tab", "Rename", "Close"];
+                if self.federated {
+                    items.push("Close on host");
+                }
+                items
+            }
             ContextMenuKind::Pane {
                 has_manual_label,
                 source_pane_id,
@@ -3063,6 +3103,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         };
 
         assert_eq!(
@@ -3083,6 +3124,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         };
 
         assert_eq!(
@@ -3103,6 +3145,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         };
 
         assert_eq!(
@@ -3134,6 +3177,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         }
     }
 
@@ -3226,6 +3270,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         };
         assert_eq!(workspace_menu.items(), vec!["Rename", "Close"]);
 
@@ -3237,6 +3282,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         };
         assert_eq!(tab_menu.items(), vec!["New tab", "Rename", "Close"]);
 
@@ -3250,11 +3296,95 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         };
         assert_eq!(
             git_menu.items(),
             vec!["Rename", "Close", "New worktree", "Open worktree..."]
         );
+    }
+
+    #[test]
+    fn federated_workspace_and_git_workspace_context_menus_add_close_on_host() {
+        let workspace_menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            federated: true,
+        };
+        assert_eq!(
+            workspace_menu.items(),
+            vec!["Rename", "Close", "Close on host"]
+        );
+
+        let git_menu = ContextMenuState {
+            kind: ContextMenuKind::GitWorkspace {
+                ws_idx: 0,
+                is_linked_worktree: false,
+                has_worktree_children: false,
+                collapsed: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            federated: true,
+        };
+        assert_eq!(
+            git_menu.items(),
+            vec![
+                "Rename",
+                "Close",
+                "New worktree",
+                "Open worktree...",
+                "Close on host"
+            ]
+        );
+    }
+
+    #[test]
+    fn non_federated_workspace_context_menu_omits_close_on_host() {
+        let workspace_menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            federated: false,
+        };
+        assert!(!workspace_menu.items().contains(&"Close on host"));
+    }
+
+    #[test]
+    fn federated_tab_context_menu_adds_close_on_host() {
+        let tab_menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            federated: true,
+        };
+        assert_eq!(
+            tab_menu.items(),
+            vec!["New tab", "Rename", "Close", "Close on host"]
+        );
+    }
+
+    #[test]
+    fn non_federated_tab_context_menu_omits_close_on_host() {
+        let tab_menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            federated: false,
+        };
+        assert!(!tab_menu.items().contains(&"Close on host"));
     }
 
     #[test]

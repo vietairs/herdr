@@ -1082,6 +1082,138 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    /// `workspace.close_remote`: forwards a close to the serving host of a
+    /// federated workspace instead of retiring the local mirror
+    /// (`handle_workspace_close` NEVER reaches the wire — this is the
+    /// distinct opt-in verb for that). Mirrors `dispatch_remote_pane_close`
+    /// (`api/panes.rs`)'s exact shape/reasoning: this JSON-API handler runs
+    /// synchronously and cannot await the eventual `WorkspaceCloseResponse`,
+    /// so it sends the request now and acknowledges with
+    /// `remote_close_pending`. Falls back to `remote_close_unsupported` when
+    /// the target is not a federated workspace, has no live mount, or the
+    /// mount's peer never agreed `WORKSPACE_TAB_CLOSE`.
+    pub(super) fn handle_workspace_close_remote(
+        &mut self,
+        id: String,
+        target: WorkspaceTarget,
+    ) -> String {
+        let Some(ws_idx) = self.parse_workspace_id(&target.workspace_id) else {
+            return workspace_not_found(id, &target.workspace_id);
+        };
+        if self.state.workspaces.get(ws_idx).is_none() {
+            return workspace_not_found(id, &target.workspace_id);
+        }
+        self.dispatch_remote_workspace_close(id, ws_idx)
+    }
+
+    fn dispatch_remote_workspace_close(&mut self, id: String, ws_idx: usize) -> String {
+        let workspace_id = self.public_workspace_id(ws_idx);
+        if !matches!(
+            crate::remote::federation::id::classify(&workspace_id),
+            crate::remote::federation::id::IdClass::Remote(_)
+        ) {
+            return encode_error(
+                id,
+                "remote_close_unsupported",
+                "workspace.close_remote requires a federated workspace",
+            );
+        }
+
+        let live_pane_ids: Vec<crate::layout::PaneId> = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|ws| {
+                ws.tabs
+                    .iter()
+                    .flat_map(|tab| tab.layout.pane_ids())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let out_tx = live_pane_ids.into_iter().find_map(|pane_id| {
+            self.state.workspaces[ws_idx]
+                .terminal_id(pane_id)
+                .cloned()
+                .and_then(|terminal_id| self.terminal_runtimes.get(&terminal_id))
+                .and_then(|runtime| runtime.remote_out_tx())
+        });
+        let Some(out_tx) = out_tx else {
+            return encode_error(
+                id,
+                "remote_close_unsupported",
+                "closing a remote-federated workspace requires a live mount; this \
+                 workspace's mount is not connected",
+            );
+        };
+
+        let Some(origin) = self.federation_host_key_for_workspace(ws_idx) else {
+            return encode_error(
+                id,
+                "remote_close_unsupported",
+                "closing a remote-federated workspace requires a live mount; this \
+                 workspace has no registered federation mount",
+            );
+        };
+        let Some(mirror) = self.state.remote_mirrors.get(&origin) else {
+            return encode_error(
+                id,
+                "remote_close_unsupported",
+                "closing a remote-federated workspace requires a live mount; this \
+                 workspace's mount is not connected",
+            );
+        };
+
+        // `strip_mount_namespace` only reads `mount.host_key` — the other
+        // two `Mount` fields are unused by it and irrelevant here (the
+        // public workspace id itself carries no generation/instance data),
+        // so a placeholder `Mount` built from `origin` alone is enough to
+        // reverse the namespacing.
+        let mount = crate::remote::federation::id::Mount {
+            host_key: origin.clone(),
+            server_instance_id: crate::remote::federation::id::ServerInstanceId(String::new()),
+            mount_generation: 0,
+        };
+        let raw_target_workspace_id =
+            crate::remote::federation::id::strip_mount_namespace(&mount, &workspace_id);
+
+        let request_id = super::panes::next_remote_close_request_id();
+        let sent = crate::remote::federation::client::send_workspace_close_request(
+            mirror,
+            &out_tx,
+            crate::remote::federation::protocol::WorkspaceCloseRequest {
+                request_id,
+                target_workspace_id: raw_target_workspace_id,
+            },
+        );
+        if let Err(err) = sent {
+            let message = match err {
+                crate::remote::federation::client::CloseRequestSendError::CapabilityNotAgreed => {
+                    "the remote host does not support workspace.close_remote"
+                }
+                crate::remote::federation::client::CloseRequestSendError::LinkClosed => {
+                    "the remote mount's link is closing; the close request could not be sent"
+                }
+            };
+            return encode_error(id, "remote_close_unsupported", message);
+        }
+
+        self.register_pending_remote_close(
+            request_id,
+            crate::app::creation::PendingRemoteClose {
+                workspace_id,
+                origin,
+                target: crate::app::creation::RemoteCloseTarget::Workspace,
+            },
+        );
+
+        encode_error(
+            id,
+            "remote_close_pending",
+            "close request sent to the remote host; the workspace will disappear once \
+             the remote host confirms it is gone",
+        )
+    }
+
     /// Resolves the live federation mount's `HostKey` that `index`'s
     /// workspace belongs to, if any — matches its `worktree_space` key
     /// (`federation:<host_key>`, set by `materialize_federation_mount`)
@@ -1594,6 +1726,194 @@ mod tests {
         };
         mirror.apply_snapshot(&snapshot, EventCursor(0));
         mirror
+    }
+
+    /// A live mount with one materialized federated workspace, wired the
+    /// same way `panes.rs`'s `app_with_federation_mounted_pane` wires a
+    /// pane: `materialize_federation_mount` builds the local workspace, then
+    /// `begin_federation_mount` registers the mirror in `remote_mirrors` so
+    /// `federation_host_key_for_workspace`/`remote_mirrors.get` (both used
+    /// by `dispatch_remote_workspace_close`) resolve it. When
+    /// `agree_close_capability` is false the mirror never agrees
+    /// `WORKSPACE_TAB_CLOSE`, exercising the capability-gated refusal path.
+    #[cfg(unix)]
+    fn app_with_federation_mounted_workspace(
+        agree_close_capability: bool,
+    ) -> (
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<
+            crate::remote::federation::protocol::FederationMessage,
+        >,
+        usize,
+    ) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        let mut mirror = test_federation_mirror_with_workspace("alice@10.0.0.1", 1);
+        if agree_close_capability {
+            mirror.set_agreed_capabilities(
+                [crate::remote::federation::protocol::Capability::new(
+                    crate::remote::federation::protocol::Capability::WORKSPACE_TAB_CLOSE,
+                )]
+                .into_iter()
+                .collect(),
+            );
+        }
+
+        let mut router = crate::remote::federation::client::TerminalChannelRouter::new();
+        let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed against a loopback-shaped snapshot");
+        let ws_idx = created[0];
+        app.state
+            .begin_federation_mount(mirror)
+            .expect("registering the mirror must succeed for a fresh HostKey");
+        (app, out_rx, ws_idx)
+    }
+
+    /// `dispatch_remote_workspace_close`: closing a federated workspace via
+    /// `workspace.close_remote` must send a `WorkspaceCloseRequest` over the
+    /// mount's link, register a pending-close entry, acknowledge with
+    /// `remote_close_pending`, and NOT remove the local mirror workspace —
+    /// the real close decision belongs to the serving host, answered
+    /// asynchronously by `App::handle_federation_workspace_close_ready`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dispatch_remote_workspace_close_sends_a_request_and_registers_pending() {
+        let (mut app, mut out_rx, ws_idx) = app_with_federation_mounted_workspace(true);
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        while out_rx.try_recv().is_ok() {}
+
+        let response = app.handle_workspace_close_remote(
+            "req".into(),
+            WorkspaceTarget {
+                workspace_id: workspace_id.clone(),
+            },
+        );
+
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "remote_close_pending");
+        assert!(
+            app.state.workspaces.iter().any(|ws| ws.id == workspace_id),
+            "dispatching a remote close must not remove the local mirror workspace; only \
+             the eventual WorkspaceCloseResponse does"
+        );
+
+        let request = match out_rx.try_recv().expect("a WorkspaceCloseRequest was sent") {
+            crate::remote::federation::protocol::FederationMessage::WorkspaceCloseRequest(
+                request,
+            ) => request,
+            other => panic!("expected a WorkspaceCloseRequest, got {other:?}"),
+        };
+        assert_eq!(request.target_workspace_id, "w1");
+        assert_eq!(app.pending_remote_closes.len(), 1);
+    }
+
+    /// Every close kind correlates through the ONE `pending_remote_closes`
+    /// map, so they must all mint from the ONE close-id counter. A second
+    /// counter would restart at 1 and hand out an id already in flight,
+    /// popping the wrong pending entry — and the response handler's origin
+    /// check could not catch it, because two closes on the same mount carry
+    /// the same `HostKey`. Pinned by observing that dispatching a real close
+    /// advances that shared counter, rather than by asserting a literal id.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dispatching_a_remote_workspace_close_mints_from_the_shared_close_id_counter() {
+        let (mut app, mut out_rx, ws_idx) = app_with_federation_mounted_workspace(true);
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        while out_rx.try_recv().is_ok() {}
+
+        let before = super::super::panes::next_remote_close_request_id();
+        let _ = app.handle_workspace_close_remote(
+            "req".into(),
+            WorkspaceTarget {
+                workspace_id: workspace_id.clone(),
+            },
+        );
+        let after = super::super::panes::next_remote_close_request_id();
+
+        let dispatched = *app
+            .pending_remote_closes
+            .keys()
+            .next()
+            .expect("the dispatch registered exactly one pending close");
+        assert!(
+            dispatched > before && dispatched < after,
+            "the workspace-close dispatcher must mint from the shared close-id counter \
+             (got {dispatched}, expected strictly between {before} and {after})"
+        );
+    }
+
+    /// Echo-rule safety test (the most important one in this file):
+    /// `workspace.close` on a federated workspace must NEVER reach the wire.
+    /// `workspace.close_remote` is the distinct opt-in verb for that.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_close_on_a_mirrored_workspace_sends_nothing() {
+        let (mut app, mut out_rx, ws_idx) = app_with_federation_mounted_workspace(true);
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        while out_rx.try_recv().is_ok() {}
+
+        let response = app.handle_workspace_close(
+            "req".into(),
+            WorkspaceTarget {
+                workspace_id: workspace_id.clone(),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        // `workspace.close` legitimately still sends ordinary local-unmount
+        // teardown traffic (e.g. `Terminal(Close)` for the mirror's own
+        // terminal channels) — the echo rule under test is narrower: no
+        // `WorkspaceCloseRequest` (the wire message that would ask the
+        // SERVING host to close something) may ever be sent by this verb.
+        while let Ok(msg) = out_rx.try_recv() {
+            assert!(
+                !matches!(
+                    msg,
+                    crate::remote::federation::protocol::FederationMessage::WorkspaceCloseRequest(
+                        _
+                    )
+                ),
+                "workspace.close on a federated workspace must never send a \
+                 WorkspaceCloseRequest; only workspace.close_remote may"
+            );
+        }
+    }
+
+    /// An ungated send is fatal, not merely useless — a peer that never
+    /// agreed `WORKSPACE_TAB_CLOSE` has no decoder for `WorkspaceCloseRequest`.
+    /// `dispatch_remote_workspace_close` must refuse instead of sending when
+    /// the capability was never agreed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dispatch_remote_workspace_close_without_the_capability_agreed_is_refused() {
+        let (mut app, mut out_rx, ws_idx) = app_with_federation_mounted_workspace(false);
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        while out_rx.try_recv().is_ok() {}
+
+        let response = app.handle_workspace_close_remote(
+            "req".into(),
+            WorkspaceTarget {
+                workspace_id: workspace_id.clone(),
+            },
+        );
+
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "remote_close_unsupported");
+        assert!(
+            out_rx.try_recv().is_err(),
+            "a capability that was never agreed must never be sent over the wire"
+        );
+        assert!(app.pending_remote_closes.is_empty());
     }
 
     /// Real spawned child (`cat`) so `ChildGuard`/`ChildStdout`/`ChildStdin`

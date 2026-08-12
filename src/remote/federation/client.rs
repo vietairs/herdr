@@ -40,8 +40,8 @@ use crate::pane::RelayedAgentStatus;
 use super::id::{HostKey, Mount, ServerInstanceId};
 use super::protocol::{
     Capability, ClipboardMessage, ClipboardStageRequest, FaultReason, FederationMessage, Handshake,
-    HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, TerminalChannelMessage,
-    FEDERATION_PROTOCOL_VERSION,
+    HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, TabCloseRequest,
+    TerminalChannelMessage, WorkspaceCloseRequest, FEDERATION_PROTOCOL_VERSION,
 };
 // Only the stage-response arm names this type, and that arm is Unix-only
 // because the events it raises are.
@@ -160,6 +160,52 @@ pub(crate) fn send_clipboard_stage_request(
     out_tx
         .send(FederationMessage::ClipboardStageRequest(request))
         .map_err(|_| StageSendError::LinkClosed)
+}
+
+/// Why a gated `WorkspaceCloseRequest`/`TabCloseRequest` was not put on the
+/// wire. Same two failure modes as `StageSendError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseRequestSendError {
+    /// This mount's peer never advertised `workspace_tab_close`, so it has
+    /// no decoder for either request frame.
+    CapabilityNotAgreed,
+    /// The mount's writer is gone; the link is already tearing down.
+    LinkClosed,
+}
+
+/// The ONE place a `WorkspaceCloseRequest` may reach the wire.
+///
+/// Same fatality reasoning as `send_clipboard_stage_request`'s doc comment:
+/// `FederationMessage` is an externally-tagged enum, so a peer built before
+/// `WorkspaceCloseRequest` existed fails to decode the frame and its whole
+/// mount tears down. Routing every send through this helper makes "the
+/// capability was agreed" a precondition the caller cannot forget.
+pub(crate) fn send_workspace_close_request(
+    mirror: &RemoteMirror,
+    out_tx: &mpsc::UnboundedSender<FederationMessage>,
+    request: WorkspaceCloseRequest,
+) -> Result<(), CloseRequestSendError> {
+    if !mirror.supports(&Capability::new(Capability::WORKSPACE_TAB_CLOSE)) {
+        return Err(CloseRequestSendError::CapabilityNotAgreed);
+    }
+    out_tx
+        .send(FederationMessage::WorkspaceCloseRequest(request))
+        .map_err(|_| CloseRequestSendError::LinkClosed)
+}
+
+/// The ONE place a `TabCloseRequest` may reach the wire. Same reasoning as
+/// `send_workspace_close_request`.
+pub(crate) fn send_tab_close_request(
+    mirror: &RemoteMirror,
+    out_tx: &mpsc::UnboundedSender<FederationMessage>,
+    request: TabCloseRequest,
+) -> Result<(), CloseRequestSendError> {
+    if !mirror.supports(&Capability::new(Capability::WORKSPACE_TAB_CLOSE)) {
+        return Err(CloseRequestSendError::CapabilityNotAgreed);
+    }
+    out_tx
+        .send(FederationMessage::TabCloseRequest(request))
+        .map_err(|_| CloseRequestSendError::LinkClosed)
 }
 
 /// Successful outcome of `connect_and_mount`: a live [`RemoteMirror`]
@@ -789,6 +835,90 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
             // as `SplitPaneRequest` above.
             FederationMessage::WorkspaceCreateRequest(_) => {
                 tracing::debug!("federation client received a WorkspaceCreateRequest; ignoring");
+            }
+            // `WorkspaceCloseRequest`/`TabCloseRequest` are client->server
+            // only, same reasoning as `SplitPaneRequest` above.
+            FederationMessage::WorkspaceCloseRequest(_) => {
+                tracing::debug!("federation client received a WorkspaceCloseRequest; ignoring");
+            }
+            FederationMessage::TabCloseRequest(_) => {
+                tracing::debug!("federation client received a TabCloseRequest; ignoring");
+            }
+            // The remote host already performed (or refused) the real close
+            // by the time this arrives, same shape/reasoning as
+            // `ClosePaneResponse` below: no new `TerminalRuntime` needs
+            // spawning, only tearing an existing local mirror workspace down,
+            // which this task does not have `&mut App` to do, so it hands the
+            // outcome back via `AppEvent::FederationWorkspaceCloseReady`/
+            // `Failed`. Unlike `ClosePaneResponse`, `Failed` is never folded
+            // into `Ready` here: a target the serving host does not have is
+            // its `Failed`, matching how a missing pane makes that host's
+            // `pane.close` fail. Idempotency is the requesting side's job
+            // instead — the `Ready` handler tolerates a local target a racing
+            // resync already removed, which is the only race this side can
+            // actually observe.
+            FederationMessage::WorkspaceCloseResponse(response) => {
+                let Some(ctx) = split_materialization else {
+                    tracing::info!(
+                        "remote workspace close responded; no live session to notify of the \
+                         outcome"
+                    );
+                    continue;
+                };
+                match response {
+                    super::protocol::WorkspaceCloseResponse::Closed { request_id } => {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationWorkspaceCloseReady {
+                                request_id,
+                                origin: ctx.origin.clone(),
+                            })
+                            .await;
+                    }
+                    super::protocol::WorkspaceCloseResponse::Failed { request_id, reason } => {
+                        tracing::warn!(request_id, %reason, "remote workspace close failed");
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationWorkspaceCloseFailed {
+                                request_id,
+                                reason,
+                                origin: ctx.origin.clone(),
+                            })
+                            .await;
+                    }
+                }
+            }
+            // Tab-close counterpart of `WorkspaceCloseResponse` above; same
+            // reasoning throughout.
+            FederationMessage::TabCloseResponse(response) => {
+                let Some(ctx) = split_materialization else {
+                    tracing::info!(
+                        "remote tab close responded; no live session to notify of the outcome"
+                    );
+                    continue;
+                };
+                match response {
+                    super::protocol::TabCloseResponse::Closed { request_id } => {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationTabCloseReady {
+                                request_id,
+                                origin: ctx.origin.clone(),
+                            })
+                            .await;
+                    }
+                    super::protocol::TabCloseResponse::Failed { request_id, reason } => {
+                        tracing::warn!(request_id, %reason, "remote tab close failed");
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationTabCloseFailed {
+                                request_id,
+                                reason,
+                                origin: ctx.origin.clone(),
+                            })
+                            .await;
+                    }
+                }
             }
             // The remote host already created (or refused) the real workspace
             // by the time this arrives. Unlike `SplitPaneResponse::Created`,

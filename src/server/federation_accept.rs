@@ -49,8 +49,9 @@ use crate::remote::federation::protocol::{
     AgentStatusMessage, Capability, Channel, ClipboardStageFailure, ClipboardStageRequest,
     ClipboardStageResponse, ClosePaneRequest, ClosePaneResponse, EventChannelMessage, EventCursor,
     EventFrame, FaultMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot,
-    ScrollbackReplay, SplitPaneRequest, SplitPaneResponse, TerminalChannelMessage,
-    WorkspaceCreateRequest, WorkspaceCreateResponse, FEDERATION_PROTOCOL_VERSION,
+    ScrollbackReplay, SplitPaneRequest, SplitPaneResponse, TabCloseRequest, TabCloseResponse,
+    TerminalChannelMessage, WorkspaceCloseRequest, WorkspaceCloseResponse, WorkspaceCreateRequest,
+    WorkspaceCreateResponse, FEDERATION_PROTOCOL_VERSION,
 };
 use crate::remote::federation::tee;
 use crate::server::client_transport::ServerEvent;
@@ -98,6 +99,9 @@ fn federation_capabilities() -> BTreeSet<Capability> {
         // so is the staging module behind this capability, so the two can
         // never disagree about which targets can honour a stage request.
         Capability::new(Capability::FILE_STAGING),
+        // Gates `WorkspaceCloseRequest`/`TabCloseRequest`; see the constant's
+        // doc comment for why this needs no protocol-version bump.
+        Capability::new(Capability::WORKSPACE_TAB_CLOSE),
     ]
     .into_iter()
     .collect()
@@ -543,6 +547,28 @@ fn reader_loop<S: Read>(
             Ok(Some(FederationMessage::ClosePaneRequest(request))) => {
                 handle_close_pane_request(request, out_tx, shutdown, first_cause, server_event_tx);
             }
+            Ok(Some(FederationMessage::WorkspaceCloseRequest(request))) => {
+                handle_workspace_close_request(
+                    request,
+                    epoch,
+                    connid,
+                    out_tx,
+                    shutdown,
+                    first_cause,
+                    server_event_tx,
+                );
+            }
+            Ok(Some(FederationMessage::TabCloseRequest(request))) => {
+                handle_tab_close_request(
+                    request,
+                    epoch,
+                    connid,
+                    out_tx,
+                    shutdown,
+                    first_cause,
+                    server_event_tx,
+                );
+            }
             Ok(Some(FederationMessage::WorkspaceCreateRequest(request))) => {
                 handle_workspace_create_request(
                     request,
@@ -670,6 +696,108 @@ fn handle_close_pane_request(
     let _ = enqueue_outbound(
         out_tx,
         FederationMessage::ClosePaneResponse(response),
+        first_cause,
+        shutdown,
+    );
+}
+
+/// Services one inbound `WorkspaceCloseRequest` (federation close forwarding
+/// for the multi-workspace case): a blocking round-trip through
+/// `FederationCommand::CloseWorkspaceRemote`, mirroring
+/// `handle_close_pane_request` exactly — replies with `WorkspaceCloseResponse::
+/// Closed`/`Failed` on the shared outbound queue. Unlike `ClosePane`, this
+/// carries `(epoch, connid)` through to the actor: the actor gates it on
+/// `FederationLease::is_mounted_controller`, refusing a stale/superseded
+/// connection's close (a gap the pre-existing `SplitPane`/`ClosePane`/
+/// `CreateWorkspace` arms have and this one deliberately does not repeat). A
+/// dropped/gone actor (server shutting down) replies `Failed` rather than
+/// silently dropping the peer's request.
+fn handle_workspace_close_request(
+    request: WorkspaceCloseRequest,
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) {
+    let WorkspaceCloseRequest {
+        request_id,
+        target_workspace_id,
+    } = request;
+
+    let (reply, rx) = oneshot::channel();
+    let sent = server_event_tx.blocking_send(ServerEvent::Federation(
+        FederationCommand::CloseWorkspaceRemote {
+            epoch,
+            connid,
+            target_workspace_id,
+            reply,
+        },
+    ));
+    let outcome = if sent.is_err() {
+        Err("server event loop is gone".to_string())
+    } else {
+        rx.blocking_recv()
+            .unwrap_or_else(|_| Err("federation close-workspace reply dropped".to_string()))
+    };
+
+    let response = match outcome {
+        Ok(()) => WorkspaceCloseResponse::Closed { request_id },
+        Err(reason) => WorkspaceCloseResponse::Failed { request_id, reason },
+    };
+    let _ = enqueue_outbound(
+        out_tx,
+        FederationMessage::WorkspaceCloseResponse(response),
+        first_cause,
+        shutdown,
+    );
+}
+
+/// Services one inbound `TabCloseRequest` (federation close forwarding for
+/// the multi-tab case): a blocking round-trip through
+/// `FederationCommand::CloseTabRemote`, mirroring
+/// `handle_workspace_close_request` exactly — replies with
+/// `TabCloseResponse::Closed`/`Failed` on the shared outbound queue. Carries
+/// `(epoch, connid)` for the same lease-gate reason. A dropped/gone actor
+/// (server shutting down) replies `Failed` rather than silently dropping the
+/// peer's request.
+fn handle_tab_close_request(
+    request: TabCloseRequest,
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) {
+    let TabCloseRequest {
+        request_id,
+        target_tab_id,
+    } = request;
+
+    let (reply, rx) = oneshot::channel();
+    let sent =
+        server_event_tx.blocking_send(ServerEvent::Federation(FederationCommand::CloseTabRemote {
+            epoch,
+            connid,
+            target_tab_id,
+            reply,
+        }));
+    let outcome = if sent.is_err() {
+        Err("server event loop is gone".to_string())
+    } else {
+        rx.blocking_recv()
+            .unwrap_or_else(|_| Err("federation close-tab reply dropped".to_string()))
+    };
+
+    let response = match outcome {
+        Ok(()) => TabCloseResponse::Closed { request_id },
+        Err(reason) => TabCloseResponse::Failed { request_id, reason },
+    };
+    let _ = enqueue_outbound(
+        out_tx,
+        FederationMessage::TabCloseResponse(response),
         first_cause,
         shutdown,
     );

@@ -160,6 +160,7 @@ pub(crate) fn federated_session_allows(method: &Method) -> bool {
         | Method::WorkspaceMoveBlock(_)
         | Method::WorkspaceReportMetadata(_)
         | Method::WorkspaceClose(_)
+        | Method::WorkspaceCloseRemote(_)
         | Method::WorktreeCreate(_)
         | Method::WorktreeOpen(_)
         | Method::WorktreeRemove(_)
@@ -167,6 +168,7 @@ pub(crate) fn federated_session_allows(method: &Method) -> bool {
         | Method::TabRename(_)
         | Method::TabMove(_)
         | Method::TabClose(_)
+        | Method::TabCloseRemote(_)
         | Method::AgentRename(_)
         | Method::AgentStart(_)
         // agent.view.set/clear pin a server-side view marker (persisted local

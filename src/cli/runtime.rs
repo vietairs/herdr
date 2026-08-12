@@ -49,6 +49,13 @@ pub(super) fn workspace_close(workspace_id: String) -> std::io::Result<i32> {
     )
 }
 
+pub(super) fn workspace_close_remote(workspace_id: String) -> std::io::Result<i32> {
+    print_method_response(
+        "cli:workspace:close_remote",
+        Method::WorkspaceCloseRemote(WorkspaceTarget { workspace_id }),
+    )
+}
+
 pub(super) fn tab_list(params: TabListParams) -> std::io::Result<i32> {
     print_method_response("cli:tab:list", Method::TabList(params))
 }
@@ -71,6 +78,13 @@ pub(super) fn tab_rename(params: TabRenameParams) -> std::io::Result<i32> {
 
 pub(super) fn tab_close(tab_id: String) -> std::io::Result<i32> {
     print_method_response("cli:tab:close", Method::TabClose(TabTarget { tab_id }))
+}
+
+pub(super) fn tab_close_remote(tab_id: String) -> std::io::Result<i32> {
+    print_method_response(
+        "cli:tab:close_remote",
+        Method::TabCloseRemote(TabTarget { tab_id }),
+    )
 }
 
 pub(super) fn worktree_list(params: WorktreeListParams) -> std::io::Result<i32> {

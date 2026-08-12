@@ -62,6 +62,15 @@ use super::id::ServerInstanceId;
 /// top-level `FederationMessage` variants a v5 peer cannot decode, not an
 /// additive field. v5 shipped in tags `v0.8.0-hvn.1`/`v0.8.0-hvn.2`, so it
 /// cannot be amended in place.
+///
+/// `WorkspaceCloseRequest`/`WorkspaceCloseResponse` and
+/// `TabCloseRequest`/`TabCloseResponse` (federation close forwarding for the
+/// multi-workspace/multi-tab case, extending `ClosePaneRequest`/
+/// `ClosePaneResponse` to the other two closeable identities) ride this same
+/// 5 -> 6 bump rather than forcing a further 6 -> 7: v6 has not shipped in a
+/// release yet (unlike v3, v4 and v5 above, which were all live before their
+/// respective follow-on additions), so there is no already-deployed peer
+/// whose decode expectations these four new variants would break.
 pub const FEDERATION_PROTOCOL_VERSION: u32 = 6;
 
 /// An optional feature two federation peers may support. Modeled as an
@@ -98,6 +107,35 @@ impl Capability {
     /// failure notice, never a torn-down mount.
     ///
     pub const FILE_STAGING: &'static str = "file_staging";
+
+    /// Gates the workspace/tab close RPCs (`WorkspaceCloseRequest` /
+    /// `TabCloseRequest` and their responses): the mounting client asks the
+    /// serving host to close one of ITS workspaces or tabs, and the client
+    /// removes its own mirror only once the host confirms.
+    ///
+    /// Same hard requirement as `FILE_STAGING`, for the same reason:
+    /// `FederationMessage` is an externally-tagged enum, so a peer built
+    /// before these variants existed cannot decode the frame, its
+    /// `read_frame` returns `Err`, and its whole mount tears down — every
+    /// pane on that link dies because of one close. Both peers must advertise
+    /// this before either side emits a close frame; a peer that never
+    /// advertises it must degrade to a local failure notice, never a
+    /// torn-down mount.
+    ///
+    /// Enforcement is SEND-side only, and deliberately so: the hazard is
+    /// emitting a frame the peer cannot decode, so the gate lives in the two
+    /// send helpers in `remote::federation::client`. There is no matching
+    /// receive-side gate — a frame that decoded at all came from a peer that
+    /// speaks these variants — so do not read this as the receive-gated
+    /// arrangement `FILE_STAGING` uses via its channel sentinel.
+    ///
+    /// This is why these variants need no protocol-version bump: version
+    /// negotiation is all-or-nothing, capabilities are additive, and an older
+    /// peer simply drops an unrecognized capability name from the agreed set.
+    // Federation only negotiates capabilities on Unix, so this constant has
+    // no reader in a Windows build; matches `SCROLLBACK_REPLAY` above.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub const WORKSPACE_TAB_CLOSE: &'static str = "workspace_tab_close";
 
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
@@ -370,6 +408,55 @@ pub enum ClosePaneResponse {
     Failed { request_id: u64, reason: String },
 }
 
+/// Request to close an existing remote workspace on the serving host's own
+/// session, sent by a mounting client so a local workspace-close action
+/// tears down the workspace on the mounted host instead of only mutating
+/// the local mirror (federation close forwarding for the multi-workspace
+/// case). `request_id` correlates the eventual `WorkspaceCloseResponse`,
+/// mirroring `ClosePaneRequest`'s bare-u64 pairing rather than introducing
+/// an RPC framework — the control channel carries no other request/response
+/// pairing today.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCloseRequest {
+    pub request_id: u64,
+    /// Raw (un-namespaced) remote workspace id to close, as carried by the
+    /// mount's own `SessionSnapshot`/event stream — never a locally
+    /// namespaced `r:<host>:...` id.
+    pub target_workspace_id: String,
+}
+
+/// Response to a `WorkspaceCloseRequest`: either a confirmation the
+/// workspace is gone, or a reason it could not be closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceCloseResponse {
+    Closed { request_id: u64 },
+    Failed { request_id: u64, reason: String },
+}
+
+/// Request to close an existing remote tab on the serving host's own
+/// workspace, sent by a mounting client so a local tab-close action tears
+/// down the tab on the mounted host instead of only mutating the local
+/// mirror (federation close forwarding for the multi-tab case). `request_id`
+/// correlates the eventual `TabCloseResponse`, mirroring `ClosePaneRequest`'s
+/// bare-u64 pairing rather than introducing an RPC framework — the control
+/// channel carries no other request/response pairing today.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabCloseRequest {
+    pub request_id: u64,
+    /// Raw (un-namespaced) remote tab id to close, as carried by the
+    /// mount's own `SessionSnapshot`/event stream — never a locally
+    /// namespaced `r:<host>:...` id.
+    pub target_tab_id: String,
+}
+
+/// Response to a `TabCloseRequest`: either a confirmation the tab is gone,
+/// or a reason it could not be closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TabCloseResponse {
+    Closed { request_id: u64 },
+    Failed { request_id: u64, reason: String },
+}
+
 /// Request to create a brand new workspace on the serving host, sent by a
 /// mounting client so a local "new workspace" action performed while a
 /// federated workspace is in focus grows the *mounted host's* own workspace
@@ -621,6 +708,10 @@ pub enum FederationMessage {
     SplitPaneResponse(SplitPaneResponse),
     ClosePaneRequest(ClosePaneRequest),
     ClosePaneResponse(ClosePaneResponse),
+    WorkspaceCloseRequest(WorkspaceCloseRequest),
+    WorkspaceCloseResponse(WorkspaceCloseResponse),
+    TabCloseRequest(TabCloseRequest),
+    TabCloseResponse(TabCloseResponse),
     WorkspaceCreateRequest(WorkspaceCreateRequest),
     WorkspaceCreateResponse(WorkspaceCreateResponse),
     SnapshotRequest(SnapshotRequest),
@@ -646,6 +737,8 @@ impl FederationMessage {
             Self::Fault(_) => Channel::Control,
             Self::SplitPaneRequest(_) | Self::SplitPaneResponse(_) => Channel::Control,
             Self::ClosePaneRequest(_) | Self::ClosePaneResponse(_) => Channel::Control,
+            Self::WorkspaceCloseRequest(_) | Self::WorkspaceCloseResponse(_) => Channel::Control,
+            Self::TabCloseRequest(_) | Self::TabCloseResponse(_) => Channel::Control,
             Self::WorkspaceCreateRequest(_) | Self::WorkspaceCreateResponse(_) => Channel::Control,
             Self::SnapshotRequest(_) => Channel::Control,
             // Carries a full `SessionSnapshot`, same payload shape/size as
@@ -803,6 +896,84 @@ mod tests {
             codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
                 .expect("decode must succeed");
         assert_eq!(decoded, failed);
+    }
+
+    #[test]
+    fn workspace_close_request_response_roundtrip_through_the_wire_codec() {
+        let request = FederationMessage::WorkspaceCloseRequest(WorkspaceCloseRequest {
+            request_id: 13,
+            target_workspace_id: "w1".to_string(),
+        });
+        assert_eq!(request.channel(), Channel::Control);
+        let encoded = codec::encode(&request).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, request);
+
+        let closed = FederationMessage::WorkspaceCloseResponse(WorkspaceCloseResponse::Closed {
+            request_id: 13,
+        });
+        assert_eq!(closed.channel(), Channel::Control);
+        let encoded = codec::encode(&closed).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, closed);
+
+        let failed = FederationMessage::WorkspaceCloseResponse(WorkspaceCloseResponse::Failed {
+            request_id: 13,
+            reason: "no such workspace".to_string(),
+        });
+        let encoded = codec::encode(&failed).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, failed);
+    }
+
+    #[test]
+    fn tab_close_request_response_roundtrip_through_the_wire_codec() {
+        let request = FederationMessage::TabCloseRequest(TabCloseRequest {
+            request_id: 14,
+            target_tab_id: "w1:t1".to_string(),
+        });
+        assert_eq!(request.channel(), Channel::Control);
+        let encoded = codec::encode(&request).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, request);
+
+        let closed =
+            FederationMessage::TabCloseResponse(TabCloseResponse::Closed { request_id: 14 });
+        assert_eq!(closed.channel(), Channel::Control);
+        let encoded = codec::encode(&closed).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, closed);
+
+        let failed = FederationMessage::TabCloseResponse(TabCloseResponse::Failed {
+            request_id: 14,
+            reason: "no such tab".to_string(),
+        });
+        let encoded = codec::encode(&failed).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, failed);
+    }
+
+    // The variants added on top of the 5 -> 6 bump must keep the constant at
+    // 6: they ride the already-paid bump rather than forcing a further 6 ->
+    // 7, since v6 has not shipped in a release yet (see the doc comment on
+    // `FEDERATION_PROTOCOL_VERSION`). An accidental bump here would silently
+    // desync this worktree's protocol version from what v0.8.0-hvn.2's peers
+    // expect.
+    #[test]
+    fn federation_protocol_version_is_unchanged_for_the_close_forwarding_variants() {
+        assert_eq!(FEDERATION_PROTOCOL_VERSION, 6);
     }
 
     // Post-mount pane mirroring fix (plans/260722-1327): `SnapshotRequest`/

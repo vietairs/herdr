@@ -413,6 +413,40 @@ pub enum AppEvent {
         reason: String,
         origin: crate::remote::federation::id::HostKey,
     },
+    /// A live mount's drive task received a `WorkspaceCloseResponse::Closed`
+    /// answering an earlier `WorkspaceCloseRequest` this mount sent
+    /// (`workspace.close_remote`). Same shape/reasoning as
+    /// `FederationClosePaneReady`.
+    #[cfg(unix)]
+    FederationWorkspaceCloseReady {
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+    },
+    /// The remote host rejected an earlier `WorkspaceCloseRequest`. Same
+    /// shape/reasoning as `FederationClosePaneFailed`.
+    #[cfg(unix)]
+    FederationWorkspaceCloseFailed {
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    },
+    /// A live mount's drive task received a `TabCloseResponse::Closed`
+    /// answering an earlier `TabCloseRequest` this mount sent
+    /// (`tab.close_remote`). Same shape/reasoning as
+    /// `FederationClosePaneReady`.
+    #[cfg(unix)]
+    FederationTabCloseReady {
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+    },
+    /// The remote host rejected an earlier `TabCloseRequest`. Same
+    /// shape/reasoning as `FederationClosePaneFailed`.
+    #[cfg(unix)]
+    FederationTabCloseFailed {
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    },
 }
 
 /// Payload for [`AppEvent::FederationResyncPaneCreated`] — the fully-built

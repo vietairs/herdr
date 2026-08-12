@@ -1323,6 +1323,18 @@ impl App {
                     self.state.mode = Mode::Navigate;
                 }
             }
+            (
+                ContextMenuKind::Workspace { ws_idx }
+                | ContextMenuKind::GitWorkspace { ws_idx, .. },
+                Some("Close on host"),
+            ) => {
+                // Asks the serving host to close its own workspace; never
+                // goes through the local confirm-close dialog, since this
+                // isn't a local mirror teardown (see
+                // `close_workspace_idx_remote_via_api`'s doc comment).
+                self.close_workspace_idx_remote_via_api(ws_idx);
+                leave_modal(&mut self.state);
+            }
             (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("New tab")) => {
                 self.focus_workspace_idx_via_api(ws_idx);
                 self.focus_tab_idx_via_api(tab_idx);
@@ -1339,6 +1351,13 @@ impl App {
                 if !self.close_active_tab_via_api_requires_confirmation() {
                     leave_modal(&mut self.state);
                 }
+            }
+            (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Close on host")) => {
+                // Asks the serving host to close its own tab; never goes
+                // through the local confirm-close dialog (see
+                // `close_tab_idx_remote_via_api`'s doc comment).
+                self.close_tab_idx_remote_via_api(ws_idx, tab_idx);
+                leave_modal(&mut self.state);
             }
             (ContextMenuKind::Pane { pane_id, .. }, Some("Rename pane")) => {
                 open_rename_pane(&mut self.state, pane_id);
@@ -2349,6 +2368,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         };
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
 
@@ -2395,6 +2415,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         };
         let idx = menu
             .items()
@@ -2426,6 +2447,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         };
         let idx = menu
             .items()
@@ -2461,6 +2483,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         };
         let close_idx = menu
             .items()
@@ -2476,6 +2499,81 @@ mod tests {
         assert_eq!(app.state.mode, Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert!(app.state.context_menu.is_none());
+    }
+
+    /// "Close on host" asks the SERVING host to close its own workspace
+    /// (`workspace.close_remote`); it must never route through the local
+    /// confirm-close dialog the plain "Close" item uses, since it isn't
+    /// tearing down the local mirror itself — see
+    /// `close_workspace_idx_remote_via_api`'s doc comment. With no live
+    /// federation mount behind this test workspace, the request is refused
+    /// synchronously (`remote_close_unsupported`) rather than sent, but the
+    /// no-confirm-dialog contract holds either way.
+    #[test]
+    fn context_menu_close_workspace_on_host_via_api_skips_confirm_dialog() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1:w1".to_string();
+        app.state.confirm_close = true;
+        app.state.mode = Mode::ContextMenu;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            federated: true,
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close on host")
+            .expect("close on host item");
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_ne!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "close_remote must not remove the local mirror; only the serving host's \
+             eventual confirmation does"
+        );
+    }
+
+    /// Tab counterpart of the workspace test above: "Close on host"
+    /// (`tab.close_remote`) must never route through the confirm-close
+    /// dialog either, even for the last tab in a workspace (where the plain
+    /// "Close" item would).
+    #[test]
+    fn context_menu_close_tab_on_host_via_api_skips_confirm_dialog() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1:w1".to_string();
+        app.state.confirm_close = true;
+        app.state.mode = Mode::ContextMenu;
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+            federated: true,
+        };
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Close on host")
+            .expect("close on host item");
+
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_ne!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            1,
+            "close_remote must not remove the local mirror tab; only the serving host's \
+             eventual confirmation does"
+        );
     }
 
     fn pane_menu(
@@ -2504,6 +2602,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            federated: false,
         }
     }
 

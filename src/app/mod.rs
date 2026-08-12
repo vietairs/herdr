@@ -159,13 +159,20 @@ pub struct App {
     /// eventual `SplitPaneResponse`'s materialized pane into the right spot
     /// (`App::handle_federation_split_pane_ready`, `app/creation.rs`).
     pub(crate) pending_remote_splits: HashMap<u64, creation::PendingRemoteSplit>,
-    /// Correlates an in-flight `ClosePaneRequest::request_id`
-    /// (`app/api/panes.rs::dispatch_remote_pane_close`, Gap A —
-    /// plans/260724-1536-federation-pane-close-sync) to the local layout
-    /// context (workspace/pane) needed to tear the mirror pane down once the
-    /// eventual `ClosePaneResponse` arrives
-    /// (`App::handle_federation_close_pane_ready`, `app/creation.rs`). Same
-    /// shape/reasoning as `pending_remote_splits`.
+    /// Correlates an in-flight close request's `request_id` —
+    /// `ClosePaneRequest` (`app/api/panes.rs::dispatch_remote_pane_close`),
+    /// `WorkspaceCloseRequest` (`app/api/workspaces.rs::
+    /// dispatch_remote_workspace_close`), or `TabCloseRequest`
+    /// (`app/api/tabs.rs::dispatch_remote_tab_close`) — to the local target
+    /// (`creation::RemoteCloseTarget`) needed to tear the mirror down once
+    /// the matching response arrives (`App::handle_federation_close_pane_
+    /// ready`/`handle_federation_workspace_close_ready`/
+    /// `handle_federation_tab_close_ready`, `app/creation.rs`). All three
+    /// kinds mint their `request_id` from the SAME
+    /// `next_remote_close_request_id` counter and share this ONE map —
+    /// a second counter would start at 1 and collide with an id already in
+    /// flight here, popping the wrong pending entry (see that function's own
+    /// doc comment). Same shape/reasoning as `pending_remote_splits`.
     pub(crate) pending_remote_closes: HashMap<u64, creation::PendingRemoteClose>,
     /// Correlates an in-flight `ClipboardStageRequest::request_id`
     /// (`app/remote_clipboard_stage.rs::begin_remote_clipboard_stage`) to the
@@ -6416,6 +6423,7 @@ last_pane = "prefix+tab"
             x: 2,
             y: 2,
             list: state::MenuListState::new(1),
+            federated: false,
         });
         app.state.mode = Mode::ContextMenu;
 

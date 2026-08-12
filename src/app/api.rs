@@ -314,6 +314,40 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::FederationWorkspaceCloseReady { request_id, origin } = ev {
+            self.handle_federation_workspace_close_ready(request_id, origin);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationWorkspaceCloseFailed {
+            request_id,
+            reason,
+            origin,
+        } = ev
+        {
+            self.handle_federation_workspace_close_failed(request_id, reason, origin);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationTabCloseReady { request_id, origin } = ev {
+            self.handle_federation_tab_close_ready(request_id, origin);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationTabCloseFailed {
+            request_id,
+            reason,
+            origin,
+        } = ev
+        {
+            self.handle_federation_tab_close_failed(request_id, reason, origin);
+            return;
+        }
+
+        #[cfg(unix)]
         if let AppEvent::FederationClipboardStageReady {
             request_id,
             remote_path,
@@ -1227,6 +1261,9 @@ impl App {
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target)
             }
+            Method::WorkspaceCloseRemote(target) => {
+                return self.handle_workspace_close_remote(request.id, target)
+            }
             Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
             Method::WorktreeCreate(params) => {
                 let _ = params;
@@ -1252,6 +1289,9 @@ impl App {
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
+            Method::TabCloseRemote(target) => {
+                return self.handle_tab_close_remote(request.id, target)
+            }
             Method::AgentList(_) => return self.handle_agent_list(request.id),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
             Method::AgentFocus(target) => return self.handle_agent_focus(request.id, target),

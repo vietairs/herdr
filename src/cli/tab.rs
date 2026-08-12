@@ -15,6 +15,7 @@ pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
         "focus" => tab_focus(&args[1..]),
         "rename" => tab_rename(&args[1..]),
         "close" => tab_close(&args[1..]),
+        "close-remote" => tab_close_remote(&args[1..]),
         "help" | "--help" | "-h" => {
             print_tab_help();
             Ok(0)
@@ -174,6 +175,19 @@ fn tab_close(args: &[String]) -> std::io::Result<i32> {
     super::runtime::tab_close(super::normalize_tab_id(raw_tab_id))
 }
 
+fn tab_close_remote(args: &[String]) -> std::io::Result<i32> {
+    let Some(raw_tab_id) = args.first() else {
+        eprintln!("usage: herdr tab close-remote <tab_id>");
+        return Ok(2);
+    };
+    if args.len() != 1 {
+        eprintln!("usage: herdr tab close-remote <tab_id>");
+        return Ok(2);
+    }
+
+    super::runtime::tab_close_remote(super::normalize_tab_id(raw_tab_id))
+}
+
 fn print_tab_help() {
     eprintln!("herdr tab commands:");
     eprintln!("  herdr tab list [--workspace <workspace_id>]");
@@ -183,5 +197,6 @@ fn print_tab_help() {
     eprintln!("  herdr tab get <tab_id>");
     eprintln!("  herdr tab focus <tab_id>");
     eprintln!("  herdr tab rename <tab_id> <label>");
-    eprintln!("  herdr tab close <tab_id>");
+    eprintln!("  herdr tab close <tab_id>          close your local mirror only; leaves the host's copy running");
+    eprintln!("  herdr tab close-remote <tab_id>   close a mirrored tab on its serving host");
 }

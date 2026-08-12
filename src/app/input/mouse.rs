@@ -1097,11 +1097,18 @@ impl AppState {
                             })
                         })
                         .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
+                    let federated = self.workspaces.get(idx).is_some_and(|ws| {
+                        matches!(
+                            crate::remote::federation::id::classify(&ws.id),
+                            crate::remote::federation::id::IdClass::Remote(_)
+                        )
+                    });
                     self.context_menu = Some(ContextMenuState {
                         kind,
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
+                        federated,
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -1114,11 +1121,18 @@ impl AppState {
                 if let (Some(ws_idx), Some(tab_idx)) =
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
+                    let federated = self.workspaces.get(ws_idx).is_some_and(|ws| {
+                        matches!(
+                            crate::remote::federation::id::classify(&ws.id),
+                            crate::remote::federation::id::IdClass::Remote(_)
+                        )
+                    });
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Tab { ws_idx, tab_idx },
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
+                        federated,
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -1156,6 +1170,7 @@ impl AppState {
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
+                        federated: false,
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -2660,6 +2675,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(0),
+            federated: false,
         });
         app.state.mode = Mode::ContextMenu;
 
@@ -2954,6 +2970,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(1),
+            federated: false,
         });
         app.state.mode = Mode::ContextMenu;
         handle_context_menu_key(
@@ -2994,6 +3011,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(1),
+            federated: false,
         });
         app.state.mode = Mode::ContextMenu;
 
@@ -3048,6 +3066,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(1),
+            federated: false,
         });
         app.state.mode = Mode::ContextMenu;
 

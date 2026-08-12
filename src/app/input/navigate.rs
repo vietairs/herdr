@@ -454,6 +454,17 @@ impl App {
         self.runtime_workspace_close("tui.workspace.close", workspace_id);
     }
 
+    /// `workspace.close_remote`: unlike `close_workspace_idx_via_api`, this
+    /// never removes the local mirror itself — the response is the only
+    /// feedback the user gets, so it is parsed and surfaced as a toast (see
+    /// `surface_remote_close_response`).
+    pub(crate) fn close_workspace_idx_remote_via_api(&mut self, ws_idx: usize) {
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let response =
+            self.runtime_workspace_close_remote("tui.workspace.close_remote", workspace_id);
+        self.surface_remote_close_response(&response);
+    }
+
     pub(crate) fn move_workspace_via_api(&mut self, source_ws_idx: usize, insert_idx: usize) {
         let workspace_id = self.public_workspace_id(source_ws_idx);
         self.runtime_workspace_move(
@@ -504,6 +515,63 @@ impl App {
         };
         self.runtime_tab_close("tui.tab.close", tab_id);
         false
+    }
+
+    /// `tab.close_remote`: unlike `close_active_tab_via_api_requires_confirmation`,
+    /// this never removes the local mirror tab itself — the response is the
+    /// only feedback the user gets, so it is parsed and surfaced as a toast
+    /// (see `surface_remote_close_response`). Returns `false` (as the plain
+    /// path's `Some(tab_id)` branch does) when there is nothing to send.
+    pub(crate) fn close_tab_idx_remote_via_api(&mut self, ws_idx: usize, tab_idx: usize) -> bool {
+        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+            return false;
+        };
+        let response = self.runtime_tab_close_remote("tui.tab.close_remote", tab_id);
+        self.surface_remote_close_response(&response);
+        true
+    }
+
+    /// Parses a `workspace.close_remote` / `tab.close_remote` JSON response
+    /// and surfaces it to the user via toast. `remote_close_pending` is the
+    /// normal accepted-and-sent outcome for these fire-and-forget verbs, so
+    /// it gets an informational toast explaining the item disappears once
+    /// the serving host confirms; any other error code (`remote_close_unsupported`,
+    /// `workspace_not_found`, `tab_not_found`, ...) reuses
+    /// `App::raise_remote_close_failed_toast`, the same attention-toast path
+    /// federation's async close-failure handlers already use. A bare success
+    /// envelope (not expected from these verbs, but a legal shape) raises
+    /// nothing.
+    fn surface_remote_close_response(&mut self, response: &str) {
+        let Ok(envelope) = serde_json::from_str::<crate::api::schema::ErrorResponse>(response)
+        else {
+            return;
+        };
+        if envelope.error.code == "remote_close_pending" {
+            self.raise_remote_close_pending_toast(envelope.error.message);
+            return;
+        }
+        // Every other code is a real failure the user must see, on every
+        // platform. Besides `remote_close_unsupported` (the only one a
+        // non-Unix build can produce, since federation dispatch is Unix-only)
+        // this also carries `workspace_not_found` / `tab_not_found`, so the
+        // branch cannot be reduced to a single expected code.
+        self.raise_remote_close_toast(
+            super::super::state::ToastKind::NeedsAttention,
+            "close request failed",
+            envelope.error.message,
+        );
+    }
+
+    /// Informational counterpart to `App::raise_remote_close_failed_toast`:
+    /// same `state.toast_config.delivery` dispatch, but a non-attention toast
+    /// kind for the normal "request accepted, will resolve later" outcome of
+    /// `workspace.close_remote` / `tab.close_remote`.
+    fn raise_remote_close_pending_toast(&mut self, reason: String) {
+        self.raise_remote_close_toast(
+            super::super::state::ToastKind::Finished,
+            "close request sent",
+            reason,
+        );
     }
 
     pub(crate) fn move_tab_via_api(

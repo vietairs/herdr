@@ -133,8 +133,8 @@ mod tests {
         AgentStatusMessage, Capability, Channel, ClipboardMessage, ClosePaneRequest,
         ClosePaneResponse, EventChannelMessage, EventCursor, EventFrame, FaultMessage, FaultReason,
         FederationMessage, Handshake, HandshakeResponse, MountSnapshot, RejectReason,
-        ScrollbackReplay, SplitDirection, SplitPaneRequest, SplitPaneResponse,
-        TerminalChannelMessage,
+        ScrollbackReplay, SplitDirection, SplitPaneRequest, SplitPaneResponse, TabCloseRequest,
+        TabCloseResponse, TerminalChannelMessage, WorkspaceCloseRequest, WorkspaceCloseResponse,
     };
     use super::*;
     use crate::api::schema::common::AgentStatus;
@@ -251,6 +251,26 @@ mod tests {
             FederationMessage::ClosePaneResponse(ClosePaneResponse::Failed {
                 request_id: 9,
                 reason: "no such pane".to_string(),
+            }),
+            FederationMessage::WorkspaceCloseRequest(WorkspaceCloseRequest {
+                request_id: 13,
+                target_workspace_id: "w1".to_string(),
+            }),
+            FederationMessage::WorkspaceCloseResponse(WorkspaceCloseResponse::Closed {
+                request_id: 13,
+            }),
+            FederationMessage::WorkspaceCloseResponse(WorkspaceCloseResponse::Failed {
+                request_id: 13,
+                reason: "no such workspace".to_string(),
+            }),
+            FederationMessage::TabCloseRequest(TabCloseRequest {
+                request_id: 14,
+                target_tab_id: "w1:t1".to_string(),
+            }),
+            FederationMessage::TabCloseResponse(TabCloseResponse::Closed { request_id: 14 }),
+            FederationMessage::TabCloseResponse(TabCloseResponse::Failed {
+                request_id: 14,
+                reason: "no such tab".to_string(),
             }),
         ]
     }

@@ -36,12 +36,26 @@ fn next_remote_split_request_id() -> u64 {
     NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Mints a fresh, process-wide-unique `ClosePaneRequest::request_id`. A
-/// separate counter from `next_remote_split_request_id` (not a shared one) so
-/// a split and a close minted "at the same time" can never collide, matching
-/// that function's own reasoning for why a bare counter (not a per-mount map)
-/// is enough today.
-fn next_remote_close_request_id() -> u64 {
+/// Mints a fresh close-request id, shared by EVERY
+/// close kind — `ClosePaneRequest`, `WorkspaceCloseRequest`
+/// (`api/workspaces.rs::dispatch_remote_workspace_close`), and
+/// `TabCloseRequest` (`api/tabs.rs::dispatch_remote_tab_close`) — because
+/// they all correlate through the SAME `App::pending_remote_closes` map
+/// (`creation::PendingRemoteClose`'s `target` field tells the kinds apart).
+///
+/// This id is unique only WITHIN one pending-request map, not process-wide
+/// in any stronger sense: `next_remote_split_request_id` above mints from
+/// its own separate counter and both start at 1, so a split and a close
+/// minted "at the same time" DO share the same numeric id today — that is
+/// harmless only because splits and closes correlate through two entirely
+/// separate maps. Every close kind, in contrast, shares this ONE counter
+/// precisely because they share this ONE map: a second close-side counter
+/// would also start at 1 and collide with a close id already in flight,
+/// silently popping the wrong pending entry (two closes on the same mount
+/// have identical origins, so the response handler's origin check cannot
+/// catch that collision). `pub(super)` so the workspace/tab dispatchers in
+/// sibling `api/` modules can mint from it too.
+pub(super) fn next_remote_close_request_id() -> u64 {
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -403,8 +417,8 @@ impl App {
             request_id,
             crate::app::creation::PendingRemoteClose {
                 workspace_id: self.public_workspace_id(ws_idx),
-                pane_id: target_pane_id,
                 origin,
+                target: crate::app::creation::RemoteCloseTarget::Pane(target_pane_id),
             },
         );
 
