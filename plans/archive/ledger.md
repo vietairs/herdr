@@ -9,3 +9,7 @@
 - 260724-1213-cmux-clipboard-over-ssh-study — COMPLETE 2026-07-24 — recon/comparison only, no code change warranted
 - 260802-2301-herdr-perf-and-mount-recents — COMPLETE 2026-08-03 — mount-dialog recents feature + resync-purge leak fix; PR #9, commits cd21be84 + 3a489601
 - 260807-0041-federation-ui-labels — COMPLETE 2026-08-07 — federation badge-width fix stacked on PR #10; PR #11 merged as 83d23438
+- 260713-1217-herdr-remote-workspace-federation — FORCE-ARCHIVED (UNKNOWN, PR merged) 2026-07-22 — remote workspace federation v2; PR #1 merged as 965c15ea
+- 260722-1913-tui-add-remote-workspace — FORCE-ARCHIVED (UNKNOWN, PR merged) 2026-07-22 — in-app remote-mount dialog; PR #3 merged as 1c833031
+- 260724-1034-remote-paste-live-failure-diagnosis — FORCE-ARCHIVED (UNKNOWN, PR merged) 2026-07-24 — remote clipboard-paste 3-gap fix; PR #6 merged as 46c4dd1e
+- 260806-2311-merge-upstream-v0.8.0 — FORCE-ARCHIVED (UNKNOWN, PR merged, stale active-log pointer) 2026-08-06 — upstream v0.8.0 merge; PR #10 merged as 584c5c97
