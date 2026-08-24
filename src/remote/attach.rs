@@ -96,6 +96,12 @@ pub(crate) fn federation_requested(remote: &RemoteLaunch, env_value: Option<&str
 /// REVISED Phase A (multi-remote federated workspace launch) launch-time
 /// routing decision — pure, so tests 3/3b in the phase's TDD list can assert
 /// `main.rs`'s branch selection without any process/socket I/O.
+/// Every caller of this federation-launch helper is `#[cfg(unix)]`
+/// (`main.rs`'s coexistence branch, `autodetect::auto_detect_launch_with_mount`,
+/// `app::api::workspaces`), so non-Unix builds compile it with no users.
+/// Kept compiled rather than `#[cfg(unix)]`-gated so the unit tests below
+/// still build on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LaunchRoute {
     /// No `--remote` target: local-only autodetect launch, untouched.
@@ -112,6 +118,12 @@ pub(crate) enum LaunchRoute {
 
 /// Decides `main.rs`'s launch route from the already-parsed `RemoteLaunch`
 /// and federation env var, with no I/O of its own.
+/// Every caller of this federation-launch helper is `#[cfg(unix)]`
+/// (`main.rs`'s coexistence branch, `autodetect::auto_detect_launch_with_mount`,
+/// `app::api::workspaces`), so non-Unix builds compile it with no users.
+/// Kept compiled rather than `#[cfg(unix)]`-gated so the unit tests below
+/// still build on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn decide_launch_route(
     remote: Option<&RemoteLaunch>,
     env_value: Option<&str>,
@@ -128,6 +140,12 @@ pub(crate) fn decide_launch_route(
 /// construction, no socket I/O, so test 3b can assert its shape directly.
 /// Phase B requirement 9: carries the full non-localhost target list in one
 /// request; the server-side handler owns the concurrent-dial fan-out.
+/// Every caller of this federation-launch helper is `#[cfg(unix)]`
+/// (`main.rs`'s coexistence branch, `autodetect::auto_detect_launch_with_mount`,
+/// `app::api::workspaces`), so non-Unix builds compile it with no users.
+/// Kept compiled rather than `#[cfg(unix)]`-gated so the unit tests below
+/// still build on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn mount_remote_request(targets: &[String]) -> crate::api::schema::Request {
     crate::api::schema::Request {
         id: "cli:workspace:mount_remote".to_string(),
@@ -160,6 +178,12 @@ pub(crate) fn mount_remote_request(targets: &[String]) -> crate::api::schema::Re
 /// connection-level keybindings handshake to carry the flag to. Rather than
 /// silently ignore an explicit `--remote-keybindings server`/`local` flag
 /// (the reviewed bug), the caller must reject the combination up front.
+/// Every caller of this federation-launch helper is `#[cfg(unix)]`
+/// (`main.rs`'s coexistence branch, `autodetect::auto_detect_launch_with_mount`,
+/// `app::api::workspaces`), so non-Unix builds compile it with no users.
+/// Kept compiled rather than `#[cfg(unix)]`-gated so the unit tests below
+/// still build on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn coexistence_keybindings_conflict(remote: &RemoteLaunch) -> bool {
     remote.keybindings != RemoteKeybindings::Local
 }
@@ -167,12 +191,24 @@ pub(crate) fn coexistence_keybindings_conflict(remote: &RemoteLaunch) -> bool {
 /// Phase B requirement 2: `localhost` (exact string match only — not
 /// `127.0.0.1` or a hostname; no v1 canonicalization, per predict's decision)
 /// means "local workspace, no SSH dial".
+/// Every caller of this federation-launch helper is `#[cfg(unix)]`
+/// (`main.rs`'s coexistence branch, `autodetect::auto_detect_launch_with_mount`,
+/// `app::api::workspaces`), so non-Unix builds compile it with no users.
+/// Kept compiled rather than `#[cfg(unix)]`-gated so the unit tests below
+/// still build on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn is_local_target(target: &str) -> bool {
     target == "localhost"
 }
 
 /// Phase B requirement 3: the subset of `targets` that must be dialed over
 /// SSH — `localhost` entries are filtered out (requirement 2).
+/// Every caller of this federation-launch helper is `#[cfg(unix)]`
+/// (`main.rs`'s coexistence branch, `autodetect::auto_detect_launch_with_mount`,
+/// `app::api::workspaces`), so non-Unix builds compile it with no users.
+/// Kept compiled rather than `#[cfg(unix)]`-gated so the unit tests below
+/// still build on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn remote_ssh_targets(targets: &[String]) -> Vec<String> {
     targets
         .iter()
@@ -894,6 +930,12 @@ impl RemoteHerdr {
     /// Binds status probes to `session_name`. The default session is left
     /// implicit, matching `remote_bridge_command`'s existing convention of
     /// only passing `--session` for a non-default name.
+    /// Every caller of this federation-launch helper is `#[cfg(unix)]`
+    /// (`main.rs`'s coexistence branch, `autodetect::auto_detect_launch_with_mount`,
+    /// `app::api::workspaces`), so non-Unix builds compile it with no users.
+    /// Kept compiled rather than `#[cfg(unix)]`-gated so the unit tests below
+    /// still build on Windows.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn with_session_name(mut self, session_name: &str) -> Self {
         self.session_name = if session_name == crate::session::DEFAULT_SESSION_NAME {
             None
