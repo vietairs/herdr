@@ -228,9 +228,27 @@ fn datetime_from_tm(value: &libc::tm) -> Option<time::PrimitiveDateTime> {
     Some(time::PrimitiveDateTime::new(date, time))
 }
 
+pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: &std::path::Path) {
+    if !env.iter().any(|(key, _)| key == "PWD") {
+        env.push(("PWD".to_string(), cwd.display().to_string()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_pane_pwd_defaults_to_cwd_without_overriding_explicit_env() {
+        let cwd = Path::new("/plugin-cwd");
+        let mut derived = vec![("OTHER".to_string(), "value".to_string())];
+        set_default_plugin_pane_pwd(&mut derived, cwd);
+        assert!(derived.contains(&("PWD".to_string(), "/plugin-cwd".to_string())));
+
+        let mut explicit = vec![("PWD".to_string(), "/caller-pwd".to_string())];
+        set_default_plugin_pane_pwd(&mut explicit, cwd);
+        assert_eq!(explicit, [("PWD".to_string(), "/caller-pwd".to_string())]);
+    }
 
     #[test]
     fn remote_ssh_config_dir_rejects_overlong_control_socket_name() {
