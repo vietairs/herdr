@@ -476,6 +476,7 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                     ratio,
                     cwd: None,
                     focus,
+                    right_click: Default::default(),
                     env: std::collections::HashMap::new(),
                 }),
             });

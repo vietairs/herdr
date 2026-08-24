@@ -773,6 +773,7 @@ impl App {
                             split_moved,
                             ratatui::layout::Direction::Horizontal,
                             0.5,
+                            true,
                         )
                         .is_ok()
                     {
@@ -1073,6 +1074,7 @@ impl App {
                 moved,
                 pending.direction,
                 pending.ratio,
+                true,
             )
             .is_err()
         {
@@ -1790,6 +1792,7 @@ impl App {
                         moved,
                         ratatui::layout::Direction::Horizontal,
                         0.5,
+                        true,
                     )
                     .is_err()
                 {
