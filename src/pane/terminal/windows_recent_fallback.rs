@@ -331,7 +331,7 @@ mod tests {
         let mut core = pane.core.lock().unwrap();
         let _ = super::super::finish_recent_snapshot(&mut core, String::new(), 3, false);
         drop(core);
-        pane.resize(2, 40, 8, 16);
+        pane.resize(2, 40, 8, 16, false);
         pane.process_pty_bytes(pane_id, 0, b"\rupdated", &tx);
         let mut core = pane.core.lock().unwrap();
         let resized = super::super::finish_recent_snapshot(&mut core, String::new(), 10, false);
@@ -449,14 +449,14 @@ mod tests {
             assert!(!core.recent_fallback.needs_refresh);
             assert!(recent_text(&core, 3, false).text.contains("redraw"));
         }
-        pane.resize(4, 40, 8, 16);
+        pane.resize(4, 40, 8, 16, false);
         pane.scroll_reset();
         assert!(recent_text(&pane.core.lock().unwrap(), 3, false)
             .text
             .contains("redraw"));
         pane.set_scroll_offset_from_bottom(before.max_offset_from_bottom);
         pane.process_pty_bytes(pane_id, 0, b"new output\r\n", &tx);
-        pane.resize(4, 40, 8, 16);
+        pane.resize(4, 40, 8, 16, false);
 
         let core = pane.core.lock().unwrap();
         assert!(!core.recent_fallback.needs_refresh);
@@ -488,7 +488,7 @@ mod tests {
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
         pane.seed_history_ansi("abcdefghij\r\nend");
-        pane.resize(3, 10, 8, 16);
+        pane.resize(3, 10, 8, 16, false);
 
         let core = pane.core.lock().unwrap();
         assert_eq!(recent_text(&core, 10, false).text, "abcdefghij\nend\n");
