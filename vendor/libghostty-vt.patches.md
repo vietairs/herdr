@@ -65,6 +65,14 @@ saturating `-|` operator, and the exact regression tests this patch backported
 (`resize shrinks both axes with cursor at bottom` in
 `vendor/libghostty-vt/src/terminal/c/terminal.zig`, `PageList resize less rows
 and cols cursor at bottom` in `PageList.zig`) are already present natively.
+
+verification:
+
+```sh
+zig build test-lib-vt -Demit-lib-vt -Doptimize=ReleaseSafe -Dtest-filter="resize shrinks both axes with cursor at bottom"
+zig build test-lib-vt -Demit-lib-vt -Doptimize=ReleaseSafe -Dtest-filter="PageList resize less rows and cols cursor at bottom"
+```
+
 ## 0002 expose modifyOtherKeys mode through terminal data
 
 status: active
@@ -97,8 +105,6 @@ modifyOtherKeys mode 2 and Herdr can use it without this patch.
 verification:
 
 ```sh
-zig build test-lib-vt -Demit-lib-vt -Doptimize=ReleaseSafe -Dtest-filter="resize shrinks both axes with cursor at bottom"
-zig build test-lib-vt -Demit-lib-vt -Doptimize=ReleaseSafe -Dtest-filter="PageList resize less rows and cols cursor at bottom"
 cargo nextest run --locked modify_other_keys_query_tracks_mode_two
 cargo nextest run --locked host_report_all_supplies_printable_releases_for_event_type_only_panes
 python3 -m unittest scripts.test_vendor_libghostty_vt scripts.test_ui_hot_path_architecture

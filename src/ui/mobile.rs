@@ -1431,6 +1431,12 @@ mod tests {
         let workspace_row = viewport.y + (workspace_doc_row - scroll) as u16;
         let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, workspace_row);
         assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
+
+        // An overshooting scroll must be clamped before hit testing. Left
+        // unclamped it would map the top viewport row to a document row far
+        // past the end and resolve to nothing.
+        app.mobile_switcher_scroll = 100;
+        assert!(mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 1).is_some());
     }
 
     fn worktree_workspace(name: &str, key: &str, linked: bool) -> crate::workspace::Workspace {

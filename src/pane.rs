@@ -2119,7 +2119,13 @@ impl PaneRuntime {
                 // subscribers (dormant unless one subscribes; see
                 // `remote::federation::tee`), same as every local `on_read`.
                 let _ = output_tee.send(Bytes::copy_from_slice(bytes));
-                if result.request_render && render_dirty.request_pty(pane_id) {
+                // Terminal titles are pulled from panes marked dirty here; a
+                // remote pane that never marks itself would keep `None` for
+                // its title forever, so mirror the local sites exactly.
+                let title_requested =
+                    result.terminal_title_changed && render_dirty.request_terminal_title(pane_id);
+                let render_requested = result.request_render && render_dirty.request_pty(pane_id);
+                if title_requested || render_requested {
                     render_notify.notify_one();
                 }
                 if let Some(delay) = result.render_delay {
