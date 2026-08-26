@@ -1,36 +1,66 @@
 {
   "schema_version": 1,
   "channel": "preview",
-  "base_version": "0.8.0",
-  "build_id": "2026-08-08-68c0ce2666f2",
-  "commit": "68c0ce2666f25d8d7e734ed3225257c5977d8a8a",
-  "built_at": "2026-08-08T02:07:59Z",
-  "protocol": 19,
-  "notes": "Preview build 2026-08-08-68c0ce2666f2\n\nBuilt from `68c0ce2666f2` on `master`.\nBase stable: v0.8.0\nCompare: https://github.com/herdrdev/herdr/compare/v0.8.0-hvn.1...68c0ce2666f25d8d7e734ed3225257c5977d8a8a\n\n### Fixed\n- Survive an unresolvable recorded preview commit\n- Restage the published agent detection manifests\n- Compile the federation surface on windows\n- Restore docs slug helper and starlight head/search overrides\n\n### Maintenance\n- Fall back to the run token when publishing preview\n- Document the two undocumented fork config keys\n- Clear the clippy debt blocking preview preflight\n- Build the website on website and docs changes\n\n### Other\n- Revert \"ci: build the website on website and docs changes\"",
+  "base_version": "0.8.2",
+  "build_id": "2026-08-27-ba940075bf34",
+  "commit": "ba940075bf34331a8c805bcbf18bd7a97219bdcb",
+  "built_at": "2026-08-26T14:19:37Z",
+  "protocol": 21,
+  "notes": "Preview build 2026-08-27-ba940075bf34\n\nBuilt from `ba940075bf34` on `master`.\nBase stable: v0.8.2\nCompare: https://github.com/vietairs/herdr/compare/v0.8.2-hvn.2...ba940075bf34331a8c805bcbf18bd7a97219bdcb\n\n### Fixed\n- Accept fork -hvn release tags in docs version parsing (#18)\n- Restore the fork preview snapshot and its pin (#20)\n\n### Maintenance\n- Pass the acting repository to preview notes and manifest (#19)\n- Add windows install instructions for fork releases (#17)",
   "assets": {
     "linux-x86_64": {
-      "url": "https://github.com/herdrdev/herdr/releases/download/preview-2026-08-08-68c0ce2666f2/herdr-linux-x86_64",
-      "sha256": "05b92fdfdcde225b9e7115ba5dcc215c8f0ed64f36da3bcc4344c15e308e6ed7"
+      "url": "https://github.com/vietairs/herdr/releases/download/preview-2026-08-27-ba940075bf34/herdr-linux-x86_64",
+      "sha256": "be44c778d7df94e76ca7243fba126da97dd49169dfc9d382a784200ab3c0f224"
     },
     "linux-aarch64": {
-      "url": "https://github.com/herdrdev/herdr/releases/download/preview-2026-08-08-68c0ce2666f2/herdr-linux-aarch64",
-      "sha256": "b2c02450084849dc01c2717cac19a9dce84d6de09dd2bbddbb781e8be5a717bd"
+      "url": "https://github.com/vietairs/herdr/releases/download/preview-2026-08-27-ba940075bf34/herdr-linux-aarch64",
+      "sha256": "640f95e4490acacb7e2df8ec0e07343b14ca36e182568477622c290dd510543d"
     },
     "macos-x86_64": {
-      "url": "https://github.com/herdrdev/herdr/releases/download/preview-2026-08-08-68c0ce2666f2/herdr-macos-x86_64",
-      "sha256": "ef7425368b30afcfdca7e8a8b6041b689968896b20687e2df1bdf2c9137cd12b"
+      "url": "https://github.com/vietairs/herdr/releases/download/preview-2026-08-27-ba940075bf34/herdr-macos-x86_64",
+      "sha256": "79e64b6f0353011d7b2707d46073447f4b6eae808735bda56c2f662c9f1b86d8"
     },
     "macos-aarch64": {
-      "url": "https://github.com/herdrdev/herdr/releases/download/preview-2026-08-08-68c0ce2666f2/herdr-macos-aarch64",
-      "sha256": "46954e5f6bc2270a4e07142f6df0cbf34d45c9f416a79d7c3390e09f13321572"
+      "url": "https://github.com/vietairs/herdr/releases/download/preview-2026-08-27-ba940075bf34/herdr-macos-aarch64",
+      "sha256": "3257dde437d2e272fdd32ddf1bbdeb8eca549d3f3019aa1f835940de317eee80"
     },
     "windows-x86_64": {
-      "url": "https://github.com/herdrdev/herdr/releases/download/preview-2026-08-08-68c0ce2666f2/herdr-windows-x86_64.zip",
-      "sha256": "6da51323d00c05ffb7f57ef0fc1968079a3a69adf2a82773512c215146b868e0",
+      "url": "https://github.com/vietairs/herdr/releases/download/preview-2026-08-27-ba940075bf34/herdr-windows-x86_64.zip",
+      "sha256": "d43529629b8e1ee0dcee8bb8cd3d4a6cedafecc1d4547652582fe86fc84a265b",
       "format": "zip"
     }
   },
   "builds": {
+    "2026-08-27-ba940075bf34": {
+      "base_version": "0.8.2",
+      "commit": "ba940075bf34331a8c805bcbf18bd7a97219bdcb",
+      "built_at": "2026-08-26T14:19:37Z",
+      "protocol": 21,
+      "tag": "preview-2026-08-27-ba940075bf34",
+      "assets": {
+        "linux-x86_64": {
+          "url": "https://github.com/vietairs/herdr/releases/download/preview-2026-08-27-ba940075bf34/herdr-linux-x86_64",
+          "sha256": "be44c778d7df94e76ca7243fba126da97dd49169dfc9d382a784200ab3c0f224"
+        },
+        "linux-aarch64": {
+          "url": "https://github.com/vietairs/herdr/releases/download/preview-2026-08-27-ba940075bf34/herdr-linux-aarch64",
+          "sha256": "640f95e4490acacb7e2df8ec0e07343b14ca36e182568477622c290dd510543d"
+        },
+        "macos-x86_64": {
+          "url": "https://github.com/vietairs/herdr/releases/download/preview-2026-08-27-ba940075bf34/herdr-macos-x86_64",
+          "sha256": "79e64b6f0353011d7b2707d46073447f4b6eae808735bda56c2f662c9f1b86d8"
+        },
+        "macos-aarch64": {
+          "url": "https://github.com/vietairs/herdr/releases/download/preview-2026-08-27-ba940075bf34/herdr-macos-aarch64",
+          "sha256": "3257dde437d2e272fdd32ddf1bbdeb8eca549d3f3019aa1f835940de317eee80"
+        },
+        "windows-x86_64": {
+          "url": "https://github.com/vietairs/herdr/releases/download/preview-2026-08-27-ba940075bf34/herdr-windows-x86_64.zip",
+          "sha256": "d43529629b8e1ee0dcee8bb8cd3d4a6cedafecc1d4547652582fe86fc84a265b",
+          "format": "zip"
+        }
+      }
+    },
     "2026-08-08-68c0ce2666f2": {
       "base_version": "0.8.0",
       "commit": "68c0ce2666f25d8d7e734ed3225257c5977d8a8a",
