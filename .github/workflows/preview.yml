@@ -329,6 +329,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/preview.py notes \
+            --repo '${{ github.repository }}' \
             --previous '${{ steps.previous-preview.outputs.range_base }}' \
             --commit '${{ needs.preflight.outputs.commit }}' \
             --build-id '${{ needs.preflight.outputs.build_id }}' \
@@ -419,6 +420,7 @@ jobs:
         run: |
           node website/scripts/docs-preview.mjs snapshot '${{ needs.preflight.outputs.commit }}'
           python3 scripts/preview.py manifest \
+            --repo '${{ github.repository }}' \
             --output website/preview.json \
             --tag '${{ needs.preflight.outputs.tag }}' \
             --build-id '${{ needs.preflight.outputs.build_id }}' \
