@@ -46,8 +46,11 @@ https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
 
 ## install (this fork)
 
-fork releases publish four binaries: `herdr-linux-x86_64`, `herdr-linux-aarch64`,
-`herdr-macos-x86_64`, `herdr-macos-aarch64`. no installer script, no homebrew, no windows build.
+fork releases publish five assets: `herdr-linux-x86_64`, `herdr-linux-aarch64`,
+`herdr-macos-x86_64`, `herdr-macos-aarch64`, and `herdr-windows-x86_64.zip`. no installer script,
+no homebrew. windows builds start at `v0.8.2-hvn.2` — [windows install](#windows-10-and-11).
+
+### linux and macos
 
 ```bash
 case "$(uname -s)" in Darwin) os=macos ;; *) os=linux ;; esac
@@ -68,6 +71,34 @@ pick a specific release instead of the latest by swapping `latest/download` for
 
 `herdr update` and `herdr channel set …` point at upstream's update feed, so they will
 **downgrade you off this fork**. update by re-running the download above.
+
+### windows 10 and 11
+
+x64 only. run in PowerShell — this installs beside any upstream herdr rather than over it:
+
+```powershell
+$dest = "$env:LOCALAPPDATA\Programs\herdr-hvn"
+$zip  = "$env:TEMP\herdr-windows-x86_64.zip"
+Invoke-WebRequest -Uri "https://github.com/vietairs/herdr/releases/latest/download/herdr-windows-x86_64.zip" -OutFile $zip
+Unblock-File $zip
+Expand-Archive -Path $zip -DestinationPath $dest -Force
+Remove-Item $zip
+[Environment]::SetEnvironmentVariable(
+  "Path", "$([Environment]::GetEnvironmentVariable('Path','User'));$dest", "User")
+```
+
+open a **new** terminal so the `PATH` change applies, then `herdr --version`.
+
+the archive holds `herdr.exe` next to a `conpty\` folder carrying Microsoft's signed ConPTY
+runtime (`conpty.dll`, `OpenConsole.exe`). **keep them together** — copying `herdr.exe` out on its
+own leaves it without the runtime it launches panes through. to update, re-run the block above; to
+uninstall, delete `$dest` and drop it from your user `PATH`.
+
+`herdr.exe` itself is not code-signed, so SmartScreen may warn on first run (More info → Run
+anyway). the `Unblock-File` above clears the mark-of-the-web on the archive.
+
+what works and what doesn't on windows is upstream's
+[windows support page](https://herdr.dev/docs/windows-beta/) — the fork changes nothing there.
 
 ### federation: same build on both ends
 
