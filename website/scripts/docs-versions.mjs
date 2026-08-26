@@ -20,7 +20,10 @@ const stableDocsDir = resolve(repoRoot, 'website/src/content/docs');
 const stableReferencePath = resolve(repoRoot, 'website/src/data/config-reference.json');
 const git = createGit(repoRoot);
 
-const VERSION_PATTERN = /^v?(\d+\.\d+\.\d+)$/;
+// Fork release tags append an -hvn.<n> suffix to the upstream version they build
+// on. Documentation is versioned by that base version, so the suffix is dropped
+// here the same way the release workflow's tag guard drops it.
+const VERSION_PATTERN = /^v?(\d+\.\d+\.\d+)(?:-hvn\.\d+)?$/;
 
 export function normalizeVersion(value) {
   const match = VERSION_PATTERN.exec(value);

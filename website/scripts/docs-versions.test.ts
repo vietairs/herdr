@@ -5,6 +5,8 @@ describe('normalizeVersion', () => {
   test.each([
     ['0.7.5', '0.7.5'],
     ['v0.7.5', '0.7.5'],
+    ['v0.8.2-hvn.1', '0.8.2'],
+    ['0.8.2-hvn.12', '0.8.2'],
   ])('normalizes %s', (input, expected) => {
     expect(normalizeVersion(input)).toBe(expected);
   });
@@ -12,6 +14,13 @@ describe('normalizeVersion', () => {
   test('rejects non-release refs', () => {
     expect(() => normalizeVersion('preview-123')).toThrow();
   });
+
+  test.each(['v0.8.2-hvn', 'v0.8.2-hvn.', 'v0.8.2-rc.1'])(
+    'rejects malformed fork suffix %s',
+    (input) => {
+      expect(() => normalizeVersion(input)).toThrow();
+    },
+  );
 });
 
 describe('sortVersionsNewestFirst', () => {
