@@ -170,7 +170,9 @@ jobs:
             -StageDir $stage `
             -OutputPath ${{ matrix.name }}
           $version = (& (Join-Path $stage "herdr.exe") --version | Out-String).Trim()
-          $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          # Fork tags carry an -hvn.<n> suffix that the crate version never has,
+          # so compare against the base version like the Cargo.toml guard does.
+          $tagVersion = $env:GITHUB_REF_NAME -replace '^v', '' -replace '-hvn\..*$', ''
           if ($version -notmatch [regex]::Escape($tagVersion) -or $version -match "preview") {
             throw "Packaged Windows binary has unexpected version identity: $version"
           }
