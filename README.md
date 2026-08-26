@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install">install</a> · <a href="https://herdr.dev/docs/quick-start/">quick start</a> · <a href="https://herdr.dev/docs/">docs</a>
+  <a href="https://herdr.dev">herdr.dev</a> · <a href="#install-this-fork">install</a> · <a href="https://herdr.dev/docs/quick-start/">quick start</a> · <a href="https://herdr.dev/docs/">docs</a>
 </p>
 
 <p align="center">
@@ -38,7 +38,57 @@ https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
 
 ---
 
-## install
+> **this is a fork.** [`vietairs/herdr`](https://github.com/vietairs/herdr) tracks upstream
+> [`herdrdev/herdr`](https://github.com/herdrdev/herdr) and adds remote workspace federation work
+> that is not upstream yet. fork releases are tagged `v<upstream-version>-hvn.<n>` and ship their
+> own binaries — see [install (this fork)](#install-this-fork). upstream's installer, homebrew
+> formula and update channels always give you **upstream** herdr, not this fork.
+
+## install (this fork)
+
+fork releases publish four binaries: `herdr-linux-x86_64`, `herdr-linux-aarch64`,
+`herdr-macos-x86_64`, `herdr-macos-aarch64`. no installer script, no homebrew, no windows build.
+
+```bash
+case "$(uname -s)" in Darwin) os=macos ;; *) os=linux ;; esac
+case "$(uname -m)" in arm64|aarch64) arch=aarch64 ;; *) arch=x86_64 ;; esac
+mkdir -p ~/.local/bin
+curl -fsSL "https://github.com/vietairs/herdr/releases/latest/download/herdr-$os-$arch" -o ~/.local/bin/herdr
+chmod +x ~/.local/bin/herdr
+```
+
+make sure `~/.local/bin` is on your `PATH`, then check what you got:
+
+```bash
+herdr --version
+```
+
+pick a specific release instead of the latest by swapping `latest/download` for
+`download/<tag>` — [all fork releases](https://github.com/vietairs/herdr/releases).
+
+`herdr update` and `herdr channel set …` point at upstream's update feed, so they will
+**downgrade you off this fork**. update by re-running the download above.
+
+### federation: same build on both ends
+
+remote workspace federation speaks a fork-local protocol, and the version guard refuses a mount
+between mismatched builds. install the **same fork release** on the local machine and every remote
+you mount, and upgrade them together. the remote needs `herdr` on its `PATH` (or
+`~/.local/bin`); to push a local build instead, set `HERDR_REMOTE_BINARY=path/to/herdr`.
+
+### build from source
+
+```bash
+git clone https://github.com/vietairs/herdr.git
+cd herdr
+cargo build --release   # binary at target/release/herdr
+```
+
+rust comes from `rust-toolchain.toml` (1.96.1, installed automatically by rustup). the vendored
+`libghostty-vt` needs **zig 0.15.2** specifically — if your `PATH` zig is a different version,
+point the build at the right one with `ZIG=/path/to/zig-0.15.2/zig cargo build --release`.
+
+## install (upstream herdr)
 
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh
