@@ -10,8 +10,23 @@
 - [x] 7b. federation unit tests on windows — done 15:52 — remote:: 176 passed / 0 failed
 - [x] 7c. unix regression check — done on the real Ubuntu host — clippy -D warnings EXIT 0; 3803 passed, 1 pre-existing failure (same test fails on base c9ad7846)
 - [x] 8. W2 Phase 3 e2e vs real host — done 16:10 — operator confirmed the federated attach works from Windows; see reports/e2e-260828-1502-phase3-results.md
-- [ ] 9. review -> ship-gate -> PR -> docs — in progress
-- [ ] 10. cut release tag v0.8.2-hvn.3 — pending
+- [x] 9. review -> ship-gate -> PR -> docs — done — two review rounds; PR #21 merged as ad7b4a81
+- [x] 10. cut release v0.8.2-hvn.3 — done — published with all five assets
+
+## Release note: flake-check blocked the automated publish
+
+The Release workflow's `flake-check` job failed twice (~25 min apart) on crates.io
+returning 403 to Nix's fetcher, fatally on `clap_complete-4.6.5`. All five platform
+builds succeeded; `release` was skipped only because it declares
+`needs: [build, flake-check, validate-release-inputs]`.
+
+Published manually from run 33159438202's own artifacts, with the changelog body the
+`release` job would have generated — same asset names, same body shape as v0.8.2-hvn.2.
+Nothing was rebuilt.
+
+The next `-hvn` tag will hit the same wall unless crates.io stops 403ing or
+`flake-check` is skipped for fork tags, the way `close-released-issues` and
+`update-latest-json` already are.
 
 ## Late finding — the password loop had a second, local cause
 
