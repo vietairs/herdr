@@ -241,13 +241,11 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationSplitPaneReady(ready) = ev {
             self.handle_federation_split_pane_ready(*ready);
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationSplitPaneFailed {
             request_id,
             reason,
@@ -258,19 +256,16 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationResyncPaneCreated(ready) = ev {
             self.handle_federation_resync_pane_created(*ready);
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationResyncPaneRemoved { origin, pane_id } = ev {
             self.handle_federation_resync_pane_removed(origin, pane_id);
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationResyncWorkspaceCreated {
             origin,
             workspace_id,
@@ -281,7 +276,6 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationResyncWorkspaceRemoved {
             origin,
             workspace_id,
@@ -291,7 +285,6 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationWorkspaceCreateAccepted {
             request_id,
             origin,
@@ -302,7 +295,6 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationWorkspaceCreateFailed {
             request_id,
             reason,
@@ -313,7 +305,6 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationResyncTabCreated {
             origin,
             workspace_id,
@@ -325,19 +316,16 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationResyncTabClosed { origin, tab_id } = ev {
             self.handle_federation_resync_tab_removed(origin, tab_id);
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationClosePaneReady { request_id, origin } = ev {
             self.handle_federation_close_pane_ready(request_id, origin);
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationClosePaneFailed {
             request_id,
             reason,
@@ -348,13 +336,11 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationWorkspaceCloseReady { request_id, origin } = ev {
             self.handle_federation_workspace_close_ready(request_id, origin);
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationWorkspaceCloseFailed {
             request_id,
             reason,
@@ -365,13 +351,11 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationTabCloseReady { request_id, origin } = ev {
             self.handle_federation_tab_close_ready(request_id, origin);
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationTabCloseFailed {
             request_id,
             reason,

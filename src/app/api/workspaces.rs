@@ -561,6 +561,9 @@ impl App {
         self.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
         self.purge_remote_resync_tab_index_for_workspaces(&closing_ids);
         self.purge_remote_resync_workspace_index_for_workspaces(&closing_ids);
+        // Clipboard staging and image paste are Unix-only, so there is
+        // no per-workspace state of theirs to purge on other platforms.
+        #[cfg(unix)]
         self.purge_remote_image_paste_pane_state_for_workspaces(&closing_ids);
 
         self.state.selected = idx;
@@ -1042,7 +1045,13 @@ impl App {
                 .unwrap_or_default();
             self.purge_pending_remote_splits_for_workspaces(&closing_ids);
             self.purge_pending_remote_closes_for_workspaces(&closing_ids);
+            // Clipboard staging and image paste are Unix-only, so there is
+            // no per-workspace state of theirs to purge on other platforms.
+            #[cfg(unix)]
             self.purge_pending_remote_clipboard_stages_for_workspaces(&closing_ids);
+            // Clipboard staging and image paste are Unix-only, so there is
+            // no per-workspace state of theirs to purge on other platforms.
+            #[cfg(unix)]
             self.purge_remote_image_paste_pane_state_for_workspaces(&closing_ids);
             self.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
             self.purge_remote_resync_tab_index_for_workspaces(&closing_ids);

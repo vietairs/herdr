@@ -31,9 +31,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    EnableFocusChange, EnableMouseCapture,
 };
+// Only the non-Windows keyboard-enhancement pair below names these.
+#[cfg(not(windows))]
+use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 
 use crate::app::{App, Mode};
@@ -126,6 +128,11 @@ impl Drop for TerminalRestoreGuard {
     }
 }
 
+// Keyboard enhancement is a terminal protocol the Windows console does not
+// speak, and `ime_compatible_keyboard_enhancement_flags` is compiled out there.
+// Mirror `main.rs`'s classic-session pair exactly rather than inventing a
+// second policy: push/pop are no-ops on Windows.
+#[cfg(not(windows))]
 fn push_keyboard_enhancement_flags() -> io::Result<()> {
     execute!(
         io::stdout(),
@@ -133,8 +140,19 @@ fn push_keyboard_enhancement_flags() -> io::Result<()> {
     )
 }
 
+#[cfg(windows)]
+fn push_keyboard_enhancement_flags() -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn pop_keyboard_enhancement_flags() -> io::Result<()> {
     execute!(io::stdout(), PopKeyboardEnhancementFlags)
+}
+
+#[cfg(windows)]
+fn pop_keyboard_enhancement_flags() -> io::Result<()> {
+    Ok(())
 }
 
 fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {

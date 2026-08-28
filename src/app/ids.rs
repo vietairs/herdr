@@ -76,7 +76,6 @@ impl App {
     /// would silently resolve to whatever workspace currently occupies that
     /// slot and close it, instead of failing. A serving host must only ever
     /// act on an id it actually issued.
-    #[cfg(unix)]
     pub(super) fn parse_federation_workspace_id(&self, id: &str) -> Option<usize> {
         self.state
             .workspaces
@@ -88,7 +87,6 @@ impl App {
     /// only the canonical `<workspace_id>:t<encoded_number>` form: the
     /// workspace half must match an id exactly, and the tab half must be a
     /// real encoded tab number rather than a position.
-    #[cfg(unix)]
     pub(super) fn parse_federation_tab_id(&self, id: &str) -> Option<(usize, usize)> {
         let (ws_raw, tab_raw) = id.rsplit_once(':')?;
         let ws_idx = self.parse_federation_workspace_id(ws_raw)?;

@@ -20,14 +20,17 @@ use std::sync::{
     Arc,
 };
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// Only the Windows bridge's stop-deadline needs a clock: the shutdown
+// confirmation wait no longer polls from this side.
+#[cfg(windows)]
+use std::time::Instant;
 
 const BRIDGE_ACCEPT_POLL: Duration = Duration::from_millis(50);
 #[cfg(windows)]
 const BRIDGE_IO_POLL: Duration = Duration::from_millis(1);
 const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
 const REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
-const REMOTE_SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
@@ -653,6 +656,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         .remote
         .manage_ssh_config;
     let remote_ssh = RemoteSsh::new(target.clone(), manage_ssh_config);
+    warn_if_each_ssh_connection_will_prompt(&remote_ssh);
     let prepared_remote = prepare_remote_herdr(&remote_ssh, remote.live_handoff)?;
     ensure_remote_server_ready(
         &remote_ssh,
@@ -693,7 +697,6 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
             // still fall through to the classic full-screen attach; once it
             // has entered terminal mode every exit returns `Ok` (D2 fail-fast:
             // quit or tunnel fault exits to the shell, no classic fallback).
-            #[cfg(unix)]
             {
                 let loaded_config = crate::config::Config::load();
                 let config_diagnostic =
@@ -715,14 +718,6 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
                     }
                 }
             }
-            // `federation::session` is unix-only, so a non-unix client that
-            // reached the federated route falls through to the classic
-            // full-screen attach below instead of failing to build.
-            #[cfg(not(unix))]
-            eprintln!(
-                "herdr: federated sessions are not supported on this platform; \
-                 attaching to {target} via the classic full-screen view instead."
-            );
         }
         FederationRoute::ClassicFallback { notice } => {
             eprintln!("herdr: {notice}");
@@ -1294,6 +1289,121 @@ impl Drop for RemoteSsh {
             .stderr(Stdio::null())
             .status();
     }
+}
+
+/// Whether every `ssh` spawn of this attach authenticates independently.
+///
+/// A single attach opens several ssh connections: the platform and binary
+/// probes, the server-readiness checks, any install steps, and the long-lived
+/// stdio bridge. A herdr-managed control master shares one authentication
+/// across all of them; without one each spawn authenticates again. With a key
+/// or an agent identity that is invisible, but with password auth it is one
+/// password prompt per connection.
+///
+/// Derived from the control socket this attach actually got, not from the
+/// platform alone: ssh with no multiplexing never has one, and neither does a
+/// unix attach that opted out through `[remote].manage_ssh_config = false` or
+/// whose managed config could not be written.
+fn ssh_reauthenticates_per_connection(options: Option<&ManagedSshOptions>) -> bool {
+    options
+        .and_then(|options| options.control_path.as_ref())
+        .is_none()
+}
+
+/// Warns once, before provisioning starts, when this attach is about to ask for
+/// the same password over and over.
+///
+/// Runs one `BatchMode=yes` connection, which never prompts: it either succeeds
+/// against an existing key or agent identity, or fails immediately. Success
+/// means the rest of the attach is non-interactive too, so nothing is printed.
+/// Only an authentication rejection warns — every other failure (host
+/// unreachable, unknown host key, no ssh binary) stays silent, because the
+/// provisioning step that follows reports it far better than a guess here
+/// could.
+///
+/// Advisory only: it never blocks the attach, so hosts that genuinely want
+/// password auth keep working exactly as before.
+fn warn_if_each_ssh_connection_will_prompt(ssh: &RemoteSsh) {
+    if !ssh_reauthenticates_per_connection(ssh.options()) {
+        return;
+    }
+
+    let probe = ssh
+        .base_command()
+        .arg("-o")
+        .arg("BatchMode=yes")
+        // Bounded so an unreachable host cannot stall the attach here; a
+        // timeout is a non-auth failure, which this warning stays silent about.
+        .arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg("-T")
+        .arg(ssh.target())
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+    let Ok(output) = probe else {
+        return;
+    };
+    if output.status.success() {
+        return;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !crate::remote::reports_ssh_auth_failure(&stderr) {
+        return;
+    }
+
+    eprintln!(
+        "herdr: ssh here cannot share one authentication between connections, and preparing this attach opens several."
+    );
+
+    // A key that ssh found and then skipped looks identical to no key at all
+    // from the exit status, so tell those two apart before advising a fix.
+    if crate::remote::reports_ignored_local_key(&stderr) {
+        eprintln!(
+            "herdr: ssh found a private key but ignored it because the key file's permissions are too open, so it will ask for your password once per connection."
+        );
+        eprintln!(
+            "hint: {}",
+            ignored_key_permissions_hint(crate::remote::ignored_local_key_path(&stderr))
+        );
+        return;
+    }
+
+    // Deliberately not "the host accepts no key": `BatchMode` also suppresses
+    // the passphrase prompt, so an authorized-but-unloaded key fails here too.
+    eprintln!(
+        "herdr: no key or agent identity was accepted for {}, so it will ask for your password once per connection.",
+        ssh.target()
+    );
+    eprintln!(
+        "hint: if you already have a key for this host, load it with `ssh-add` — a passphrase cannot be prompted for during this check."
+    );
+    eprintln!(
+        "hint: otherwise generate one with `ssh-keygen -t ed25519` and install its `.pub` in the remote `~/.ssh/authorized_keys`."
+    );
+}
+
+/// Platform-specific way to restrict a private key file to its owner, naming
+/// the key ssh itself reported when it gave one.
+///
+/// Single-quoted so PowerShell does not expand anything in a path that came
+/// from the server's output; `remote::ignored_local_key_path` has already
+/// rejected a path that could break out of the quoting.
+#[cfg(windows)]
+fn ignored_key_permissions_hint(key_path: Option<&str>) -> String {
+    let key = key_path.unwrap_or(r"$env:USERPROFILE\.ssh\id_ed25519");
+    format!(
+        "restrict the key to your account, then retry: `icacls '{key}' /inheritance:r /grant:r \"$($env:USERNAME):(R)\"`."
+    )
+}
+
+/// See the Windows counterpart above.
+#[cfg(not(windows))]
+fn ignored_key_permissions_hint(key_path: Option<&str>) -> String {
+    let key = key_path.unwrap_or("~/.ssh/id_ed25519");
+    format!("restrict the key to your account, then retry: `chmod 600 '{key}'`.")
 }
 
 fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
@@ -2074,24 +2184,84 @@ fn stop_remote_server(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Result
     Ok(())
 }
 
+/// Polls the remote server's status until it reports stopped, entirely on the
+/// remote side.
+///
+/// The poll loop deliberately runs in the remote shell rather than here: a
+/// local loop spends one `ssh` connection per attempt, and on a platform
+/// without connection multiplexing every one of those re-authenticates — up to
+/// a full round of password prompts from a single wait. One connection, one
+/// authentication.
+///
+/// The shell's own `"running":false` match is only an early exit. Whatever the
+/// loop ends on is printed and parsed here by [`parse_remote_server_status_json`],
+/// so the verdict never depends on matching JSON in `sh`: a missed match just
+/// costs the remaining attempts before the same answer is reached.
+fn remote_server_shutdown_wait_script(remote_herdr: &RemoteHerdr, attempts: u64) -> String {
+    format!(
+        "attempts={attempts}
+         status=''
+         while [ \"$attempts\" -gt 0 ]; do
+         status=$({invocation} status server --json || printf '')
+         case \"$status\" in *'\"running\":false'*) break ;; esac
+         attempts=$((attempts - 1))
+         [ \"$attempts\" -gt 0 ] && sleep 1
+         done
+         printf '%s' \"$status\"
+",
+        invocation = remote_herdr.invocation(),
+    )
+}
+
 fn wait_for_remote_server_shutdown(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Result<()> {
-    let deadline = Instant::now() + REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT;
-    loop {
-        if remote_server_status(ssh, remote_herdr)? == RemoteServerStatus::NotRunning {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "shutdown was requested, but the old remote herdr server on {target} is still responding after {} seconds",
-                    REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT.as_secs(),
-                    target = ssh.target()
-                ),
-            ));
-        }
-        thread::sleep(REMOTE_SERVER_SHUTDOWN_POLL_INTERVAL);
+    let attempts = REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT.as_secs().max(1);
+    let output = ssh.sh_output(&remote_server_shutdown_wait_script(remote_herdr, attempts))?;
+    if !output.status.success() {
+        return Err(command_failed(
+            "remote server shutdown confirmation failed",
+            &output,
+        ));
     }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let status = stdout.trim();
+    if status.is_empty() {
+        // The status command's own stderr rides ssh's, so a broken remote
+        // binary or a bad session name explains itself here rather than
+        // reaching the user as a bare "reported no status".
+        // Every poll iteration appends, so report only the last line rather
+        // than the same message repeated once per attempt.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        return Err(io::Error::other(if detail.is_empty() {
+            format!(
+                "shutdown was requested, but the remote herdr on {} reported no status",
+                ssh.target()
+            )
+        } else {
+            format!(
+                "shutdown was requested, but the remote herdr on {} reported no status: {detail}",
+                ssh.target()
+            )
+        }));
+    }
+    if parse_remote_server_status_json(status)? == RemoteServerStatus::NotRunning {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "shutdown was requested, but the old remote herdr server on {target} is still responding after {} seconds",
+            REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT.as_secs(),
+            target = ssh.target()
+        ),
+    ))
 }
 
 fn version_label(version: Option<&str>) -> &str {
@@ -3172,6 +3342,55 @@ mod tests {
             remote_install_commit_script("/home/a b/herdr.tmp.42", "/home/a b/herdr"),
             "set -eu\nchmod 755 '/home/a b/herdr.tmp.42'\nmv '/home/a b/herdr.tmp.42' '/home/a b/herdr'\n"
         );
+    }
+
+    #[test]
+    fn shutdown_wait_script_polls_on_the_remote_side() {
+        let remote_herdr =
+            RemoteHerdr::for_platform(RemotePlatform::local()).with_shell_path("herdr".to_string());
+
+        let script = remote_server_shutdown_wait_script(&remote_herdr, 5);
+
+        // One connection carries the whole wait: the loop is in the remote
+        // shell, not in a local `ssh`-per-attempt loop.
+        assert!(script.contains("attempts=5"));
+        assert!(script.contains("while ["));
+        assert!(script.contains("herdr status server --json"));
+        // The final status is printed for this side to parse authoritatively.
+        assert!(script.contains("printf '%s'"));
+    }
+
+    #[test]
+    fn shutdown_wait_script_carries_the_session_name() {
+        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform::local())
+            .with_shell_path("herdr".to_string())
+            .with_session_name("work");
+
+        let script = remote_server_shutdown_wait_script(&remote_herdr, 5);
+
+        assert!(script.contains("herdr --session work status server --json"));
+    }
+
+    #[test]
+    fn ssh_reauthentication_tracks_the_control_socket_not_the_platform() {
+        // No managed config at all: `[remote].manage_ssh_config = false`, or a
+        // config that could not be written. Every spawn authenticates again
+        // even on a platform whose ssh can multiplex.
+        assert!(ssh_reauthenticates_per_connection(None));
+
+        // Managed, but the platform has no multiplexing, so no control socket.
+        let no_socket = ManagedSshOptions {
+            config_path: PathBuf::from("config"),
+            control_path: None,
+        };
+        assert!(ssh_reauthenticates_per_connection(Some(&no_socket)));
+
+        // A control socket shares one authentication across the whole attach.
+        let multiplexed = ManagedSshOptions {
+            config_path: PathBuf::from("config"),
+            control_path: Some(PathBuf::from("socket")),
+        };
+        assert!(!ssh_reauthenticates_per_connection(Some(&multiplexed)));
     }
 
     #[test]

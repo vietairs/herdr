@@ -76,6 +76,18 @@ herdr --remote workbox
 
 For any remote authentication failure, verify plain SSH access first with `ssh workbox`, then run `herdr --remote workbox` again.
 
+On Windows, OpenSSH has no connection multiplexing, so every SSH connection a single attach opens
+authenticates on its own. With a key or an agent identity that is invisible; with password
+authentication it means one prompt per connection. Herdr checks this before provisioning starts and
+prints a one-time explanation when it applies, so key authentication is the fix. Note that Windows
+OpenSSH refuses to load a private key whose file other accounts can read — it reports
+`bad permissions` and then continues as if no key were present, which looks exactly like a host
+that accepts no key. Restrict the key to your account:
+
+```powershell
+icacls $env:USERPROFILE\.ssh\id_ed25519 /inheritance:r /grant:r "$($env:USERNAME):(R)"
+```
+
 By default, remote attach uses the normal restart/stop flow if it needs to replace or restart a running remote server. To opt into experimental live handoff for a supported running remote server, pass `--handoff`:
 
 ```bash
