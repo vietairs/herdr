@@ -1387,11 +1387,15 @@ fn warn_if_each_ssh_connection_will_prompt(ssh: &RemoteSsh) {
 
 /// Platform-specific way to restrict a private key file to its owner, naming
 /// the key ssh itself reported when it gave one.
+///
+/// Single-quoted so PowerShell does not expand anything in a path that came
+/// from the server's output; `remote::ignored_local_key_path` has already
+/// rejected a path that could break out of the quoting.
 #[cfg(windows)]
 fn ignored_key_permissions_hint(key_path: Option<&str>) -> String {
     let key = key_path.unwrap_or(r"$env:USERPROFILE\.ssh\id_ed25519");
     format!(
-        r#"restrict the key to your account, then retry: `icacls "{key}" /inheritance:r /grant:r "$($env:USERNAME):(R)"`."#
+        "restrict the key to your account, then retry: `icacls '{key}' /inheritance:r /grant:r \"$($env:USERNAME):(R)\"`."
     )
 }
 
@@ -1399,7 +1403,7 @@ fn ignored_key_permissions_hint(key_path: Option<&str>) -> String {
 #[cfg(not(windows))]
 fn ignored_key_permissions_hint(key_path: Option<&str>) -> String {
     let key = key_path.unwrap_or("~/.ssh/id_ed25519");
-    format!("restrict the key to your account, then retry: `chmod 600 {key}`.")
+    format!("restrict the key to your account, then retry: `chmod 600 '{key}'`.")
 }
 
 fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
@@ -2225,8 +2229,15 @@ fn wait_for_remote_server_shutdown(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) 
         // The status command's own stderr rides ssh's, so a broken remote
         // binary or a bad session name explains itself here rather than
         // reaching the user as a bare "reported no status".
+        // Every poll iteration appends, so report only the last line rather
+        // than the same message repeated once per attempt.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim();
         return Err(io::Error::other(if detail.is_empty() {
             format!(
                 "shutdown was requested, but the remote herdr on {} reported no status",

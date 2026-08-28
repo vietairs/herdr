@@ -32,7 +32,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 // Named only by the agent-status relay test, which is Unix-only because it
 // drives `drive_mount_channel`.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 use crate::api::schema::common::AgentStatus;
 use crate::api::EventHub;
 use crate::pane::RelayedAgentStatus;
@@ -1833,10 +1833,6 @@ mod tests {
     // `Event` + `Terminal::Output` + `Clipboard` message in one deterministic
     // sequence without reaching into `loopback.rs`'s private fixture state
     // (not this phase's file to modify).
-    // Gated for the payloads, not the subject: `drive_mount_channel`
-    // itself runs on every platform now, but these cases drive it with
-    // clipboard-stage and agent-status frames whose types stay Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn drive_mount_channel_routes_terminal_and_clipboard_while_still_applying_events() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -1970,10 +1966,6 @@ mod tests {
     // Dropping them outright is how a created workspace could be stranded
     // forever, so a trigger seen during an in-flight request re-arms exactly
     // one follow-up request when the response lands.
-    // Gated for the payloads, not the subject: `drive_mount_channel`
-    // itself runs on every platform now, but these cases drive it with
-    // clipboard-stage and agent-status frames whose types stay Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_burst_of_structural_frames_coalesces_into_one_snapshot_request_and_the_response_updates_the_mirror(
     ) {
@@ -2123,10 +2115,6 @@ mod tests {
     // response can carry; dropping the trigger because a request happened to
     // be in flight stranded the workspace forever, with the user already told
     // the create was accepted. The follow-up request is what recovers it.
-    // Gated for the payloads, not the subject: `drive_mount_channel`
-    // itself runs on every platform now, but these cases drive it with
-    // clipboard-stage and agent-status frames whose types stay Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_workspace_created_while_a_resync_is_in_flight_still_materializes() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -2307,10 +2295,6 @@ mod tests {
     // via `TerminalChannelRouter::route_agent_status`, keyed by the same
     // raw `terminal_id` `open_terminal` uses — not just get silently
     // dropped as it was before this fix.
-    // Gated for the payloads, not the subject: `drive_mount_channel`
-    // itself runs on every platform now, but these cases drive it with
-    // clipboard-stage and agent-status frames whose types stay Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn drive_mount_channel_relays_agent_status_to_the_registered_pane_sink() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -2435,10 +2419,6 @@ mod tests {
     // real local `TerminalRuntime` (via `router.open_terminal` + `TerminalRuntime::
     // spawn_remote`, both already proven independently by `build_remote_pane`'s
     // own tests) and hand it back on `AppEvent::FederationSplitPaneReady`.
-    // Gated for the payloads, not the subject: `drive_mount_channel`
-    // itself runs on every platform now, but these cases drive it with
-    // clipboard-stage and agent-status frames whose types stay Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn drive_mount_channel_materializes_a_runtime_on_split_pane_created() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -2552,10 +2532,6 @@ mod tests {
     // `App` would materialize a SECOND `TerminalRuntime`/pane for the same
     // remote terminal. Proves: pane count stays 1 in the mirror after the
     // resync, and no second `AppEvent` is emitted for the same pane.
-    // Gated for the payloads, not the subject: `drive_mount_channel`
-    // itself runs on every platform now, but these cases drive it with
-    // clipboard-stage and agent-status frames whose types stay Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_split_created_pane_is_not_double_materialized_by_a_later_resync() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -2744,10 +2720,6 @@ mod tests {
     // and hand it back on `AppEvent::FederationResyncPaneCreated`, carrying
     // the workspace id a live `App` needs to splice it into the already-
     // mounted layout.
-    // Gated for the payloads, not the subject: `drive_mount_channel`
-    // itself runs on every platform now, but these cases drive it with
-    // clipboard-stage and agent-status frames whose types stay Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn drive_mount_channel_materializes_a_runtime_on_resync_created_pane() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -2899,10 +2871,6 @@ mod tests {
     // longer reports must surface `AppEvent::FederationResyncPaneRemoved`
     // (namespaced pane id + this mount's origin) so `App` can tear down the
     // matching local runtime/layout entry.
-    // Gated for the payloads, not the subject: `drive_mount_channel`
-    // itself runs on every platform now, but these cases drive it with
-    // clipboard-stage and agent-status frames whose types stay Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn drive_mount_channel_emits_resync_pane_removed_for_a_pane_dropped_from_the_snapshot() {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
@@ -3269,9 +3237,8 @@ mod tests {
     /// A stage answer has to name both the mount it came from and the
     /// connection that produced it: a delayed answer from a connection a
     /// remount has already replaced must be distinguishable from a live one.
-    // Gated for the payloads, not the subject: `drive_mount_channel`
-    // itself runs on every platform now, but these cases drive it with
-    // clipboard-stage and agent-status frames whose types stay Unix-only.
+    // `ClipboardStageResponse` and the `FederationClipboardStage*` events it
+    // raises are Unix-only, so only this case has to stay gated.
     #[cfg(unix)]
     #[tokio::test]
     async fn clipboard_stage_response_emits_an_app_event_carrying_origin_and_connection_epoch() {

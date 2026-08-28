@@ -54,14 +54,37 @@ pub(crate) fn reports_ignored_local_key(message: &str) -> bool {
 /// The key file ssh named while refusing to load it, so a hint can point at the
 /// file the user actually has rather than guessing a conventional name.
 ///
-/// Returns `None` when ssh reported the refusal without a path, which leaves
-/// the caller to fall back to the conventional location.
+/// Two shapes have to be read. `Load key "<path>": bad permissions` is the one
+/// both platforms print. The `Permissions ... for '<path>' are too open` line
+/// carries an octal mode on OpenSSH proper and none on Win32-OpenSSH, so the
+/// mode is skipped rather than matched.
+///
+/// Returns `None` when ssh reported the refusal without a usable path, which
+/// leaves the caller to fall back to the conventional location.
 pub(crate) fn ignored_local_key_path(message: &str) -> Option<&str> {
-    let after = message.split_once("Permissions for ")?.1;
-    let (path, tail) = after.strip_prefix('\'')?.split_once('\'')?;
-    tail.trim_start()
-        .starts_with("are too open")
-        .then_some(path)
+    if let Some(path) = message
+        .split_once("Load key \"")
+        .and_then(|(_, after)| after.split_once('"'))
+        .filter(|(path, tail)| tail.starts_with(':') && is_safe_key_path(path))
+        .map(|(path, _)| path)
+    {
+        return Some(path);
+    }
+
+    let after = message.split_once("ermissions ")?.1;
+    let (path, tail) = after.split_once("for '")?.1.split_once('\'')?;
+    (tail.trim_start().starts_with("are too open") && is_safe_key_path(path)).then_some(path)
+}
+
+/// Whether a path read out of ssh's output is safe to place inside a shell
+/// command the user is told to paste.
+///
+/// A hostile server can write anything to this stderr before authentication
+/// fails, and PowerShell expands `$(...)` and backticks inside double quotes.
+/// Anything carrying those, a quote, or a newline is discarded in favour of the
+/// conventional path.
+fn is_safe_key_path(path: &str) -> bool {
+    !path.is_empty() && !path.contains(['$', '`', '\'', '"', '\n', '\r', ';', '|', '&'])
 }
 
 /// Whether ssh output describes an authentication rejection, as opposed to any
@@ -128,19 +151,71 @@ mod tests {
 
     #[test]
     fn ignored_local_key_is_told_apart_from_a_host_that_accepts_no_key() {
-        // Real Win32-OpenSSH stderr: the key is found, skipped, and the
-        // connection then fails with the same rejection a keyless host gives.
-        let skipped = concat!(
-            "Permissions for '/home/u/.ssh/id_ed25519' are too open.\n",
-            "Load key \"/home/u/.ssh/id_ed25519\": bad permissions\n",
+        // Captured from OpenSSH_for_Windows_9.5p2. Note the mixed separators
+        // and the absence of an octal mode, both of which the parser must take.
+        let win32 = concat!(
+            "Bad permissions. Try removing permissions for user: EXAMPLE on file ",
+            "C:/Users/u/.ssh/id_ed25519.\n",
+            "@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @\n",
+            r"Permissions for 'C:\Users\u/.ssh/id_ed25519' are too open.",
+            "\n",
+            "It is required that your private key files are NOT accessible by others.\n",
+            "This private key will be ignored.\n",
+            r#"Load key "C:\Users\u/.ssh/id_ed25519": bad permissions"#,
+            "\n",
             "u@host: Permission denied (publickey,password).\n",
         );
-        assert!(reports_ssh_auth_failure(skipped));
-        assert!(reports_ignored_local_key(skipped));
+        assert!(reports_ssh_auth_failure(win32));
+        assert!(reports_ignored_local_key(win32));
+        assert_eq!(
+            ignored_local_key_path(win32),
+            Some(r"C:\Users\u/.ssh/id_ed25519")
+        );
 
+        // OpenSSH proper puts the octal mode between "Permissions" and "for".
+        let posix = concat!(
+            "@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @\n",
+            "Permissions 0644 for '/home/u/.ssh/id_rsa' are too open.\n",
+            r#"Load key "/home/u/.ssh/id_rsa": bad permissions"#,
+            "\n",
+            "u@host: Permission denied (publickey,password).\n",
+        );
+        assert!(reports_ignored_local_key(posix));
+        assert_eq!(ignored_local_key_path(posix), Some("/home/u/.ssh/id_rsa"));
+
+        // A host that simply accepts no key looks the same from the exit
+        // status, and must not be sent to fix file permissions.
         let no_key = "u@host: Permission denied (publickey,password).\n";
         assert!(reports_ssh_auth_failure(no_key));
         assert!(!reports_ignored_local_key(no_key));
+        assert_eq!(ignored_local_key_path(no_key), None);
+    }
+
+    #[test]
+    fn a_key_path_that_could_break_out_of_a_pasted_command_is_not_reported() {
+        // The server writes this stderr, so it must not reach a hint the user
+        // is told to paste into PowerShell, where `$(...)` expands.
+        let hostile = concat!(
+            r#"Load key "/home/u/$(calc).key": bad permissions"#,
+            "\n",
+            "Permissions 0644 for '/home/u/$(calc).key' are too open.\n",
+            "u@host: Permission denied (publickey,password).\n",
+        );
+        assert!(reports_ignored_local_key(hostile));
+        assert_eq!(ignored_local_key_path(hostile), None);
+    }
+
+    #[test]
+    fn a_truncated_permissions_line_yields_no_path_instead_of_panicking() {
+        for message in [
+            "Permissions for '",
+            "Permissions 0644 for '/home/u/id_rsa",
+            "Permissions for '/home/u/id_rsa' are fine.",
+            r#"Load key ""#,
+            r#"Load key "/home/u/id_rsa" bad permissions"#,
+        ] {
+            assert_eq!(ignored_local_key_path(message), None, "{message}");
+        }
     }
 
     #[test]
