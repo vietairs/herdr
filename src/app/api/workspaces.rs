@@ -515,9 +515,6 @@ impl App {
         // dies on that path would otherwise leak its in-flight stages until
         // each one's budget expires. Keyed by connection as well as host, so it
         // can only ever reach the work of the connection that actually ended.
-        // Clipboard staging and image paste are Unix-only, so there is
-        // no per-workspace state of theirs to purge on other platforms.
-        #[cfg(unix)]
         self.purge_pending_remote_clipboard_stages_for_origin(&host_key, connection_epoch);
 
         self.state.end_federation_mount(&host_key);

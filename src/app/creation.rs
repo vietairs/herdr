@@ -881,7 +881,6 @@ impl App {
         self.pending_remote_splits.insert(request_id, pending);
     }
 
-    // Only reached from the `#[cfg(unix)]` federation response handlers below.
     fn take_pending_remote_split(&mut self, request_id: u64) -> Option<PendingRemoteSplit> {
         self.pending_remote_splits.remove(&request_id)
     }
@@ -892,7 +891,6 @@ impl App {
     /// so a late/never-arriving `SplitPaneResponse` for a torn-down mount
     /// can no longer splice its pane into whatever workspace later reuses
     /// the same index, and the entry doesn't leak in the map forever.
-    // Only reached from the `#[cfg(unix)]` federation response handlers below.
     pub(crate) fn purge_pending_remote_splits_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -915,7 +913,6 @@ impl App {
         self.pending_remote_closes.insert(request_id, pending);
     }
 
-    // Only reached from the `#[cfg(unix)]` federation response handlers below.
     fn take_pending_remote_close(&mut self, request_id: u64) -> Option<PendingRemoteClose> {
         self.pending_remote_closes.remove(&request_id)
     }
@@ -926,7 +923,6 @@ impl App {
     /// from every site that removes a federated workspace, so a late/never-
     /// arriving `ClosePaneResponse` for a torn-down mount can no longer act
     /// on whatever later reuses the same slot.
-    // Only reached from the `#[cfg(unix)]` federation response handlers below.
     pub(crate) fn purge_pending_remote_closes_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -944,7 +940,6 @@ impl App {
     /// workspace it pointed into is gone. Unlike the sibling maps, entries
     /// here don't carry a `workspace_id`, so membership is resolved by
     /// walking the still-live workspaces' pane ids before they're removed.
-    // Only reached from the `#[cfg(unix)]` federation response handlers below.
     pub(crate) fn purge_remote_resync_pane_index_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -966,7 +961,6 @@ impl App {
     /// resolve a resync tab id onto a workspace/tab that no longer exists.
     /// Unlike the pane index these entries carry their workspace id
     /// directly, so no pane walk is needed.
-    // Only reached from the `#[cfg(unix)]` federation response handlers below.
     pub(crate) fn purge_remote_resync_tab_index_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -979,7 +973,6 @@ impl App {
     /// `remote_resync_workspace_index` entries for one of the given
     /// (closing) workspaces. Keyed by the namespaced remote workspace id,
     /// which is exactly the local `Workspace::id` those sets carry.
-    // Only reached from the `#[cfg(unix)]` federation response handlers below.
     pub(crate) fn purge_remote_resync_workspace_index_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -1661,9 +1654,9 @@ impl App {
         });
     }
 
-    /// No mount can exist on a target without the federation mount
-    /// primitives, so there is never any pending remote close to purge
-    /// there. See the `#[cfg(unix)]` twin above.
+    /// Non-Unix twin of the above: `pending_remote_closes` is only ever
+    /// populated by the close paths that stage a `TabCloseRequest`, which do
+    /// not exist here, so there is nothing to purge.
     #[cfg(not(unix))]
     pub(crate) fn purge_pending_remote_close_for_tab(&mut self, _tab_id: &str) {}
 
@@ -2005,13 +1998,6 @@ impl App {
         }
     }
 
-    /// Windows counterparts of the two federation close helpers below.
-    /// `server::federation_actor` is compiled on every platform (unlike
-    /// `federation_accept`, which is Unix-only), so its command arms must
-    /// resolve these names on Windows too. Federation never actually serves
-    /// there, so nothing can reach them; they refuse rather than pretend to
-    /// close something. Same shape as `nudge_child_redraw`'s cfg pair in that
-    /// module.
     /// Closes exactly one LOCAL workspace on this host in response to a
     /// federated peer's `WorkspaceCloseRequest` — the serving-host half of
     /// close forwarding for the multi-workspace case. Deliberately does NOT
@@ -2153,9 +2139,9 @@ impl App {
     }
 
     /// Drops every per-mount bookkeeping entry belonging to the given
-    /// (closing) workspace ids. Grouping the purge helpers behind one ungated
-    /// entry point lets the ungated close paths (`api/tabs.rs`'s `tab.close`)
-    /// stay free of `#[cfg]` while the helpers keep their Unix gating.
+    /// (closing) workspace ids. One entry point for the close paths
+    /// (`api/tabs.rs`'s `tab.close`) so they need no knowledge of which
+    /// per-mount maps exist.
     pub(crate) fn purge_federation_state_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -2176,8 +2162,6 @@ impl App {
             .retain(|workspace_id| !workspace_ids.contains(workspace_id));
     }
 
-    /// No mount can exist on a target without the federation mount
-    /// primitives, so there is never any per-mount state to purge there.
     /// `AppEvent::FederationWorkspaceCreateAccepted` handler: the remote host
     /// confirmed the workspace this client asked it to create and named the
     /// id it will materialize under. Nothing is built here — the resync the
@@ -2719,10 +2703,6 @@ impl App {
 /// Local layout context a `SplitPaneRequest` was minted from, remembered
 /// until its `SplitPaneResponse` arrives (or the process ends). See
 /// `App::register_pending_remote_split`/`handle_federation_split_pane_ready`.
-/// Populated by the ungated dispatch path but only read by the
-/// `#[cfg(unix)]` federation response handlers, so every field is unread on a
-/// target without the federation mount primitives.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct PendingRemoteSplit {
     /// Stable workspace id (`Workspace::id`), not a `Vec` index — indices
     /// shift when workspaces close, so a raw `usize` here could splice a
@@ -2743,28 +2723,11 @@ pub(crate) struct PendingRemoteSplit {
     pub(crate) origin: crate::remote::federation::id::HostKey,
 }
 
-/// Local layout context a `ClosePaneRequest` was minted from, remembered
-/// until its `ClosePaneResponse` arrives (or the process ends). See
-/// `App::register_pending_remote_close`/`handle_federation_close_pane_ready`
-/// (Gap A, plans/260724-1536-federation-pane-close-sync).
-/// Populated by the ungated dispatch path but only read by the
-/// `#[cfg(unix)]` federation response handlers, so every field is unread on a
-/// target without the federation mount primitives.
-/// Where a mirrored remote tab lives locally (`App::remote_resync_tab_index`
-/// value). Identifies the local tab by workspace id + *public tab number*
-/// rather than a `Vec` index because tab indices shift whenever any earlier
-/// tab in the same workspace closes, while `Tab::number` is stable for the
-/// life of the tab and never reused (`Workspace::next_public_tab_number` only
-/// ever increases) — the same reasoning `PendingRemoteSplit::workspace_id`
-/// records for workspaces.
-/// Only read by the `#[cfg(unix)]` federation resync handlers.
 /// A mirrored remote workspace a resync has announced but whose local
 /// `Workspace` does not exist yet (`App::remote_resync_workspace_index`
 /// value). Holds only what building that workspace needs once its first pane
 /// arrives; a materialized workspace is looked up by `Workspace::id`
 /// directly, so entries here are short-lived.
-/// Only read by the `#[cfg(unix)]` federation resync handlers.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct RemoteWorkspaceRef {
     /// The mount that announced this workspace. Re-checked against the
     /// origin of the pane event that materializes it, so a second mount
@@ -2775,7 +2738,13 @@ pub(crate) struct RemoteWorkspaceRef {
     pub(crate) label: String,
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
+/// Where a mirrored remote tab lives locally (`App::remote_resync_tab_index`
+/// value). Identifies the local tab by workspace id + *public tab number*
+/// rather than a `Vec` index because tab indices shift whenever any earlier
+/// tab in the same workspace closes, while `Tab::number` is stable for the
+/// life of the tab and never reused (`Workspace::next_public_tab_number` only
+/// ever increases) — the same reasoning `PendingRemoteSplit::workspace_id`
+/// records for workspaces.
 pub(crate) struct RemoteTabRef {
     /// Stable local `Workspace::id` (already the mirror's namespaced id for
     /// a materialized federation workspace).
@@ -2794,7 +2763,6 @@ pub(crate) struct RemoteTabRef {
 /// counter (`next_remote_close_request_id`, `app/api/panes.rs`) — see
 /// `App::pending_remote_closes`'s own doc comment for why a second counter
 /// would be unsafe.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum RemoteCloseTarget {
     /// `ClosePaneRequest`.
     Pane(PaneId),
@@ -2810,7 +2778,9 @@ pub(crate) enum RemoteCloseTarget {
     Workspace,
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
+/// Local layout context a `ClosePaneRequest` was minted from, remembered
+/// until its `ClosePaneResponse` arrives (or the process ends). See
+/// `App::register_pending_remote_close`/`handle_federation_close_pane_ready`.
 pub(crate) struct PendingRemoteClose {
     /// Stable workspace id (`Workspace::id`), same reasoning as
     /// `PendingRemoteSplit::workspace_id`.

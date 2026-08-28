@@ -1291,20 +1291,23 @@ impl Drop for RemoteSsh {
     }
 }
 
-/// Whether every `ssh` spawn on this platform authenticates independently.
+/// Whether every `ssh` spawn of this attach authenticates independently.
 ///
 /// A single attach opens several ssh connections: the platform and binary
 /// probes, the server-readiness checks, any install steps, and the long-lived
-/// stdio bridge. Unix shares one authentication across all of them through the
-/// herdr-managed control master (see [`apply_managed_ssh_options`]). Platforms
-/// whose ssh has no connection multiplexing cannot, so each spawn authenticates
-/// again. With a key or an agent identity that is invisible; with password auth
-/// it is one password prompt per connection.
+/// stdio bridge. A herdr-managed control master shares one authentication
+/// across all of them; without one each spawn authenticates again. With a key
+/// or an agent identity that is invisible, but with password auth it is one
+/// password prompt per connection.
 ///
-/// Derived from the platform capability rather than a target-os check, so this
-/// stays a single fact owned by `platform`.
-fn ssh_reauthenticates_per_connection() -> bool {
-    !crate::platform::remote_ssh_config_paths().multiplexing
+/// Derived from the control socket this attach actually got, not from the
+/// platform alone: ssh with no multiplexing never has one, and neither does a
+/// unix attach that opted out through `[remote].manage_ssh_config = false` or
+/// whose managed config could not be written.
+fn ssh_reauthenticates_per_connection(options: Option<&ManagedSshOptions>) -> bool {
+    options
+        .and_then(|options| options.control_path.as_ref())
+        .is_none()
 }
 
 /// Warns once, before provisioning starts, when this attach is about to ask for
@@ -1321,7 +1324,7 @@ fn ssh_reauthenticates_per_connection() -> bool {
 /// Advisory only: it never blocks the attach, so hosts that genuinely want
 /// password auth keep working exactly as before.
 fn warn_if_each_ssh_connection_will_prompt(ssh: &RemoteSsh) {
-    if !ssh_reauthenticates_per_connection() {
+    if !ssh_reauthenticates_per_connection(ssh.options()) {
         return;
     }
 
@@ -1329,6 +1332,10 @@ fn warn_if_each_ssh_connection_will_prompt(ssh: &RemoteSsh) {
         .base_command()
         .arg("-o")
         .arg("BatchMode=yes")
+        // Bounded so an unreachable host cannot stall the attach here; a
+        // timeout is a non-auth failure, which this warning stays silent about.
+        .arg("-o")
+        .arg("ConnectTimeout=5")
         .arg("-T")
         .arg(ssh.target())
         .arg("true")
@@ -1348,7 +1355,7 @@ fn warn_if_each_ssh_connection_will_prompt(ssh: &RemoteSsh) {
     }
 
     eprintln!(
-        "herdr: ssh on this platform cannot share one authentication between connections, and preparing this attach opens several."
+        "herdr: ssh here cannot share one authentication between connections, and preparing this attach opens several."
     );
 
     // A key that ssh found and then skipped looks identical to no key at all
@@ -1357,30 +1364,42 @@ fn warn_if_each_ssh_connection_will_prompt(ssh: &RemoteSsh) {
         eprintln!(
             "herdr: ssh found a private key but ignored it because the key file's permissions are too open, so it will ask for your password once per connection."
         );
-        eprintln!("hint: {}", ignored_key_permissions_hint());
+        eprintln!(
+            "hint: {}",
+            ignored_key_permissions_hint(crate::remote::ignored_local_key_path(&stderr))
+        );
         return;
     }
 
+    // Deliberately not "the host accepts no key": `BatchMode` also suppresses
+    // the passphrase prompt, so an authorized-but-unloaded key fails here too.
     eprintln!(
-        "herdr: {} does not accept a key or agent identity, so it will ask for your password once per connection.",
+        "herdr: no key or agent identity was accepted for {}, so it will ask for your password once per connection.",
         ssh.target()
     );
     eprintln!(
-        "hint: set up key authentication to be asked once, or not at all: generate a key with `ssh-keygen -t ed25519`, install its `.pub` in the remote `~/.ssh/authorized_keys`, then load it with `ssh-add`."
+        "hint: if you already have a key for this host, load it with `ssh-add` — a passphrase cannot be prompted for during this check."
+    );
+    eprintln!(
+        "hint: otherwise generate one with `ssh-keygen -t ed25519` and install its `.pub` in the remote `~/.ssh/authorized_keys`."
     );
 }
 
-/// Platform-specific way to restrict a private key file to its owner, named in
-/// the hint above.
+/// Platform-specific way to restrict a private key file to its owner, naming
+/// the key ssh itself reported when it gave one.
 #[cfg(windows)]
-fn ignored_key_permissions_hint() -> &'static str {
-    r#"restrict the key to your account, then retry: `icacls %USERPROFILE%\.ssh\id_ed25519 /inheritance:r /grant:r "%USERNAME%:(R)"`."#
+fn ignored_key_permissions_hint(key_path: Option<&str>) -> String {
+    let key = key_path.unwrap_or(r"$env:USERPROFILE\.ssh\id_ed25519");
+    format!(
+        r#"restrict the key to your account, then retry: `icacls "{key}" /inheritance:r /grant:r "$($env:USERNAME):(R)"`."#
+    )
 }
 
 /// See the Windows counterpart above.
 #[cfg(not(windows))]
-fn ignored_key_permissions_hint() -> &'static str {
-    "restrict the key to your account, then retry: `chmod 600 ~/.ssh/id_ed25519`."
+fn ignored_key_permissions_hint(key_path: Option<&str>) -> String {
+    let key = key_path.unwrap_or("~/.ssh/id_ed25519");
+    format!("restrict the key to your account, then retry: `chmod 600 {key}`.")
 }
 
 fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
@@ -2179,7 +2198,7 @@ fn remote_server_shutdown_wait_script(remote_herdr: &RemoteHerdr, attempts: u64)
         "attempts={attempts}
          status=''
          while [ \"$attempts\" -gt 0 ]; do
-         status=$({invocation} status server --json 2>/dev/null || printf '')
+         status=$({invocation} status server --json || printf '')
          case \"$status\" in *'\"running\":false'*) break ;; esac
          attempts=$((attempts - 1))
          [ \"$attempts\" -gt 0 ] && sleep 1
@@ -2203,10 +2222,22 @@ fn wait_for_remote_server_shutdown(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let status = stdout.trim();
     if status.is_empty() {
-        return Err(io::Error::other(format!(
-            "shutdown was requested, but the remote herdr on {} reported no status",
-            ssh.target()
-        )));
+        // The status command's own stderr rides ssh's, so a broken remote
+        // binary or a bad session name explains itself here rather than
+        // reaching the user as a bare "reported no status".
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        return Err(io::Error::other(if detail.is_empty() {
+            format!(
+                "shutdown was requested, but the remote herdr on {} reported no status",
+                ssh.target()
+            )
+        } else {
+            format!(
+                "shutdown was requested, but the remote herdr on {} reported no status: {detail}",
+                ssh.target()
+            )
+        }));
     }
     if parse_remote_server_status_json(status)? == RemoteServerStatus::NotRunning {
         return Ok(());
@@ -3304,8 +3335,8 @@ mod tests {
 
     #[test]
     fn shutdown_wait_script_polls_on_the_remote_side() {
-        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform::local())
-            .with_shell_path("herdr".to_string());
+        let remote_herdr =
+            RemoteHerdr::for_platform(RemotePlatform::local()).with_shell_path("herdr".to_string());
 
         let script = remote_server_shutdown_wait_script(&remote_herdr, 5);
 
@@ -3330,13 +3361,28 @@ mod tests {
     }
 
     #[test]
-    fn ssh_reauthentication_tracks_the_platform_multiplexing_capability() {
-        assert_eq!(
-            ssh_reauthenticates_per_connection(),
-            !crate::platform::remote_ssh_config_paths().multiplexing
-        );
+    fn ssh_reauthentication_tracks_the_control_socket_not_the_platform() {
+        // No managed config at all: `[remote].manage_ssh_config = false`, or a
+        // config that could not be written. Every spawn authenticates again
+        // even on a platform whose ssh can multiplex.
+        assert!(ssh_reauthenticates_per_connection(None));
+
+        // Managed, but the platform has no multiplexing, so no control socket.
+        let no_socket = ManagedSshOptions {
+            config_path: PathBuf::from("config"),
+            control_path: None,
+        };
+        assert!(ssh_reauthenticates_per_connection(Some(&no_socket)));
+
+        // A control socket shares one authentication across the whole attach.
+        let multiplexed = ManagedSshOptions {
+            config_path: PathBuf::from("config"),
+            control_path: Some(PathBuf::from("socket")),
+        };
+        assert!(!ssh_reauthenticates_per_connection(Some(&multiplexed)));
     }
 
+    #[test]
     fn extract_remote_args_removes_space_form() {
         let args = vec![
             "herdr".into(),

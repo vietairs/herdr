@@ -38,25 +38,38 @@ fn is_remote_auth_error(err: &std::io::Error) -> bool {
     reports_ssh_auth_failure(&err.to_string())
 }
 
+/// Whether ssh output says it skipped a local private key it found.
+///
+/// ssh refuses to load a key whose file is readable by accounts other than the
+/// owner, reports that on stderr, and then continues as if no key existed — so
+/// the connection is rejected exactly like a host that accepts no key at all.
+/// Distinguishing the two matters: the fix is local file permissions, not
+/// installing a key on the remote.
+pub(crate) fn reports_ignored_local_key(message: &str) -> bool {
+    (message.contains("Permissions for") && message.contains("are too open"))
+        || message.contains("bad permissions")
+        || message.contains("UNPROTECTED PRIVATE KEY FILE")
+}
+
+/// The key file ssh named while refusing to load it, so a hint can point at the
+/// file the user actually has rather than guessing a conventional name.
+///
+/// Returns `None` when ssh reported the refusal without a path, which leaves
+/// the caller to fall back to the conventional location.
+pub(crate) fn ignored_local_key_path(message: &str) -> Option<&str> {
+    let after = message.split_once("Permissions for ")?.1;
+    let (path, tail) = after.strip_prefix('\'')?.split_once('\'')?;
+    tail.trim_start()
+        .starts_with("are too open")
+        .then_some(path)
+}
+
 /// Whether ssh output describes an authentication rejection, as opposed to any
 /// other failure (host unreachable, unknown host key, no ssh binary).
 ///
 /// Shared by the post-failure hint above and the pre-attach probe in `attach`,
 /// which matches against a child's raw stderr rather than an
 /// [`std::io::Error`].
-/// Whether ssh output says it skipped a local private key it found.
-///
-/// ssh refuses to load a key whose file is readable by accounts other than the
-/// owner, reports that on stderr, and then continues as if no key existed —
-/// so the connection is rejected exactly like a host that accepts no key at
-/// all. Distinguishing the two matters: the fix is local file permissions, not
-/// installing a key on the remote.
-pub(crate) fn reports_ignored_local_key(message: &str) -> bool {
-    message.contains("bad permissions")
-        || message.contains("UNPROTECTED PRIVATE KEY FILE")
-        || message.contains("Permissions for")
-}
-
 pub(crate) fn reports_ssh_auth_failure(message: &str) -> bool {
     message.contains("Permission denied")
         && (message.contains("(publickey")
