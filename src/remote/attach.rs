@@ -20,7 +20,11 @@ use std::sync::{
     Arc,
 };
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// Only the Windows bridge's stop-deadline needs a clock: the shutdown
+// confirmation wait no longer polls from this side.
+#[cfg(windows)]
+use std::time::Instant;
 
 const BRIDGE_ACCEPT_POLL: Duration = Duration::from_millis(50);
 #[cfg(windows)]
