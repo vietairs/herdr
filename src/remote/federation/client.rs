@@ -486,7 +486,6 @@ const CLIPBOARD_CHANNEL_CAPACITY: usize = 64;
 // `#[cfg(unix)]`: only reachable from the federation mount drive task, whose
 // dial/mount primitives live in `remote::unix`. Carries `AppEvent` senders for
 // the federation variants, which are `#[cfg(unix)]` for the same reason.
-#[cfg(unix)]
 pub(crate) struct SplitMaterializationContext {
     pub(crate) rows: u16,
     pub(crate) cols: u16,
@@ -636,7 +635,6 @@ pub(crate) fn send_local_clipboard_to_remote(
 // `#[cfg(unix)]`: emits the `#[cfg(unix)]` federation `AppEvent` variants and is
 // only spawned by `remote::unix`-owned mount paths (`federation::session` and
 // `App::materialize_federation_mount`), both Unix-only.
-#[cfg(unix)]
 pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
     reader: &mut R,
     mirror: &mut RemoteMirror,
@@ -1278,8 +1276,7 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
 /// user-initiated split, there is no pending local request/toast target to
 /// fail here — the remote pane simply stays mirror-only metadata until the
 /// next resync retries).
-// `#[cfg(unix)]`: private helper of `drive_mount_channel`, same gate.
-#[cfg(unix)]
+// Private helper of `drive_mount_channel`, same gate — now every platform.
 async fn materialize_resync_pane(
     mount: &super::id::Mount,
     generation: u64,

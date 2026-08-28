@@ -66,12 +66,11 @@ pub(crate) mod pane_source;
 // visibility pattern of every other module in this file.
 pub(crate) mod sanitize;
 
-// P9.2b b2: the in-proc federated session runner (`run_federated_session`) plus
-// the process-global local-spawn backstop it arms. Unix-only (mirrors the
-// `#[cfg(unix)]` gate on `remote::unix`, which owns `dial_federation`/
-// `LiveTunnel` and `App::new_federated`). Dormant until b3 flips
-// `run_remote`'s federated arm onto it.
-#[cfg(unix)]
+// The in-proc federated session runner (`run_federated_session`) plus the
+// process-global local-spawn backstop it arms. Built on tokio, crossterm and
+// `App` alone — no POSIX surface of its own — so a Windows client can mount a
+// remote unix host. The remote HOST side stays Unix-only (see `file_staging`
+// below and `remote::host_unix`).
 pub(crate) mod session;
 
 // Remote-side clipboard-image staging for federated paste. Unix-only: the

@@ -882,7 +882,6 @@ impl App {
     }
 
     // Only reached from the `#[cfg(unix)]` federation response handlers below.
-    #[cfg(unix)]
     fn take_pending_remote_split(&mut self, request_id: u64) -> Option<PendingRemoteSplit> {
         self.pending_remote_splits.remove(&request_id)
     }
@@ -894,7 +893,6 @@ impl App {
     /// can no longer splice its pane into whatever workspace later reuses
     /// the same index, and the entry doesn't leak in the map forever.
     // Only reached from the `#[cfg(unix)]` federation response handlers below.
-    #[cfg(unix)]
     pub(crate) fn purge_pending_remote_splits_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -918,7 +916,6 @@ impl App {
     }
 
     // Only reached from the `#[cfg(unix)]` federation response handlers below.
-    #[cfg(unix)]
     fn take_pending_remote_close(&mut self, request_id: u64) -> Option<PendingRemoteClose> {
         self.pending_remote_closes.remove(&request_id)
     }
@@ -930,7 +927,6 @@ impl App {
     /// arriving `ClosePaneResponse` for a torn-down mount can no longer act
     /// on whatever later reuses the same slot.
     // Only reached from the `#[cfg(unix)]` federation response handlers below.
-    #[cfg(unix)]
     pub(crate) fn purge_pending_remote_closes_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -949,7 +945,6 @@ impl App {
     /// here don't carry a `workspace_id`, so membership is resolved by
     /// walking the still-live workspaces' pane ids before they're removed.
     // Only reached from the `#[cfg(unix)]` federation response handlers below.
-    #[cfg(unix)]
     pub(crate) fn purge_remote_resync_pane_index_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -972,7 +967,6 @@ impl App {
     /// Unlike the pane index these entries carry their workspace id
     /// directly, so no pane walk is needed.
     // Only reached from the `#[cfg(unix)]` federation response handlers below.
-    #[cfg(unix)]
     pub(crate) fn purge_remote_resync_tab_index_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -986,7 +980,6 @@ impl App {
     /// (closing) workspaces. Keyed by the namespaced remote workspace id,
     /// which is exactly the local `Workspace::id` those sets carry.
     // Only reached from the `#[cfg(unix)]` federation response handlers below.
-    #[cfg(unix)]
     pub(crate) fn purge_remote_resync_workspace_index_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -1001,7 +994,6 @@ impl App {
     /// splices it into the requesting pane's own tab layout, the same
     /// `insert_existing_pane` primitive `materialize_federation_mount` uses
     /// for mount-time split panes.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_split_pane_ready(
         &mut self,
         ready: crate::events::FederationSplitPaneReady,
@@ -1122,7 +1114,6 @@ impl App {
     /// drop the pending context and surface it exactly like a failed local
     /// split, via the same toast mechanism `handle_federation_mount_failed`
     /// uses.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_split_pane_failed(
         &mut self,
         request_id: u64,
@@ -1185,7 +1176,6 @@ impl App {
     /// also showed up as a resync-removed pane before this response
     /// arrived), `find_pane` returns `None` and this is a silent no-op
     /// rather than a panic or a double `PaneClosed` emission.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_close_pane_ready(
         &mut self,
         request_id: u64,
@@ -1287,7 +1277,6 @@ impl App {
     /// idempotent `ClosePaneReady` instead of reaching this handler at all
     /// (see `client.rs`'s `ClosePaneResponse::Failed` handling doc comment)
     /// — Predict risk 3's retry/duplicate-click safety requirement.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_close_pane_failed(
         &mut self,
         request_id: u64,
@@ -1380,7 +1369,6 @@ impl App {
     /// `handle_federation_mount_ended`), the id lookup below finds nothing
     /// and this is a silent no-op rather than a panic or a double
     /// `WorkspaceClosed` emission.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_workspace_close_ready(
         &mut self,
         request_id: u64,
@@ -1464,7 +1452,6 @@ impl App {
     /// rejected an earlier `WorkspaceCloseRequest` — drop the pending
     /// context and surface it, without touching layout. Same shape/reasoning
     /// as `handle_federation_close_pane_failed`.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_workspace_close_failed(
         &mut self,
         request_id: u64,
@@ -1499,7 +1486,6 @@ impl App {
     /// last tab. Idempotent: if the tab was already retired locally by the
     /// time this arrives (a racing resync, or the whole workspace already
     /// gone), `parse_tab_id` finds nothing and this is a silent no-op.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_tab_close_ready(
         &mut self,
         request_id: u64,
@@ -1629,7 +1615,6 @@ impl App {
     /// rejected an earlier `TabCloseRequest` — drop the pending context and
     /// surface it, without touching layout. Same shape/reasoning as
     /// `handle_federation_close_pane_failed`.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_tab_close_failed(
         &mut self,
         request_id: u64,
@@ -1693,7 +1678,6 @@ impl App {
     /// local `Tab`. The earlier behavior — always splitting into
     /// `Workspace::active_tab` — is what made an N-tab remote workspace
     /// render as one tab with N splits.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_resync_pane_created(
         &mut self,
         ready: crate::events::FederationResyncPaneCreated,
@@ -1874,7 +1858,6 @@ impl App {
     /// `emit_workspace_open_events` — so a workspace discovered after mount
     /// is indistinguishable from one present at mount, including to the
     /// federation-origin classification that reads `Workspace::id`.
-    #[cfg(unix)]
     #[allow(clippy::too_many_arguments)] // the destructured `FederationResyncPaneCreated` payload, minus the fields the caller already consumed
     fn materialize_resync_workspace_from_pane(
         &mut self,
@@ -2011,7 +1994,6 @@ impl App {
     /// them, and a later remount reports the host as already live. The local
     /// `workspace.close` verb does this inline; the confirmed-close handlers
     /// must do the same, or the two verbs diverge on their last workspace.
-    #[cfg(unix)]
     fn end_federation_mount_if_no_mirrors_remain(
         &mut self,
         host_key: &crate::remote::federation::id::HostKey,
@@ -2030,22 +2012,6 @@ impl App {
     /// there, so nothing can reach them; they refuse rather than pretend to
     /// close something. Same shape as `nudge_child_redraw`'s cfg pair in that
     /// module.
-    #[cfg(not(unix))]
-    pub(crate) fn close_federation_target_workspace(
-        &mut self,
-        _target_workspace_id: &str,
-    ) -> Result<(), String> {
-        Err("federation is not supported on this platform".to_string())
-    }
-
-    #[cfg(not(unix))]
-    pub(crate) fn close_federation_target_tab(
-        &mut self,
-        _target_tab_id: &str,
-    ) -> Result<(), String> {
-        Err("federation is not supported on this platform".to_string())
-    }
-
     /// Closes exactly one LOCAL workspace on this host in response to a
     /// federated peer's `WorkspaceCloseRequest` — the serving-host half of
     /// close forwarding for the multi-workspace case. Deliberately does NOT
@@ -2067,7 +2033,6 @@ impl App {
     /// request id for a remote peer's close to be mistaken for a local user
     /// gesture, and no confirmation prompt it could trigger on this host's
     /// own session.
-    #[cfg(unix)]
     pub(crate) fn close_federation_target_workspace(
         &mut self,
         target_workspace_id: &str,
@@ -2119,7 +2084,6 @@ impl App {
     /// to prevent. This path always retires exactly the target tab (or, when
     /// it is the last tab, exactly the target workspace via
     /// `close_single_workspace_at`) and never asks for confirmation.
-    #[cfg(unix)]
     pub(crate) fn close_federation_target_tab(
         &mut self,
         target_tab_id: &str,
@@ -2192,7 +2156,6 @@ impl App {
     /// (closing) workspace ids. Grouping the purge helpers behind one ungated
     /// entry point lets the ungated close paths (`api/tabs.rs`'s `tab.close`)
     /// stay free of `#[cfg]` while the helpers keep their Unix gating.
-    #[cfg(unix)]
     pub(crate) fn purge_federation_state_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -2202,28 +2165,25 @@ impl App {
         self.purge_remote_resync_pane_index_for_workspaces(workspace_ids);
         self.purge_remote_resync_tab_index_for_workspaces(workspace_ids);
         self.purge_remote_resync_workspace_index_for_workspaces(workspace_ids);
-        self.purge_remote_image_paste_pane_state_for_workspaces(workspace_ids);
-        self.purge_pending_remote_clipboard_stages_for_workspaces(workspace_ids);
+        // Clipboard staging and image paste are Unix-only, so there is
+        // no per-workspace state of theirs to purge on other platforms.
+        #[cfg(unix)]
+        {
+            self.purge_remote_image_paste_pane_state_for_workspaces(workspace_ids);
+            self.purge_pending_remote_clipboard_stages_for_workspaces(workspace_ids);
+        }
         self.pending_remote_workspace_focus
             .retain(|workspace_id| !workspace_ids.contains(workspace_id));
     }
 
     /// No mount can exist on a target without the federation mount
     /// primitives, so there is never any per-mount state to purge there.
-    #[cfg(not(unix))]
-    pub(crate) fn purge_federation_state_for_workspaces(
-        &mut self,
-        _workspace_ids: &std::collections::HashSet<String>,
-    ) {
-    }
-
     /// `AppEvent::FederationWorkspaceCreateAccepted` handler: the remote host
     /// confirmed the workspace this client asked it to create and named the
     /// id it will materialize under. Nothing is built here — the resync the
     /// same response triggers remains the single materialization path — this
     /// only remembers that *this* client owns the new workspace, so
     /// `materialize_resync_workspace_from_pane` can focus it on arrival.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_workspace_create_accepted(
         &mut self,
         request_id: u64,
@@ -2276,7 +2236,6 @@ impl App {
     /// label — the pane event that follows in the same diff
     /// (`materialize_resync_workspace_from_pane`) builds the real workspace.
     /// Idempotent: an already-materialized workspace keeps its live state.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_resync_workspace_created(
         &mut self,
         origin: crate::remote::federation::id::HostKey,
@@ -2320,7 +2279,6 @@ impl App {
     /// most often just an index prune — but it also tears the workspace down
     /// for its own sake when the pane removals did not (e.g. panes this mount
     /// never indexed).
-    #[cfg(unix)]
     pub(crate) fn handle_federation_resync_workspace_removed(
         &mut self,
         origin: crate::remote::federation::id::HostKey,
@@ -2397,7 +2355,6 @@ impl App {
     /// refused an earlier `WorkspaceCreateRequest`. Nothing was created
     /// remotely, so there is nothing local to reverse — surface the reason
     /// the same way a refused remote pane close does.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_workspace_create_failed(
         &mut self,
         request_id: u64,
@@ -2449,7 +2406,6 @@ impl App {
     /// fill in its local tab number. Idempotent: a tab already materialized
     /// (by an out-of-order pane event, or at mount time) keeps its local
     /// binding.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_resync_tab_created(
         &mut self,
         origin: crate::remote::federation::id::HostKey,
@@ -2522,7 +2478,6 @@ impl App {
     /// tab with its last pane), so this is most often just an index prune —
     /// but it also tears the tab down for its own sake when the pane
     /// removals did not (e.g. panes this mount never indexed).
-    #[cfg(unix)]
     pub(crate) fn handle_federation_resync_tab_removed(
         &mut self,
         origin: crate::remote::federation::id::HostKey,
@@ -2645,7 +2600,6 @@ impl App {
     /// `origin`. Shared origin fence for the federation resync handlers: a
     /// differently-mounted host must not be able to mutate another mount's
     /// workspace by guessing its ids.
-    #[cfg(unix)]
     fn workspace_matches_federation_origin(
         &self,
         ws_idx: usize,
@@ -2666,7 +2620,6 @@ impl App {
     /// `pane.close` API path, this never asks for close confirmation (e.g.
     /// "closing this pane would close a worktree group") — the remote
     /// already made this decision; there is nothing left here to confirm.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_resync_pane_removed(
         &mut self,
         origin: crate::remote::federation::id::HostKey,
@@ -4395,7 +4348,6 @@ mod federation_materialization_tests {
     /// fields each caller sets. Same construction the older resync tests
     /// spell out inline; factored out because the multi-tab tests below need
     /// it repeatedly.
-    #[cfg(unix)]
     fn resync_pane_payload() -> (
         crate::layout::PaneId,
         crate::terminal::TerminalId,

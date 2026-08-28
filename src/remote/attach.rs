@@ -693,7 +693,6 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
             // still fall through to the classic full-screen attach; once it
             // has entered terminal mode every exit returns `Ok` (D2 fail-fast:
             // quit or tunnel fault exits to the shell, no classic fallback).
-            #[cfg(unix)]
             {
                 let loaded_config = crate::config::Config::load();
                 let config_diagnostic =
@@ -715,14 +714,6 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
                     }
                 }
             }
-            // `federation::session` is unix-only, so a non-unix client that
-            // reached the federated route falls through to the classic
-            // full-screen attach below instead of failing to build.
-            #[cfg(not(unix))]
-            eprintln!(
-                "herdr: federated sessions are not supported on this platform; \
-                 attaching to {target} via the classic full-screen view instead."
-            );
         }
         FederationRoute::ClassicFallback { notice } => {
             eprintln!("herdr: {notice}");

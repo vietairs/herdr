@@ -200,11 +200,17 @@ pub enum AppEvent {
     /// itself cannot hold) and spawns the ongoing drive task. Unix-only:
     /// mirrors the `#[cfg(unix)]` gate on `remote::unix`, which owns the
     /// dial/mount primitives this payload carries.
+    // Produced only by `handle_workspace_mount_remote`, the daemon-owned
+    // multi-remote mount API, which is Unix-only. The single-remote
+    // federated session a Windows client runs never raises these.
     #[cfg(unix)]
     FederationMountReady(Box<FederationMountReady>),
     /// A server-owned `workspace.mount_remote` dial+mount task failed
     /// (SSH/timeout/unsupported/empty mirror). Local workspace(s) and the
     /// server daemon itself are unaffected; surfaces as a sidebar notice.
+    // Produced only by `handle_workspace_mount_remote`, the daemon-owned
+    // multi-remote mount API, which is Unix-only. The single-remote
+    // federated session a Windows client runs never raises these.
     #[cfg(unix)]
     FederationMountFailed { target: String, reason: String },
     /// A federation link's drive task ended (closed, faulted, or errored).
@@ -215,6 +221,7 @@ pub enum AppEvent {
     /// still matches a fresh remount. `connection_epoch` is minted locally,
     /// once per successful mount, and is therefore the value that
     /// distinguishes this connection from one that has already been replaced.
+    // Daemon-owned multi-remote mount path only; Unix-only producer.
     #[cfg(unix)]
     FederationMountEnded {
         host_key: crate::remote::federation::id::HostKey,
@@ -290,7 +297,6 @@ pub enum AppEvent {
     /// (`app/creation.rs`) needs to splice the new pane into the requesting
     /// pane's own tab layout, without the drive task itself ever touching
     /// `&mut App`.
-    #[cfg(unix)]
     FederationSplitPaneReady(Box<FederationSplitPaneReady>),
     /// The remote host rejected (or the local mount could not honor) an
     /// earlier `SplitPaneRequest`, or this mount's own drive task failed to
@@ -302,7 +308,6 @@ pub enum AppEvent {
     /// the matching pending-split context, plus the mount's own `origin`
     /// `HostKey` so the handler can refuse to drop a *different* mount's
     /// pending entry for a colliding/predicted `request_id`.
-    #[cfg(unix)]
     FederationSplitPaneFailed {
         request_id: u64,
         reason: String,
@@ -316,14 +321,12 @@ pub enum AppEvent {
     /// `TerminalChannelRouter`/mount out-tx a `TerminalRuntime::spawn_remote`
     /// call needs, `App::handle_federation_resync_pane_created`
     /// (`app/creation.rs`) splices it into the mounted workspace's layout.
-    #[cfg(unix)]
     FederationResyncPaneCreated(Box<FederationResyncPaneCreated>),
     /// A live mount's resync diff revealed a pane the mirror had previously
     /// mirrored, but the remote no longer reports. `pane_id` is the
     /// namespaced (public) id `RemoteMirror::panes()` used for it — the
     /// handler maps it back to the local `PaneId` it materialized via its
     /// own reverse index (`App::remote_resync_pane_index`).
-    #[cfg(unix)]
     FederationResyncPaneRemoved {
         origin: crate::remote::federation::id::HostKey,
         pane_id: String,
@@ -336,7 +339,6 @@ pub enum AppEvent {
     /// the remote workspace's identity and label so the tab/pane events that
     /// follow in the same diff materialize a correctly-labelled *new* local
     /// workspace (same staged shape as `FederationResyncTabCreated` below).
-    #[cfg(unix)]
     FederationResyncWorkspaceCreated {
         origin: crate::remote::federation::id::HostKey,
         /// Namespaced (public) workspace id (`RemoteMirror::workspaces()`'s
@@ -349,7 +351,6 @@ pub enum AppEvent {
     /// had previously mirrored. `workspace_id` is the namespaced (public) id
     /// `RemoteMirror::workspaces()` used for it, which is also the local
     /// `Workspace::id` the mount materialized.
-    #[cfg(unix)]
     FederationResyncWorkspaceRemoved {
         origin: crate::remote::federation::id::HostKey,
         workspace_id: String,
@@ -362,7 +363,6 @@ pub enum AppEvent {
     /// requesting client can focus that workspace when it arrives. A workspace
     /// the *remote* user created out of band never produces this event, so it
     /// never takes the local user's focus.
-    #[cfg(unix)]
     FederationWorkspaceCreateAccepted {
         request_id: u64,
         origin: crate::remote::federation::id::HostKey,
@@ -374,7 +374,6 @@ pub enum AppEvent {
     /// no payload beyond the reason: nothing was created remotely, so there
     /// is nothing local to reverse — same shape/reasoning as
     /// `FederationClosePaneFailed`.
-    #[cfg(unix)]
     FederationWorkspaceCreateFailed {
         request_id: u64,
         reason: String,
@@ -387,7 +386,6 @@ pub enum AppEvent {
     /// (`FederationResyncPaneCreated`, emitted right after) materialize into
     /// a correctly-labelled *new* local tab instead of being spliced into
     /// whichever tab happened to be active.
-    #[cfg(unix)]
     FederationResyncTabCreated {
         origin: crate::remote::federation::id::HostKey,
         /// Namespaced (public) workspace id — the already-materialized local
@@ -401,7 +399,6 @@ pub enum AppEvent {
     /// previously mirrored. `tab_id` is the namespaced (public) id
     /// `RemoteMirror::tabs()` used for it — the handler maps it back to the
     /// local tab it materialized via `App::remote_resync_tab_index`.
-    #[cfg(unix)]
     FederationResyncTabClosed {
         origin: crate::remote::federation::id::HostKey,
         tab_id: String,
@@ -412,7 +409,6 @@ pub enum AppEvent {
     /// `FederationSplitPaneReady`, carries no pane payload — closing needs
     /// no new `TerminalRuntime`, only tearing an existing local mirror pane
     /// down (`App::handle_federation_close_pane_ready`, `app/creation.rs`).
-    #[cfg(unix)]
     FederationClosePaneReady {
         request_id: u64,
         origin: crate::remote::federation::id::HostKey,
@@ -422,7 +418,6 @@ pub enum AppEvent {
     /// `FederationClosePaneReady` instead — see `client.rs`'s
     /// `ClosePaneResponse::Failed` handling). Same shape/reasoning as
     /// `FederationSplitPaneFailed`.
-    #[cfg(unix)]
     FederationClosePaneFailed {
         request_id: u64,
         reason: String,
@@ -432,14 +427,12 @@ pub enum AppEvent {
     /// answering an earlier `WorkspaceCloseRequest` this mount sent
     /// (`workspace.close_remote`). Same shape/reasoning as
     /// `FederationClosePaneReady`.
-    #[cfg(unix)]
     FederationWorkspaceCloseReady {
         request_id: u64,
         origin: crate::remote::federation::id::HostKey,
     },
     /// The remote host rejected an earlier `WorkspaceCloseRequest`. Same
     /// shape/reasoning as `FederationClosePaneFailed`.
-    #[cfg(unix)]
     FederationWorkspaceCloseFailed {
         request_id: u64,
         reason: String,
@@ -449,14 +442,12 @@ pub enum AppEvent {
     /// answering an earlier `TabCloseRequest` this mount sent
     /// (`tab.close_remote`). Same shape/reasoning as
     /// `FederationClosePaneReady`.
-    #[cfg(unix)]
     FederationTabCloseReady {
         request_id: u64,
         origin: crate::remote::federation::id::HostKey,
     },
     /// The remote host rejected an earlier `TabCloseRequest`. Same
     /// shape/reasoning as `FederationClosePaneFailed`.
-    #[cfg(unix)]
     FederationTabCloseFailed {
         request_id: u64,
         reason: String,
@@ -469,7 +460,6 @@ pub enum AppEvent {
 /// assembled by the mount's own drive task (see
 /// [`FederationSplitPaneReady`]'s identical precedent) and handed back to
 /// `App` for layout insertion.
-#[cfg(unix)]
 pub struct FederationResyncPaneCreated {
     /// The mount's own `HostKey`. `App::handle_federation_resync_pane_created`
     /// refuses to splice the pane into a workspace whose federation origin
@@ -498,7 +488,6 @@ pub struct FederationResyncPaneCreated {
     pub pane_state: crate::pane::PaneState,
 }
 
-#[cfg(unix)]
 impl std::fmt::Debug for FederationResyncPaneCreated {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FederationResyncPaneCreated")
@@ -514,7 +503,6 @@ impl std::fmt::Debug for FederationResyncPaneCreated {
 /// task (which owns the `TerminalChannelRouter`/mount out-tx a
 /// `TerminalRuntime::spawn_remote` call needs) and handed back to `App` for
 /// layout insertion.
-#[cfg(unix)]
 pub struct FederationSplitPaneReady {
     pub request_id: u64,
     /// The mount's own `HostKey` (`SplitMaterializationContext::origin`).
@@ -539,7 +527,6 @@ pub struct FederationSplitPaneReady {
 
 // `TerminalRuntime`/`TerminalState` don't derive `Debug`, matching
 // `FederationMountReady`'s existing precedent above.
-#[cfg(unix)]
 impl std::fmt::Debug for FederationSplitPaneReady {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FederationSplitPaneReady")
@@ -553,6 +540,7 @@ impl std::fmt::Debug for FederationSplitPaneReady {
 /// `App::materialize_federation_mount` + the ongoing drive task need, handed
 /// back from the server-owned dial+mount task spawned by the
 /// `workspace.mount_remote` API handler.
+// Daemon-owned multi-remote mount path only; Unix-only producer.
 #[cfg(unix)]
 pub struct FederationMountReady {
     pub target: String,
