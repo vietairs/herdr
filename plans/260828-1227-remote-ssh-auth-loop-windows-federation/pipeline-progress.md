@@ -1,0 +1,10 @@
+- [x] 1. worktree create — done 12:52 — MOVED to C:/Users/viete/hw-remote (zig cannot build from .claude/worktrees; see reports/windows-build-setup-260828-1311-toolchain.md)
+- [x] 2. W1a preflight auth probe — done 13:05 — src/remote/attach.rs warn_if_each_ssh_connection_will_prompt + src/remote.rs reports_ssh_auth_failure
+- [x] 3. W1b remote-side shutdown wait — done 13:10 — attach.rs remote_server_shutdown_wait_script; killed the per-poll ssh spawn loop
+- [x] 3b. toolchain setup — done 13:35 — rust 1.96.1, zig 0.15.2, VS BuildTools 2026; clippy --bin herdr -D warnings CLEAN
+- [ ] 4. W1c probe consolidation — DEFERRED (warm attach 6 -> 2 spawns; not needed to stop the loop)
+- [ ] 5. W2 Phase 1 ungate events/actions/client — pending
+- [ ] 6. W2 Phase 2 ungate session + App::new_federated + windows PTY backstop + flip attach.rs:696 — pending
+- [ ] 7. build + windows gate + tests — in progress
+- [ ] 8. W2 Phase 3 e2e vs real host — BLOCKED, needs ssh target from user
+- [ ] 9. review -> ship-gate -> PR -> docs — pending

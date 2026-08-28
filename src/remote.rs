@@ -35,7 +35,16 @@ pub(crate) fn print_remote_error_hint(err: &std::io::Error, target: &str) {
 }
 
 fn is_remote_auth_error(err: &std::io::Error) -> bool {
-    let message = err.to_string();
+    reports_ssh_auth_failure(&err.to_string())
+}
+
+/// Whether ssh output describes an authentication rejection, as opposed to any
+/// other failure (host unreachable, unknown host key, no ssh binary).
+///
+/// Shared by the post-failure hint above and the pre-attach probe in `attach`,
+/// which matches against a child's raw stderr rather than an
+/// [`std::io::Error`].
+pub(crate) fn reports_ssh_auth_failure(message: &str) -> bool {
     message.contains("Permission denied")
         && (message.contains("(publickey")
             || message.contains("(keyboard-interactive")
@@ -89,6 +98,34 @@ mod tests {
         let err = std::io::Error::other("remote platform detection failed: unsupported platform");
 
         assert!(!is_remote_auth_error(&err));
+    }
+
+    #[test]
+    fn auth_failure_matcher_reads_raw_ssh_stderr() {
+        // The pre-attach probe matches a child's stderr, not an io::Error.
+        assert!(reports_ssh_auth_failure(
+            "user@host: Permission denied (publickey,password).
+"
+        ));
+        assert!(reports_ssh_auth_failure(
+            "user@host: Permission denied (keyboard-interactive).
+"
+        ));
+    }
+
+    #[test]
+    fn auth_failure_matcher_ignores_non_auth_ssh_stderr() {
+        // These must stay silent: the provisioning step that follows reports
+        // them far better than the probe could.
+        assert!(!reports_ssh_auth_failure(
+            "ssh: connect to host host port 22: Connection refused
+"
+        ));
+        assert!(!reports_ssh_auth_failure(
+            "Host key verification failed.
+"
+        ));
+        assert!(!reports_ssh_auth_failure(""));
     }
 
     #[test]
