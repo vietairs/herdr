@@ -33,6 +33,21 @@ Key auth installed with the operator's approval (ed25519, `herdr-e2e-windows`,
    protocol version negotiation and capability agreement therefore all work cross-platform. This
    is the substantive part of the port working end to end against a real host.
 
+## The password loop — second cause, found late
+
+Key installation did not stop the prompting. The generated private key inherited an ACE for a
+second account, so Win32-OpenSSH refused to load it, printed `bad permissions`, and continued as
+if no key existed — producing the same `Permission denied (publickey,password)` a keyless host
+gives. The earlier "key auth verified" checks passed only because they ran through Git Bash's MSYS
+ssh, which ignores Windows ACLs. herdr invokes `C:\Windows\System32\OpenSSH\ssh.exe`, which
+does not. Ruled out along the way: herdr's managed ssh config and its `-F` flag are NOT involved —
+key auth succeeds identically with and without it.
+
+Fixed on the machine with `icacls <key> /inheritance:r /grant:r "<user>:(R)"`; after that the
+Win32 `BatchMode` probe returns success and the attach runs with no prompt. Fixed in the product
+by commit 02ba4e7f, which tells a skipped key apart from a host that accepts no key and advises
+restricting the key file rather than installing one that is already installed.
+
 ## Not proven — the mount fails
 
 The remote accepts the handshake, then closes before sending the snapshot.
@@ -54,17 +69,17 @@ The next step that would settle it is running client and host on the **same** bu
 branch's Linux binary on the host and repeat. That requires a Linux build (CI artifact, or a
 cross-build), which was not attempted here.
 
-## Not tested — needs a human at a real terminal
+## Confirmed at a real terminal
 
-`ssh` reads passwords from the TTY and herdr is a full-screen TUI; the agent shell has no TTY, so
-the interactive half of Test C never ran. Still unverified on Windows:
-pane rendering, keyboard input reaching remote panes (the console-parity risk, since keyboard
-enhancement flags are a no-op there), mouse click/drag/split, clean terminal restore on quit, and
-the new `src/pty/backend.rs` local-spawn backstop actually refusing a spawn.
+The operator ran the branch binary interactively against the host and confirmed the federated
+workspace works. No password prompt, no "not supported on this platform" message.
 
-Tests A and B (password-prompt counts, before vs after) also still need a human — key auth is now
-installed, so reproducing the password path needs `PreferredAuthentications password` for this
-host in `~/.ssh/config`.
+## Still not exercised
+
+Not individually itemised during the operator's run: mouse click/drag/split, and the new
+`src/pty/backend.rs` local-spawn backstop actually refusing a spawn. Tests A and B (password-prompt
+counts, before vs after) were overtaken by the ACL fix — reproducing the password path now needs
+`PreferredAuthentications password` for this host in `~/.ssh/config`.
 
 ## Side effect requiring cleanup
 
@@ -74,8 +89,8 @@ with a spawned pane** on the live remote session. Two were created:
     wC  iPEMS_Webapp  panes=1   (05:14:01Z)
     wD  iPEMS_Webapp  panes=1   (05:15:17Z)
 
-Workspace count went 4 -> 6. These are artifacts of the test, not pre-existing. Left in place
-pending the operator's decision — removing workspaces on a live server is theirs to authorize.
+Workspace count went 4 -> 6. Both were removed with the operator's approval; the server is back to
+w5/w9/wA/wB.
 
 ## Unresolved questions
 
