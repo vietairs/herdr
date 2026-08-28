@@ -1342,20 +1342,45 @@ fn warn_if_each_ssh_connection_will_prompt(ssh: &RemoteSsh) {
     if output.status.success() {
         return;
     }
-    if !crate::remote::reports_ssh_auth_failure(&String::from_utf8_lossy(&output.stderr)) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !crate::remote::reports_ssh_auth_failure(&stderr) {
         return;
     }
 
     eprintln!(
-        "herdr: ssh on this platform cannot share one authentication between connections,          and preparing this attach opens several."
+        "herdr: ssh on this platform cannot share one authentication between connections, and preparing this attach opens several."
     );
+
+    // A key that ssh found and then skipped looks identical to no key at all
+    // from the exit status, so tell those two apart before advising a fix.
+    if crate::remote::reports_ignored_local_key(&stderr) {
+        eprintln!(
+            "herdr: ssh found a private key but ignored it because the key file's permissions are too open, so it will ask for your password once per connection."
+        );
+        eprintln!("hint: {}", ignored_key_permissions_hint());
+        return;
+    }
+
     eprintln!(
         "herdr: {} does not accept a key or agent identity, so it will ask for your password once per connection.",
         ssh.target()
     );
     eprintln!(
-        "hint: set up key authentication to be asked once, or not at all: generate a key with          `ssh-keygen -t ed25519`, install its `.pub` in the remote `~/.ssh/authorized_keys`,          then load it with `ssh-add`."
+        "hint: set up key authentication to be asked once, or not at all: generate a key with `ssh-keygen -t ed25519`, install its `.pub` in the remote `~/.ssh/authorized_keys`, then load it with `ssh-add`."
     );
+}
+
+/// Platform-specific way to restrict a private key file to its owner, named in
+/// the hint above.
+#[cfg(windows)]
+fn ignored_key_permissions_hint() -> &'static str {
+    r#"restrict the key to your account, then retry: `icacls %USERPROFILE%\.ssh\id_ed25519 /inheritance:r /grant:r "%USERNAME%:(R)"`."#
+}
+
+/// See the Windows counterpart above.
+#[cfg(not(windows))]
+fn ignored_key_permissions_hint() -> &'static str {
+    "restrict the key to your account, then retry: `chmod 600 ~/.ssh/id_ed25519`."
 }
 
 fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
@@ -3277,7 +3302,6 @@ mod tests {
         );
     }
 
-    #[test]
     #[test]
     fn shutdown_wait_script_polls_on_the_remote_side() {
         let remote_herdr = RemoteHerdr::for_platform(RemotePlatform::local())

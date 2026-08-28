@@ -44,6 +44,19 @@ fn is_remote_auth_error(err: &std::io::Error) -> bool {
 /// Shared by the post-failure hint above and the pre-attach probe in `attach`,
 /// which matches against a child's raw stderr rather than an
 /// [`std::io::Error`].
+/// Whether ssh output says it skipped a local private key it found.
+///
+/// ssh refuses to load a key whose file is readable by accounts other than the
+/// owner, reports that on stderr, and then continues as if no key existed —
+/// so the connection is rejected exactly like a host that accepts no key at
+/// all. Distinguishing the two matters: the fix is local file permissions, not
+/// installing a key on the remote.
+pub(crate) fn reports_ignored_local_key(message: &str) -> bool {
+    message.contains("bad permissions")
+        || message.contains("UNPROTECTED PRIVATE KEY FILE")
+        || message.contains("Permissions for")
+}
+
 pub(crate) fn reports_ssh_auth_failure(message: &str) -> bool {
     message.contains("Permission denied")
         && (message.contains("(publickey")
@@ -98,6 +111,23 @@ mod tests {
         let err = std::io::Error::other("remote platform detection failed: unsupported platform");
 
         assert!(!is_remote_auth_error(&err));
+    }
+
+    #[test]
+    fn ignored_local_key_is_told_apart_from_a_host_that_accepts_no_key() {
+        // Real Win32-OpenSSH stderr: the key is found, skipped, and the
+        // connection then fails with the same rejection a keyless host gives.
+        let skipped = concat!(
+            "Permissions for '/home/u/.ssh/id_ed25519' are too open.\n",
+            "Load key \"/home/u/.ssh/id_ed25519\": bad permissions\n",
+            "u@host: Permission denied (publickey,password).\n",
+        );
+        assert!(reports_ssh_auth_failure(skipped));
+        assert!(reports_ignored_local_key(skipped));
+
+        let no_key = "u@host: Permission denied (publickey,password).\n";
+        assert!(reports_ssh_auth_failure(no_key));
+        assert!(!reports_ignored_local_key(no_key));
     }
 
     #[test]
