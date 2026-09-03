@@ -9033,6 +9033,23 @@
               "type": "object"
             },
             {
+              "description": "Tab counterpart of `WorkspaceCreateRequested`: acknowledges a\n`tab.create` that targeted a workspace mounted from a remote host, so\nthe request grows that host's workspace rather than creating a local\ntab. The request was sent over the mount named by `origin`.\n\n\"Requested, not completed\": the serving host answers asynchronously,\nand the new tab appears through the same resync path a tab created by\nthe remote user takes. It deliberately carries **no** tab or pane ids,\nbecause the tab does not exist yet — unlike the local `TabCreated`\nanswer, which returns the tab it just built.",
+              "properties": {
+                "origin": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "tab_create_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "origin"
+              ],
+              "type": "object"
+            },
+            {
               "description": "Tab counterpart of `WorkspaceCloseRequested`: acknowledges a\n`tab.close_remote` whose request was sent over the mount named by\n`origin`. The mirror tab disappears only once the serving host\nconfirms it closed its own tab.",
               "properties": {
                 "origin": {

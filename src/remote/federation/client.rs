@@ -875,6 +875,25 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
             FederationMessage::TabCloseRequest(_) => {
                 tracing::debug!("federation client received a TabCloseRequest; ignoring");
             }
+            // `TabCreateRequest` is client->server only, same reasoning as
+            // `SplitPaneRequest` above.
+            FederationMessage::TabCreateRequest(_) => {
+                tracing::debug!("federation client received a TabCreateRequest; ignoring");
+            }
+            // Contract-only placeholder. The wire types landed with the
+            // protocol bump; the send helper and the real handling here
+            // (emit `AppEvent::FederationTabCreate{Accepted,Failed}` plus a
+            // coalesced `SnapshotRequest`) land with the mount-client change
+            // that first makes this client send a `TabCreateRequest`. Until
+            // then nothing sends one, so this arm is unreachable in practice
+            // — it exists to keep the match exhaustive, and warns rather than
+            // ignoring silently because reaching it means a peer answered a
+            // request this build never made.
+            FederationMessage::TabCreateResponse(_) => {
+                tracing::warn!(
+                    "federation client received a TabCreateResponse it never requested; ignoring"
+                );
+            }
             // The remote host already performed (or refused) the real close
             // by the time this arrives, same shape/reasoning as
             // `ClosePaneResponse` below: no new `TerminalRuntime` needs

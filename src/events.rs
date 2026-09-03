@@ -379,6 +379,47 @@ pub enum AppEvent {
         reason: String,
         origin: crate::remote::federation::id::HostKey,
     },
+    /// The remote host accepted an earlier `TabCreateRequest` and named the
+    /// tab it created. The tab itself still materializes through the ordinary
+    /// resync path (`FederationResyncTabCreated` plus the pane event that
+    /// builds it) — this only correlates the in-flight request with the
+    /// workspace and tab ids it will land under, so the requesting client can
+    /// focus that tab when it arrives. A tab the *remote* user created out of
+    /// band never produces this event, so it never takes the local user's
+    /// focus.
+    // Constructed by the mount client's `TabCreateResponse` arm, which lands
+    // with the change that first makes this client *send* a
+    // `TabCreateRequest`; until then nothing builds either variant and
+    // `dead_code` fires on the non-test bin target, where a `#[cfg(test)]`
+    // constructor is invisible. Remove this attribute in that same change —
+    // if it is still here once `remote::federation::client` emits these two
+    // events, it is stale and hiding a real unused variant.
+    #[allow(dead_code)]
+    #[cfg(unix)]
+    FederationTabCreateAccepted {
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+        /// Namespaced (public) workspace id the new tab belongs to, sourced
+        /// from `TabCreateResponse::Created.workspace_id` on the wire — never
+        /// resolved from the mirror, which cannot yet know this tab.
+        workspace_id: String,
+        /// Namespaced (public) tab id — what `RemoteMirror::tabs()` will key
+        /// the tab under once the resync reveals it.
+        tab_id: String,
+    },
+    /// The remote host rejected an earlier `TabCreateRequest`. Carries no
+    /// payload beyond the reason: nothing was created remotely, so there is
+    /// nothing local to reverse — same shape/reasoning as
+    /// `FederationWorkspaceCreateFailed`.
+    // See `FederationTabCreateAccepted` above for why this is allowed and
+    // when the attribute must be removed.
+    #[allow(dead_code)]
+    #[cfg(unix)]
+    FederationTabCreateFailed {
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    },
     /// A live mount's resync diff revealed a tab the mirror had never seen
     /// before. A local `Tab` cannot exist without at least one pane, so this
     /// carries no layout payload: it only records the remote tab's identity

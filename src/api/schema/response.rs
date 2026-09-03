@@ -121,6 +121,19 @@ pub enum ResponseResult {
     TabList {
         tabs: Vec<TabInfo>,
     },
+    /// Tab counterpart of `WorkspaceCreateRequested`: acknowledges a
+    /// `tab.create` that targeted a workspace mounted from a remote host, so
+    /// the request grows that host's workspace rather than creating a local
+    /// tab. The request was sent over the mount named by `origin`.
+    ///
+    /// "Requested, not completed": the serving host answers asynchronously,
+    /// and the new tab appears through the same resync path a tab created by
+    /// the remote user takes. It deliberately carries **no** tab or pane ids,
+    /// because the tab does not exist yet — unlike the local `TabCreated`
+    /// answer, which returns the tab it just built.
+    TabCreateRequested {
+        origin: String,
+    },
     /// Tab counterpart of `WorkspaceCloseRequested`: acknowledges a
     /// `tab.close_remote` whose request was sent over the mount named by
     /// `origin`. The mirror tab disappears only once the serving host
