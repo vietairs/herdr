@@ -762,9 +762,11 @@ impl App {
             // it when the resync materializes it instead of leaving the user
             // where they were with no sign the keypress did anything. Only
             // this request's own answer can redeem the claim
-            // (`App::handle_federation_workspace_create_accepted`).
+            // (`App::handle_federation_workspace_create_accepted`), and only
+            // on the mount it went out on: the claim carries that mount's key
+            // so an answer arriving on another link cannot consume it.
             self.pending_remote_workspace_create_focus
-                .insert(request_id);
+                .insert((origin.clone(), request_id));
         }
 
         encode_success(

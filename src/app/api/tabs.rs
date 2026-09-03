@@ -287,8 +287,11 @@ impl App {
             // when the resync materializes it instead of leaving the user
             // where they were with no sign the keypress did anything. Only
             // this request's own answer can redeem the claim
-            // (`App::handle_federation_tab_create_accepted`).
-            self.pending_remote_tab_create_focus.insert(request_id);
+            // (`App::handle_federation_tab_create_accepted`), and only on the
+            // mount it went out on: the claim carries that mount's key so an
+            // answer arriving on another link cannot consume it.
+            self.pending_remote_tab_create_focus
+                .insert((origin.clone(), request_id));
         }
 
         encode_success(

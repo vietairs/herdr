@@ -649,11 +649,21 @@ impl App {
         // failure the pre-gate existed to prevent. The informational
         // "request sent" branch above stays on the configured channel because
         // nothing is broken when it is suppressed.
+        self.raise_tab_create_failed_toast(envelope.error.message);
+    }
+
+    /// The refusal half of [`Self::surface_tab_create_response`], shared with
+    /// the callers that refuse a create before it ever reaches the API (the
+    /// new-tab dialog whose pinned workspace disappeared). Delivered
+    /// unconditionally for the reason given there: `toast_config.delivery`
+    /// defaults to `off`, and a suppressed refusal is indistinguishable from
+    /// a dead keypress.
+    pub(crate) fn raise_tab_create_failed_toast(&mut self, context: String) {
         let previous_toast = self.state.toast.clone();
         self.state.toast = Some(crate::app::state::ToastNotification {
             kind: super::super::state::ToastKind::NeedsAttention,
             title: "tab create failed".to_string(),
-            context: envelope.error.message,
+            context,
             position: None,
             target: None,
         });

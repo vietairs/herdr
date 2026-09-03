@@ -730,6 +730,27 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                 let _ = reply.send(Err("not the mounted controller".to_string()));
                 return;
             }
+            // Resolve the peer's id by EXACT match, never through
+            // `parse_workspace_id`'s positional CLI shorthand: a bare `"1"`
+            // or `"w_1"` from the wire would otherwise resolve to whatever
+            // workspace occupies that slot right now — including one this
+            // host only mirrors, which classifies as local and slips past
+            // the redirect guard below. A serving host acts only on ids it
+            // actually issued.
+            let Some(ws_idx) = app.parse_federation_workspace_id(&target_workspace_id) else {
+                tracing::warn!(
+                    %target_workspace_id,
+                    "refusing a peer's federation tab-create for a workspace this host \
+                     never published"
+                );
+                let _ = reply.send(Err(
+                    "workspace_not_found: this host has no workspace with that id".to_string(),
+                ));
+                return;
+            };
+            // What this host published for that slot, which is what the
+            // classification and the dispatch below must both act on.
+            let target_workspace_id = app.public_workspace_id(ws_idx);
             // Refuse a redirect before dispatching the request at all: if
             // `target_workspace_id` names a workspace this host only mirrors
             // from a third host (an `r:` id), `handle_tab_create` would
@@ -756,8 +777,8 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
             let response = app.handle_api_request_after_internal_events_drained(Request {
                 id: "federation-create-tab".to_string(),
                 method: Method::TabCreate(crate::api::schema::TabCreateParams {
-                    // The peer names the workspace by the id this host itself
-                    // published, so it goes through unchanged.
+                    // The exact id this host published for the resolved slot,
+                    // never the raw string the peer sent.
                     workspace_id: Some(target_workspace_id),
                     // A mounting client's filesystem path is meaningless
                     // here; let this host's own `tab.create` defaults pick
@@ -2156,6 +2177,51 @@ mod tests {
             out_rx.try_recv().is_err(),
             "the pre-dispatch classify guard must refuse before this host ever \
              forwards a TabCreateRequest over the third host's mount link"
+        );
+    }
+
+    /// The positional CLI shorthand (`"1"`, `"w_1"`) must never resolve a
+    /// wire id: it classifies as local, so it slips past the chained-mount
+    /// guard, and then `handle_tab_create` resolves it to whatever workspace
+    /// occupies that slot — here a mirror of a third host, which would send a
+    /// `TabCreateRequest` off this machine and leave a ghost tab the peer can
+    /// never reach.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_peers_tab_create_by_positional_shorthand_is_refused() {
+        let (mut app, mut out_rx, _mirrored_workspace_id) = app_with_a_mirrored_workspace();
+        while out_rx.try_recv().is_ok() {}
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        let tabs_before = app.state.workspaces[0].tabs.len();
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CreateTab {
+                epoch,
+                connid: 1,
+                target_workspace_id: "1".to_string(),
+                label: None,
+                reply: tx,
+            },
+        );
+
+        let outcome = rx.try_recv().expect("reply delivered");
+        let reason = outcome.expect_err("a positional id is not an id this host issued");
+        assert!(
+            reason.starts_with("workspace_not_found"),
+            "a wire id must resolve exactly or not at all: {reason}"
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            tabs_before,
+            "a refused create must not touch any workspace's tab set"
+        );
+        assert!(
+            out_rx.try_recv().is_err(),
+            "nothing may leave this host over a third host's mount link"
         );
     }
 

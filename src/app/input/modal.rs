@@ -1134,15 +1134,33 @@ impl App {
                 // Target the workspace the dialog was opened from, not
                 // whatever is active now: that choice also decides local vs
                 // forwarded-over-the-mount, and the active workspace can move
-                // under an open dialog without any user keystroke. A pin whose
-                // workspace disappeared meanwhile falls back to the active one,
-                // which is what an unpinned create would have done anyway.
-                let workspace_id = self
-                    .state
-                    .pending_tab_create_source_workspace
-                    .as_ref()
-                    .and_then(|pinned| self.state.workspaces.iter().position(|ws| &ws.id == pinned))
-                    .map(|ws_idx| self.public_workspace_id(ws_idx));
+                // under an open dialog without any user keystroke.
+                let workspace_id = match self.state.pending_tab_create_source_workspace.clone() {
+                    Some(pinned) => {
+                        let Some(ws_idx) =
+                            self.state.workspaces.iter().position(|ws| ws.id == pinned)
+                        else {
+                            // The pinned workspace disappeared while the
+                            // dialog was open (its mount ended, or it was
+                            // closed). Falling through to the active
+                            // workspace would silently create a LOCAL tab,
+                            // under the label typed for a remote one, in a
+                            // workspace the user never pointed at. Refuse
+                            // instead, and say why.
+                            cancel_rename_modal(&mut self.state);
+                            self.raise_tab_create_failed_toast(
+                                "the workspace this tab was for is gone; no tab was created"
+                                    .to_string(),
+                            );
+                            return;
+                        };
+                        Some(self.public_workspace_id(ws_idx))
+                    }
+                    // Never pinned (the dialog was opened with no source
+                    // workspace): the create targets the active workspace,
+                    // exactly as before.
+                    None => None,
+                };
                 let response = self.runtime_tab_create(
                     "tui.tab.create_named",
                     crate::api::schema::TabCreateParams {
@@ -2336,6 +2354,55 @@ mod tests {
         assert!(
             app.state.pending_tab_create_source_workspace.is_none(),
             "confirming must clear the pin"
+        );
+    }
+
+    /// The pinned workspace can also disappear while the dialog is up (its
+    /// mount ended, or another client closed it). Falling back to whatever is
+    /// active now would create a LOCAL tab, under the label typed for a remote
+    /// one, in a workspace the user never pointed at — so the create is
+    /// refused and the reason surfaced instead.
+    #[test]
+    fn new_tab_dialog_refuses_when_its_pinned_workspace_is_gone() {
+        let mut app = app_with_test_workspaces(&["federated", "local"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1#s1:default".to_string();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        open_new_tab_dialog(&mut app.state);
+        app.state.name_input = "remote-work".to_string();
+        // The mount ends under the open dialog: the mirrored workspace is
+        // removed and focus lands on the surviving local one.
+        app.state.workspaces.remove(0);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let local_tabs_before = app.state.workspaces[0].tabs.len();
+
+        app.save_rename_modal_via_api();
+
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            local_tabs_before,
+            "a stale pin must not create a local tab in an unrelated workspace"
+        );
+        let toast = app
+            .state
+            .toast
+            .clone()
+            .expect("a refused create must be surfaced, not silently dropped");
+        assert_eq!(toast.title, "tab create failed");
+        assert_eq!(
+            toast.context,
+            "the workspace this tab was for is gone; no tab was created"
+        );
+        assert!(
+            app.state.pending_tab_create_source_workspace.is_none(),
+            "the refusal must clear the pin"
+        );
+        assert_ne!(
+            app.state.mode,
+            Mode::RenameTab,
+            "the refusal must close the dialog"
         );
     }
 
