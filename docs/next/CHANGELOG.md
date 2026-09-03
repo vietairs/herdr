@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Creating a tab in a mounted remote workspace now creates it on the serving host instead of refusing, from the new-tab keybind, the new-tab dialog (the label travels with it), the new-tab button, and the `tab.create` API. Because the tab is created remotely and appears through the mount's normal resync, `tab.create` answers `tab_create_requested` with the `origin` mount key rather than `tab_created`. An explicit `cwd` or a non-empty launch `env` is refused with `remote_tab_cwd_unsupported` / `remote_tab_env_unsupported` rather than silently dropped, and a mount with no live link reports `remote_tab_create_unsupported` instead of quietly creating a local tab.
 - Custom themes can now define separate light and dark color overrides when automatic theme switching is enabled. (#837, thanks @aneym)
 
 ### Fixed
@@ -117,6 +118,7 @@
 - Pasting a clipboard image into a pane of a mounted remote workspace now also works from a host terminal that reports an image paste as an empty bracketed paste, so `Cmd+V` stages the image on hosts such as Warp. Terminals that substitute a temporary file path, such as cmux, continue to work unchanged. Apple Terminal sends nothing at all for an image-only clipboard, so `keys.remote_image_paste` (`Ctrl+V` by default) remains the way to paste there. A side effect on such terminals: pasting an empty clipboard into a pane of a mounted remote workspace now reports "no image on the clipboard" instead of doing nothing. Setting `keys.remote_image_paste` to an empty string turns the whole feature off, including this trigger.
 
 ### Changed
+- The federation protocol version moved from 6 to 7. The federation handshake requires an exact version match, so this is a fleet-wide cutover: update and restart Herdr on the client and on every host it mounts together, or existing mounts stop connecting until both ends run the new version.
 - The server/client protocol version moved from 19 to 20. After upgrading, restart the Herdr server (`herdr server stop`, then start Herdr again) so the running server and the installed CLI speak the same protocol; until then CLI commands report a client/server version mismatch.
 
 ### Fixed
