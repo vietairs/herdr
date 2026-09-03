@@ -257,11 +257,29 @@ pub struct App {
     /// materializes it; a materialized workspace is found by `Workspace::id`
     /// directly, not through this map.
     pub(crate) remote_resync_workspace_index: HashMap<String, creation::RemoteWorkspaceRef>,
-    /// `request_id`s of `WorkspaceCreateRequest`s this client sent that asked
-    /// for the new workspace to be focused (`WorkspaceCreateParams::focus`).
+    /// `WorkspaceCreateRequest`s this client sent that asked for the new
+    /// workspace to be focused (`WorkspaceCreateParams::focus`), keyed by the
+    /// mount the request went out on together with its `request_id`.
     /// Cleared when the request is answered either way; a request that asked
     /// for no focus is never recorded here at all.
-    pub(crate) pending_remote_workspace_create_focus: HashSet<u64>,
+    ///
+    /// The `HostKey` half is what binds a claim to the link that can redeem
+    /// it: `request_id`s are process-unique but carry no mount identity, so a
+    /// bare id would let an answer arriving on mount B redeem a claim minted
+    /// for mount A and move the user into a workspace they never asked for.
+    pub(crate) pending_remote_workspace_create_focus:
+        HashSet<(crate::remote::federation::id::HostKey, u64)>,
+    /// `TabCreateRequest`s this client sent that asked for the new tab to be
+    /// focused (`TabCreateParams::focus`), keyed by mount and `request_id`.
+    /// Tab counterpart of `pending_remote_workspace_create_focus`, with its
+    /// own counter, so the two never redeem each other's ids, and with the
+    /// same `HostKey` binding, so one mount's answer cannot redeem another
+    /// mount's claim. Written only by `App::dispatch_remote_tab_create`;
+    /// cleared when the request is answered either way.
+    /// Ungated for the same reason the workspace-side create set is: its
+    /// single writer (`dispatch_remote_tab_create`) is itself ungated.
+    pub(crate) pending_remote_tab_create_focus:
+        HashSet<(crate::remote::federation::id::HostKey, u64)>,
     /// Namespaced workspace ids the remote host confirmed for one of those
     /// focus-requesting creates but the resync has not materialized yet. The
     /// workspace is focused the moment it appears, so pressing "new
@@ -270,6 +288,16 @@ pub struct App {
     /// `WorkspaceCreateResponse` answering this client's own request, never
     /// from an out-of-band remote create.
     pub(crate) pending_remote_workspace_focus: HashSet<String>,
+    /// Second stage of the tab focus claim: namespaced (public) tab ids the
+    /// remote host confirmed for one of this client's focus-requesting tab
+    /// creates, whose tab the resync has not materialized yet. The tab is
+    /// focused the moment its first pane arrives
+    /// (`handle_federation_resync_pane_created`, the single redemption
+    /// point), so pressing "new tab" inside a mounted workspace lands the
+    /// user in the new tab exactly as a local create does. Ids only enter
+    /// here from `App::handle_federation_tab_create_accepted` answering this
+    /// client's own request, never from an out-of-band remote create.
+    pub(crate) pending_remote_tab_focus: HashSet<String>,
     pub(crate) local_terminal_notifications: bool,
     /// Whether this process applies `AppEvent::PrefixInputSource` to the host input source.
     /// The headless server sets this to false: the switch belongs to the foreground client,
@@ -741,6 +769,7 @@ impl App {
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
             pending_workspace_create_source_workspace: None,
+            pending_tab_create_source_workspace: None,
             rename_pane_target: None,
             worktree_create: None,
             worktree_open: None,
@@ -1005,7 +1034,9 @@ impl App {
             remote_resync_tab_index: HashMap::new(),
             remote_resync_workspace_index: HashMap::new(),
             pending_remote_workspace_create_focus: HashSet::new(),
+            pending_remote_tab_create_focus: HashSet::new(),
             pending_remote_workspace_focus: HashSet::new(),
+            pending_remote_tab_focus: HashSet::new(),
             local_terminal_notifications: true,
             local_input_source_switch: true,
             config_reloaded_from_disk: false,
@@ -1221,7 +1252,7 @@ impl App {
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 let label = self.state.requested_new_tab_name.take();
-                self.runtime_tab_create(
+                let response = self.runtime_tab_create(
                     "tui.tab.create",
                     crate::api::schema::TabCreateParams {
                         workspace_id: None,
@@ -1231,6 +1262,9 @@ impl App {
                         env: Default::default(),
                     },
                 );
+                // Covers the new-tab button and the mobile tab switcher,
+                // whose single consumer this is.
+                self.surface_tab_create_response(&response);
                 needs_render = true;
             }
 

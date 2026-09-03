@@ -12,7 +12,9 @@ impl App {
             .find_map(|(ws_idx, ws)| ws.pane_state(pane_id).map(|pane| (ws_idx, pane)))
     }
 
-    pub(super) fn public_workspace_id(&self, ws_idx: usize) -> String {
+    /// `pub(crate)` because the federation actor resolves a peer's target
+    /// workspace to its published id before dispatching anything at it.
+    pub(crate) fn public_workspace_id(&self, ws_idx: usize) -> String {
         self.state.workspaces[ws_idx].id.clone()
     }
 
@@ -76,7 +78,7 @@ impl App {
     /// would silently resolve to whatever workspace currently occupies that
     /// slot and close it, instead of failing. A serving host must only ever
     /// act on an id it actually issued.
-    pub(super) fn parse_federation_workspace_id(&self, id: &str) -> Option<usize> {
+    pub(crate) fn parse_federation_workspace_id(&self, id: &str) -> Option<usize> {
         self.state
             .workspaces
             .iter()

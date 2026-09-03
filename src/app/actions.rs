@@ -2950,6 +2950,8 @@ impl AppState {
             AppEvent::FederationResyncWorkspaceRemoved { .. } => Vec::new(),
             AppEvent::FederationWorkspaceCreateAccepted { .. } => Vec::new(),
             AppEvent::FederationWorkspaceCreateFailed { .. } => Vec::new(),
+            AppEvent::FederationTabCreateAccepted { .. } => Vec::new(),
+            AppEvent::FederationTabCreateFailed { .. } => Vec::new(),
             AppEvent::FederationResyncTabCreated { .. } => Vec::new(),
             AppEvent::FederationResyncTabClosed { .. } => Vec::new(),
             AppEvent::FederationClosePaneReady { .. } => Vec::new(),

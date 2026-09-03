@@ -41,8 +41,8 @@ use super::id::{HostKey, Mount, ServerInstanceId};
 use super::protocol::{
     Capability, ClipboardMessage, ClipboardStageRequest, FaultReason, FederationMessage, Handshake,
     HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, TabCloseRequest,
-    TerminalChannelMessage, WorkspaceCloseRequest, WorkspaceCreateRequest,
-    FEDERATION_PROTOCOL_VERSION,
+    TabCreateRequest, TabCreateResponse, TerminalChannelMessage, WorkspaceCloseRequest,
+    WorkspaceCreateRequest, FEDERATION_PROTOCOL_VERSION,
 };
 // Only the stage-response arm names this type, and that arm is Unix-only
 // because the events it raises are.
@@ -244,6 +244,36 @@ pub(crate) fn send_workspace_create_request(
     };
     out_tx
         .send(FederationMessage::WorkspaceCreateRequest(request))
+        .map_err(|_| CreateRequestSendError::LinkClosed)
+}
+
+/// The ONE place a `TabCreateRequest` may reach the wire.
+///
+/// No capability gate, for exactly the reason spelled out on
+/// `send_workspace_create_request`: the variant arrived *with* the federation
+/// protocol bump to v7 itself, and version negotiation is all-or-nothing (a
+/// mismatch rejects the handshake outright), so any peer this mount is
+/// connected to necessarily decodes it. A gate here would be a
+/// permanently-true check plus a dead not-agreed branch.
+///
+/// `target_workspace_id` is passed through untouched: it is the raw
+/// (un-namespaced) remote id, and stripping the local `r:<host>:` namespace is
+/// the caller's job, as `TabCreateRequest`'s own doc-comment states.
+pub(crate) fn send_tab_create_request(
+    out_tx: &mpsc::UnboundedSender<FederationMessage>,
+    request: TabCreateRequest,
+) -> Result<(), CreateRequestSendError> {
+    // Bounded before framing: the control channel's receiver rejects a frame
+    // over its 4 KiB ceiling outright, which would lose the request with
+    // nothing to show the user for it.
+    let request = TabCreateRequest {
+        label: request
+            .label
+            .map(crate::remote::federation::protocol::clamp_workspace_label),
+        ..request
+    };
+    out_tx
+        .send(FederationMessage::TabCreateRequest(request))
         .map_err(|_| CreateRequestSendError::LinkClosed)
 }
 
@@ -875,6 +905,11 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
             FederationMessage::TabCloseRequest(_) => {
                 tracing::debug!("federation client received a TabCloseRequest; ignoring");
             }
+            // `TabCreateRequest` is client->server only, same reasoning as
+            // `SplitPaneRequest` above.
+            FederationMessage::TabCreateRequest(_) => {
+                tracing::debug!("federation client received a TabCreateRequest; ignoring");
+            }
             // The remote host already performed (or refused) the real close
             // by the time this arrives, same shape/reasoning as
             // `ClosePaneResponse` below: no new `TerminalRuntime` needs
@@ -1015,6 +1050,79 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                         let _ = ctx
                             .events
                             .send(crate::events::AppEvent::FederationWorkspaceCreateFailed {
+                                request_id,
+                                reason,
+                                origin: ctx.origin.clone(),
+                            })
+                            .await;
+                    }
+                }
+            },
+            // Tab-create counterpart of `WorkspaceCreateResponse` above; same
+            // reasoning throughout, including the deliberate absence of any
+            // inline materialization: the resync diff
+            // (`created_tabs`/`created_panes`) is the single path that builds
+            // the local `Tab`, so materializing here as
+            // `SplitPaneResponse::Created` does would create the tab and its
+            // pane twice.
+            FederationMessage::TabCreateResponse(response) => match response {
+                TabCreateResponse::Created {
+                    request_id,
+                    workspace_id,
+                    tab_id,
+                    pane_id,
+                    terminal_id,
+                } => {
+                    tracing::info!(
+                        request_id,
+                        %workspace_id,
+                        %tab_id,
+                        %pane_id,
+                        %terminal_id,
+                        "remote tab created; resyncing to materialize it"
+                    );
+                    // Only this client sends `TabCreateRequest` on this link,
+                    // so a `Created` response always answers a create *this*
+                    // client asked for — unlike a tab the remote user made,
+                    // which only ever arrives as a structural event. That is
+                    // what makes claiming focus for it safe.
+                    //
+                    // Both ids are re-namespaced straight off the wire, never
+                    // looked up in the mirror: `RemoteMirror.tabs` is filled
+                    // only by `apply_snapshot`/`apply_event_message`, and this
+                    // arm is what *fires* the `SnapshotRequest` that first
+                    // reveals this tab, so a lookup would miss except in a
+                    // race.
+                    if let Some(ctx) = split_materialization {
+                        let local_workspace_id =
+                            super::id::map_in(workspace_id, mirror.mount()).to_public_id();
+                        let local_tab_id = super::id::map_in(tab_id, mirror.mount()).to_public_id();
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationTabCreateAccepted {
+                                request_id,
+                                origin: ctx.origin.clone(),
+                                workspace_id: local_workspace_id,
+                                tab_id: local_tab_id,
+                            })
+                            .await;
+                    }
+                    if resync_in_flight {
+                        resync_dirty = true;
+                    } else {
+                        resync_in_flight = out_tx
+                            .send(FederationMessage::SnapshotRequest(
+                                super::protocol::SnapshotRequest,
+                            ))
+                            .is_ok();
+                    }
+                }
+                TabCreateResponse::Failed { request_id, reason } => {
+                    tracing::warn!(request_id, %reason, "remote tab create failed");
+                    if let Some(ctx) = split_materialization {
+                        let _ = ctx
+                            .events
+                            .send(crate::events::AppEvent::FederationTabCreateFailed {
                                 request_id,
                                 reason,
                                 origin: ctx.origin.clone(),
@@ -3381,5 +3489,310 @@ mod tests {
             other => panic!("expected FederationClipboardStageFailed, got {other:?}"),
         }
         let _ = fake_server.await;
+    }
+
+    // ---- federation-forwarded tab creation (mount client side) ----
+
+    // The clamp lives in the send helper, not at the call sites: the control
+    // channel's receiver rejects an over-sized frame outright, so an
+    // unclamped label would lose the request with nothing to show the user.
+    #[test]
+    fn send_tab_create_request_clamps_the_label_before_framing() {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+
+        send_tab_create_request(
+            &out_tx,
+            TabCreateRequest {
+                request_id: 7,
+                target_workspace_id: "w_remote".to_string(),
+                label: Some("x".repeat(10_000)),
+            },
+        )
+        .expect("a live link accepts the request");
+
+        match out_rx.try_recv().expect("the request reaches the wire") {
+            FederationMessage::TabCreateRequest(request) => {
+                assert_eq!(request.request_id, 7);
+                assert_eq!(
+                    request.target_workspace_id, "w_remote",
+                    "the raw target id is passed through untouched"
+                );
+                assert_eq!(
+                    request
+                        .label
+                        .as_deref()
+                        .map(|label| label.chars().count())
+                        .expect("the label survives"),
+                    crate::remote::federation::protocol::MAX_WORKSPACE_LABEL_CHARS,
+                    "the label must be clamped before framing"
+                );
+            }
+            other => panic!("expected a TabCreateRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_tab_create_request_reports_a_closed_link() {
+        let (out_tx, out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        drop(out_rx);
+
+        let result = send_tab_create_request(
+            &out_tx,
+            TabCreateRequest {
+                request_id: 1,
+                target_workspace_id: "w_remote".to_string(),
+                label: None,
+            },
+        );
+
+        assert_eq!(result, Err(CreateRequestSendError::LinkClosed));
+    }
+
+    /// Mounts against a scripted fake server that writes `frames` after the
+    /// handshake, drives the mount channel with a live
+    /// `SplitMaterializationContext` until the link closes, and returns every
+    /// `AppEvent` raised plus every outbound `FederationMessage` queued.
+    /// Shared by the tab-create response tests so each one asserts only its
+    /// own behavior.
+    async fn drive_mount_script(
+        frames: Vec<FederationMessage>,
+    ) -> (Vec<crate::events::AppEvent>, Vec<FederationMessage>) {
+        let (client_side, server_side) = tokio::io::duplex(1 << 16);
+        let (client_reader, client_writer) = tokio::io::split(client_side);
+        let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
+
+        let fake_server = tokio::spawn(async move {
+            let Some(FederationMessage::Handshake(_)) =
+                read_frame(&mut server_reader).await.unwrap()
+            else {
+                panic!("expected a Handshake");
+            };
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                    agreed_capabilities: BTreeSet::new(),
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server_writer,
+                &FederationMessage::MountSnapshot(MountSnapshot {
+                    server_instance_id: ServerInstanceId("fake-server".to_string()),
+                    snapshot: crate::remote::federation::serve::empty_snapshot(),
+                    cursor: crate::remote::federation::protocol::EventCursor(0),
+                }),
+            )
+            .await
+            .unwrap();
+            // The client's own outbound frames go to its `out_tx` queue (a
+            // writer task pumps that in production), so this script never
+            // reads them; the drive loop processes inbound frames strictly in
+            // order, which is what makes the sequence deterministic.
+            for frame in &frames {
+                write_frame(&mut server_writer, frame).await.unwrap();
+            }
+            // Dropping both halves ends the drive loop with `LinkClosed`
+            // instead of leaning on a sleep.
+        });
+
+        let client = FederationClient::new(host_key(), BTreeSet::new(), BTreeSet::new());
+        let mounted = client
+            .connect_and_mount(client_reader, client_writer)
+            .await
+            .expect("the loopback mount succeeds");
+        let generation = mounted.mirror.mount().mount_generation;
+        let MountedConnection {
+            mut mirror,
+            mut reader,
+            ..
+        } = mounted;
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let (clipboard_tx, _clipboard_rx) =
+            mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
+        let (outbound_clip_tx, _outbound_clip_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+        let (events_tx, mut events_rx) = mpsc::channel::<crate::events::AppEvent>(16);
+        let ctx = SplitMaterializationContext {
+            rows: 24,
+            cols: 80,
+            scrollback_limit_bytes: 1 << 16,
+            host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
+            origin: host_key(),
+            events: events_tx,
+            render_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            render_dirty: std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        };
+        let hub = EventHub::default();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            drive_mount_channel(
+                &mut reader,
+                &mut mirror,
+                generation,
+                &hub,
+                &mut router,
+                &clipboard_tx,
+                &out_tx,
+                &outbound_clip_tx,
+                Some(&ctx),
+            ),
+        )
+        .await;
+        fake_server.await.expect("the fake server script completes");
+
+        let mut events = Vec::new();
+        while let Ok(event) = events_rx.try_recv() {
+            events.push(event);
+        }
+        let mut outbound = Vec::new();
+        while let Ok(msg) = out_rx.try_recv() {
+            outbound.push(msg);
+        }
+        (events, outbound)
+    }
+
+    fn tab_created(request_id: u64) -> FederationMessage {
+        FederationMessage::TabCreateResponse(
+            crate::remote::federation::protocol::TabCreateResponse::Created {
+                request_id,
+                workspace_id: "w_remote".to_string(),
+                tab_id: "tab_remote".to_string(),
+                pane_id: "pane_remote".to_string(),
+                terminal_id: "term_remote".to_string(),
+            },
+        )
+    }
+
+    fn snapshot_request_count(outbound: &[FederationMessage]) -> usize {
+        outbound
+            .iter()
+            .filter(|msg| matches!(msg, FederationMessage::SnapshotRequest(_)))
+            .count()
+    }
+
+    // Both ids are re-namespaced straight off the wire: the mirror provably
+    // cannot supply them, since this arm is what fires the `SnapshotRequest`
+    // that first reveals the tab. The mirror is deliberately NOT
+    // pre-populated with the tab here.
+    #[tokio::test]
+    async fn a_tab_create_created_response_emits_the_accepted_event_and_one_resync() {
+        let (events, outbound) = drive_mount_script(vec![tab_created(42)]).await;
+
+        assert_eq!(events.len(), 1, "exactly one event, got {events:?}");
+        match &events[0] {
+            crate::events::AppEvent::FederationTabCreateAccepted {
+                request_id,
+                origin,
+                workspace_id,
+                tab_id,
+            } => {
+                assert_eq!(*request_id, 42);
+                assert_eq!(origin, &host_key());
+                assert!(
+                    workspace_id.starts_with("r:") && workspace_id.ends_with(":w_remote"),
+                    "the workspace id must be namespaced, got {workspace_id}"
+                );
+                assert!(
+                    tab_id.starts_with("r:") && tab_id.ends_with(":tab_remote"),
+                    "the tab id must be namespaced, got {tab_id}"
+                );
+            }
+            other => panic!("expected FederationTabCreateAccepted, got {other:?}"),
+        }
+        assert_eq!(
+            snapshot_request_count(&outbound),
+            1,
+            "a created tab must trigger exactly one resync, got {outbound:?}"
+        );
+    }
+
+    // Mirrors the structural-frame coalescing test above: a burst answered
+    // while a snapshot request is already outstanding must re-arm exactly ONE
+    // more request, never one per response.
+    #[tokio::test]
+    async fn a_burst_of_tab_create_responses_coalesces_into_one_in_flight_resync() {
+        let (events, outbound) = drive_mount_script(vec![
+            // An unrelated structural change puts a snapshot request in
+            // flight before either create is answered.
+            FederationMessage::Event(
+                crate::remote::federation::protocol::EventChannelMessage::Frame(
+                    crate::remote::federation::protocol::EventFrame {
+                        source_seq: 1,
+                        kind: crate::api::schema::events::EventKind::PaneCreated,
+                    },
+                ),
+            ),
+            tab_created(1),
+            tab_created(2),
+            FederationMessage::SnapshotResponse(MountSnapshot {
+                server_instance_id: ServerInstanceId("fake-server".to_string()),
+                snapshot: crate::remote::federation::serve::empty_snapshot(),
+                cursor: crate::remote::federation::protocol::EventCursor(1),
+            }),
+        ])
+        .await;
+
+        assert_eq!(events.len(), 2, "one event per response, got {events:?}");
+        assert_eq!(
+            snapshot_request_count(&outbound),
+            2,
+            "the burst must re-arm exactly one additional request, got {outbound:?}"
+        );
+    }
+
+    // Guard against copying the `SplitPaneResponse` precedent: the tab (and
+    // its pane/PTY) materializes through the resync diff only, so a `Created`
+    // must open no terminal channel and spawn no runtime — doing both would
+    // create the tab twice.
+    #[tokio::test]
+    async fn a_tab_create_created_response_materializes_nothing_inline() {
+        let (events, outbound) = drive_mount_script(vec![tab_created(3)]).await;
+
+        assert!(
+            !outbound
+                .iter()
+                .any(|msg| matches!(msg, FederationMessage::Terminal(_))),
+            "no terminal channel may be opened inline, got {outbound:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                crate::events::AppEvent::FederationSplitPaneReady(_)
+                    | crate::events::AppEvent::FederationSplitPaneFailed { .. }
+            )),
+            "no runtime may be handed back inline, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tab_create_failed_response_emits_the_failed_event() {
+        let (events, outbound) = drive_mount_script(vec![FederationMessage::TabCreateResponse(
+            crate::remote::federation::protocol::TabCreateResponse::Failed {
+                request_id: 11,
+                reason: "not the mounted controller".to_string(),
+            },
+        )])
+        .await;
+
+        assert_eq!(events.len(), 1, "exactly one event, got {events:?}");
+        match &events[0] {
+            crate::events::AppEvent::FederationTabCreateFailed {
+                request_id,
+                reason,
+                origin,
+            } => {
+                assert_eq!(*request_id, 11);
+                assert_eq!(reason, "not the mounted controller");
+                assert_eq!(origin, &host_key());
+            }
+            other => panic!("expected FederationTabCreateFailed, got {other:?}"),
+        }
+        assert_eq!(
+            snapshot_request_count(&outbound),
+            0,
+            "a refusal must not trigger a resync, got {outbound:?}"
+        );
     }
 }

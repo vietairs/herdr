@@ -66,12 +66,31 @@ use super::id::ServerInstanceId;
 /// `WorkspaceCloseRequest`/`WorkspaceCloseResponse` and
 /// `TabCloseRequest`/`TabCloseResponse` (federation close forwarding for the
 /// multi-workspace/multi-tab case, extending `ClosePaneRequest`/
-/// `ClosePaneResponse` to the other two closeable identities) ride this same
-/// 5 -> 6 bump rather than forcing a further 6 -> 7: v6 has not shipped in a
-/// release yet (unlike v3, v4 and v5 above, which were all live before their
-/// respective follow-on additions), so there is no already-deployed peer
-/// whose decode expectations these four new variants would break.
-pub const FEDERATION_PROTOCOL_VERSION: u32 = 6;
+/// `ClosePaneResponse` to the other two closeable identities) rode this same
+/// 5 -> 6 bump rather than forcing a further bump of their own, on the
+/// reasoning that v6 had not shipped yet. **That is no longer true**: v6
+/// shipped in tag `v0.8.2-hvn.3`, so v6 can no longer be amended in place —
+/// deployed peers on that tag decode exactly the v6 variant set.
+///
+/// Bumped 6 -> 7 with the addition of
+/// `TabCreateRequest`/`TabCreateResponse` (federation-forwarded tab
+/// creation: a mounting client asking the serving host to create a new tab
+/// inside one of the mounted host's own workspaces). Same category as the
+/// `Fault` 1 -> 2, `SplitPaneRequest` 2 -> 3, `ClosePaneRequest` 3 -> 4 and
+/// `WorkspaceCreateRequest` 5 -> 6 bumps — two new top-level
+/// `FederationMessage` variants a v6 peer cannot decode, not additive
+/// fields.
+///
+/// No `Capability` accompanies this bump, deliberately. Capabilities gate
+/// variants added *within* an already-negotiated version, where an older
+/// peer on the same version would fail to decode the frame (the rule written
+/// on `Capability::WORKSPACE_TAB_CLOSE` and at
+/// `remote::federation::client`'s send gates). Version negotiation is
+/// all-or-nothing — `codec::decode` and `negotiate()` both hard-reject any
+/// mismatch — so any peer this mount reached is on v7 and is guaranteed to
+/// decode these two variants. A capability here would be a permanently-true
+/// check plus a dead not-agreed branch.
+pub const FEDERATION_PROTOCOL_VERSION: u32 = 7;
 
 /// An optional feature two federation peers may support. Modeled as an
 /// opaque name rather than a closed enum so an older peer can simply not
@@ -500,6 +519,10 @@ pub const MAX_WORKSPACE_LABEL_CHARS: usize = 128;
 /// Applied by the sender before framing and again by the serving host at
 /// ingress, so neither a hostile peer nor a future sender can push an
 /// oversized label past the control channel's ceiling.
+/// It bounds any peer-visible chrome label crossing `Channel::Control`, tab
+/// labels (`TabCreateRequest::label`) included: the ceiling being enforced is
+/// the control channel's frame cap, which is identical for either label, so
+/// there is deliberately no tab-specific twin constant.
 pub fn clamp_workspace_label(label: String) -> String {
     if label.chars().count() <= MAX_WORKSPACE_LABEL_CHARS {
         return label;
@@ -514,6 +537,67 @@ pub fn clamp_workspace_label(label: String) -> String {
 /// `App::build_remote_pane` namespaces mount-time panes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkspaceCreateResponse {
+    Created {
+        request_id: u64,
+        workspace_id: String,
+        tab_id: String,
+        pane_id: String,
+        terminal_id: String,
+    },
+    Failed {
+        request_id: u64,
+        reason: String,
+    },
+}
+
+/// Request to create a brand new tab inside one of the serving host's own
+/// workspaces, sent by a mounting client so a local "new tab" action taken
+/// while a federated workspace is in focus grows the *mounted host's*
+/// workspace instead of refusing outright. `request_id` correlates the
+/// eventual `TabCreateResponse`, mirroring `WorkspaceCreateRequest`'s
+/// bare-u64 pairing rather than introducing an RPC framework.
+///
+/// Deliberately carries no `cwd`, no `env` and no `focus`; the serving host
+/// pins all three itself:
+///
+/// - a client-side `cwd` is a path on the *client's* filesystem and is
+///   meaningless — often nonexistent — on the serving host;
+/// - a client-supplied `env` is remote code execution on the serving host
+///   (`LD_PRELOAD`, `PATH`, ...) handed to a shell the serving user owns;
+/// - a client-supplied `focus` would move the serving user's own screen.
+///
+/// `label` is an optional client hint only — the serving host remains free to
+/// sanitize, clamp, ignore or normalize it, exactly as it would for a local
+/// `tab.create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabCreateRequest {
+    pub request_id: u64,
+    /// Raw (un-namespaced) remote workspace id the new tab belongs to, as
+    /// carried by the mount's own `SessionSnapshot`/event stream — never a
+    /// locally namespaced `r:<host>:...` id.
+    pub target_workspace_id: String,
+    pub label: Option<String>,
+}
+
+/// Response to a `TabCreateRequest`: either the raw (un-namespaced) ids of
+/// the tab the serving host just created — plus the workspace it landed in,
+/// its root pane and that pane's terminal — or a reason it could not be
+/// created. The client re-namespaces every id under its own mount.
+///
+/// `Created` is **ids only**, by design. The tab materializes through the
+/// ordinary resync diff, exactly like `WorkspaceCreateResponse::Created`, and
+/// unlike `SplitPaneResponse` it must never be materialized inline: doing so
+/// would create the tab (and its PTY mirror) twice, once inline and once when
+/// the resync reveals it.
+///
+/// `workspace_id` is required rather than decorative. The mount client fences
+/// the acceptance on both ids before acting on it, and the mirror provably
+/// cannot supply this one: `RemoteMirror.tabs` is populated only by
+/// `apply_snapshot`/`apply_event_message`, and the whole purpose of the
+/// `Created` arm is to *fire* the `SnapshotRequest` that first reveals this
+/// tab, so a mirror lookup would miss except in a race.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TabCreateResponse {
     Created {
         request_id: u64,
         workspace_id: String,
@@ -719,6 +803,8 @@ pub enum FederationMessage {
     TabCloseResponse(TabCloseResponse),
     WorkspaceCreateRequest(WorkspaceCreateRequest),
     WorkspaceCreateResponse(WorkspaceCreateResponse),
+    TabCreateRequest(TabCreateRequest),
+    TabCreateResponse(TabCreateResponse),
     SnapshotRequest(SnapshotRequest),
     /// Answer to a `SnapshotRequest`: a fresh atomic (snapshot, cursor) pair,
     /// same shape as the mount handshake's own `MountSnapshot` — the
@@ -745,6 +831,7 @@ impl FederationMessage {
             Self::WorkspaceCloseRequest(_) | Self::WorkspaceCloseResponse(_) => Channel::Control,
             Self::TabCloseRequest(_) | Self::TabCloseResponse(_) => Channel::Control,
             Self::WorkspaceCreateRequest(_) | Self::WorkspaceCreateResponse(_) => Channel::Control,
+            Self::TabCreateRequest(_) | Self::TabCreateResponse(_) => Channel::Control,
             Self::SnapshotRequest(_) => Channel::Control,
             // Carries a full `SessionSnapshot`, same payload shape/size as
             // the mount handshake's `MountSnapshot` — reuse its channel cap.
@@ -970,15 +1057,112 @@ mod tests {
         assert_eq!(decoded, failed);
     }
 
-    // The variants added on top of the 5 -> 6 bump must keep the constant at
-    // 6: they ride the already-paid bump rather than forcing a further 6 ->
-    // 7, since v6 has not shipped in a release yet (see the doc comment on
+    // The version is pinned so a bump is always a deliberate, reviewed act.
+    // v6 shipped (tag `v0.8.2-hvn.3`), so it can no longer absorb new
+    // top-level variants in place; `TabCreateRequest`/`TabCreateResponse`
+    // therefore forced 6 -> 7 (see the doc comment on
     // `FEDERATION_PROTOCOL_VERSION`). An accidental bump here would silently
-    // desync this worktree's protocol version from what v0.8.0-hvn.2's peers
-    // expect.
+    // desync this worktree's protocol version from what deployed peers
+    // expect, and `codec::decode` rejects a mismatch before touching the
+    // payload, so every mount on the old version simply stops working.
     #[test]
-    fn federation_protocol_version_is_unchanged_for_the_close_forwarding_variants() {
-        assert_eq!(FEDERATION_PROTOCOL_VERSION, 6);
+    fn federation_protocol_version_is_pinned_at_the_tab_create_bump() {
+        assert_eq!(FEDERATION_PROTOCOL_VERSION, 7);
+    }
+
+    #[test]
+    fn tab_create_request_and_response_round_trip_on_the_control_channel() {
+        let request = FederationMessage::TabCreateRequest(TabCreateRequest {
+            request_id: 7,
+            target_workspace_id: "w-1".to_string(),
+            label: Some("logs".to_string()),
+        });
+        assert_eq!(request.channel(), Channel::Control);
+        let encoded = codec::encode(&request).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, request);
+
+        // A label-less request is the plain "new tab" action: the serving
+        // host's own defaults name it.
+        let unlabelled = FederationMessage::TabCreateRequest(TabCreateRequest {
+            request_id: 8,
+            target_workspace_id: "w-1".to_string(),
+            label: None,
+        });
+        let encoded = codec::encode(&unlabelled).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, unlabelled);
+
+        let created = TabCreateResponse::Created {
+            request_id: 7,
+            workspace_id: "w-1".to_string(),
+            tab_id: "w-1:t2".to_string(),
+            pane_id: "w-1:p2".to_string(),
+            terminal_id: "term_9".to_string(),
+        };
+        // The mount client's origin fence needs the workspace the tab landed
+        // in as well as the tab itself, and it must read both off the wire —
+        // the mirror cannot supply the workspace id, because the `Created`
+        // arm is what fires the resync that first reveals this tab.
+        let TabCreateResponse::Created {
+            workspace_id,
+            tab_id,
+            ..
+        } = &created
+        else {
+            panic!("constructed a Created response");
+        };
+        assert_ne!(workspace_id, tab_id);
+
+        let created = FederationMessage::TabCreateResponse(created);
+        assert_eq!(created.channel(), Channel::Control);
+        let encoded = codec::encode(&created).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, created);
+
+        let failed = FederationMessage::TabCreateResponse(TabCreateResponse::Failed {
+            request_id: 7,
+            reason: "tab_create_failed: no such workspace".to_string(),
+        });
+        assert_eq!(failed.channel(), Channel::Control);
+        let encoded = codec::encode(&failed).expect("encode must succeed");
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, failed);
+    }
+
+    // The tab label reuses `clamp_workspace_label` rather than needing a twin
+    // constant: the bound being enforced is the `Channel::Control` frame
+    // ceiling, which is the same ceiling for either label.
+    #[test]
+    fn a_clamped_tab_create_request_fits_the_control_frame_ceiling() {
+        let oversized = "x".repeat(10_000);
+        let clamped = clamp_workspace_label(oversized);
+        assert_eq!(clamped.chars().count(), MAX_WORKSPACE_LABEL_CHARS);
+
+        let request = FederationMessage::TabCreateRequest(TabCreateRequest {
+            request_id: 21,
+            target_workspace_id: "w-1".to_string(),
+            label: Some(clamped),
+        });
+        let encoded = codec::encode(&request).expect("encode must succeed");
+        assert!(
+            encoded.len() <= Channel::Control.max_len(),
+            "clamped tab-create frame ({} bytes) must fit the control cap ({} bytes)",
+            encoded.len(),
+            Channel::Control.max_len()
+        );
+        let (decoded, _consumed) =
+            codec::decode::<FederationMessage>(&encoded, Channel::Control.max_len())
+                .expect("decode must succeed");
+        assert_eq!(decoded, request);
     }
 
     // Post-mount pane mirroring fix (plans/260722-1327): `SnapshotRequest`/

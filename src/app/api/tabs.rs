@@ -8,6 +8,17 @@ use crate::app::{App, Mode};
 
 use super::responses::{encode_error, encode_success};
 
+/// Mints a fresh, process-wide-unique `TabCreateRequest::request_id`.
+/// Its own counter, deliberately not the workspace-create one in
+/// `api/workspaces.rs` nor the close one in `api/panes.rs`: the accepted and
+/// failed handlers key off this counter independently, so two kinds minted
+/// "at the same time" must never collide. A bare counter is enough because
+/// the response is fire-and-forget (see `App::dispatch_remote_tab_create`).
+fn next_remote_tab_create_request_id() -> u64 {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl App {
     pub(super) fn handle_tab_list(&mut self, id: String, params: TabListParams) -> String {
         let tabs = if let Some(workspace_id) = params.workspace_id {
@@ -68,19 +79,40 @@ impl App {
         // LOCAL PTY and stamps it with a public tab/pane id derived from the
         // target workspace, which for a mounted workspace looks exactly like
         // a real remote pane even though the backing shell actually runs on
-        // this machine. Refuse instead of silently misattributing a local
-        // shell to the remote host (mirrors the `remote_split_unsupported`
-        // refusal in `app/api/panes.rs::handle_pane_split`; remote tab
-        // creation over the federation link is not implemented yet).
-        if matches!(
-            crate::remote::federation::id::classify(&self.public_workspace_id(ws_idx)),
-            crate::remote::federation::id::IdClass::Remote(_)
-        ) {
-            return encode_error(
-                id,
-                "remote_tab_unsupported",
-                "remote workspace: new tab not supported yet",
-            );
+        // this machine. So the tab is created where the workspace really
+        // lives: forwarded over the mount, exactly as `workspace.create`
+        // already redirects into the mounted host.
+        if let crate::remote::federation::id::IdClass::Remote(origin) =
+            crate::remote::federation::id::classify(&self.public_workspace_id(ws_idx))
+        {
+            // Both refusals below are EXPLICIT rather than silent drops.
+            // `handle_workspace_create` discards `params.env` on its
+            // federated path today; that is a latent bug, not a precedent to
+            // copy — a caller whose launch environment vanished has no way to
+            // find out.
+            if cwd.is_some() {
+                // A `cwd` names a path in THIS machine's filesystem; on the
+                // serving host it is a different namespace entirely and
+                // usually does not exist.
+                return encode_error(
+                    id,
+                    "remote_tab_cwd_unsupported",
+                    "creating a tab on a remote-federated host cannot honour a local cwd; \
+                     the path would be resolved on the remote host's filesystem",
+                );
+            }
+            if !env.is_empty() {
+                // A caller-supplied launch environment would be handed to a
+                // shell the SERVING user owns (`LD_PRELOAD`, `PATH`, ...), so
+                // it never travels.
+                return encode_error(
+                    id,
+                    "remote_tab_env_unsupported",
+                    "creating a tab on a remote-federated host cannot carry a launch \
+                     environment; it would be applied to a shell on the remote host",
+                );
+            }
+            return self.dispatch_remote_tab_create(id, ws_idx, origin, label, focus);
         }
         let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
             self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
@@ -147,6 +179,127 @@ impl App {
             }
             Err(err) => encode_error(id, "tab_create_failed", err.to_string()),
         }
+    }
+
+    /// Sends a `TabCreateRequest` over `ws_idx`'s mount instead of creating a
+    /// tab locally (see the caller). Fire-and-forget for the same hard reason
+    /// `dispatch_remote_workspace_create` is: this JSON-API handler runs
+    /// synchronously inline with `App`'s own tick and cannot await the
+    /// `TabCreateResponse` the mount's async drive task will eventually read.
+    /// The new tab materializes through the ordinary resync path once the
+    /// remote confirms, so this acknowledges with
+    /// `ResponseResult::TabCreateRequested` — a *success*, because the
+    /// request really was accepted and sent — rather than fabricating a
+    /// `TabInfo` it cannot yet produce.
+    ///
+    /// Falls back to an error — never to a silent local tab — when the mount
+    /// has no live link, so a stale/disconnected mount cannot quietly produce
+    /// a local shell the user asked to run on the remote host.
+    ///
+    /// Ungated, exactly like `dispatch_remote_workspace_create`: the
+    /// federation client module compiles on every target, so
+    /// `client::send_tab_create_request` resolves everywhere. A non-Unix
+    /// build simply never classifies a workspace as `Remote`, so this branch
+    /// is unreachable there rather than absent — no `#[cfg(not(unix))]` twin,
+    /// which would invent a Windows-only behavioral divergence.
+    fn dispatch_remote_tab_create(
+        &mut self,
+        id: String,
+        ws_idx: usize,
+        origin: crate::remote::federation::id::HostKey,
+        label: Option<String>,
+        focus: bool,
+    ) -> String {
+        // Any live remote-backed pane in this workspace carries the mount's
+        // outbound handle; the request is workspace-scoped on the remote, so
+        // which one is irrelevant.
+        let pane_ids: Vec<crate::layout::PaneId> = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|ws| {
+                ws.tabs
+                    .iter()
+                    .flat_map(|tab| tab.layout.pane_ids())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let out_tx = pane_ids
+            .into_iter()
+            .filter_map(|pane_id| {
+                let terminal_id = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)?
+                    .terminal_id(pane_id)?
+                    .clone();
+                self.terminal_runtimes.get(&terminal_id)?.remote_out_tx()
+            })
+            .next();
+        let Some(out_tx) = out_tx else {
+            return encode_error(
+                id,
+                "remote_tab_create_unsupported",
+                "creating a tab in a remote-federated workspace requires a live mount; \
+                 this workspace's mount is not connected",
+            );
+        };
+
+        // The wire addresses the workspace by the remote's OWN id, never the
+        // local `r:<host>:` public form (`TabCreateRequest`'s doc-comment),
+        // so strip the namespace the close path strips it with.
+        let mount = crate::remote::federation::id::Mount {
+            host_key: origin.clone(),
+            server_instance_id: crate::remote::federation::id::ServerInstanceId(String::new()),
+            mount_generation: 0,
+        };
+        let target_workspace_id = crate::remote::federation::id::strip_mount_namespace(
+            &mount,
+            &self.public_workspace_id(ws_idx),
+        );
+
+        let request_id = next_remote_tab_create_request_id();
+        // Routed through the single gated send point that owns this variant's
+        // wire invariants (including the label clamp), the same discipline
+        // the workspace-create and close requests follow.
+        let sent = crate::remote::federation::client::send_tab_create_request(
+            &out_tx,
+            crate::remote::federation::protocol::TabCreateRequest {
+                request_id,
+                target_workspace_id,
+                label,
+            },
+        );
+        if sent.is_err() {
+            return encode_error(
+                id,
+                "remote_tab_create_unsupported",
+                "the remote mount's link is closing; the tab-create request could not be sent",
+            );
+        }
+        tracing::info!(
+            request_id,
+            %origin,
+            "sent a tab-create request to a mounted remote host"
+        );
+        if focus {
+            // Claim the tab this request creates, so the mirror focuses it
+            // when the resync materializes it instead of leaving the user
+            // where they were with no sign the keypress did anything. Only
+            // this request's own answer can redeem the claim
+            // (`App::handle_federation_tab_create_accepted`), and only on the
+            // mount it went out on: the claim carries that mount's key so an
+            // answer arriving on another link cannot consume it.
+            self.pending_remote_tab_create_focus
+                .insert((origin.clone(), request_id));
+        }
+
+        encode_success(
+            id,
+            ResponseResult::TabCreateRequested {
+                origin: origin.as_str().to_string(),
+            },
+        )
     }
 
     pub(super) fn handle_tab_focus(&mut self, id: String, target: TabTarget) -> String {
@@ -264,7 +417,7 @@ impl App {
             .unwrap_or_default();
 
         // Federation-mount awareness, the close-side counterpart of the
-        // `remote_tab_unsupported` refusal in `handle_tab_create` above. Every
+        // federated create dispatch in `handle_tab_create` above. Every
         // workspace one mount materializes shares that mount's single
         // `federation:<host_key>` worktree space, so the group close below
         // would take *all* of them down — the whole mirror of a still-live
@@ -723,21 +876,19 @@ mod tests {
         shutdown_test_runtimes(&mut app);
     }
 
-    // Regression: creating a tab in a federated remote workspace must not
-    // spawn a LOCAL shell stamped with a remote-looking pane id (mirrors
+    // Replaces the blanket refusal this handler used to answer:
+    // creating a tab in a federated remote workspace is now forwarded
+    // over the mount. What must still hold is the other half of the old
+    // refusal's reason — no LOCAL shell may ever be spawned and stamped with
+    // a remote-looking id (mirrors
     // `panes.rs::pane_split_in_a_federated_workspace_is_refused_not_misfiled_locally`).
-    #[test]
-    fn api_tab_create_in_a_federated_workspace_is_refused_not_misfiled_locally() {
-        let event_hub = crate::api::EventHub::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
-        let mut workspace = Workspace::test_new("tabs");
-        let remote_workspace_id = "r:alice@10.0.0.1#s1:default".to_string();
-        workspace.id = remote_workspace_id.clone();
-        app.state.workspaces = vec![workspace];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        let tabs_before = app.state.workspaces[0].tabs.len();
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_tab_create_in_a_federated_workspace_is_forwarded_not_misfiled_locally() {
+        let (mut app, mut out_rx, ws_idx) = app_with_federation_mounted_two_tab_workspace(true);
+        while out_rx.try_recv().is_ok() {}
+        let remote_workspace_id = app.state.workspaces[ws_idx].id.clone();
+        let tabs_before = app.state.workspaces[ws_idx].tabs.len();
 
         let response = app.handle_tab_create(
             "req".into(),
@@ -750,12 +901,22 @@ mod tests {
             },
         );
 
-        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
-        assert_eq!(error.error.code, "remote_tab_unsupported");
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(
+            matches!(success.result, ResponseResult::TabCreateRequested { .. }),
+            "a federated tab create must answer the requested-not-completed success: {response}"
+        );
         assert_eq!(
-            app.state.workspaces[0].tabs.len(),
+            app.state.workspaces[ws_idx].tabs.len(),
             tabs_before,
-            "a refused remote tab create must not create any local tab"
+            "a forwarded remote tab create must not create any local tab"
+        );
+        assert!(
+            matches!(
+                out_rx.try_recv(),
+                Ok(crate::remote::federation::protocol::FederationMessage::TabCreateRequest(_))
+            ),
+            "the request must reach the mount's link"
         );
     }
 

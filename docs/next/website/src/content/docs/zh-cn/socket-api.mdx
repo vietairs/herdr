@@ -111,6 +111,8 @@ herdr pane read w1:p2 --source recent --lines 50
 
 `workspace.move_block` 会将有序的 `workspace_ids` 原子地移动到 `before_workspace_id` 之前;省略锚点则将该块移动到末尾。id 必须唯一,且锚点不能属于被移动的块。响应包含服务器确认的有序工作区列表。
 
+`tab.create` 本身即支持联邦,不存在单独的 `tab.create_remote` 方法。当目标工作区(显式的 `workspace_id`,否则为当前活动工作区)属于一个仍在连接的远程挂载时,标签页会在提供服务的主机上创建,而不是在本地创建;这适用于包括 CLI 和脚本在内的所有调用方。此时响应是携带 `origin` 挂载键的 `tab_create_requested`,而不是 `tab_created`:因为标签页尚不存在,它不包含标签页 id 或窗格 id;它会通过该挂载的常规重新同步在本地出现,就像远程用户自己创建的标签页一样。依据 `tab_created` 分支的脚本调用方必须处理这种形态。`label` 会发送到提供服务的主机,并在进入该主机自身界面之前完成净化和长度截断。显式的 `cwd` 会以 `remote_tab_cwd_unsupported` 失败,非空的 `env` 会以 `remote_tab_env_unsupported` 失败:两者都是本地机器的概念,在提供服务的主机上没有意义,因此会被明确拒绝而不是静默忽略。当目标工作区的挂载没有可用链路时,请求会以 `remote_tab_create_unsupported` 失败,而不会静默创建本地标签页。返回 `tab_create_requested` 之后,提供服务的主机自己的答复是异步到达的,不会报告给 API 或 CLI 调用方:拒绝(包括提供服务的主机本身会把该创建重定向到它所挂载的主机时的 `tab_create_redirected`、`not the mounted controller`,以及 `<code>: tab could not be created on the remote host`)只会出现在 TUI 提示和服务器日志中。脚本调用方必须等待标签页通过重新同步或事件出现,而不是期待第二个响应。
+
 `session.snapshot` 为维护本地运行时缓存的客户端返回一次性引导快照。响应包含版本/协议元数据、当前聚焦的工作区/标签页/窗格 id、工作区记录、标签页记录、窗格记录、标签页布局快照和智能体记录。它不是订阅。为避免引导期间漏掉事件,应先在另一个连接上打开 `events.subscribe` 并等待确认,在调用 `session.snapshot` 时缓冲该事件流,然后安装快照、按顺序应用缓冲的事件并继续接收事件。重新连接后或本地缓存可能已过期时,再次调用 `session.snapshot`。工作区记录也包含关联 worktree 的来源信息。完整的仓库 worktree 发现仍使用 `worktree.list`。
 
 CLI 的 `herdr api snapshot` 会把当前 `session.snapshot` 响应输出为 JSON,让客户端和智能体可以简单地完成引导。

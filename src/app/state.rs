@@ -1705,6 +1705,16 @@ pub struct AppState {
     /// whatever the modal mode makes "current" at confirm time. Cleared
     /// together with `pending_workspace_create_cwd`.
     pub pending_workspace_create_source_workspace: Option<String>,
+    /// `Workspace::id` of the workspace an open new-tab name dialog was
+    /// started from, pinned while the dialog is up. Tab counterpart of
+    /// `pending_workspace_create_source_workspace` and pinned for the same
+    /// reason: the create it confirms resolves local-vs-remote from the target
+    /// workspace, and the active workspace can change under an open dialog
+    /// without any user keystroke (a resync materializing a focused remote
+    /// workspace or tab, a workspace close shifting indices, another attached
+    /// client calling `workspace.focus`). Cleared together with
+    /// `pending_workspace_create_source_workspace`.
+    pub pending_tab_create_source_workspace: Option<String>,
     pub rename_pane_target: Option<PaneId>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
@@ -2241,6 +2251,7 @@ impl AppState {
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
             pending_workspace_create_source_workspace: None,
+            pending_tab_create_source_workspace: None,
             rename_pane_target: None,
             worktree_create: None,
             worktree_open: None,

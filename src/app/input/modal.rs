@@ -386,6 +386,7 @@ pub(super) fn open_rename_workspace(
 ) {
     state.pending_workspace_create_cwd = None;
     state.pending_workspace_create_source_workspace = None;
+    state.pending_tab_create_source_workspace = None;
     state.selected = ws_idx;
     state.rename_pane_target = None;
     state.name_input =
@@ -418,6 +419,7 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.pending_workspace_create_source_workspace = None;
+    state.pending_tab_create_source_workspace = None;
     state.rename_pane_target = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
         if let Some(name) = ws.active_tab_display_name() {
@@ -440,6 +442,7 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.pending_workspace_create_source_workspace = None;
+    state.pending_tab_create_source_workspace = None;
     state.rename_pane_target = Some(pane_id);
     state.name_input = terminal
         .and_then(|t| t.manual_label.clone())
@@ -466,6 +469,14 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.pending_workspace_create_source_workspace = None;
+    // Pin the workspace the dialog was opened from, by id rather than index,
+    // so confirming targets it even if the active workspace moved or shifted
+    // while the dialog was up. Every caller focuses the intended workspace
+    // before opening the dialog.
+    state.pending_tab_create_source_workspace = state
+        .active
+        .and_then(|ws_idx| state.workspaces.get(ws_idx))
+        .map(|ws| ws.id.clone());
     state.rename_pane_target = None;
     state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
@@ -607,6 +618,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.creating_new_tab = false;
             state.pending_workspace_create_cwd = None;
             state.pending_workspace_create_source_workspace = None;
+            state.pending_tab_create_source_workspace = None;
             state.rename_pane_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
@@ -621,6 +633,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.requested_new_tab_name = None;
             state.pending_workspace_create_cwd = None;
             state.pending_workspace_create_source_workspace = None;
+            state.pending_tab_create_source_workspace = None;
             state.rename_pane_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
@@ -1099,6 +1112,7 @@ impl App {
                         },
                     );
                     self.state.pending_workspace_create_source_workspace = None;
+                    self.state.pending_tab_create_source_workspace = None;
                 } else if !self.state.workspaces.is_empty() && !new_name.is_empty() {
                     let workspace_id = self.public_workspace_id(self.state.selected);
                     self.runtime_workspace_rename(
@@ -1117,16 +1131,50 @@ impl App {
                 } else {
                     Some(new_name)
                 };
-                self.runtime_tab_create(
+                // Target the workspace the dialog was opened from, not
+                // whatever is active now: that choice also decides local vs
+                // forwarded-over-the-mount, and the active workspace can move
+                // under an open dialog without any user keystroke.
+                let workspace_id = match self.state.pending_tab_create_source_workspace.clone() {
+                    Some(pinned) => {
+                        let Some(ws_idx) =
+                            self.state.workspaces.iter().position(|ws| ws.id == pinned)
+                        else {
+                            // The pinned workspace disappeared while the
+                            // dialog was open (its mount ended, or it was
+                            // closed). Falling through to the active
+                            // workspace would silently create a LOCAL tab,
+                            // under the label typed for a remote one, in a
+                            // workspace the user never pointed at. Refuse
+                            // instead, and say why.
+                            cancel_rename_modal(&mut self.state);
+                            self.raise_tab_create_failed_toast(
+                                "the workspace this tab was for is gone; no tab was created"
+                                    .to_string(),
+                            );
+                            return;
+                        };
+                        Some(self.public_workspace_id(ws_idx))
+                    }
+                    // Never pinned (the dialog was opened with no source
+                    // workspace): the create targets the active workspace,
+                    // exactly as before.
+                    None => None,
+                };
+                let response = self.runtime_tab_create(
                     "tui.tab.create_named",
                     crate::api::schema::TabCreateParams {
-                        workspace_id: None,
+                        workspace_id,
                         cwd: None,
                         focus: true,
                         label,
                         env: Default::default(),
                     },
                 );
+                // The dialog's create can now be forwarded over a mount, so
+                // its outcome needs the same surfacing every other
+                // `runtime_tab_create` caller does.
+                self.surface_tab_create_response(&response);
             }
             Mode::RenameTab if !new_name.is_empty() => {
                 let Some(ws_idx) = self.state.active else {
@@ -1527,6 +1575,7 @@ fn cancel_rename_modal(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.pending_workspace_create_source_workspace = None;
+    state.pending_tab_create_source_workspace = None;
     state.rename_pane_target = None;
     state.name_input.clear();
     state.name_input_replace_on_type = false;
@@ -2253,6 +2302,123 @@ mod tests {
         assert_eq!(state.mode, Mode::RenameTab);
         assert_eq!(state.name_input, "2");
         assert!(state.name_input_replace_on_type);
+    }
+
+    /// The new-tab dialog only asks for a name, but the workspace it confirms
+    /// against also decides local-vs-forwarded-over-the-mount. The active
+    /// workspace can move while the dialog is up without any user keystroke —
+    /// a resync materializing a focused remote workspace, a close shifting
+    /// indices, another attached client calling `workspace.focus` — so the
+    /// source is pinned when the dialog opens, exactly as the workspace-create
+    /// dialog pins its own.
+    #[test]
+    fn new_tab_dialog_targets_the_workspace_it_was_opened_from() {
+        let mut app = app_with_test_workspaces(&["federated", "local"]);
+        // The pinned workspace is federated with no live mount, so the API
+        // refuses it; the unpinned one is ordinary and local. That makes the
+        // two outcomes distinguishable without spawning a PTY.
+        app.state.workspaces[0].id = "r:alice@10.0.0.1#s1:default".to_string();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        open_new_tab_dialog(&mut app.state);
+        assert_eq!(
+            app.state.pending_tab_create_source_workspace.as_deref(),
+            Some("r:alice@10.0.0.1#s1:default"),
+            "opening the dialog must pin its source workspace"
+        );
+
+        // Focus moves under the open dialog, with no user keystroke.
+        let local_tabs_before = app.state.workspaces[1].tabs.len();
+        app.state.active = Some(1);
+        app.state.selected = 1;
+
+        app.save_rename_modal_via_api();
+
+        assert_eq!(
+            app.state.workspaces[1].tabs.len(),
+            local_tabs_before,
+            "the create must not land in whatever workspace became active"
+        );
+        let toast = app
+            .state
+            .toast
+            .clone()
+            .expect("the pinned federated workspace refuses, and that is surfaced");
+        assert_eq!(toast.title, "tab create failed");
+        assert_eq!(
+            toast.context,
+            "creating a tab in a remote-federated workspace requires a live mount; \
+             this workspace's mount is not connected"
+        );
+        assert!(
+            app.state.pending_tab_create_source_workspace.is_none(),
+            "confirming must clear the pin"
+        );
+    }
+
+    /// The pinned workspace can also disappear while the dialog is up (its
+    /// mount ended, or another client closed it). Falling back to whatever is
+    /// active now would create a LOCAL tab, under the label typed for a remote
+    /// one, in a workspace the user never pointed at — so the create is
+    /// refused and the reason surfaced instead.
+    #[test]
+    fn new_tab_dialog_refuses_when_its_pinned_workspace_is_gone() {
+        let mut app = app_with_test_workspaces(&["federated", "local"]);
+        app.state.workspaces[0].id = "r:alice@10.0.0.1#s1:default".to_string();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        open_new_tab_dialog(&mut app.state);
+        app.state.name_input = "remote-work".to_string();
+        // The mount ends under the open dialog: the mirrored workspace is
+        // removed and focus lands on the surviving local one.
+        app.state.workspaces.remove(0);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let local_tabs_before = app.state.workspaces[0].tabs.len();
+
+        app.save_rename_modal_via_api();
+
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            local_tabs_before,
+            "a stale pin must not create a local tab in an unrelated workspace"
+        );
+        let toast = app
+            .state
+            .toast
+            .clone()
+            .expect("a refused create must be surfaced, not silently dropped");
+        assert_eq!(toast.title, "tab create failed");
+        assert_eq!(
+            toast.context,
+            "the workspace this tab was for is gone; no tab was created"
+        );
+        assert!(
+            app.state.pending_tab_create_source_workspace.is_none(),
+            "the refusal must clear the pin"
+        );
+        assert_ne!(
+            app.state.mode,
+            Mode::RenameTab,
+            "the refusal must close the dialog"
+        );
+    }
+
+    /// Every dialog exit path clears the pin, so a later create can never
+    /// redeem a stale one.
+    #[test]
+    fn cancelling_the_new_tab_dialog_clears_the_pinned_source_workspace() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+
+        open_new_tab_dialog(&mut state);
+        assert!(state.pending_tab_create_source_workspace.is_some());
+
+        cancel_rename_modal(&mut state);
+
+        assert!(state.pending_tab_create_source_workspace.is_none());
     }
 
     #[test]

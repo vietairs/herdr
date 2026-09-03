@@ -50,8 +50,9 @@ use crate::remote::federation::protocol::{
     ClipboardStageResponse, ClosePaneRequest, ClosePaneResponse, EventChannelMessage, EventCursor,
     EventFrame, FaultMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot,
     ScrollbackReplay, SplitPaneRequest, SplitPaneResponse, TabCloseRequest, TabCloseResponse,
-    TerminalChannelMessage, WorkspaceCloseRequest, WorkspaceCloseResponse, WorkspaceCreateRequest,
-    WorkspaceCreateResponse, FEDERATION_PROTOCOL_VERSION,
+    TabCreateRequest, TabCreateResponse, TerminalChannelMessage, WorkspaceCloseRequest,
+    WorkspaceCloseResponse, WorkspaceCreateRequest, WorkspaceCreateResponse,
+    FEDERATION_PROTOCOL_VERSION,
 };
 use crate::remote::federation::tee;
 use crate::server::client_transport::ServerEvent;
@@ -580,6 +581,17 @@ fn reader_loop<S: Read>(
                     server_event_tx,
                 );
             }
+            Ok(Some(FederationMessage::TabCreateRequest(request))) => {
+                handle_tab_create_request(
+                    request,
+                    epoch,
+                    connid,
+                    out_tx,
+                    shutdown,
+                    first_cause,
+                    server_event_tx,
+                );
+            }
             Ok(Some(FederationMessage::ClipboardStageRequest(request))) => {
                 handle_clipboard_stage_request(request, staging, out_tx, shutdown, first_cause);
             }
@@ -873,6 +885,90 @@ fn handle_workspace_create_request(
     let _ = enqueue_outbound(
         out_tx,
         FederationMessage::WorkspaceCreateResponse(response),
+        first_cause,
+        shutdown,
+    );
+}
+
+/// Services one inbound `TabCreateRequest` (federation-forwarded tab
+/// creation): a blocking round-trip through `FederationCommand::CreateTab`,
+/// mirroring `handle_workspace_create_request` exactly — replies with
+/// `TabCreateResponse::Created`/`Failed` on the shared outbound queue. A
+/// dropped/gone actor (server shutting down) replies `Failed` rather than
+/// silently dropping the peer's request.
+///
+/// Carries `(epoch, connid)` through to the actor, which gates the create on
+/// `FederationLease::is_mounted_controller` exactly as the close and
+/// workspace-create handlers do: only the peer holding the mount may grow
+/// this host's tab set.
+///
+/// Uncapped and unrated, matching the existing `SplitPaneRequest`/
+/// `ClosePaneRequest`/`WorkspaceCreateRequest` handlers: a peer that reached
+/// this reader loop already cleared the handshake, and no other request kind
+/// here is metered either.
+fn handle_tab_create_request(
+    request: TabCreateRequest,
+    epoch: AcceptEpoch,
+    connid: ConnId,
+    out_tx: &std_mpsc::SyncSender<FederationMessage>,
+    shutdown: &Arc<AtomicBool>,
+    first_cause: &Arc<FirstCauseCell>,
+    server_event_tx: &mpsc::Sender<ServerEvent>,
+) {
+    let TabCreateRequest {
+        request_id,
+        target_workspace_id,
+        label,
+    } = request;
+
+    // Trust boundary, the same one `handle_workspace_create_request` guards:
+    // `label` is peer-controlled free text that becomes this host's own tab
+    // name, so it reaches this host's tab chrome and its session save. A raw
+    // ESC/OSC payload would let a mounting peer drive the *serving* user's
+    // terminal (OSC 52 clipboard writes, screen clears, concealed text).
+    // Neutralized here, at the earliest point the peer string enters this
+    // process — never downstream, where the local user's own `tab.create`
+    // shares the path and must keep taking labels verbatim. Clamped as well
+    // so an oversized label cannot exceed the control channel's frame ceiling
+    // on the way back through any relay; the workspace-label clamp is reused
+    // because the bound being enforced is that frame ceiling, not a
+    // workspace-semantic rule.
+    let label = crate::remote::federation::sanitize::sanitize_remote_string_opt(label)
+        .map(crate::remote::federation::protocol::clamp_workspace_label);
+    // `target_workspace_id` is deliberately NOT sanitized: it is an opaque id
+    // matched against this host's own workspace ids and never rendered
+    // anywhere. Rewriting it would only turn a legitimate id into a miss,
+    // which the actor already answers with `workspace_not_found`.
+
+    let (reply, rx) = oneshot::channel();
+    let sent =
+        server_event_tx.blocking_send(ServerEvent::Federation(FederationCommand::CreateTab {
+            epoch,
+            connid,
+            target_workspace_id,
+            label,
+            reply,
+        }));
+    let outcome = if sent.is_err() {
+        Err("server event loop is gone".to_string())
+    } else {
+        rx.blocking_recv()
+            .unwrap_or_else(|_| Err("federation tab-create reply dropped".to_string()))
+    };
+
+    let response = match outcome {
+        Ok((workspace_id, tab_id, pane_id, terminal_id)) => TabCreateResponse::Created {
+            request_id,
+            workspace_id,
+            tab_id,
+            pane_id,
+            terminal_id,
+        },
+        Err(reason) => TabCreateResponse::Failed { request_id, reason },
+    };
+    let _ = enqueue_outbound(
+        out_tx,
+        FederationMessage::TabCreateResponse(response),
         first_cause,
         shutdown,
     );
@@ -3141,5 +3237,182 @@ mod tests {
         );
         assert_eq!(cause, None, "a delivered response records no fault");
         assert!(!shutdown, "a delivered response must not signal teardown");
+    }
+
+    /// Trust boundary, tab-create half: a peer's tab label is free text that
+    /// becomes this host's own tab name and reaches its tab chrome and
+    /// session save. It must be stripped of every terminal control sequence
+    /// and bounded *before* the `App` sees it. Asserted on the command the
+    /// actor receives, the last point still inside this process's control.
+    /// The opaque `target_workspace_id` must survive verbatim: it is matched
+    /// against this host's own ids and never rendered.
+    #[test]
+    fn an_inbound_tab_create_requests_label_is_sanitized_and_clamped() {
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        #[allow(clippy::type_complexity)] // one observation tuple, single-use
+        let (observed_tx, observed_rx) = std_mpsc::channel::<(String, Option<String>)>();
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::CreateTab {
+                    target_workspace_id,
+                    label,
+                    reply,
+                    ..
+                }) = ev
+                {
+                    let _ = observed_tx.send((target_workspace_id, label));
+                    let _ = reply.send(Ok((
+                        "w1".to_string(),
+                        "t1".to_string(),
+                        "p1".to_string(),
+                        "term1".to_string(),
+                    )));
+                }
+            }
+        });
+
+        let hostile = format!(
+            "ok\x1b]52;c;ZXZpbA==\x07\x1b[2J\x1b[8mhidden\x1b[0m{}",
+            // Over the label bound but under the control channel's frame
+            // cap, matching the workspace-label twin: `Channel::Control`'s
+            // `max_len()` is 4 KiB, so a frame past that cap is rejected by
+            // `codec::decode` and never reaches this handler at all — which
+            // is exactly why the *sending* side clamps too.
+            "A".repeat(512)
+        );
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::TabCreateRequest(TabCreateRequest {
+                request_id: 31,
+                target_workspace_id: "w1".to_string(),
+                label: Some(hostile),
+            }),
+        )
+        .expect("client writes tab-create request");
+        drop(client); // EOF ends the reader after servicing the one frame
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            None,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        let (target_workspace_id, label) = observed_rx
+            .try_recv()
+            .expect("the create command reached the actor");
+        assert_eq!(
+            target_workspace_id, "w1",
+            "the opaque target id must reach the actor verbatim"
+        );
+        let label = label.expect("the label survived as text");
+        assert!(
+            !label.contains('\x1b') && !label.contains('\x07'),
+            "no escape or BEL byte may survive into host state: {label:?}"
+        );
+        assert!(
+            !label.chars().any(|ch| (ch as u32) < 0x20),
+            "no C0 control byte may survive into host state: {label:?}"
+        );
+        assert!(
+            label.starts_with("ok]52;c;ZXZpbA==[2J[8mhidden[0m"),
+            "the visible text must be preserved verbatim: {label:?}"
+        );
+        assert_eq!(
+            label.chars().count(),
+            crate::remote::federation::protocol::MAX_WORKSPACE_LABEL_CHARS,
+            "an oversized label must be clamped, not forwarded whole"
+        );
+
+        match out_rx.try_recv().expect("a response was enqueued") {
+            FederationMessage::TabCreateResponse(TabCreateResponse::Created {
+                request_id,
+                workspace_id,
+                tab_id,
+                pane_id,
+                terminal_id,
+            }) => {
+                assert_eq!(request_id, 31);
+                assert_eq!(workspace_id, "w1");
+                assert_eq!(tab_id, "t1");
+                assert_eq!(pane_id, "p1");
+                assert_eq!(terminal_id, "term1");
+            }
+            other => panic!("expected TabCreateResponse::Created, got {other:?}"),
+        }
+    }
+
+    /// The failure path must answer the peer, not drop its request: a
+    /// gone/dropped actor is exactly what a shutting-down server looks like.
+    #[test]
+    fn an_inbound_tab_create_replies_failed_when_it_cannot_be_serviced() {
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let loop_handle = std::thread::spawn(move || {
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(FederationCommand::CreateTab { reply, .. }) = ev {
+                    drop(reply);
+                }
+            }
+        });
+
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame_blocking(
+            &mut client,
+            &FederationMessage::TabCreateRequest(TabCreateRequest {
+                request_id: 32,
+                target_workspace_id: "w1".to_string(),
+                label: None,
+            }),
+        )
+        .expect("client writes tab-create request");
+        drop(client);
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let mut pumps = HashMap::new();
+        reader_loop(
+            &mut server,
+            0,
+            1,
+            &ServerInstanceId("test-inst".to_string()),
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            None,
+        )
+        .expect("reader loop drains to EOF");
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+
+        match out_rx.try_recv().expect("a response was enqueued") {
+            FederationMessage::TabCreateResponse(TabCreateResponse::Failed {
+                request_id,
+                reason,
+            }) => {
+                assert_eq!(request_id, 32);
+                assert!(
+                    reason.contains("reply dropped"),
+                    "unexpected failure reason: {reason}"
+                );
+            }
+            other => panic!("expected TabCreateResponse::Failed, got {other:?}"),
+        }
     }
 }
