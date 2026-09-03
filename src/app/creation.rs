@@ -2375,7 +2375,21 @@ impl App {
         // Nothing will ever materialize for this request; drop its focus
         // claim so a later create cannot inherit it.
         self.pending_remote_tab_create_focus.remove(&request_id);
-        self.raise_remote_close_failed_toast("remote tab create failed", reason);
+        // Delivered unconditionally rather than through
+        // `raise_remote_close_failed_toast`: `toast_config.delivery` defaults
+        // to `off`, and a remote refusal (not the mounted controller,
+        // workspace_not_found, host PTY spawn failure) must be visible on a
+        // stock config the same way the synchronous refusal branch in
+        // `surface_tab_create_response` is.
+        let previous_toast = self.state.toast.clone();
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: super::state::ToastKind::NeedsAttention,
+            title: "remote tab create failed".to_string(),
+            context: reason,
+            position: None,
+            target: None,
+        });
+        self.sync_toast_deadline(previous_toast);
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
     }
@@ -5714,7 +5728,6 @@ mod federation_materialization_tests {
     #[tokio::test]
     async fn a_failed_remote_tab_create_drops_its_focus_claim_and_raises_a_toast() {
         let (mut app, mount, _ws_idx, _out_rx) = mounted_and_focused_mirror();
-        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         app.pending_remote_tab_create_focus.insert(9);
 
         app.handle_federation_tab_create_failed(
@@ -5724,9 +5737,13 @@ mod federation_materialization_tests {
         );
 
         assert!(app.pending_remote_tab_create_focus.is_empty());
-        let toast = app.state.toast.clone().expect("expected a failure toast");
+        let toast = app.state.toast.clone().expect(
+            "a remote refusal must be visible even on the default \
+             toast_config.delivery (off)",
+        );
         assert_eq!(toast.kind, crate::app::state::ToastKind::NeedsAttention);
         assert_eq!(toast.title, "remote tab create failed");
+        assert_eq!(toast.context, "not the mounted controller");
         app.state.assert_invariants_for_test();
     }
 

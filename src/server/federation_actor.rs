@@ -730,6 +730,29 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                 let _ = reply.send(Err("not the mounted controller".to_string()));
                 return;
             }
+            // Refuse a redirect before dispatching the request at all: if
+            // `target_workspace_id` names a workspace this host only mirrors
+            // from a third host (an `r:` id), `handle_tab_create` would
+            // forward the create onto that third host before this arm ever
+            // sees the `TabCreateRequested` result below, leaving a ghost tab
+            // there that the requesting peer can never reach. Classifying up
+            // front stops the forward from ever leaving this host.
+            if matches!(
+                crate::remote::federation::id::classify(&target_workspace_id),
+                crate::remote::federation::id::IdClass::Remote(_)
+            ) {
+                tracing::warn!(
+                    %target_workspace_id,
+                    "refusing a peer's federation tab-create whose target workspace is \
+                     itself mirrored from a third host, instead of redirecting it there"
+                );
+                let _ = reply.send(Err(
+                    "tab_create_redirected: this host redirected the create onto \
+                     a host it mounts, so no tab was created here"
+                        .to_string(),
+                ));
+                return;
+            }
             let response = app.handle_api_request_after_internal_events_drained(Request {
                 id: "federation-create-tab".to_string(),
                 method: Method::TabCreate(crate::api::schema::TabCreateParams {
@@ -774,6 +797,14 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                     // the tab that does appear lives on a third host the
                     // peer never addressed. Reported under its own code so
                     // it is never confused with a real create failure.
+                    //
+                    // The `classify(&target_workspace_id)` check above this
+                    // match block is the primary guard against this case: it
+                    // refuses before dispatch, so the forward this arm
+                    // describes never actually happens for a peer-originated
+                    // `CreateTab`. This arm is now a defensive fallback for
+                    // any future path that reaches `handle_tab_create` with a
+                    // non-`r:` id that still resolves to a mounted workspace.
                     ResponseResult::TabCreateRequested { origin } => {
                         tracing::warn!(
                             %origin,
@@ -2088,7 +2119,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_peers_tab_create_redirected_onto_a_third_host_is_refused() {
-        let (mut app, _out_rx, mirrored_workspace_id) = app_with_a_mirrored_workspace();
+        let (mut app, mut out_rx, mirrored_workspace_id) = app_with_a_mirrored_workspace();
+        // Drain whatever the mount's own materialization already queued
+        // (terminal subscribe/resize messages) so the assertion below only
+        // sees traffic caused by the `CreateTab` dispatch itself.
+        while out_rx.try_recv().is_ok() {}
         let mut lease = FederationLease::new();
         let epoch = acquire_and_mount(&mut app, &mut lease, 1);
         let tabs_before = app.state.workspaces[0].tabs.len();
@@ -2116,6 +2151,11 @@ mod tests {
             app.state.workspaces[0].tabs.len(),
             tabs_before,
             "a redirected create must not have created a local tab here"
+        );
+        assert!(
+            out_rx.try_recv().is_err(),
+            "the pre-dispatch classify guard must refuse before this host ever \
+             forwards a TabCreateRequest over the third host's mount link"
         );
     }
 
