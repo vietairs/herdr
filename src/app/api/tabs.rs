@@ -97,7 +97,8 @@ impl App {
                 return encode_error(
                     id,
                     "remote_tab_cwd_unsupported",
-                    "creating a tab on a remote-federated host cannot honour a local cwd;                      the path would be resolved on the remote host's filesystem",
+                    "creating a tab on a remote-federated host cannot honour a local cwd; \
+                     the path would be resolved on the remote host's filesystem",
                 );
             }
             if !env.is_empty() {
@@ -107,7 +108,8 @@ impl App {
                 return encode_error(
                     id,
                     "remote_tab_env_unsupported",
-                    "creating a tab on a remote-federated host cannot carry a launch                      environment; it would be applied to a shell on the remote host",
+                    "creating a tab on a remote-federated host cannot carry a launch \
+                     environment; it would be applied to a shell on the remote host",
                 );
             }
             return self.dispatch_remote_tab_create(id, ws_idx, origin, label, focus);

@@ -763,6 +763,7 @@ impl App {
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
             pending_workspace_create_source_workspace: None,
+            pending_tab_create_source_workspace: None,
             rename_pane_target: None,
             worktree_create: None,
             worktree_open: None,

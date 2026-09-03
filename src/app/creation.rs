@@ -5445,6 +5445,14 @@ mod federation_materialization_tests {
 
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "remote_tab_cwd_unsupported");
+        // The message is surfaced verbatim to CLI/API callers and to the TUI
+        // toast, so its exact spacing is part of the contract: a dropped line
+        // continuation in the literal would leak a run of padding spaces.
+        assert_eq!(
+            error.error.message,
+            "creating a tab on a remote-federated host cannot honour a local cwd; the path \
+             would be resolved on the remote host's filesystem"
+        );
         assert!(
             out_rx.try_recv().is_err(),
             "a refused create must put nothing on the wire"
@@ -5480,6 +5488,12 @@ mod federation_materialization_tests {
 
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "remote_tab_env_unsupported");
+        // Same verbatim-surfacing contract as the cwd refusal above.
+        assert_eq!(
+            error.error.message,
+            "creating a tab on a remote-federated host cannot carry a launch environment; it \
+             would be applied to a shell on the remote host"
+        );
         assert!(
             out_rx.try_recv().is_err(),
             "a refused create must put nothing on the wire"

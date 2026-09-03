@@ -608,12 +608,15 @@ impl App {
     /// nothing.
     ///
     /// A `TabCreateRequested` success is the accepted-but-not-yet-done
-    /// federated outcome and gets the informational toast; a local
-    /// `TabCreated` raises nothing, because the new tab is already on screen.
-    /// Any error envelope raises the attention toast carrying the code's own
-    /// message — including `remote_tab_cwd_unsupported` /
-    /// `remote_tab_env_unsupported` / `remote_tab_create_unsupported`, and the
-    /// ordinary local failures too.
+    /// federated outcome and gets the informational toast, on the configured
+    /// `toast_config.delivery` channel; a local `TabCreated` raises nothing,
+    /// because the new tab is already on screen. Any error envelope raises the
+    /// attention toast carrying the code's own message — including
+    /// `remote_tab_cwd_unsupported` / `remote_tab_env_unsupported` /
+    /// `remote_tab_create_unsupported`, and the ordinary local failures too —
+    /// and that one is delivered unconditionally, because `delivery` defaults
+    /// to `off` and a suppressed refusal is indistinguishable from a dead
+    /// keypress.
     pub(crate) fn surface_tab_create_response(&mut self, response: &str) {
         if let Ok(success) = serde_json::from_str::<crate::api::schema::SuccessResponse>(response) {
             if matches!(
@@ -638,11 +641,23 @@ impl App {
         else {
             return;
         };
-        self.raise_remote_close_toast(
-            super::super::state::ToastKind::NeedsAttention,
-            "tab create failed",
-            envelope.error.message,
-        );
+        // Refusals are delivered unconditionally, not through
+        // `raise_remote_close_toast`: `toast_config.delivery` defaults to
+        // `off`, and the keybind pre-gate this replaced wrote `state.toast`
+        // directly. Routing a refusal through the configured channel would
+        // make new-tab silently do nothing on a stock config — exactly the
+        // failure the pre-gate existed to prevent. The informational
+        // "request sent" branch above stays on the configured channel because
+        // nothing is broken when it is suppressed.
+        let previous_toast = self.state.toast.clone();
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: super::super::state::ToastKind::NeedsAttention,
+            title: "tab create failed".to_string(),
+            context: envelope.error.message,
+            position: None,
+            target: None,
+        });
+        self.sync_toast_deadline(previous_toast);
     }
 
     /// Informational counterpart to `App::raise_remote_close_failed_toast`:
@@ -3738,10 +3753,9 @@ navigate_pane_down = "ctrl+j"
         // Straight-to-create config, so this test exercises the dispatch
         // itself rather than the name dialog.
         app.state.prompt_new_tab_name = false;
-        // Default delivery is `Off`; this surfacing honours the user's
-        // configured channel, unlike the old pre-gate which wrote
-        // `state.toast` directly.
-        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        // Deliberately left on the default `ToastDelivery`: the refusal must
+        // reach the user without any toast configuration, exactly as the
+        // removed keybind pre-gate did.
         let tabs_before = app.state.workspaces[0].tabs.len();
 
         app.execute_tui_navigate_action(NavigateAction::NewTab, ActionContext::Navigate);
@@ -3805,6 +3819,59 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(toast.title, "tab create failed");
         assert_eq!(toast.kind, crate::app::state::ToastKind::NeedsAttention);
         assert_eq!(toast.context, "this workspace's mount is not connected");
+    }
+
+    /// `toast_config.delivery` defaults to `off`, which suppresses everything
+    /// routed through the configured channel. A refusal must not be one of
+    /// those: suppressed, it is indistinguishable from a dead keypress. The
+    /// informational "request sent" toast stays on the configured channel,
+    /// because nothing is broken when it is suppressed.
+    #[test]
+    fn a_refused_tab_create_is_visible_under_the_default_toast_delivery() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Off,
+            "this test is only meaningful while `off` is the default"
+        );
+        let refusal = serde_json::to_string(&crate::api::schema::ErrorResponse {
+            id: "tui.tab.create".to_string(),
+            error: crate::api::schema::ErrorBody {
+                code: "remote_tab_create_unsupported".to_string(),
+                message: "this workspace's mount is not connected".to_string(),
+            },
+        })
+        .expect("the envelope serializes");
+
+        app.surface_tab_create_response(&refusal);
+
+        let toast = app
+            .state
+            .toast
+            .clone()
+            .expect("a refusal must be visible on a stock config");
+        assert_eq!(toast.title, "tab create failed");
+        assert_eq!(toast.kind, crate::app::state::ToastKind::NeedsAttention);
+        assert!(
+            app.toast_deadline.is_some(),
+            "an unconditionally raised toast must also be scheduled to expire"
+        );
+
+        app.state.toast = None;
+        let accepted = serde_json::to_string(&crate::api::schema::SuccessResponse {
+            id: "tui.tab.create".to_string(),
+            result: crate::api::schema::ResponseResult::TabCreateRequested {
+                origin: "alice@10.0.0.1#s1".to_string(),
+            },
+        })
+        .expect("the envelope serializes");
+
+        app.surface_tab_create_response(&accepted);
+
+        assert!(
+            app.state.toast.is_none(),
+            "the informational outcome stays on the configured channel"
+        );
     }
 
     #[cfg(unix)]
