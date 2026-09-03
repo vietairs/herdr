@@ -215,6 +215,40 @@ pub(crate) enum FederationCommand {
         // one tuple of four ids; a named struct would be single-use
         reply: oneshot::Sender<Result<(String, String, String, String), String>>,
     },
+    /// Creates a brand new tab inside one of this host's own workspaces — the
+    /// serving-host half of federation-forwarded tab creation: a mounting
+    /// client's "new tab" action taken while a mounted workspace is in focus
+    /// must grow the workspace where it really lives, not spawn a local shell
+    /// stamped with a remote-looking id. Reuses the same JSON-API method the
+    /// local TUI/CLI new-tab action calls (`Method::TabCreate`).
+    ///
+    /// Named `CreateTab`, not `CreateTabRemote`: the `*Remote` suffix on
+    /// `CloseTabRemote` marks the *close* verb's local/remote fork, which
+    /// create does not have.
+    ///
+    /// Gated on `(epoch, connid)` being the mounted controller, same as
+    /// `CloseTabRemote`/`CreateWorkspace`: only the peer that actually holds
+    /// the mount may grow this host's tab set.
+    ///
+    /// `target_workspace_id` is the workspace's own id on this host, as this
+    /// host published it; `label` is the client's optional hint, already
+    /// sanitized and clamped at ingress. `cwd`, `env` and `focus` are
+    /// deliberately not requestable — a client-side path is meaningless here,
+    /// a client-supplied environment is remote code execution on this host,
+    /// and a client-supplied focus would move this user's own screen. The
+    /// reply carries the raw (un-namespaced)
+    /// `(workspace_id, tab_id, pane_id, terminal_id)` of the new tab's root
+    /// pane, so the mount client never has to guess which workspace it
+    /// landed in.
+    CreateTab {
+        epoch: AcceptEpoch,
+        connid: ConnId,
+        target_workspace_id: String,
+        label: Option<String>,
+        #[allow(clippy::type_complexity)]
+        // one tuple of four ids; a named struct would be single-use
+        reply: oneshot::Sender<Result<(String, String, String, String), String>>,
+    },
 }
 
 // `ServerEvent` derives `Debug`, so its `Federation` variant needs one — but the
@@ -271,6 +305,9 @@ impl std::fmt::Debug for FederationCommand {
             }
             FederationCommand::CreateWorkspace { label, .. } => {
                 write!(f, "CreateWorkspace({label:?})")
+            }
+            FederationCommand::CreateTab { epoch, connid, .. } => {
+                write!(f, "CreateTab(e{epoch}, c{connid})")
             }
         }
     }
@@ -678,6 +715,116 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                     Err(format!(
                         "{code}: workspace could not be created on the remote host"
                     ))
+                });
+            let _ = reply.send(outcome);
+        }
+        FederationCommand::CreateTab {
+            epoch,
+            connid,
+            target_workspace_id,
+            label,
+            reply,
+        } => {
+            // Only the mounted controller may create a tab on this host.
+            if !lease.is_mounted_controller(epoch, connid) {
+                let _ = reply.send(Err("not the mounted controller".to_string()));
+                return;
+            }
+            let response = app.handle_api_request_after_internal_events_drained(Request {
+                id: "federation-create-tab".to_string(),
+                method: Method::TabCreate(crate::api::schema::TabCreateParams {
+                    // The peer names the workspace by the id this host itself
+                    // published, so it goes through unchanged.
+                    workspace_id: Some(target_workspace_id),
+                    // A mounting client's filesystem path is meaningless
+                    // here; let this host's own `tab.create` defaults pick
+                    // the new tab's cwd.
+                    cwd: None,
+                    // Never steal this host's own focus for a remotely
+                    // requested tab — the requesting client focuses its own
+                    // mirror of it, this host's user did not ask for
+                    // anything.
+                    focus: false,
+                    label,
+                    // A peer-supplied launch environment is remote code
+                    // execution on this host (`LD_PRELOAD`, `PATH`, ...)
+                    // handed to a shell the serving user owns, so it is not
+                    // requestable at all — the wire carries no `env` field
+                    // to begin with.
+                    env: std::collections::HashMap::new(),
+                }),
+            });
+            let outcome = serde_json::from_str::<SuccessResponse>(&response)
+                .ok()
+                .map(|success| match success.result {
+                    // `TabInfo` carries its owning `workspace_id`, so the
+                    // workspace the tab landed in comes from this host's own
+                    // answer rather than a second lookup.
+                    ResponseResult::TabCreated { tab, root_pane } => Ok((
+                        tab.workspace_id,
+                        tab.tab_id,
+                        root_pane.pane_id,
+                        root_pane.terminal_id,
+                    )),
+                    // This host answered its own `tab.create` by forwarding
+                    // it onto a host *it* has mounted (the federated
+                    // redirect in `handle_tab_create`), so no tab was
+                    // created here and none ever will be: what the peer
+                    // asked for — a tab on THIS host — did not happen, and
+                    // the tab that does appear lives on a third host the
+                    // peer never addressed. Reported under its own code so
+                    // it is never confused with a real create failure.
+                    ResponseResult::TabCreateRequested { origin } => {
+                        tracing::warn!(
+                            %origin,
+                            "a peer's federation tab-create was redirected onto a host \
+                             this one mounts; refusing it instead of reporting a tab the \
+                             peer cannot reach"
+                        );
+                        Err(
+                            "tab_create_redirected: this host redirected the create onto \
+                             a host it mounts, so no tab was created here"
+                                .to_string(),
+                        )
+                    }
+                    // No other success shape can carry the ids the peer
+                    // needs. Reported distinctly rather than as a create
+                    // failure: the create's real outcome is unknown to this
+                    // reply path.
+                    other => {
+                        tracing::warn!(
+                            ?other,
+                            "unexpected success result for a peer's federation tab-create \
+                             request"
+                        );
+                        Err("tab_create_unexpected_result: this host answered the create \
+                             with a result carrying no tab ids"
+                            .to_string())
+                    }
+                })
+                .unwrap_or_else(|| {
+                    let error_value = serde_json::from_str::<serde_json::Value>(&response)
+                        .ok()
+                        .and_then(|value| value.get("error").cloned());
+                    let code = error_value
+                        .as_ref()
+                        .and_then(|error| error.get("code"))
+                        .and_then(|code| code.as_str())
+                        .unwrap_or("tab_create_failed");
+                    let message = error_value
+                        .as_ref()
+                        .and_then(|error| error.get("message"))
+                        .and_then(|message| message.as_str())
+                        .unwrap_or("tab create failed");
+                    // The peer gets the machine-readable `code` and a fixed
+                    // message, never the API message itself: a failed create
+                    // is usually a PTY spawn or cwd error whose text names
+                    // this host's own filesystem (default shell path, home
+                    // directory). The detail stays here, in this host's
+                    // logs. Same `code: message` shape every other
+                    // federation request failure replies with.
+                    tracing::warn!(%code, %message, "refusing a peer's federation tab-create request");
+                    Err(format!("{code}: tab could not be created on the remote host"))
                 });
             let _ = reply.send(outcome);
         }
@@ -1763,5 +1910,303 @@ mod tests {
             workspaces_before,
             "a refused positional id must never close anything"
         );
+    }
+
+    /// Creating a tab on this host is a controller-only action, exactly like
+    /// creating a workspace: a connection that is not the mounted controller
+    /// must be refused, and the refusal must not grow the target workspace's
+    /// tab set.
+    #[tokio::test]
+    async fn a_peers_tab_create_is_refused_when_it_is_not_the_mounted_controller() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("only")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let target_workspace_id = app.state.workspaces[0].id.clone();
+
+        // Captured rather than hardcoded: a refusal must leave this host's UI
+        // exactly as it found it, whatever the fixture starts in.
+        let mode_before = app.state.mode;
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        let tabs_before = app.state.workspaces[0].tabs.len();
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CreateTab {
+                epoch,
+                connid: 999,
+                target_workspace_id,
+                label: Some("from-an-impostor".to_string()),
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        assert_eq!(
+            outcome,
+            Err("not the mounted controller".to_string()),
+            "a non-controller connid must be refused, not serviced"
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            tabs_before,
+            "a refused create must not touch the workspace's tab set"
+        );
+        assert_eq!(
+            app.state.mode, mode_before,
+            "a refusal must never mutate this host's UI mode"
+        );
+    }
+
+    /// `CreateTab` performs a real create against the live `App` (via the same
+    /// `Method::TabCreate` handler the local TUI/CLI new-tab action uses) and
+    /// replies with the new tab's raw workspace/tab/pane/terminal ids, without
+    /// moving the serving user's own focus.
+    #[tokio::test]
+    async fn a_peers_tab_create_creates_a_tab_in_the_named_workspace_without_stealing_focus() {
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("first"),
+            crate::workspace::Workspace::test_new("second"),
+        ];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        // Deliberately NOT the host's active workspace: the peer names its
+        // target, and the target is what must grow.
+        let target_workspace_id = app.state.workspaces[1].id.clone();
+
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        let tabs_before = app.state.workspaces[1].tabs.len();
+        let active_tab_before = app.state.workspaces[1].active_tab;
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CreateTab {
+                epoch,
+                connid: 1,
+                target_workspace_id: target_workspace_id.clone(),
+                label: Some("from-remote".to_string()),
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        let (workspace_id, tab_id, pane_id, terminal_id) =
+            outcome.expect("tab create on a healthy App succeeds");
+        assert_eq!(
+            workspace_id, target_workspace_id,
+            "the reply must name the workspace the peer asked for, read off this \
+             host's own answer"
+        );
+        assert!(!tab_id.is_empty());
+        assert!(!pane_id.is_empty());
+        assert!(!terminal_id.is_empty());
+        assert_eq!(
+            app.state.workspaces[1].tabs.len(),
+            tabs_before + 1,
+            "the serving host really gained a tab in the named workspace"
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            1,
+            "an untargeted workspace must be left alone"
+        );
+        assert_eq!(
+            app.state.workspaces[1].tabs[tabs_before]
+                .custom_name
+                .as_deref(),
+            Some("from-remote"),
+            "the peer's label hint reached the serving host's tab"
+        );
+        // Open question 1 in the plan: `focus: false` must be honoured all the
+        // way down. If this fails, do not weaken it — the pin is insufficient
+        // and that is a separate local-behavior fix.
+        assert_eq!(
+            app.state.workspaces[1].active_tab, active_tab_before,
+            "a remotely requested tab must not move the serving host's own active tab"
+        );
+        assert_eq!(
+            app.state.active,
+            Some(0),
+            "a remotely requested tab must not steal the serving host's own focus"
+        );
+    }
+
+    /// A target id that resolves to nothing on this host is answered with a
+    /// reason, never a panic and never a fabricated success.
+    #[tokio::test]
+    async fn a_peers_tab_create_for_an_unknown_workspace_is_refused() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("only")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let mode_before = app.state.mode;
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        let tabs_before = app.state.workspaces[0].tabs.len();
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CreateTab {
+                epoch,
+                connid: 1,
+                target_workspace_id: "no-such-workspace".to_string(),
+                label: None,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        let reason = outcome.expect_err("an unknown target must be refused");
+        assert!(
+            reason.starts_with("workspace_not_found"),
+            "the peer must get this host's machine-readable code: {reason}"
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            tabs_before,
+            "a refused create must not touch any workspace's tab set"
+        );
+        assert_eq!(
+            app.state.mode, mode_before,
+            "a refusal must never mutate this host's UI mode"
+        );
+    }
+
+    /// Chained-mount refusal: the peer named a workspace that is itself a
+    /// federation mirror on THIS host, so this host's own `tab.create`
+    /// forwards the create onto a third host and answers
+    /// `TabCreateRequested`. No tab was created here, and the tab that will
+    /// eventually appear lives somewhere the peer never addressed, so the
+    /// reply must be a refusal under its own code — never a fabricated
+    /// success.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_peers_tab_create_redirected_onto_a_third_host_is_refused() {
+        let (mut app, _out_rx, mirrored_workspace_id) = app_with_a_mirrored_workspace();
+        let mut lease = FederationLease::new();
+        let epoch = acquire_and_mount(&mut app, &mut lease, 1);
+        let tabs_before = app.state.workspaces[0].tabs.len();
+
+        let (tx, mut rx) = oneshot::channel();
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::CreateTab {
+                epoch,
+                connid: 1,
+                target_workspace_id: mirrored_workspace_id,
+                label: None,
+                reply: tx,
+            },
+        );
+        let outcome = rx.try_recv().expect("reply delivered");
+        let reason = outcome.expect_err("a redirected create must be refused");
+        assert!(
+            reason.starts_with("tab_create_redirected"),
+            "a redirect must be reported under its own code, never as a generic \
+             create failure: {reason}"
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            tabs_before,
+            "a redirected create must not have created a local tab here"
+        );
+    }
+
+    /// One live-mounted remote workspace on this host, so a `tab.create`
+    /// against it takes the federated redirect path. Written fresh rather
+    /// than shared: the `app/api/tabs.rs` twin is private to that module's
+    /// test scope. The out channel's receiver is returned so the request the
+    /// redirect emits keeps a live link (dropping it would close the mount's
+    /// outbound side mid-test).
+    #[cfg(unix)]
+    fn app_with_a_mirrored_workspace() -> (
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<
+            crate::remote::federation::protocol::FederationMessage,
+        >,
+        String,
+    ) {
+        use crate::api::schema::{PaneInfo, TabInfo, WorkspaceInfo};
+        use crate::remote::federation::id::{HostKey, Mount, ServerInstanceId};
+
+        let mut app = test_app();
+        let mount = Mount {
+            host_key: HostKey::new("alice@10.0.0.1", "s1"),
+            server_instance_id: ServerInstanceId("inst-a".to_string()),
+            mount_generation: 1,
+        };
+        let mut mirror = crate::remote::federation::reducer::RemoteMirror::new(mount);
+        let snapshot = SessionSnapshot {
+            version: "0.0.0-test".to_string(),
+            protocol: 1,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            workspaces: vec![WorkspaceInfo {
+                workspace_id: "w1".to_string(),
+                number: 1,
+                label: "remote workspace".to_string(),
+                focused: false,
+                pane_count: 1,
+                tab_count: 1,
+                active_tab_id: "w1-tab".to_string(),
+                agent_status: AgentStatus::Idle,
+                tokens: Default::default(),
+                worktree: None,
+            }],
+            tabs: vec![TabInfo {
+                tab_id: "w1-tab".to_string(),
+                workspace_id: "w1".to_string(),
+                number: 1,
+                label: "first remote tab".to_string(),
+                focused: false,
+                pane_count: 1,
+                agent_status: AgentStatus::Idle,
+            }],
+            panes: vec![PaneInfo {
+                pane_id: "p1".to_string(),
+                terminal_id: "t1".to_string(),
+                workspace_id: "w1".to_string(),
+                tab_id: "w1-tab".to_string(),
+                focused: false,
+                cwd: Some("/home/alice/project".to_string()),
+                foreground_cwd: None,
+                label: Some("remote pane 1".to_string()),
+                agent: None,
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Idle,
+                state_labels: Default::default(),
+                tokens: Default::default(),
+                agent_session: None,
+                scroll: None,
+                revision: 0,
+            }],
+            layouts: Vec::new(),
+            agents: Vec::new(),
+        };
+        mirror.apply_snapshot(&snapshot, EventCursor(0));
+
+        let mut router = crate::remote::federation::client::TerminalChannelRouter::new();
+        let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed against a loopback-shaped snapshot");
+        app.state.active = Some(created[0]);
+        app.state
+            .begin_federation_mount(mirror)
+            .expect("registering the mirror must succeed for a fresh HostKey");
+        let workspace_id = app.state.workspaces[created[0]].id.clone();
+        (app, out_rx, workspace_id)
     }
 }
