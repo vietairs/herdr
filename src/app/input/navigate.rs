@@ -274,32 +274,14 @@ impl App {
                 }
             }
             NavigateAction::NewTab => {
-                if let Some(ws_idx) = self.state.active {
-                    if matches!(
-                        crate::remote::federation::id::classify(&self.public_workspace_id(ws_idx)),
-                        crate::remote::federation::id::IdClass::Remote(_)
-                    ) {
-                        // Mirrors `app/api/tabs.rs::handle_tab_create`'s
-                        // `remote_tab_unsupported` refusal: a federated
-                        // workspace's new-tab shell would spawn locally but
-                        // be stamped with a remote-looking id, so refuse
-                        // here before ever reaching the dialog/API call.
-                        let previous_toast = self.state.toast.clone();
-                        self.state.toast = Some(crate::app::state::ToastNotification {
-                            kind: crate::app::state::ToastKind::NeedsAttention,
-                            title: "remote workspace".to_string(),
-                            context: "new tab not supported yet".to_string(),
-                            position: None,
-                            target: None,
-                        });
-                        self.sync_toast_deadline(previous_toast);
-                        leave_navigate_mode(&mut self.state);
-                        return;
-                    }
+                // No local/remote pre-gate here: `tab.create` owns that
+                // decision and forwards a federated workspace's new tab over
+                // its mount, so this path is identical for both.
+                if self.state.active.is_some() {
                     if self.state.prompt_new_tab_name {
                         super::modal::open_new_tab_dialog(&mut self.state);
                     } else {
-                        self.runtime_tab_create(
+                        let response = self.runtime_tab_create(
                             "tui.key.tab.create",
                             crate::api::schema::TabCreateParams {
                                 workspace_id: None,
@@ -309,6 +291,7 @@ impl App {
                                 env: Default::default(),
                             },
                         );
+                        self.surface_tab_create_response(&response);
                         leave_navigate_mode(&mut self.state);
                     }
                 }
@@ -613,6 +596,51 @@ impl App {
         self.raise_remote_close_toast(
             super::super::state::ToastKind::NeedsAttention,
             "close request failed",
+            envelope.error.message,
+        );
+    }
+
+    /// Parses a `tab.create` JSON response and surfaces it to the user via
+    /// toast. Wired into every `runtime_tab_create` caller (keybind, new-tab
+    /// dialog, new-tab button / mobile switcher): with the old keybind-level
+    /// remote pre-gate gone, this is the only thing that keeps a refused or
+    /// still-pending remote create from looking like a keypress that did
+    /// nothing.
+    ///
+    /// A `TabCreateRequested` success is the accepted-but-not-yet-done
+    /// federated outcome and gets the informational toast; a local
+    /// `TabCreated` raises nothing, because the new tab is already on screen.
+    /// Any error envelope raises the attention toast carrying the code's own
+    /// message — including `remote_tab_cwd_unsupported` /
+    /// `remote_tab_env_unsupported` / `remote_tab_create_unsupported`, and the
+    /// ordinary local failures too.
+    pub(crate) fn surface_tab_create_response(&mut self, response: &str) {
+        if let Ok(success) = serde_json::from_str::<crate::api::schema::SuccessResponse>(response) {
+            if matches!(
+                success.result,
+                crate::api::schema::ResponseResult::TabCreateRequested { .. }
+            ) {
+                // `raise_remote_close_toast` is the shared delivery dispatch
+                // (Herdr toast / terminal / system notification), not a
+                // close-specific behavior; reusing it keeps one delivery path
+                // rather than a fourth copy of the same match.
+                self.raise_remote_close_toast(
+                    super::super::state::ToastKind::Finished,
+                    "tab create sent",
+                    "tab create request sent to the remote host; the tab will appear once \
+                     the remote host confirms it"
+                        .to_string(),
+                );
+            }
+            return;
+        }
+        let Ok(envelope) = serde_json::from_str::<crate::api::schema::ErrorResponse>(response)
+        else {
+            return;
+        };
+        self.raise_remote_close_toast(
+            super::super::state::ToastKind::NeedsAttention,
+            "tab create failed",
             envelope.error.message,
         );
     }
@@ -3694,17 +3722,26 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(app.state.workspaces.len(), 2);
     }
 
-    // Regression: pressing the new-tab keybind while focused on a federated
-    // remote workspace must refuse instead of spawning a LOCAL shell that
-    // gets stamped with a remote-looking (`r:`) tab id (mirrors
-    // `api/tabs.rs::api_tab_create_in_a_federated_workspace_is_refused_not_misfiled_locally`).
+    // Replaces the old pre-gate refusal test: the keybind no longer decides
+    // local-vs-remote itself, it always calls `tab.create` and lets the API
+    // own the decision. This workspace is federated but has no live mount, so
+    // the API refuses — what matters here is that the refusal comes from the
+    // API (surfaced as a toast) rather than from a keybind-level pre-gate,
+    // and that no local tab is ever created.
     #[test]
-    fn tui_new_tab_keybind_in_a_federated_workspace_is_refused_with_toast() {
+    fn the_new_tab_keybind_in_a_federated_workspace_forwards_over_the_mount() {
         let mut app = app_with_test_workspaces(&["main"]);
         app.state.workspaces[0].id = "r:alice@10.0.0.1#s1:default".to_string();
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Navigate;
+        // Straight-to-create config, so this test exercises the dispatch
+        // itself rather than the name dialog.
+        app.state.prompt_new_tab_name = false;
+        // Default delivery is `Off`; this surfacing honours the user's
+        // configured channel, unlike the old pre-gate which wrote
+        // `state.toast` directly.
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         let tabs_before = app.state.workspaces[0].tabs.len();
 
         app.execute_tui_navigate_action(NavigateAction::NewTab, ActionContext::Navigate);
@@ -3712,14 +3749,62 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(
             app.state.workspaces[0].tabs.len(),
             tabs_before,
-            "a refused remote new-tab keybind must not create any local tab"
+            "the keybind must never create a local tab in a federated workspace"
         );
         assert!(
             !app.state.creating_new_tab,
-            "must not open the new-tab rename dialog for a remote workspace"
+            "this config dispatches straight to `tab.create`"
         );
-        let toast = app.state.toast.expect("expected a refusal toast");
-        assert_eq!(toast.title, "remote workspace");
+        let toast = app.state.toast.expect("the API outcome must be surfaced");
+        assert_ne!(
+            toast.title, "remote workspace",
+            "the keybind-level pre-gate refusal must be gone"
+        );
+        assert_eq!(toast.title, "tab create failed");
+    }
+
+    /// The forwarded (accepted-but-not-yet-done) outcome must tell the user
+    /// the tab is coming; without it, deleting the pre-gate would make a
+    /// successful remote create look like nothing happened.
+    #[test]
+    fn a_forwarded_tab_create_raises_a_pending_toast() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let response = serde_json::to_string(&crate::api::schema::SuccessResponse {
+            id: "tui.tab.create".to_string(),
+            result: crate::api::schema::ResponseResult::TabCreateRequested {
+                origin: "alice@10.0.0.1#s1".to_string(),
+            },
+        })
+        .expect("the envelope serializes");
+
+        app.surface_tab_create_response(&response);
+
+        let toast = app.state.toast.expect("expected a pending toast");
+        assert_eq!(toast.title, "tab create sent");
+        assert_ne!(toast.kind, crate::app::state::ToastKind::NeedsAttention);
+    }
+
+    /// A refusal must be visible, on every entry point.
+    #[test]
+    fn a_refused_tab_create_raises_an_attention_toast() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let response = serde_json::to_string(&crate::api::schema::ErrorResponse {
+            id: "tui.tab.create".to_string(),
+            error: crate::api::schema::ErrorBody {
+                code: "remote_tab_create_unsupported".to_string(),
+                message: "this workspace's mount is not connected".to_string(),
+            },
+        })
+        .expect("the envelope serializes");
+
+        app.surface_tab_create_response(&response);
+
+        let toast = app.state.toast.expect("expected an attention toast");
+        assert_eq!(toast.title, "tab create failed");
+        assert_eq!(toast.kind, crate::app::state::ToastKind::NeedsAttention);
+        assert_eq!(toast.context, "this workspace's mount is not connected");
     }
 
     #[cfg(unix)]

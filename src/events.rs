@@ -387,14 +387,6 @@ pub enum AppEvent {
     /// focus that tab when it arrives. A tab the *remote* user created out of
     /// band never produces this event, so it never takes the local user's
     /// focus.
-    // The mount client's `TabCreateResponse` arm constructs both variants, but
-    // nothing *reads* their fields until `App` grows the handlers that redeem
-    // the focus claim and surface the failure, so `dead_code` still fires on
-    // the non-test bin target (a `#[cfg(test)]` reader is invisible to it).
-    // Remove this attribute in that same change — if it is still here once
-    // `App` dispatches these two events, it is stale and hiding real unused
-    // payload.
-    #[allow(dead_code)]
     #[cfg(unix)]
     FederationTabCreateAccepted {
         request_id: u64,
@@ -411,9 +403,6 @@ pub enum AppEvent {
     /// payload beyond the reason: nothing was created remotely, so there is
     /// nothing local to reverse — same shape/reasoning as
     /// `FederationWorkspaceCreateFailed`.
-    // See `FederationTabCreateAccepted` above for why this is allowed and when
-    // the attribute must be removed.
-    #[allow(dead_code)]
     #[cfg(unix)]
     FederationTabCreateFailed {
         request_id: u64,

@@ -305,6 +305,29 @@ impl App {
             return Vec::new();
         }
 
+        #[cfg(unix)]
+        if let AppEvent::FederationTabCreateAccepted {
+            request_id,
+            origin,
+            workspace_id,
+            tab_id,
+        } = ev
+        {
+            self.handle_federation_tab_create_accepted(request_id, origin, workspace_id, tab_id);
+            return Vec::new();
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::FederationTabCreateFailed {
+            request_id,
+            reason,
+            origin,
+        } = ev
+        {
+            self.handle_federation_tab_create_failed(request_id, reason, origin);
+            return Vec::new();
+        }
+
         if let AppEvent::FederationResyncTabCreated {
             origin,
             workspace_id,

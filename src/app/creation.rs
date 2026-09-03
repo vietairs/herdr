@@ -1811,13 +1811,24 @@ impl App {
         let local_workspace_id = self.state.workspaces[ws_idx].id.clone();
         let entry = self
             .remote_resync_tab_index
-            .entry(tab_id)
+            .entry(tab_id.clone())
             .or_insert_with(|| RemoteTabRef {
                 workspace_id: local_workspace_id,
                 tab_number: None,
                 label: None,
             });
         entry.tab_number = tab_number;
+        // The single redemption point of the tab focus claim: this is where a
+        // namespaced remote tab id first has a real local `Tab` behind it.
+        // Focus it only if this client asked the remote host to create it and
+        // asked for focus (`App::handle_federation_tab_create_accepted` is the
+        // only writer of this set). A tab the remote user created out of band
+        // arrives through exactly this path and must never pull the local
+        // user out of what they were doing.
+        #[cfg(unix)]
+        if self.pending_remote_tab_focus.remove(&tab_id) {
+            self.state.switch_workspace_tab(ws_idx, tab_idx);
+        }
         self.schedule_session_save();
 
         if created_tab {
@@ -2149,6 +2160,13 @@ impl App {
         self.purge_pending_remote_splits_for_workspaces(workspace_ids);
         self.purge_pending_remote_closes_for_workspaces(workspace_ids);
         self.purge_remote_resync_pane_index_for_workspaces(workspace_ids);
+        // Before the tab index is purged: the tab focus claims are keyed by
+        // namespaced tab id and reach their workspace only through it.
+        // Unix-gated because the claim sets it drains are only ever written by
+        // the Unix-only federation client path; on other targets no mount can
+        // exist, so there is nothing to drop.
+        #[cfg(unix)]
+        self.purge_pending_remote_focus_claims_for_workspaces(workspace_ids);
         self.purge_remote_resync_tab_index_for_workspaces(workspace_ids);
         self.purge_remote_resync_workspace_index_for_workspaces(workspace_ids);
         // Clipboard staging and image paste are Unix-only, so there is
@@ -2160,6 +2178,56 @@ impl App {
         }
         self.pending_remote_workspace_focus
             .retain(|workspace_id| !workspace_ids.contains(workspace_id));
+    }
+
+    /// Drops the focus claims a closing set of workspaces can no longer
+    /// redeem.
+    ///
+    /// Runs BEFORE `remote_resync_tab_index` is purged, because
+    /// `pending_remote_tab_focus` is keyed by namespaced tab id — which
+    /// carries no workspace component — so the only way back to a workspace
+    /// is that index. A claim whose tab the resync has not revealed yet has
+    /// no index entry at all; it is dropped whenever the purge covers any
+    /// workspace of the same mount, since only that mount's link could ever
+    /// answer it.
+    ///
+    /// The two create-side sets are keyed by `request_id` and cannot be keyed
+    /// by workspace at all, so they are drained whole once the purge touches
+    /// any federated workspace: a request whose mount is being torn down can
+    /// never be answered, and its claim is therefore dead by construction.
+    /// This also closes the pre-existing leak on the workspace-side create
+    /// set, which used to survive the mount that alone could redeem it.
+    #[cfg(unix)]
+    fn purge_pending_remote_focus_claims_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        let purged_hosts: std::collections::HashSet<crate::remote::federation::id::HostKey> =
+            workspace_ids
+                .iter()
+                .filter_map(|workspace_id| {
+                    match crate::remote::federation::id::classify(workspace_id) {
+                        crate::remote::federation::id::IdClass::Remote(host_key) => Some(host_key),
+                        crate::remote::federation::id::IdClass::Local => None,
+                    }
+                })
+                .collect();
+        if purged_hosts.is_empty() {
+            // A purely local close cannot invalidate any federation claim.
+            return;
+        }
+        let tab_index = &self.remote_resync_tab_index;
+        self.pending_remote_tab_focus
+            .retain(|tab_id| match tab_index.get(tab_id) {
+                Some(tab_ref) => !workspace_ids.contains(&tab_ref.workspace_id),
+                None => !matches!(
+                    crate::remote::federation::id::classify(tab_id),
+                    crate::remote::federation::id::IdClass::Remote(host_key)
+                        if purged_hosts.contains(&host_key)
+                ),
+            });
+        self.pending_remote_tab_create_focus.clear();
+        self.pending_remote_workspace_create_focus.clear();
     }
 
     /// `AppEvent::FederationWorkspaceCreateAccepted` handler: the remote host
@@ -2211,6 +2279,105 @@ impl App {
             return;
         }
         self.pending_remote_workspace_focus.insert(workspace_id);
+    }
+
+    /// `AppEvent::FederationTabCreateAccepted` handler: the remote host
+    /// confirmed the tab this client asked it to create and named the ids it
+    /// materialized under. Nothing is built here — the resync the same
+    /// response triggers remains the single materialization path — this only
+    /// remembers that *this* client owns the new tab, so the redemption point
+    /// in `handle_federation_resync_pane_created` can focus it on arrival.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_tab_create_accepted(
+        &mut self,
+        request_id: u64,
+        origin: crate::remote::federation::id::HostKey,
+        workspace_id: String,
+        tab_id: String,
+    ) {
+        // Origin fence on BOTH ids, same shape as the workspace-create
+        // handler: a relayed or spoofed acceptance carrying a foreign
+        // namespace must be dropped, not trusted.
+        let namespaced_under_origin = |id: &str| {
+            matches!(
+                crate::remote::federation::id::classify(id),
+                crate::remote::federation::id::IdClass::Remote(ref host_key) if *host_key == origin
+            )
+        };
+        if !namespaced_under_origin(&workspace_id) || !namespaced_under_origin(&tab_id) {
+            tracing::warn!(
+                request_id,
+                %workspace_id,
+                %tab_id,
+                expected_origin = %origin,
+                "dropping a tab-create acceptance whose ids are not namespaced under the \
+                 mount that reported it"
+            );
+            return;
+        }
+        if !self.pending_remote_tab_create_focus.remove(&request_id) {
+            // The request did not ask for focus (or was already answered);
+            // the tab still materializes, it just does not take focus.
+            return;
+        }
+        // The target workspace may have been closed locally, or its mount
+        // ended, between the request and this answer. The tab can then never
+        // materialize here, so the claim is dropped rather than parked
+        // forever on an id nothing will ever redeem.
+        if !self.state.workspaces.iter().any(|ws| ws.id == workspace_id) {
+            tracing::debug!(
+                request_id,
+                %workspace_id,
+                "dropping a tab-create focus claim whose mirrored workspace is gone"
+            );
+            return;
+        }
+        // Already materialized (a structural event beat the response): focus
+        // it now instead of waiting for a create that already happened.
+        let materialized = self
+            .remote_resync_tab_index
+            .get(&tab_id)
+            .and_then(|tab_ref| {
+                let tab_number = tab_ref.tab_number?;
+                let ws_idx = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .position(|ws| ws.id == tab_ref.workspace_id)?;
+                let tab_idx = self.state.workspaces[ws_idx]
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.number == tab_number)?;
+                Some((ws_idx, tab_idx))
+            });
+        if let Some((ws_idx, tab_idx)) = materialized {
+            self.state.switch_workspace_tab(ws_idx, tab_idx);
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+            return;
+        }
+        self.pending_remote_tab_focus.insert(tab_id);
+    }
+
+    /// `AppEvent::FederationTabCreateFailed` handler: the remote host refused
+    /// an earlier `TabCreateRequest`. Nothing was created remotely, so there
+    /// is nothing local to reverse — surface the reason the same way a
+    /// refused remote workspace create does, through the one delivery
+    /// dispatch every remote-request toast shares.
+    #[cfg(unix)]
+    pub(crate) fn handle_federation_tab_create_failed(
+        &mut self,
+        request_id: u64,
+        reason: String,
+        origin: crate::remote::federation::id::HostKey,
+    ) {
+        tracing::warn!(request_id, %reason, %origin, "remote tab create failed");
+        // Nothing will ever materialize for this request; drop its focus
+        // claim so a later create cannot inherit it.
+        self.pending_remote_tab_create_focus.remove(&request_id);
+        self.raise_remote_close_failed_toast("remote tab create failed", reason);
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
     }
 
     /// `AppEvent::FederationResyncWorkspaceCreated` handler: a resync diff
@@ -5155,9 +5322,455 @@ mod federation_materialization_tests {
         );
         assert!(
             app.pending_remote_workspace_focus.is_empty()
-                && app.pending_remote_workspace_create_focus.is_empty(),
+                && app.pending_remote_workspace_create_focus.is_empty()
+                && app.pending_remote_tab_focus.is_empty()
+                && app.pending_remote_tab_create_focus.is_empty(),
             "the focus claim must be consumed, not left to catch a later create"
         );
+        app.state.assert_invariants_for_test();
+    }
+
+    // ---- federation-forwarded tab creation (client dispatch + focus claim) ----
+
+    /// Sends a `tab.create` at `workspace_id` through the ordinary API entry
+    /// point, so every test below exercises the same path the TUI does.
+    #[cfg(unix)]
+    fn request_tab_create(
+        app: &mut App,
+        workspace_id: &str,
+        label: Option<&str>,
+        focus: bool,
+    ) -> String {
+        app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+            id: "tui.tab.create".to_string(),
+            method: crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
+                workspace_id: Some(workspace_id.to_string()),
+                cwd: None,
+                focus,
+                label: label.map(str::to_string),
+                env: Default::default(),
+            }),
+        })
+    }
+
+    /// Plays the two resync events that materialize one new remote tab: the
+    /// tab announcement followed by its first pane, exactly as a resync diff
+    /// delivers them.
+    #[cfg(unix)]
+    fn resync_reveals_tab(app: &mut App, origin: &HostKey, workspace_id: &str, tab_id: &str) {
+        app.handle_federation_resync_tab_created(
+            origin.clone(),
+            workspace_id.to_string(),
+            tab_id.to_string(),
+            "remote tab".to_string(),
+        );
+        let (local_pane_id, terminal_id, terminal, runtime, pane_state) = resync_pane_payload();
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: origin.clone(),
+            workspace_id: workspace_id.to_string(),
+            tab_id: tab_id.to_string(),
+            pane_id: format!("{tab_id}-pane"),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+    }
+
+    /// The core of this change: a `tab.create` aimed at a mirrored workspace
+    /// must leave over the mount carrying the RAW remote workspace id, and
+    /// must not build a local tab — a local shell stamped with a remote id
+    /// is exactly the bug the old blanket refusal existed to avoid.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tab_create_in_a_federated_workspace_goes_out_over_the_mount() {
+        let (mut app, _mount, ws_idx, mut out_rx) = mounted_and_focused_mirror();
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        let tabs_before = app.state.workspaces[ws_idx].tabs.len();
+
+        let response = request_tab_create(&mut app, &workspace_id, Some("logs"), true);
+
+        assert!(
+            response.contains("tab_create_requested"),
+            "unexpected response: {response}"
+        );
+        let request = loop {
+            match out_rx.try_recv().expect("a TabCreateRequest must be sent") {
+                FederationMessage::TabCreateRequest(request) => break request,
+                _ => continue,
+            }
+        };
+        assert_eq!(
+            request.target_workspace_id, "w1",
+            "the wire carries the raw remote id, never the local `r:<host>:` form"
+        );
+        assert_eq!(request.label.as_deref(), Some("logs"));
+        assert_eq!(
+            app.state.workspaces[ws_idx].tabs.len(),
+            tabs_before,
+            "the tab materializes only through the resync, never inline"
+        );
+        assert_eq!(
+            app.pending_remote_tab_create_focus.len(),
+            1,
+            "a focus-requesting create must claim its request id"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    /// A client-side `cwd` names a path in the CLIENT's filesystem; refusing
+    /// is explicit rather than silent so the caller learns the directory was
+    /// not honoured.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tab_create_with_an_explicit_cwd_in_a_federated_workspace_is_refused() {
+        let (mut app, _mount, ws_idx, mut out_rx) = mounted_and_focused_mirror();
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        let tabs_before = app.state.workspaces[ws_idx].tabs.len();
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "req".to_string(),
+                method: crate::api::schema::Method::TabCreate(
+                    crate::api::schema::TabCreateParams {
+                        workspace_id: Some(workspace_id),
+                        cwd: Some("/Users/local/only".to_string()),
+                        focus: false,
+                        label: None,
+                        env: Default::default(),
+                    },
+                ),
+            });
+
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "remote_tab_cwd_unsupported");
+        assert!(
+            out_rx.try_recv().is_err(),
+            "a refused create must put nothing on the wire"
+        );
+        assert_eq!(app.state.workspaces[ws_idx].tabs.len(), tabs_before);
+        app.state.assert_invariants_for_test();
+    }
+
+    /// A client-supplied launch env would be handed to a shell the SERVING
+    /// user owns (`LD_PRELOAD`, `PATH`, ...), so it never travels and the
+    /// request is refused rather than silently stripped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tab_create_with_a_launch_env_in_a_federated_workspace_is_refused() {
+        let (mut app, _mount, ws_idx, mut out_rx) = mounted_and_focused_mirror();
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string());
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "req".to_string(),
+                method: crate::api::schema::Method::TabCreate(
+                    crate::api::schema::TabCreateParams {
+                        workspace_id: Some(workspace_id),
+                        cwd: None,
+                        focus: false,
+                        label: None,
+                        env: env.into_iter().collect(),
+                    },
+                ),
+            });
+
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "remote_tab_env_unsupported");
+        assert!(
+            out_rx.try_recv().is_err(),
+            "a refused create must put nothing on the wire"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    /// The silent-local-fallback trap: a federated workspace whose mount has
+    /// no live link must refuse, never quietly spawn a LOCAL tab under a
+    /// remote-looking id.
+    #[tokio::test]
+    async fn tab_create_in_a_federated_workspace_without_a_live_mount_is_refused() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("mirror");
+        workspace.id = "r:alice@10.0.0.1#s1:w1".to_string();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let tabs_before = app.state.workspaces[0].tabs.len();
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "req".to_string(),
+                method: crate::api::schema::Method::TabCreate(
+                    crate::api::schema::TabCreateParams {
+                        workspace_id: Some("r:alice@10.0.0.1#s1:w1".to_string()),
+                        cwd: None,
+                        focus: true,
+                        label: None,
+                        env: Default::default(),
+                    },
+                ),
+            });
+
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "remote_tab_create_unsupported");
+        assert_eq!(
+            app.state.workspaces[0].tabs.len(),
+            tabs_before,
+            "a dead mount must never produce a local tab"
+        );
+        assert!(app.pending_remote_tab_create_focus.is_empty());
+        // No `assert_invariants_for_test()` here: `Workspace::test_new`'s pane
+        // references a terminal that was never registered in `state.terminals`,
+        // so the fixture itself violates the invariants regardless of this
+        // handler. Every test above that starts from a real materialized mount
+        // does assert them.
+    }
+
+    /// Origin fence: an acceptance whose ids are namespaced under a mount
+    /// other than the one that reported it is dropped untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tab_create_acceptance_from_a_foreign_origin_is_dropped() {
+        let (mut app, mount, ws_idx, _out_rx) = mounted_and_focused_mirror();
+        let origin = mount.host_key.clone();
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        let active_before = app.state.active;
+        app.pending_remote_tab_create_focus.insert(41);
+
+        app.handle_federation_tab_create_accepted(
+            41,
+            origin,
+            workspace_id,
+            "r:mallory@10.0.0.9#s9:w1-tab3".to_string(),
+        );
+
+        assert!(
+            app.pending_remote_tab_create_focus.contains(&41),
+            "a foreign-origin acceptance must not redeem another mount's claim"
+        );
+        assert!(app.pending_remote_tab_focus.is_empty());
+        assert_eq!(app.state.active, active_before);
+        app.state.assert_invariants_for_test();
+    }
+
+    /// Ordering 1: the acceptance lands before the resync reveals the tab, so
+    /// the claim is parked on the namespaced tab id and redeemed when the tab
+    /// materializes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_requested_remote_tab_arrives_focused_when_the_acceptance_precedes_the_resync() {
+        let (mut app, mount, ws_idx, _out_rx) = mounted_and_focused_mirror();
+        let origin = mount.host_key.clone();
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        let response = request_tab_create(&mut app, &workspace_id, None, true);
+        assert!(response.contains("tab_create_requested"));
+        let request_id = *app
+            .pending_remote_tab_create_focus
+            .iter()
+            .next()
+            .expect("the create claimed its request id");
+        let tab_id = format!("r:{}:w1-tab3", origin.as_str());
+
+        app.handle_federation_tab_create_accepted(
+            request_id,
+            origin.clone(),
+            workspace_id.clone(),
+            tab_id.clone(),
+        );
+        assert!(
+            app.pending_remote_tab_focus.contains(&tab_id),
+            "the claim must be parked until the tab exists"
+        );
+        resync_reveals_tab(&mut app, &origin, &workspace_id, &tab_id);
+
+        let tab_idx = app.state.workspaces[ws_idx].tabs.len() - 1;
+        assert_eq!(app.state.active, Some(ws_idx));
+        assert_eq!(
+            app.state.workspaces[ws_idx].active_tab, tab_idx,
+            "the tab this client asked for must arrive focused"
+        );
+        assert!(
+            app.pending_remote_tab_focus.is_empty()
+                && app.pending_remote_tab_create_focus.is_empty(),
+            "both claim sets must drain"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    /// Ordering 2: the resync beats the acceptance, so the acceptance finds
+    /// the tab already materialized and focuses it immediately.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_requested_remote_tab_arrives_focused_when_the_resync_precedes_the_acceptance() {
+        let (mut app, mount, ws_idx, _out_rx) = mounted_and_focused_mirror();
+        let origin = mount.host_key.clone();
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        request_tab_create(&mut app, &workspace_id, None, true);
+        let request_id = *app
+            .pending_remote_tab_create_focus
+            .iter()
+            .next()
+            .expect("the create claimed its request id");
+        let tab_id = format!("r:{}:w1-tab3", origin.as_str());
+        let active_tab_before = app.state.workspaces[ws_idx].active_tab;
+
+        resync_reveals_tab(&mut app, &origin, &workspace_id, &tab_id);
+        assert_eq!(
+            app.state.workspaces[ws_idx].active_tab, active_tab_before,
+            "an unclaimed tab must not move focus on arrival"
+        );
+
+        app.handle_federation_tab_create_accepted(request_id, origin, workspace_id, tab_id.clone());
+
+        let tab_idx = app.state.workspaces[ws_idx].tabs.len() - 1;
+        assert_eq!(app.state.active, Some(ws_idx));
+        assert_eq!(app.state.workspaces[ws_idx].active_tab, tab_idx);
+        assert!(
+            app.pending_remote_tab_focus.is_empty()
+                && app.pending_remote_tab_create_focus.is_empty(),
+            "an immediately-focused tab must not leave a stranded claim"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    /// Ordering 3: the acceptance names a tab that already existed at mount
+    /// time (the serving host reused an existing tab id in its answer). It is
+    /// focused at once, and nothing is parked for a resync that will never
+    /// mention it again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_requested_remote_tab_that_is_already_materialized_is_focused_without_a_stranded_claim(
+    ) {
+        let (mut app, mount, ws_idx, _out_rx) = mounted_and_focused_mirror();
+        let origin = mount.host_key.clone();
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        request_tab_create(&mut app, &workspace_id, None, true);
+        let request_id = *app
+            .pending_remote_tab_create_focus
+            .iter()
+            .next()
+            .expect("the create claimed its request id");
+        let tab_id = format!("r:{}:w1-tab2", origin.as_str());
+
+        app.handle_federation_tab_create_accepted(request_id, origin, workspace_id, tab_id);
+
+        assert_eq!(app.state.active, Some(ws_idx));
+        assert_eq!(
+            app.state.workspaces[ws_idx].active_tab, 1,
+            "the already-materialized tab must be focused directly"
+        );
+        assert!(
+            app.pending_remote_tab_focus.is_empty()
+                && app.pending_remote_tab_create_focus.is_empty(),
+            "both claim sets must drain"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    /// A tab the REMOTE user created arrives through exactly the same resync
+    /// path and must never pull the local user out of what they were doing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unrequested_remote_tab_never_steals_focus() {
+        let (mut app, mount, ws_idx, _out_rx) = mounted_and_focused_mirror();
+        let origin = mount.host_key.clone();
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        let active_tab_before = app.state.workspaces[ws_idx].active_tab;
+
+        resync_reveals_tab(
+            &mut app,
+            &origin,
+            &workspace_id,
+            &format!("r:{}:w1-tab-foreign", origin.as_str()),
+        );
+
+        assert_eq!(
+            app.state.workspaces[ws_idx].active_tab, active_tab_before,
+            "a tab the remote user created must not steal focus"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    /// A refusal from the serving host ends the request for good: the claim
+    /// must not survive to catch a later create, and the user must see why.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_remote_tab_create_drops_its_focus_claim_and_raises_a_toast() {
+        let (mut app, mount, _ws_idx, _out_rx) = mounted_and_focused_mirror();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.pending_remote_tab_create_focus.insert(9);
+
+        app.handle_federation_tab_create_failed(
+            9,
+            "not the mounted controller".to_string(),
+            mount.host_key.clone(),
+        );
+
+        assert!(app.pending_remote_tab_create_focus.is_empty());
+        let toast = app.state.toast.clone().expect("expected a failure toast");
+        assert_eq!(toast.kind, crate::app::state::ToastKind::NeedsAttention);
+        assert_eq!(toast.title, "remote tab create failed");
+        app.state.assert_invariants_for_test();
+    }
+
+    /// An acceptance whose target workspace is already gone (closed locally,
+    /// or its mount ended between send and ack) must drop the claim instead
+    /// of parking it on a tab that can never materialize.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tab_create_acceptance_for_a_vanished_workspace_drops_the_claim() {
+        let (mut app, mount, ws_idx, _out_rx) = mounted_and_focused_mirror();
+        let origin = mount.host_key.clone();
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        app.pending_remote_tab_create_focus.insert(12);
+        app.state.workspaces.clear();
+        app.state.active = None;
+        app.state.selected = 0;
+
+        app.handle_federation_tab_create_accepted(
+            12,
+            origin.clone(),
+            workspace_id,
+            format!("r:{}:w1-tab3", origin.as_str()),
+        );
+
+        assert!(app.pending_remote_tab_create_focus.is_empty());
+        assert!(
+            app.pending_remote_tab_focus.is_empty(),
+            "a claim on a vanished workspace must be dropped, not parked forever"
+        );
+    }
+
+    /// Unmounting drains every focus claim the mount could still have
+    /// answered — including the workspace-side pair, whose create claims used
+    /// to survive the mount that alone could redeem them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unmounting_purges_pending_remote_tab_focus_claims() {
+        let (mut app, mount, ws_idx, _out_rx) = mounted_and_focused_mirror();
+        let origin = mount.host_key.clone();
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        app.pending_remote_tab_create_focus.insert(1);
+        app.pending_remote_workspace_create_focus.insert(2);
+        app.pending_remote_workspace_focus
+            .insert(workspace_id.clone());
+        // One claim the tab index knows (a mount-time tab) and one it does
+        // not (accepted, but the resync has not revealed it yet).
+        app.pending_remote_tab_focus
+            .insert(format!("r:{}:w1-tab2", origin.as_str()));
+        app.pending_remote_tab_focus
+            .insert(format!("r:{}:w1-tab3", origin.as_str()));
+
+        let closing: std::collections::HashSet<String> = std::iter::once(workspace_id).collect();
+        app.purge_federation_state_for_workspaces(&closing);
+
+        assert!(app.pending_remote_tab_focus.is_empty());
+        assert!(app.pending_remote_tab_create_focus.is_empty());
+        assert!(app.pending_remote_workspace_focus.is_empty());
+        assert!(app.pending_remote_workspace_create_focus.is_empty());
         app.state.assert_invariants_for_test();
     }
 

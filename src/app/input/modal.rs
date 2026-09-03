@@ -1117,7 +1117,7 @@ impl App {
                 } else {
                     Some(new_name)
                 };
-                self.runtime_tab_create(
+                let response = self.runtime_tab_create(
                     "tui.tab.create_named",
                     crate::api::schema::TabCreateParams {
                         workspace_id: None,
@@ -1127,6 +1127,10 @@ impl App {
                         env: Default::default(),
                     },
                 );
+                // The dialog's create can now be forwarded over a mount, so
+                // its outcome needs the same surfacing every other
+                // `runtime_tab_create` caller does.
+                self.surface_tab_create_response(&response);
             }
             Mode::RenameTab if !new_name.is_empty() => {
                 let Some(ws_idx) = self.state.active else {
