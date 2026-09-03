@@ -387,7 +387,6 @@ pub enum AppEvent {
     /// focus that tab when it arrives. A tab the *remote* user created out of
     /// band never produces this event, so it never takes the local user's
     /// focus.
-    #[cfg(unix)]
     FederationTabCreateAccepted {
         request_id: u64,
         origin: crate::remote::federation::id::HostKey,
@@ -403,7 +402,6 @@ pub enum AppEvent {
     /// payload beyond the reason: nothing was created remotely, so there is
     /// nothing local to reverse — same shape/reasoning as
     /// `FederationWorkspaceCreateFailed`.
-    #[cfg(unix)]
     FederationTabCreateFailed {
         request_id: u64,
         reason: String,

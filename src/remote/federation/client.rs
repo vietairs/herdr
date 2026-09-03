@@ -41,13 +41,13 @@ use super::id::{HostKey, Mount, ServerInstanceId};
 use super::protocol::{
     Capability, ClipboardMessage, ClipboardStageRequest, FaultReason, FederationMessage, Handshake,
     HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, TabCloseRequest,
-    TabCreateRequest, TerminalChannelMessage, WorkspaceCloseRequest, WorkspaceCreateRequest,
-    FEDERATION_PROTOCOL_VERSION,
+    TabCreateRequest, TabCreateResponse, TerminalChannelMessage, WorkspaceCloseRequest,
+    WorkspaceCreateRequest, FEDERATION_PROTOCOL_VERSION,
 };
-// Only the stage-response and tab-create-response arms name these types, and
-// both arms are Unix-only because the events they raise are.
+// Only the stage-response arm names this type, and that arm is Unix-only
+// because the events it raises are.
 #[cfg(unix)]
-use super::protocol::{ClipboardStageResponse, TabCreateResponse};
+use super::protocol::ClipboardStageResponse;
 use super::reducer::{ReducerAction, RemoteMirror};
 use super::serve::{read_frame, write_frame};
 
@@ -3554,8 +3554,6 @@ mod tests {
     /// `AppEvent` raised plus every outbound `FederationMessage` queued.
     /// Shared by the tab-create response tests so each one asserts only its
     /// own behavior.
-    // `#[cfg(unix)]`: drives `drive_mount_channel`, which is Unix-only.
-    #[cfg(unix)]
     async fn drive_mount_script(
         frames: Vec<FederationMessage>,
     ) -> (Vec<crate::events::AppEvent>, Vec<FederationMessage>) {
@@ -3655,7 +3653,6 @@ mod tests {
         (events, outbound)
     }
 
-    #[cfg(unix)]
     fn tab_created(request_id: u64) -> FederationMessage {
         FederationMessage::TabCreateResponse(
             crate::remote::federation::protocol::TabCreateResponse::Created {
@@ -3668,7 +3665,6 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
     fn snapshot_request_count(outbound: &[FederationMessage]) -> usize {
         outbound
             .iter()
@@ -3680,8 +3676,6 @@ mod tests {
     // cannot supply them, since this arm is what fires the `SnapshotRequest`
     // that first reveals the tab. The mirror is deliberately NOT
     // pre-populated with the tab here.
-    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_tab_create_created_response_emits_the_accepted_event_and_one_resync() {
         let (events, outbound) = drive_mount_script(vec![tab_created(42)]).await;
@@ -3717,8 +3711,6 @@ mod tests {
     // Mirrors the structural-frame coalescing test above: a burst answered
     // while a snapshot request is already outstanding must re-arm exactly ONE
     // more request, never one per response.
-    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_burst_of_tab_create_responses_coalesces_into_one_in_flight_resync() {
         let (events, outbound) = drive_mount_script(vec![
@@ -3754,8 +3746,6 @@ mod tests {
     // its pane/PTY) materializes through the resync diff only, so a `Created`
     // must open no terminal channel and spawn no runtime — doing both would
     // create the tab twice.
-    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_tab_create_created_response_materializes_nothing_inline() {
         let (events, outbound) = drive_mount_script(vec![tab_created(3)]).await;
@@ -3776,8 +3766,6 @@ mod tests {
         );
     }
 
-    // `#[cfg(unix)]`: exercises `drive_mount_channel`, which is Unix-only.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_tab_create_failed_response_emits_the_failed_event() {
         let (events, outbound) = drive_mount_script(vec![FederationMessage::TabCreateResponse(

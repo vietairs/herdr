@@ -305,7 +305,6 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationTabCreateAccepted {
             request_id,
             origin,
@@ -317,7 +316,6 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationTabCreateFailed {
             request_id,
             reason,

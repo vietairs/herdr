@@ -1825,7 +1825,6 @@ impl App {
         // only writer of this set). A tab the remote user created out of band
         // arrives through exactly this path and must never pull the local
         // user out of what they were doing.
-        #[cfg(unix)]
         if self.pending_remote_tab_focus.remove(&tab_id) {
             self.state.switch_workspace_tab(ws_idx, tab_idx);
         }
@@ -2162,10 +2161,6 @@ impl App {
         self.purge_remote_resync_pane_index_for_workspaces(workspace_ids);
         // Before the tab index is purged: the tab focus claims are keyed by
         // namespaced tab id and reach their workspace only through it.
-        // Unix-gated because the claim sets it drains are only ever written by
-        // the Unix-only federation client path; on other targets no mount can
-        // exist, so there is nothing to drop.
-        #[cfg(unix)]
         self.purge_pending_remote_focus_claims_for_workspaces(workspace_ids);
         self.purge_remote_resync_tab_index_for_workspaces(workspace_ids);
         self.purge_remote_resync_workspace_index_for_workspaces(workspace_ids);
@@ -2197,7 +2192,6 @@ impl App {
     /// never be answered, and its claim is therefore dead by construction.
     /// This also closes the pre-existing leak on the workspace-side create
     /// set, which used to survive the mount that alone could redeem it.
-    #[cfg(unix)]
     fn purge_pending_remote_focus_claims_for_workspaces(
         &mut self,
         workspace_ids: &std::collections::HashSet<String>,
@@ -2287,7 +2281,6 @@ impl App {
     /// response triggers remains the single materialization path — this only
     /// remembers that *this* client owns the new tab, so the redemption point
     /// in `handle_federation_resync_pane_created` can focus it on arrival.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_tab_create_accepted(
         &mut self,
         request_id: u64,
@@ -2364,7 +2357,6 @@ impl App {
     /// is nothing local to reverse — surface the reason the same way a
     /// refused remote workspace create does, through the one delivery
     /// dispatch every remote-request toast shares.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_tab_create_failed(
         &mut self,
         request_id: u64,
