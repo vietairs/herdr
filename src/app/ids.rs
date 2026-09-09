@@ -18,7 +18,7 @@ impl App {
         self.state.workspaces[ws_idx].id.clone()
     }
 
-    pub(super) fn public_tab_id(&self, ws_idx: usize, tab_idx: usize) -> Option<String> {
+    pub(crate) fn public_tab_id(&self, ws_idx: usize, tab_idx: usize) -> Option<String> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab_number = ws.public_tab_number(tab_idx)?;
         Some(crate::workspace::public_tab_id_for_number(
@@ -26,7 +26,7 @@ impl App {
         ))
     }
 
-    pub(super) fn public_pane_id(
+    pub(crate) fn public_pane_id(
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -59,7 +59,7 @@ impl App {
         )
     }
 
-    pub(super) fn parse_workspace_id(&self, id: &str) -> Option<usize> {
+    pub(crate) fn parse_workspace_id(&self, id: &str) -> Option<usize> {
         self.state
             .workspaces
             .iter()
@@ -103,7 +103,7 @@ impl App {
         Some((ws_idx, tab_idx))
     }
 
-    pub(super) fn parse_tab_id(&self, id: &str) -> Option<(usize, usize)> {
+    pub(crate) fn parse_tab_id(&self, id: &str) -> Option<(usize, usize)> {
         if let Some(rest) = id.strip_prefix("t_") {
             let (ws_raw, tab_raw) = rest.rsplit_once('_')?;
             let ws_idx = self.parse_workspace_id(ws_raw)?;

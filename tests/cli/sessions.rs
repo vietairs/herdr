@@ -398,11 +398,19 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
-        full_stdout.contains("  compatible: yes"),
+        full_stdout.contains("  private_protocol_compatible: yes"),
+        "stdout: {full_stdout}"
+    );
+    assert!(
+        full_stdout.contains("  endpoint_compatible: yes"),
         "stdout: {full_stdout}"
     );
     assert!(
         full_stdout.contains("  restart_needed: no"),
+        "stdout: {full_stdout}"
+    );
+    assert!(
+        full_stdout.contains("  server_binary_stale: no"),
         "stdout: {full_stdout}"
     );
     assert!(
@@ -422,7 +430,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {server_stdout}"
     );
     assert!(
-        server_stdout.contains(&format!("protocol: {CURRENT_PROTOCOL}")),
+        server_stdout.contains(&format!("private_protocol: {CURRENT_PROTOCOL}")),
         "stdout: {server_stdout}"
     );
 
@@ -438,6 +446,13 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {client_stdout}"
     );
     assert!(
+        client_stdout.contains(&format!(
+            "endpoint_protocol_generation: {}",
+            crate::support::CURRENT_ENDPOINT_PROTOCOL_GENERATION
+        )),
+        "stdout: {client_stdout}"
+    );
+    assert!(
         client_stdout.contains("binary: "),
         "stdout: {client_stdout}"
     );
@@ -445,25 +460,37 @@ fn status_commands_report_client_and_server_versions() {
     let full_json = run_cli_json(&socket_path, &["status", "--json"]);
     assert_eq!(full_json["client"]["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(full_json["client"]["protocol"], CURRENT_PROTOCOL);
+    assert_eq!(
+        full_json["client"]["endpoint_protocol_generation"],
+        crate::support::CURRENT_ENDPOINT_PROTOCOL_GENERATION
+    );
     assert_eq!(full_json["server"]["status"], "running");
     assert_eq!(full_json["server"]["running"], true);
     assert_eq!(full_json["server"]["compatible"], true);
+    assert_eq!(full_json["server"]["endpoint_compatible"], true);
     assert_eq!(
         full_json["server"]["socket"],
         socket_path.display().to_string()
     );
     assert_eq!(full_json["server"]["restart_needed"], false);
+    assert_eq!(full_json["server"]["server_binary_stale"], false);
     assert_eq!(full_json["update"]["restart_needed"], false);
+    assert_eq!(full_json["update"]["server_binary_stale"], false);
 
     let server_json = run_cli_json(&socket_path, &["status", "server", "--json"]);
     assert_eq!(server_json["status"], "running");
     assert_eq!(server_json["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(server_json["protocol"], CURRENT_PROTOCOL);
     assert_eq!(server_json["compatible"], true);
+    assert_eq!(server_json["endpoint_compatible"], true);
 
     let client_json = run_cli_json(&socket_path, &["status", "client", "--json"]);
     assert_eq!(client_json["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(client_json["protocol"], CURRENT_PROTOCOL);
+    assert_eq!(
+        client_json["endpoint_protocol_generation"],
+        crate::support::CURRENT_ENDPOINT_PROTOCOL_GENERATION
+    );
     assert!(client_json["binary"]
         .as_str()
         .is_some_and(|path| !path.is_empty()));
@@ -485,6 +512,10 @@ fn status_reports_not_running_when_server_socket_is_missing() {
     assert!(stdout.contains("  status: not running"), "stdout: {stdout}");
     assert!(stdout.contains("  restart_needed: no"), "stdout: {stdout}");
     assert!(
+        stdout.contains("  server_binary_stale: no"),
+        "stdout: {stdout}"
+    );
+    assert!(
         stdout.contains(&socket_path.display().to_string()),
         "stdout: {stdout}"
     );
@@ -497,7 +528,9 @@ fn status_reports_not_running_when_server_socket_is_missing() {
         socket_path.display().to_string()
     );
     assert_eq!(status_json["server"]["restart_needed"], false);
+    assert_eq!(status_json["server"]["server_binary_stale"], false);
     assert_eq!(status_json["update"]["restart_needed"], false);
+    assert_eq!(status_json["update"]["server_binary_stale"], false);
 
     cleanup_test_base(&base);
 }

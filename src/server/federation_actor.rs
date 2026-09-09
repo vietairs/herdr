@@ -620,6 +620,9 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
             let response = app.handle_api_request_after_internal_events_drained(Request {
                 id: "federation-create-workspace".to_string(),
                 method: Method::WorkspaceCreate(crate::api::schema::WorkspaceCreateParams {
+                    // A remotely requested workspace has no local source
+                    // workspace to inherit a `follow` cwd policy from.
+                    source_workspace_id: None,
                     // A mounting client's filesystem path is meaningless
                     // here; let this host's own `workspace.create` defaults
                     // pick the root pane's cwd.
@@ -951,7 +954,13 @@ mod tests {
     fn test_app() -> App {
         let config = crate::config::Config::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        crate::app::App::new(&config, true, None, api_rx, crate::api::EventHub::default())
+        crate::app::App::new(
+            &config,
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
     }
 
     /// Drive a connection through admission + mount, returning its `(epoch,

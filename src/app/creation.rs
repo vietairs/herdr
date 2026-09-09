@@ -1,13 +1,10 @@
 use std::path::PathBuf;
 
-use crate::api::schema::{EventData, EventEnvelope, EventKind};
-#[cfg(test)]
-use tracing::error;
-
 use super::{
     api_helpers::{pane_agent_status, tab_attention_priority},
     App, Mode,
 };
+use crate::api::schema::{EventData, EventEnvelope, EventKind};
 use crate::{config::NewTerminalCwdConfig, workspace::Workspace};
 
 // P9 materialization (mount -> rendered panes).
@@ -93,20 +90,29 @@ impl App {
         resolve_new_terminal_cwd(&self.state.new_terminal_cwd, follow_cwd)
     }
 
-    pub(super) fn workspace_creation_source(&self) -> Option<usize> {
-        // A create confirmed from the name dialog belongs to the workspace
-        // that was in focus when the dialog opened. Recomputing it at confirm
-        // time would read `Mode::RenameWorkspace` — the modal's own mode — and
-        // fall through to `active`, which is not the sidebar-selected
-        // workspace the user started the create from. Pinned by id, not index,
-        // because a resync can add or remove workspaces while the dialog is
-        // open.
-        if let Some(pinned) = &self.state.pending_workspace_create_source_workspace {
-            if let Some(idx) = self.state.workspaces.iter().position(|ws| &ws.id == pinned) {
-                return Some(idx);
-            }
-        }
+    pub(crate) fn resolved_new_workspace_cwd_from(&self, ws_idx: usize) -> PathBuf {
+        let tab_idx = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(crate::workspace::Workspace::active_tab_index);
+        self.resolved_new_workspace_cwd_from_tab(ws_idx, tab_idx)
+    }
 
+    pub(crate) fn resolved_new_workspace_cwd_from_tab(
+        &self,
+        ws_idx: usize,
+        tab_idx: Option<usize>,
+    ) -> PathBuf {
+        let follow_cwd = tab_idx
+            .and_then(|tab_idx| self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx))
+            .map(|tab| tab.layout.focused())
+            .and_then(|pane_id| self.launch_cwd_for_pane_in_workspace(ws_idx, pane_id))
+            .or_else(|| self.seed_cwd_from_workspace(ws_idx));
+        self.resolve_new_terminal_cwd(follow_cwd)
+    }
+
+    pub(super) fn workspace_creation_source(&self) -> Option<usize> {
         if self.state.mode == Mode::Navigate
             && self.state.workspaces.get(self.state.selected).is_some()
         {
@@ -121,152 +127,12 @@ impl App {
         })
     }
 
-    pub(super) fn begin_tui_workspace_create(&mut self, request_id: &'static str) {
-        if self.state.prompt_new_workspace_name {
-            let source_ws_idx = self.workspace_creation_source();
-            let follow_cwd = source_ws_idx.and_then(|ws_idx| {
-                self.focused_pane_cwd_in_workspace(ws_idx)
-                    .or_else(|| self.seed_cwd_from_workspace(ws_idx))
-            });
-            let cwd = self.resolve_new_terminal_cwd(follow_cwd);
-            // Pin the source so confirming the dialog creates from the same
-            // workspace the user started on — including deciding whether the
-            // create goes out over that workspace's mount.
-            let source_workspace_id = source_ws_idx
-                .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
-                .map(|ws| ws.id.clone());
-            super::input::open_new_workspace_dialog(&mut self.state, cwd, source_workspace_id);
-            return;
-        }
-
-        self.runtime_workspace_create(
-            request_id,
-            crate::api::schema::WorkspaceCreateParams {
-                cwd: None,
-                focus: true,
-                label: None,
-                env: Default::default(),
-            },
-        );
-        self.state.mode = if self.state.active.is_some() {
-            Mode::Terminal
-        } else {
-            Mode::Navigate
-        };
-    }
-
-    /// Create a workspace with a real PTY (needs event_tx).
-    #[cfg(test)]
-    pub(crate) fn create_workspace(&mut self) {
-        let follow_cwd = self.workspace_creation_source().and_then(|ws_idx| {
-            self.focused_pane_cwd_in_workspace(ws_idx)
-                .or_else(|| self.seed_cwd_from_workspace(ws_idx))
-        });
-        let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
-        if let Err(e) = self.create_workspace_with_events(initial_cwd, true) {
-            error!(err = %e, "failed to create workspace");
-            self.state.mode = Mode::Navigate;
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn create_tab(&mut self) {
-        let custom_name = self.state.requested_new_tab_name.take();
-        let active_before = self.state.active;
-        let follow_cwd = self.state.active.and_then(|ws_idx| {
-            self.focused_pane_cwd_in_workspace(ws_idx)
-                .or_else(|| self.seed_cwd_from_workspace(ws_idx))
-        });
-        let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
-        match self.create_tab_with_options(initial_cwd, true) {
-            Ok(created_idx) => {
-                let created_workspace = active_before.is_none();
-                let ws_idx = if created_workspace {
-                    Some(created_idx)
-                } else {
-                    self.state.active
-                };
-                let tab_idx = if created_workspace { 0 } else { created_idx };
-                if let Some(name) = custom_name {
-                    if let Some(ws) =
-                        ws_idx.and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
-                    {
-                        if let Some(tab) = ws.tabs.get_mut(tab_idx) {
-                            tab.set_custom_name(name);
-                        }
-                        self.schedule_session_save();
-                    }
-                }
-                if let Some(ws_idx) = ws_idx {
-                    if created_workspace {
-                        self.emit_workspace_open_events(ws_idx);
-                    } else {
-                        self.emit_tab_created_events(ws_idx, tab_idx);
-                    }
-                }
-            }
-            Err(e) => {
-                error!(err = %e, "failed to create tab");
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn create_tab_with_options(
-        &mut self,
-        initial_cwd: PathBuf,
-        focus: bool,
-    ) -> std::io::Result<usize> {
-        let Some(ws_idx) = self.state.active else {
-            return self.create_workspace_with_options(initial_cwd, focus);
-        };
-        let (rows, cols) = self.state.estimate_pane_size();
-        let ws = &mut self.state.workspaces[ws_idx];
-        let (idx, terminal, runtime) = ws.create_tab(
-            rows,
-            cols,
-            initial_cwd,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
-            Vec::new(),
-        )?;
-        let root_pane = ws.tabs[idx].root_pane;
-        self.terminal_runtimes.insert(terminal.id.clone(), runtime);
-        self.state.terminals.insert(terminal.id.clone(), terminal);
-        self.state.remove_alias_shadowed_by_new_pane(root_pane);
-        if focus {
-            self.state.switch_workspace_tab(ws_idx, idx);
-            self.state.mode = Mode::Terminal;
-        }
-        let workspace_id = self.state.workspaces[ws_idx].id.clone();
-        let tab_id = self
-            .public_tab_id(ws_idx, idx)
-            .unwrap_or_else(|| crate::workspace::public_tab_id_for_number(&workspace_id, idx + 1));
-        let root_pane = self.state.workspaces[ws_idx].tabs[idx].root_pane.raw();
-        crate::logging::tab_created(&workspace_id, &tab_id, root_pane);
-        self.schedule_session_save();
-        Ok(idx)
-    }
-
     pub(crate) fn create_workspace_with_options(
         &mut self,
         initial_cwd: PathBuf,
         focus: bool,
     ) -> std::io::Result<usize> {
         self.create_workspace_with_launch_env(initial_cwd, focus, Vec::new())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn create_workspace_with_events(
-        &mut self,
-        initial_cwd: PathBuf,
-        focus: bool,
-    ) -> std::io::Result<()> {
-        let ws_idx = self.create_workspace_with_options(initial_cwd, focus)?;
-        self.emit_workspace_open_events(ws_idx);
-        Ok(())
     }
 
     pub(crate) fn create_workspace_with_launch_env(
@@ -981,6 +847,41 @@ impl App {
             .retain(|workspace_id, _| !workspace_ids.contains(workspace_id));
     }
 
+    /// Drops the per-pane clipboard-image-paste bookkeeping of the given
+    /// (closing) workspaces.
+    ///
+    /// Both sets are keyed by `PaneId` and neither is otherwise reachable once
+    /// the pane is gone: the unsupported-mount notice would sit there for the
+    /// life of the process, and an in-flight marker whose answer is dropped
+    /// (the workspace lookup in `handle_remote_clipboard_image_captured`
+    /// fails silently) would too. Run wherever the other per-pane federation
+    /// indexes are purged, so the whole group behaves the same on both the
+    /// locally-initiated close and the remote teardown.
+    ///
+    /// Relocated here from the fork's `app/input/mod.rs` (deleted by the
+    /// v0.9.0 client/server split, which moved input dispatch to
+    /// `client/shell/input.rs`) since this is App/federation bookkeeping, not
+    /// input dispatch, and creation.rs already owns its sibling purge
+    /// helpers and the umbrella `purge_federation_state_for_workspaces` that
+    /// calls it.
+    #[cfg(unix)]
+    pub(crate) fn purge_remote_image_paste_pane_state_for_workspaces(
+        &mut self,
+        workspace_ids: &std::collections::HashSet<String>,
+    ) {
+        let closing_pane_ids: std::collections::HashSet<crate::layout::PaneId> = self
+            .state
+            .workspaces
+            .iter()
+            .filter(|ws| workspace_ids.contains(&ws.id))
+            .flat_map(|ws| ws.tabs.iter().flat_map(|tab| tab.layout.pane_ids()))
+            .collect();
+        self.remote_image_paste_unsupported_notices
+            .retain(|pane_id| !closing_pane_ids.contains(pane_id));
+        self.remote_clipboard_image_reads_in_flight
+            .retain(|pane_id| !closing_pane_ids.contains(pane_id));
+    }
+
     /// `AppEvent::FederationSplitPaneReady` handler: the drive task already
     /// built the new pane's real `TerminalRuntime` (it owns the mount's
     /// `TerminalChannelRouter`/out-tx, which this handler does not); this
@@ -1087,7 +988,12 @@ impl App {
             self.state.switch_workspace_tab(ws_idx, tab_idx);
             self.state
                 .record_pane_focus_change(previous_focus, ws_idx, pane_id);
-            self.state.settle_terminal_mode_after_focus();
+            // `settle_terminal_mode_after_focus` (deleted with the fork's
+            // whole `app/input/` module, which also owned copy mode) did two
+            // things: force `mode = Mode::Terminal` and resync copy-mode
+            // selection with the new focus. Copy mode no longer exists in
+            // the slimmed `Mode` enum, so only the mode assignment survives.
+            self.state.mode = Mode::Terminal;
         }
 
         if let Some(pane) = self.pane_info(ws_idx, pane_id) {
@@ -2073,13 +1979,14 @@ impl App {
     /// for the multi-tab case. Deliberately does NOT go through the
     /// `tab.close` JSON-API method (`handle_tab_close`): when the target is
     /// its workspace's last tab and that workspace shares a worktree-group
-    /// with a sibling, that handler's `AppState::confirm_implicit_worktree_group_close`
-    /// sets `mode = Mode::ConfirmClose` (and `selected`) BEFORE refusing —
-    /// mutating this host's own UI state in response to a remote peer's
-    /// request, which the fixed internal request id below exists precisely
-    /// to prevent. This path always retires exactly the target tab (or, when
-    /// it is the last tab, exactly the target workspace via
-    /// `close_single_workspace_at`) and never asks for confirmation.
+    /// with a sibling, that handler refuses with a `confirmation_required`
+    /// API error via `AppState::confirm_implicit_worktree_group_close` — a
+    /// remote peer's close request has no local operator to answer that
+    /// confirmation, which the fixed internal request id below exists
+    /// precisely to avoid getting stuck behind. This path always retires
+    /// exactly the target tab (or, when it is the last tab, exactly the
+    /// target workspace via `close_single_workspace_at`) and never asks for
+    /// confirmation.
     pub(crate) fn close_federation_target_tab(
         &mut self,
         target_tab_id: &str,
@@ -3037,7 +2944,7 @@ mod federation_materialization_tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         App::new(
             &crate::config::Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             api_rx,
             crate::api::EventHub::default(),
@@ -5014,14 +4921,11 @@ mod federation_materialization_tests {
     }
 
     /// The client-triggered half: a plain `workspace.create` — the method
-    /// every live "new workspace" path funnels into
-    /// (`App::begin_tui_workspace_create`, `App::run`'s
-    /// `request_new_workspace` drain, and the CLI/JSON API, all via
+    /// every live "new workspace" path funnels into (the client shell's
+    /// create-workspace action and the CLI/JSON API, all via
     /// `runtime_workspace_create`) — must go out over the mount as a
     /// `WorkspaceCreateRequest` when the workspace it is created from is
-    /// federation-owned, instead of spawning a local workspace. The
-    /// name-prompt dialog's own route is covered separately by
-    /// `named_workspace_create_inside_a_federated_workspace_goes_out_over_the_mount`.
+    /// federation-owned, instead of spawning a local workspace.
     #[cfg(unix)]
     #[tokio::test]
     async fn workspace_create_inside_a_federated_workspace_goes_out_over_the_mount() {
@@ -5054,6 +4958,7 @@ mod federation_materialization_tests {
                 id: "tui.workspace.create".to_string(),
                 method: crate::api::schema::Method::WorkspaceCreate(
                     crate::api::schema::WorkspaceCreateParams {
+                        source_workspace_id: None,
                         cwd: None,
                         focus: true,
                         label: Some("remote scratch".to_string()),
@@ -5133,6 +5038,7 @@ mod federation_materialization_tests {
                 id: "tui.workspace.create_cwd".to_string(),
                 method: crate::api::schema::Method::WorkspaceCreate(
                     crate::api::schema::WorkspaceCreateParams {
+                        source_workspace_id: None,
                         cwd: Some(temp.display().to_string()),
                         focus: true,
                         label: None,
@@ -5186,80 +5092,17 @@ mod federation_materialization_tests {
         (app, mount, ws_idx, out_rx)
     }
 
-    /// Regression guard for the configuration that silently disabled the whole
-    /// feature: with `ui.prompt_new_workspace_name` on, "new workspace" opens
-    /// a name dialog whose confirm used to always send a locally-resolved
-    /// `cwd`, which the redirect read as a deliberate local-directory choice.
-    /// A user on that config got a local workspace seeded from a path that
-    /// only exists on the serving host. The dialog asks for a name, never a
-    /// directory, so its create must reach the wire — carrying the typed name
-    /// as the label, the only route by which a label reaches the wire at all.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn named_workspace_create_inside_a_federated_workspace_goes_out_over_the_mount() {
-        let (mut app, _mount, _ws_idx, mut out_rx) = mounted_and_focused_mirror();
-        app.state.prompt_new_workspace_name = true;
-        let before = app.state.workspaces.len();
-
-        app.begin_tui_workspace_create("tui.workspace.create");
-        assert_eq!(
-            app.state.mode,
-            Mode::RenameWorkspace,
-            "the prompt config must open the name dialog"
-        );
-        app.state.name_input = "remote scratch".to_string();
-        app.handle_rename_key_via_api(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::empty(),
-        ));
-
-        assert_eq!(
-            app.state.workspaces.len(),
-            before,
-            "the named create must not spawn a local workspace from a remote-only path"
-        );
-        let mut sent_label = None;
-        while let Ok(frame) = out_rx.try_recv() {
-            if let FederationMessage::WorkspaceCreateRequest(request) = frame {
-                sent_label = Some(request.label);
-            }
-        }
-        assert_eq!(
-            sent_label,
-            Some(Some("remote scratch".to_string())),
-            "the mount must have received a WorkspaceCreateRequest carrying the typed name"
-        );
-    }
-
-    /// The same dialog on a plain local workspace must still create locally,
-    /// at the directory it captured when it opened.
-    #[tokio::test]
-    async fn named_workspace_create_outside_a_mount_still_creates_locally() {
-        let mut app = test_app();
-        let cwd = std::env::temp_dir();
-        app.state.new_terminal_cwd =
-            crate::config::NewTerminalCwdConfig::Path(cwd.display().to_string());
-        app.state.prompt_new_workspace_name = true;
-        let before = app.state.workspaces.len();
-
-        app.begin_tui_workspace_create("tui.workspace.create");
-        app.state.name_input = "local scratch".to_string();
-        app.handle_rename_key_via_api(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::empty(),
-        ));
-
-        assert_eq!(
-            app.state.workspaces.len(),
-            before + 1,
-            "a non-federated named create is still a local create"
-        );
-        assert_eq!(
-            app.state.workspaces[before].custom_name.as_deref(),
-            Some("local scratch")
-        );
-        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
-    }
+    // The name-prompt dialog's own federation-redirect regression coverage
+    // (`named_workspace_create_inside_a_federated_workspace_goes_out_over_the_mount`
+    // and `named_workspace_create_outside_a_mount_still_creates_locally`) is
+    // removed here: it exercised `App::begin_tui_workspace_create`,
+    // `Mode::RenameWorkspace`, and `AppState::name_input`, all deleted by the
+    // v0.9.0 client/server split (the name-prompt dialog is now client-shell
+    // presentation state, not App/AppState). The underlying redirect logic
+    // this guarded (`workspace_create_inside_a_federated_workspace_goes_out_over_the_mount`
+    // above) is still covered for the plain `workspace.create` API path; only
+    // the dialog-specific route lost its test until the client shell grows an
+    // equivalent one.
 
     /// The remote workspace this client asked for must arrive focused —
     /// otherwise the keypress looks like it did nothing — while a workspace
@@ -5308,6 +5151,7 @@ mod federation_materialization_tests {
                 id: "tui.workspace.create".to_string(),
                 method: crate::api::schema::Method::WorkspaceCreate(
                     crate::api::schema::WorkspaceCreateParams {
+                        source_workspace_id: None,
                         cwd: None,
                         focus: true,
                         label: None,

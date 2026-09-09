@@ -6,6 +6,9 @@ use super::common::AgentStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceCreateParams {
+    /// Workspace whose focused pane supplies the `follow` cwd policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -29,6 +32,13 @@ pub struct WorkspaceMountRemoteParams {
     pub targets: Vec<String>,
     #[serde(default)]
     pub remote_keybindings: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceCloseParams {
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub close_group: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

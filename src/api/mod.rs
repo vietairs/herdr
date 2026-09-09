@@ -7,8 +7,8 @@ mod subscriptions;
 mod wait;
 
 pub use event_hub::EventHub;
-pub(crate) use server::start_server_with_stop_control;
-pub use server::{start_server_with_capabilities, ServerHandle};
+pub use server::ServerHandle;
+pub(crate) use server::{api_method_name, start_server_with_stop_control};
 pub use status::{read_runtime_status_at, RuntimeStatus};
 
 use std::path::PathBuf;
@@ -25,6 +25,9 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
         Method::ServerReloadConfig(_)
             | Method::ServerReloadAgentManifests(_)
             | Method::NotificationShow(_)
+            | Method::ProductAnnouncementDismiss(_)
+            | Method::ReleaseNotesDismiss(_)
+            | Method::CommandInvoke(_)
             | Method::WorkspaceCreate(_)
             | Method::WorkspaceMountRemote(_)
             | Method::WorkspaceFocus(_)
@@ -56,6 +59,8 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneZoom(_)
             | Method::PaneFocusDirection(_)
             | Method::PaneResize(_)
+            | Method::PaneScroll(_)
+            | Method::PaneEditScrollback(_)
             | Method::PaneFocus(_)
             | Method::PaneInputSet(_)
             | Method::PaneRename(_)
@@ -131,6 +136,16 @@ pub(crate) fn federated_session_allows(method: &Method) -> bool {
         | Method::PluginList(_)
         | Method::PluginActionList(_)
         | Method::PluginLogList(_)
+        | Method::IntegrationList(_)
+        // pane.selection.read / pane.copy.motion / pane.copy.search compute
+        // and return text/cursor targets from the pane's own content; they
+        // never write pane, workspace, or persisted state.
+        | Method::PaneSelectionRead(_)
+        | Method::PaneCopyMotion(_)
+        | Method::PaneCopySearch(_)
+        // pane.scroll only moves the ephemeral (unpersisted) viewport
+        // offset within the terminal scrollback, like a focus change.
+        | Method::PaneScroll(_)
         // Presentation / navigation — view-state focus only, no structural change.
         | Method::WorkspaceFocus(_)
         | Method::TabFocus(_)
@@ -153,8 +168,19 @@ pub(crate) fn federated_session_allows(method: &Method) -> bool {
         | Method::ServerReloadConfig(_)
         | Method::ServerReloadAgentManifests(_)
         | Method::NotificationShow(_)
+        // product.announcement.dismiss / release_notes.dismiss persist a
+        // local seen/dismissed marker in server state, same class as
+        // NotificationShow above.
+        | Method::ProductAnnouncementDismiss(_)
+        | Method::ReleaseNotesDismiss(_)
+        // command.invoke runs an arbitrary client-shell-bound command
+        // (up to and including plugin actions with local side effects).
+        | Method::CommandInvoke(_)
         | Method::ClientWindowTitleSet(_)
         | Method::ClientWindowTitleClear(_)
+        // client.shell.surface.set is a client-display signal, same class
+        // as the window-title methods above.
+        | Method::ClientShellSurfaceSet(_)
         | Method::WorkspaceCreate(_)
         | Method::WorkspaceMountRemote(_)
         | Method::WorkspaceRename(_)
@@ -194,6 +220,12 @@ pub(crate) fn federated_session_allows(method: &Method) -> bool {
         | Method::LayoutSetSplitRatio(_)
         | Method::LayoutBalance(_)
         | Method::PaneResize(_)
+        // pane.edit_scrollback spawns a local editor process over the
+        // pane's scrollback, a local host side effect, not remote input.
+        | Method::PaneEditScrollback(_)
+        // pane.link_activate runs a local plugin link handler for the
+        // clicked URL, another local host side effect, not remote input.
+        | Method::PaneLinkActivate(_)
         // pane.input.set writes persisted local pane input state
         // (right-click passthrough), not remote input forwarding.
         | Method::PaneInputSet(_)
