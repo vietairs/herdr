@@ -819,16 +819,6 @@ pub struct AppState {
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
     pub worktree_directory: std::path::PathBuf,
-    /// Set when the headless server should complete first-run onboarding.
-    pub request_complete_onboarding: bool,
-    /// Targets whose dial was still in flight when the user dismissed the
-    /// mount-remote dialog. The dial keeps running server-side, so its
-    /// outcome still arrives; without this, a later dialog submitting the
-    /// same target string would absorb the stale outcome as its own (targets
-    /// are correlated by string alone — the mount events carry no
-    /// per-submission identity). One entry per abandoned dial, so duplicates
-    /// are tracked independently.
-    pub abandoned_remote_mounts: Vec<String>,
     /// Latest endpoint-owned release notes, cached outside render paths.
     pub latest_release_notes: Option<crate::release_notes::ReleaseNotes>,
     pub product_announcement: Option<ProductAnnouncementState>,
@@ -1188,8 +1178,6 @@ impl AppState {
             should_quit: false,
             request_client_config_reload: false,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
-            request_complete_onboarding: false,
-            abandoned_remote_mounts: Vec::new(),
             latest_release_notes: None,
             product_announcement: None,
             view: ViewState {

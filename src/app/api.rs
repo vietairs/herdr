@@ -28,29 +28,6 @@ enum RuntimeExitAction {
 }
 
 impl App {
-    pub(crate) fn dispatch_deferred_api_request(
-        &mut self,
-        id: &'static str,
-        method: crate::api::schema::Method,
-    ) -> Option<String> {
-        // The federated view-only guard for this deferred-worktree path lives at
-        // the deepest choke (`handle_deferred_worktree_api_request`), so it
-        // covers this interactive keyboard caller AND the `api_rx` message path
-        // with one check rather than being duplicated per dispatch entrance.
-        let (respond_to, response_rx) = std::sync::mpsc::channel();
-        if !self.handle_deferred_worktree_api_request(
-            crate::api::schema::Request {
-                id: id.to_string(),
-                method,
-            },
-            respond_to,
-        ) {
-            return None;
-        }
-
-        response_rx.try_recv().ok()
-    }
-
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
             AppEvent::GitStatusRefreshed {
@@ -1162,14 +1139,6 @@ impl App {
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
-
-        // Federated sessions are view-only: reject any method outside the
-        // allowlist before it reaches a mutating handler (default-forbidden).
-        // `federated_mode` is false on every classic construction, so this is
-        // inert until a federated App is live.
-        if self.federated_mode && !crate::api::federated_session_allows(&request.method) {
-            return crate::api::federated_forbidden_response(request.id);
-        }
 
         let response = match request.method {
             Method::ServerStop(_) => {

@@ -663,13 +663,13 @@ pub(crate) fn run_remote(remote: FederatedRemoteLaunch) -> io::Result<()> {
         FederationRoute::Federated => {
             // Mode A (the standalone full-screen federated session started
             // directly from `herdr --remote <host>`, previously rendered
-            // in-process via `run_federated_session` + `App::new_federated`)
-            // was dropped in the v0.9.0 merge: that path called `App::run`
-            // and read `input_rx`, both removed by upstream's runtime/client
-            // split. Rebuilding an in-proc App viewer here is out of scope
-            // for this merge, so the snapshot mount above is discarded and
-            // every federation-requested launch now falls through to the
-            // classic full-screen attach below, same as a failed mount.
+            // in-process) was dropped in the v0.9.0 merge: that path relied on
+            // the in-process App run loop and input receiver, both removed by
+            // upstream's runtime/client split. Rebuilding an in-proc App viewer
+            // here is out of scope for this merge, so the snapshot mount above
+            // is discarded and every federation-requested launch now falls
+            // through to the classic full-screen attach below, same as a failed
+            // mount.
             eprintln!(
                 "herdr: federated workspace mode is not available in this build; \
                  attaching via the classic full-screen view instead."
