@@ -3177,6 +3177,102 @@ fn terminal_attach_disconnect_restores_client_shell_pane_size() {
     rt.shutdown_timeout(Duration::from_millis(100));
 }
 
+// A mounted federation controller holds the single-controller lease and owns
+// its terminals' sizes. A direct attach (and any later resize from that
+// attached client) must not resize behind it: the mount's mirror would be
+// laid out for the wrong width, and nothing restores the size when the
+// direct client detaches.
+#[test]
+fn terminal_attach_does_not_resize_a_terminal_a_mount_owns() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let _runtime_guard = rt.enter();
+    let mut server = test_headless_server();
+    let workspace = crate::workspace::Workspace::test_new("test");
+    let pane_id = workspace.tabs[0].root_pane;
+    let terminal_id = workspace.terminal_id(pane_id).expect("terminal id").clone();
+    let terminal_id_string = terminal_id.to_string();
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    server.app.terminal_runtimes.insert(
+        terminal_id.clone(),
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+    );
+
+    // The mount is driving this terminal at a size distinct from the
+    // runtime's initial geometry.
+    server
+        .app
+        .terminal_runtimes
+        .get(&terminal_id)
+        .expect("runtime")
+        .resize(50, 150, 0, 0);
+    server
+        .app
+        .state
+        .federation_owned_terminal_sizes
+        .insert(terminal_id.clone());
+    let mount_size = server
+        .app
+        .terminal_runtimes
+        .get(&terminal_id)
+        .expect("runtime")
+        .current_size();
+    assert_ne!(mount_size, (24, 80));
+
+    // Guard site 1: the attach path (headless.rs client_attach_terminal, near
+    // line 1985) must not resize the mount-owned runtime.
+    connect_pending_terminal_client(&mut server, 2);
+    assert!(
+        server.handle_server_event(ServerEvent::ClientAttachTerminal {
+            client_id: 2,
+            terminal_id: terminal_id_string,
+            takeover: false,
+        })
+    );
+    assert_eq!(
+        server
+            .app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("runtime")
+            .current_size(),
+        mount_size,
+        "the direct attach must leave the mount's size alone"
+    );
+
+    // Guard site 2: a later resize from the still-attached client
+    // (headless.rs handle_server_event ClientResize path, near line 2319)
+    // must also leave the mount-owned runtime alone.
+    assert!(server.handle_server_event(ServerEvent::ClientResize {
+        client_id: 2,
+        cols: 77,
+        rows: 22,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        pixel_mouse: false,
+    }));
+    assert_eq!(
+        server
+            .app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("runtime")
+            .current_size(),
+        mount_size,
+        "a resize on the attached client must leave the mount's size alone"
+    );
+
+    drop(server);
+    drop(_runtime_guard);
+    rt.shutdown_timeout(Duration::from_millis(100));
+}
+
 #[test]
 fn terminal_observe_allows_multiple_clients_without_attach_ownership() {
     with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
@@ -5486,6 +5582,84 @@ fn clipboard_write_targets_foreground_client_only() {
             .is_err(),
         "background client should not receive clipboard writes"
     );
+}
+
+/// `remote.accept_clipboard_writes = false` is the operator's refusal to let
+/// a federated remote pane's OSC 52 land in the local clipboard. Gate lives
+/// at `HeadlessServer::handle_internal_event_with_forwarding`
+/// (`src/server/headless/notifications.rs:352`), the only place a
+/// `ClipboardWrite` is actually forwarded — the copy in
+/// `App::handle_internal_event_with_pane_updates`
+/// (`src/app/api.rs:113-129`) is dead in production: this match arm returns
+/// before ever calling into `App`, and `App::actions` documents that
+/// host-local effects "never touch AppState" for exactly this reason, so
+/// there is nothing left to observe by calling the `App` copy directly in a
+/// test.
+#[test]
+fn remote_clipboard_write_is_ignored_when_the_operator_refuses_remote_writes() {
+    let mut server = test_headless_server();
+    let (foreground_tx, foreground_control_rx, _foreground_rx) = test_client_writer();
+    server.clients.insert(
+        1,
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(foreground_tx),
+        ),
+    );
+    server.foreground_client_id = Some(1);
+    server.app.state.accept_remote_clipboard_writes = false;
+
+    let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+        content: b"test".to_vec(),
+        origin: Some("remote-host".to_string()),
+    });
+
+    assert!(!changed);
+    assert!(
+        foreground_control_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err(),
+        "a refused remote clipboard write must not reach the operator's clipboard"
+    );
+}
+
+/// The refusal must be narrow: only writes with an `origin` (a federated
+/// remote pane) are gated. A local pane's own OSC 52 must still land even
+/// when the operator has turned off *remote* clipboard writes.
+#[test]
+fn refusing_remote_clipboard_writes_does_not_affect_local_panes() {
+    let mut server = test_headless_server();
+    let (foreground_tx, foreground_control_rx, _foreground_rx) = test_client_writer();
+    server.clients.insert(
+        1,
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(foreground_tx),
+        ),
+    );
+    server.foreground_client_id = Some(1);
+    server.app.state.accept_remote_clipboard_writes = false;
+
+    let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+        content: b"test".to_vec(),
+        origin: None,
+    });
+
+    assert!(!changed);
+    match read_server_message(
+        foreground_control_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("a local clipboard write must still reach the operator"),
+    ) {
+        ServerMessage::Clipboard { data } => assert_eq!(data, "dGVzdA=="),
+        other => panic!("expected clipboard message, got {other:?}"),
+    }
 }
 
 #[test]
