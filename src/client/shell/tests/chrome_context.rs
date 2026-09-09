@@ -661,3 +661,127 @@ fn auto_resize_toggle_persists_the_inverted_setting_and_reloads_the_endpoint() {
         "toggle should ask the endpoint to reload so the new value takes effect"
     );
 }
+
+/// Rows are activated by index, so the exact item list of every menu shape is
+/// the contract, not an implementation detail. This pins all four pane-menu
+/// label combinations at once: a row inserted in the middle, renamed, or
+/// dropped shifts an index and fires the WRONG action, which no
+/// single-action test would catch.
+#[test]
+fn pane_menu_rows_are_pinned_for_every_label_combination() {
+    let labels = |has_manual_label: bool, other_pane_focused: bool, auto_resize: bool| {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let mut snapshot = snapshot();
+        snapshot.auto_resize_splits = auto_resize;
+        if has_manual_label {
+            snapshot.panes[0].label = Some("build".into());
+        }
+        snapshot.focused_pane_id = other_pane_focused.then(|| "pane_other".into());
+        state.set_snapshot(Box::new(snapshot));
+        state.open_pane_context_menu("pane_1".into(), 0, 0);
+        pane_menu_labels(&state)
+    };
+
+    let tail = [
+        "Split right",
+        "Split down",
+        "Zoom",
+        "Balance splits",
+        "Auto-resize splits: Off",
+        "Send right-clicks to pane",
+        "Close pane",
+    ];
+
+    assert_eq!(
+        labels(false, false, false),
+        ["Rename pane"]
+            .iter()
+            .chain(tail.iter())
+            .copied()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        labels(true, false, false),
+        ["Rename pane", "Clear pane name"]
+            .iter()
+            .chain(tail.iter())
+            .copied()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        labels(false, true, false),
+        ["Rename pane", "Swap with focused pane"]
+            .iter()
+            .chain(tail.iter())
+            .copied()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        labels(true, true, false),
+        ["Rename pane", "Clear pane name", "Swap with focused pane"]
+            .iter()
+            .chain(tail.iter())
+            .copied()
+            .collect::<Vec<_>>()
+    );
+    // Auto-resize only ever swaps its own label in place.
+    assert_eq!(
+        labels(false, false, true),
+        [
+            "Rename pane",
+            "Split right",
+            "Split down",
+            "Zoom",
+            "Balance splits",
+            "Auto-resize splits: On",
+            "Send right-clicks to pane",
+            "Close pane",
+        ]
+    );
+}
+
+/// Same contract for the non-pane menu shapes, including the federated
+/// variants that append close-on-host.
+#[test]
+fn workspace_and_tab_menu_rows_are_pinned_for_every_shape() {
+    let workspace = |mutate: &dyn Fn(&mut ClientShellWorkspace)| {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let mut snapshot = snapshot();
+        mutate(&mut snapshot.workspaces[0]);
+        state.set_snapshot(Box::new(snapshot));
+        state.open_workspace_context_menu("ws_1".into(), 0, 0);
+        workspace_menu_labels(&state)
+    };
+
+    // Non-git workspace: no branch, no worktree.
+    assert_eq!(workspace(&|ws| ws.branch = None), ["Rename", "Close"]);
+    assert_eq!(
+        workspace(&|ws| {
+            ws.branch = None;
+            ws.federation_origin = Some("dev@10.0.0.5".into());
+        }),
+        ["Rename", "Close", "Close on host"]
+    );
+    // Git workspace with no linked worktrees.
+    assert_eq!(
+        workspace(&|_| {}),
+        ["Rename", "Close", "New worktree", "Open worktree..."]
+    );
+    // Linked worktree checkout.
+    assert_eq!(
+        workspace(&|ws| ws.worktree = Some(ClientShellWorktree {
+            key: "repo".into(),
+            label: "repo".into(),
+            is_linked_worktree: true,
+        })),
+        ["Rename", "Close", "Delete worktree checkout..."]
+    );
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.open_tab_context_menu("tab_1".into(), 0, 0);
+    assert_eq!(
+        workspace_menu_labels(&state),
+        ["New tab", "Rename", "Close"]
+    );
+}
