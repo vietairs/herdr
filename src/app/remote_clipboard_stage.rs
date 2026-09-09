@@ -2790,4 +2790,173 @@ mod tests {
             .remote_clipboard_image_reads_in_flight
             .contains(&other_pane));
     }
+
+    // -----------------------------------------------------------------------
+    // Bracketed-paste image-path bridge
+    //
+    // Restored from the fork's deleted `src/app/input/mod.rs`
+    // (`mod remote_image_paste_tests`) and retargeted at
+    // `bracketed_paste_image_decision` / `intercept_remote_image_paste_events`
+    // rather than the deleted `App::handle_paste`.
+    // -----------------------------------------------------------------------
+
+    /// A file under the OS temp dir with a recognized image extension, the
+    /// shape a terminal's "paste image as path" convention (iTerm2,
+    /// Terminal.app, cmux) produces. Cleaned up on drop so a failing
+    /// assertion still leaves nothing behind.
+    struct TempDropFile {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDropFile {
+        fn new(bytes: &[u8]) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "herdr-bracketed-paste-test-{}-{}.png",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDropFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// The headline gap: nothing exercised `bracketed_paste_image_decision`
+    /// or the `Capture` arm of `dispatch_bracketed_paste_image` end to end.
+    /// Proves a non-empty bracketed paste carrying a temp-dir image path on a
+    /// staging-capable mount is captured, read off-loop through
+    /// `read_verified_image_drop_file`, and staged — not forwarded as a local
+    /// path the remote host cannot resolve.
+    #[tokio::test]
+    async fn bracketed_paste_of_a_temp_image_path_stages_on_a_remote_pane() {
+        let mut app = test_app();
+        let (pane_id, mut out_rx) = attach_mount(&mut app, true);
+        let file = TempDropFile::new(b"image-bytes");
+        let text = file.path.display().to_string();
+
+        assert!(
+            matches!(
+                bracketed_paste_image_decision(&app.state, 0, &text),
+                BracketedPasteImageDecision::Capture { .. }
+            ),
+            "a temp-dir image path on a staging-capable mount must be captured"
+        );
+
+        let kept = app.intercept_remote_image_paste_events(
+            0,
+            pane_id,
+            vec![crate::protocol::ClientPaneInputEvent::Paste(text)],
+        );
+        assert!(
+            kept.is_empty(),
+            "a staged path must not reach the remote PTY as text"
+        );
+
+        // The file read runs off-loop, same as the ctrl+v clipboard read; the
+        // paste is answered when its capture event comes back.
+        let ev = tokio::time::timeout(Duration::from_secs(10), app.event_rx.recv())
+            .await
+            .expect("the off-loop file read must answer")
+            .expect("the capture sender is still alive");
+        app.handle_internal_event(ev);
+
+        assert_eq!(
+            app.pending_remote_clipboard_stages.len(),
+            1,
+            "the path must have been staged, not forwarded as text"
+        );
+        assert_eq!(stage_requests(&drain(&mut out_rx)), vec!["image.png"]);
+    }
+
+    /// A local pane is never in scope for the path-staging bridge: the shape
+    /// match never runs because `mount_file_staging_support` returns `None`
+    /// for a pane with no live mount at all.
+    #[tokio::test]
+    async fn bracketed_paste_of_a_temp_image_path_on_a_local_pane_is_forwarded_unchanged() {
+        let mut app = test_app();
+        let (pane_id, _rx) = attach_runtime(&mut app, 0);
+        let file = TempDropFile::new(b"image-bytes");
+        let text = file.path.display().to_string();
+
+        assert!(matches!(
+            bracketed_paste_image_decision(&app.state, 0, &text),
+            BracketedPasteImageDecision::FallThrough
+        ));
+
+        let events = vec![crate::protocol::ClientPaneInputEvent::Paste(text)];
+        let kept = app.intercept_remote_image_paste_events(0, pane_id, events.clone());
+        assert_eq!(
+            kept, events,
+            "a local pane must receive the pasted path as ordinary text"
+        );
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+    }
+
+    /// Non-path text on a staging-capable mount must not be swallowed by the
+    /// shape check — proven at both the decision level and the intercept
+    /// level, since the decision alone does not prove the intercept still
+    /// calls it before returning `Forward`.
+    #[tokio::test]
+    async fn bracketed_paste_of_ordinary_text_on_a_remote_pane_is_forwarded_unchanged() {
+        let mut app = test_app();
+        let (pane_id, mut out_rx) = attach_mount(&mut app, true);
+        let text = "not a path, just some pasted text".to_string();
+
+        assert!(matches!(
+            bracketed_paste_image_decision(&app.state, 0, &text),
+            BracketedPasteImageDecision::FallThrough
+        ));
+
+        let events = vec![crate::protocol::ClientPaneInputEvent::Paste(text)];
+        let kept = app.intercept_remote_image_paste_events(0, pane_id, events.clone());
+        assert_eq!(kept, events);
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+        assert!(stage_requests(&drain(&mut out_rx)).is_empty());
+    }
+
+    /// The security-relevant case: a real, existing, correctly-suffixed image
+    /// file outside a recognized drop location (e.g. under `$HOME`) must fall
+    /// through as ordinary text. This is the gate that stops herdr reading
+    /// and shipping arbitrary local files to a remote host whenever the user
+    /// pastes an absolute path that merely looks like a temp-dir drop.
+    #[tokio::test]
+    async fn bracketed_paste_of_a_path_outside_the_temp_dir_is_forwarded_unchanged() {
+        let mut app = test_app();
+        let (pane_id, mut out_rx) = attach_mount(&mut app, true);
+        let home = std::env::var("HOME").expect("HOME must be set to run this test");
+        let path = std::path::PathBuf::from(home).join(format!(
+            "herdr-bracketed-paste-outside-test-{}-not-a-drop.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"bytes").unwrap();
+        let text = path.display().to_string();
+
+        assert!(
+            crate::image_path::recognized_image_drop_location(&path).is_none(),
+            "fixture must actually sit outside the temp dir root to exercise the gate"
+        );
+        assert!(matches!(
+            bracketed_paste_image_decision(&app.state, 0, &text),
+            BracketedPasteImageDecision::FallThrough
+        ));
+
+        let events = vec![crate::protocol::ClientPaneInputEvent::Paste(text)];
+        let kept = app.intercept_remote_image_paste_events(0, pane_id, events.clone());
+        assert_eq!(
+            kept, events,
+            "a path outside a recognized drop location must be forwarded as text, not staged"
+        );
+        assert!(app.pending_remote_clipboard_stages.is_empty());
+        assert!(stage_requests(&drain(&mut out_rx)).is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

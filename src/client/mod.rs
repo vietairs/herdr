@@ -1732,12 +1732,15 @@ async fn run_client_loop(
                             }
                         }
                     }
-                    ServerMessage::Clipboard { data } => {
+                    ServerMessage::Clipboard { data, origin } => {
                         if forward_clipboard(&data) {
                             let (width, height) = state.reported_size;
                             let frame = state.shell.as_mut().and_then(|shell| {
                                 shell
-                                    .show_copy_feedback(std::time::Instant::now())
+                                    .show_copy_feedback(
+                                        std::time::Instant::now(),
+                                        origin.as_deref(),
+                                    )
                                     .then(|| shell.compose(width, height))
                                     .flatten()
                             });

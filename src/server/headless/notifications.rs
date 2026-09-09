@@ -361,9 +361,15 @@ impl HeadlessServer {
                 // the foreground client instead of broadcasting to every attached client.
                 // The client itself shows copy feedback on receipt of
                 // `ServerMessage::Clipboard` (see `client::mod` / `ClientShellState::show_copy_feedback`),
-                // so the server no longer tracks copy-feedback presentation state.
+                // so the server no longer tracks copy-feedback presentation state. `origin`
+                // still rides along so the client can name the federated remote host in
+                // that feedback; the refusal policy above has already run, so this is
+                // presentation only.
                 let data = base64::engine::general_purpose::STANDARD.encode(content.as_slice());
-                self.send_to_foreground_client(ServerMessage::Clipboard { data });
+                self.send_to_foreground_client(ServerMessage::Clipboard {
+                    data,
+                    origin: origin.clone(),
+                });
                 false
             }
             AppEvent::StateChanged { pane_id, agent, .. } => {

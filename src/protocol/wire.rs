@@ -1377,6 +1377,12 @@ pub enum ServerMessage {
     Clipboard {
         /// Base64-encoded clipboard data.
         data: String,
+        /// The federated remote host that wrote this clipboard content, if
+        /// any. `None` for a write from a local pane. Purely presentational —
+        /// the client uses it only to attribute copy feedback, never to
+        /// re-decide whether the write should have happened (that policy is
+        /// already enforced server-side before this message is ever sent).
+        origin: Option<String>,
     },
 
     /// Set the foreground client's outer terminal window title.
@@ -2754,13 +2760,16 @@ mod tests {
 
     #[test]
     fn server_clipboard_roundtrip() {
-        let msg = ServerMessage::Clipboard {
-            data: "dGVzdA==".to_owned(), // base64 "test"
-        };
-        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-        let (decoded, _): (ServerMessage, _) =
-            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
-        assert_eq!(msg, decoded);
+        for origin in [None, Some("hvnguyen@10.0.0.5".to_owned())] {
+            let msg = ServerMessage::Clipboard {
+                data: "dGVzdA==".to_owned(), // base64 "test"
+                origin,
+            };
+            let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+            let (decoded, _): (ServerMessage, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(msg, decoded);
+        }
     }
 
     #[test]

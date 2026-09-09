@@ -143,7 +143,7 @@ fn client_mouse_selection_highlights_and_copies_through_endpoint_extraction() {
 fn clipboard_feedback_is_client_local_and_respects_config() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     let now = std::time::Instant::now();
-    assert!(state.show_copy_feedback(now));
+    assert!(state.show_copy_feedback(now, None));
     assert_eq!(
         state
             .copy_feedback
@@ -159,9 +159,26 @@ fn clipboard_feedback_is_client_local_and_respects_config() {
     state.config.clipboard_toast_enabled = false;
     state.copy_feedback = None;
     state.copy_feedback_deadline = None;
-    assert!(!state.show_copy_feedback(now));
+    assert!(!state.show_copy_feedback(now, None));
     assert!(state.copy_feedback.is_none());
     assert!(state.copy_feedback_deadline.is_none());
+}
+
+/// A federated remote pane's clipboard write names the host that wrote it —
+/// the fork feature restored once `ServerMessage::Clipboard` carried an
+/// `origin` field again.
+#[test]
+fn clipboard_feedback_names_the_remote_origin() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let now = std::time::Instant::now();
+    assert!(state.show_copy_feedback(now, Some("hvnguyen@10.0.0.5")));
+    assert_eq!(
+        state
+            .copy_feedback
+            .as_ref()
+            .map(|feedback| feedback.message.as_str()),
+        Some("copied to clipboard from hvnguyen@10.0.0.5")
+    );
 }
 
 #[test]

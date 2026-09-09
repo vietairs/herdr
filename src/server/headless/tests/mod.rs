@@ -5573,7 +5573,7 @@ fn clipboard_write_targets_foreground_client_only() {
             .recv_timeout(Duration::from_millis(100))
             .expect("foreground clipboard message"),
     ) {
-        ServerMessage::Clipboard { data } => assert_eq!(data, "dGVzdA=="),
+        ServerMessage::Clipboard { data, .. } => assert_eq!(data, "dGVzdA=="),
         other => panic!("expected clipboard message, got {other:?}"),
     }
     assert!(
@@ -5657,7 +5657,7 @@ fn refusing_remote_clipboard_writes_does_not_affect_local_panes() {
             .recv_timeout(Duration::from_millis(100))
             .expect("a local clipboard write must still reach the operator"),
     ) {
-        ServerMessage::Clipboard { data } => assert_eq!(data, "dGVzdA=="),
+        ServerMessage::Clipboard { data, .. } => assert_eq!(data, "dGVzdA=="),
         other => panic!("expected clipboard message, got {other:?}"),
     }
 }

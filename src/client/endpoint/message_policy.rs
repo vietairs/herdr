@@ -64,7 +64,8 @@ mod tests {
             false,
             false,
             &ServerMessage::Clipboard {
-                data: "text".into()
+                data: "text".into(),
+                origin: None,
             }
         ));
         assert!(!accepts_endpoint_message(

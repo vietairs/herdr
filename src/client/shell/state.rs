@@ -1737,13 +1737,23 @@ impl ClientShellState {
         }
     }
 
-    pub(crate) fn show_copy_feedback(&mut self, now: std::time::Instant) -> bool {
+    /// `origin` names the federated remote host whose pane wrote this
+    /// clipboard content, if any. `None` covers both a local pane's own
+    /// write and a local mouse-selection copy, which are indistinguishable
+    /// to the user and get the same unattributed message.
+    pub(crate) fn show_copy_feedback(
+        &mut self,
+        now: std::time::Instant,
+        origin: Option<&str>,
+    ) -> bool {
         if !self.config.clipboard_toast_enabled {
             return false;
         }
-        self.copy_feedback = Some(crate::app::state::CopyFeedback {
-            message: "copied to clipboard".to_owned(),
-        });
+        let message = match origin {
+            Some(host) => format!("copied to clipboard from {host}"),
+            None => "copied to clipboard".to_owned(),
+        };
+        self.copy_feedback = Some(crate::app::state::CopyFeedback { message });
         self.copy_feedback_deadline = Some(now + std::time::Duration::from_secs(2));
         true
     }
