@@ -240,6 +240,7 @@ pub(super) fn snapshot(
         latest_release_notes_available: app.state.latest_release_notes_available,
         integration_updates_available: app.state.integration_updates_available(),
         worktree_directory: app.state.worktree_directory.to_string_lossy().into_owned(),
+        auto_resize_splits: app.state.auto_resize_splits,
         release_notes,
         focused_workspace_id,
         focused_tab_id,

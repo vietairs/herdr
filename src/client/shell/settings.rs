@@ -159,7 +159,7 @@ impl ClientShellState {
         self.config.palette = settings.original_palette;
     }
 
-    fn save_settings_edit(
+    pub(super) fn save_settings_edit(
         &mut self,
         edit: crate::config::ConfigEdit<'_>,
         outcome: &mut ClientShellInput,

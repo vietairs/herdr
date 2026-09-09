@@ -81,6 +81,7 @@ impl ClientContextMenuOverlay {
                 source_pane_id,
                 has_manual_label,
                 right_click_passthrough,
+                auto_resize_splits,
                 ..
             } => {
                 let mut items = vec![item("Rename pane", Action::RenamePane)];
@@ -95,6 +96,14 @@ impl ClientContextMenuOverlay {
                     item("Split down", Action::SplitDown),
                     item("Zoom", Action::Zoom),
                     item("Balance splits", Action::BalanceSplits),
+                    item(
+                        if *auto_resize_splits {
+                            "Auto-resize splits: On"
+                        } else {
+                            "Auto-resize splits: Off"
+                        },
+                        Action::ToggleAutoResizeSplits,
+                    ),
                     item(
                         if *right_click_passthrough {
                             "Use Herdr right-click menu"
@@ -199,6 +208,7 @@ impl ClientShellState {
                 source_pane_id,
                 has_manual_label: pane.label.is_some(),
                 right_click_passthrough: pane.right_click_passthrough,
+                auto_resize_splits: snapshot.auto_resize_splits,
             },
             x,
             y,
@@ -244,12 +254,14 @@ impl ClientShellState {
                 workspace_id,
                 source_pane_id,
                 right_click_passthrough,
+                auto_resize_splits,
                 ..
             } => self.activate_pane_context_action(
                 pane_id,
                 workspace_id,
                 source_pane_id,
                 right_click_passthrough,
+                auto_resize_splits,
                 action,
                 outcome,
             ),
@@ -423,6 +435,7 @@ impl ClientShellState {
         workspace_id: String,
         source_pane_id: Option<String>,
         right_click_passthrough: bool,
+        auto_resize_splits: bool,
         action: ClientContextMenuAction,
         outcome: &mut ClientShellInput,
     ) {
@@ -506,6 +519,16 @@ impl ClientShellState {
                 }),
                 outcome,
             ),
+            // Unlike the other pane rows this is not an API call: auto-resize
+            // is driven by `ui.auto_resize_splits`, so the toggle persists the
+            // config edit and asks the endpoint to reload, which is also what
+            // makes it survive a restart.
+            ClientContextMenuAction::ToggleAutoResizeSplits => {
+                self.save_settings_edit(
+                    crate::config::ConfigEdit::AutoResizeSplits(!auto_resize_splits),
+                    outcome,
+                );
+            }
             ClientContextMenuAction::ToggleRightClickPassthrough => self.push_endpoint_method(
                 Method::PaneInputSet(PaneInputSetParams {
                     pane_id,

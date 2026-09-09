@@ -580,6 +580,7 @@ pub(super) enum ClientContextMenuAction {
     SplitDown,
     Zoom,
     BalanceSplits,
+    ToggleAutoResizeSplits,
     ToggleRightClickPassthrough,
     ClosePane,
     /// Ask the SERVING host to close its own workspace/tab, rather than just
@@ -613,6 +614,10 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+        /// The endpoint's live auto-resize setting, snapshotted when the menu
+        /// opens so the row's On/Off label matches server behaviour rather
+        /// than this client's own config file.
+        auto_resize_splits: bool,
     },
 }
 

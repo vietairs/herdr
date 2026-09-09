@@ -582,3 +582,82 @@ fn balance_splits_row_rebalances_the_clicked_panes_tab() {
         request.method
     );
 }
+
+fn pane_menu_labels(state: &ClientShellState) -> Vec<&'static str> {
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => {
+            menu.items().iter().map(|item| item.label).collect()
+        }
+        _ => panic!("pane context menu overlay"),
+    }
+}
+
+/// Auto-resize is endpoint behaviour (it drives pane.split/pane.close), so the
+/// row must label itself from the endpoint's snapshot. A client reading its own
+/// config file would mislabel the toggle whenever the two disagree, which is
+/// exactly the case for a remote endpoint.
+#[test]
+fn auto_resize_row_labels_itself_from_the_endpoint_snapshot() {
+    let labels_for = |server_enabled: bool| {
+        // Client config is left at its default (auto-resize off) on purpose:
+        // only the snapshot should move the label.
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let mut snapshot = snapshot();
+        snapshot.auto_resize_splits = server_enabled;
+        state.set_snapshot(Box::new(snapshot));
+        state.open_pane_context_menu("pane_1".into(), 0, 0);
+        pane_menu_labels(&state)
+    };
+
+    assert!(labels_for(true).contains(&"Auto-resize splits: On"));
+    assert!(labels_for(false).contains(&"Auto-resize splits: Off"));
+}
+
+/// The toggle has no API method behind it: it persists `ui.auto_resize_splits`
+/// and asks the endpoint to reload, which is what makes the setting survive a
+/// restart. Both halves are asserted here because either alone is a silent
+/// half-feature.
+#[test]
+fn auto_resize_toggle_persists_the_inverted_setting_and_reloads_the_endpoint() {
+    let _guard = crate::config::test_config_env_lock().lock().unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "herdr-auto-resize-toggle-{}.toml",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, "[ui]\nauto_resize_splits = true\n").unwrap();
+    std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut snapshot = snapshot();
+    snapshot.auto_resize_splits = true;
+    state.set_snapshot(Box::new(snapshot));
+    state.open_pane_context_menu("pane_1".into(), 0, 0);
+    let index = pane_menu_labels(&state)
+        .iter()
+        .position(|label| *label == "Auto-resize splits: On")
+        .expect("auto-resize row");
+
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut outcome);
+
+    let written = std::fs::read_to_string(&path).unwrap();
+    std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+    let _ = std::fs::remove_file(&path);
+
+    assert!(
+        written.contains("auto_resize_splits = false"),
+        "toggle should persist the inverted value, got:\n{written}"
+    );
+    assert!(
+        outcome.actions.iter().any(|action| matches!(
+            action,
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(
+                    request.method,
+                    crate::api::schema::Method::ServerReloadConfig(_)
+                )
+        )),
+        "toggle should ask the endpoint to reload so the new value takes effect"
+    );
+}

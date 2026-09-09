@@ -925,6 +925,16 @@ pub struct ClientShellSnapshot {
     pub integration_updates_available: bool,
     /// Endpoint-owned base directory used for new linked worktree checkouts.
     pub worktree_directory: String,
+    /// Whether the endpoint rebalances sibling splits when a pane is added or
+    /// removed. A runtime behaviour owned by the server (it drives
+    /// `pane.split`/`pane.close`), surfaced here so a client can label its
+    /// toggle with the live value instead of guessing from its own config.
+    ///
+    /// `default` (not `skip_serializing_if`) so an older endpoint's snapshot
+    /// still decodes as "off" -- the field is always encoded, which the
+    /// positional codecs require.
+    #[serde(default)]
+    pub auto_resize_splits: bool,
     /// Cached endpoint-owned notes used by the client-rendered overlay.
     pub release_notes: Option<ClientShellReleaseNotes>,
     pub focused_workspace_id: Option<String>,
@@ -2644,6 +2654,7 @@ mod tests {
             latest_release_notes_available: true,
             integration_updates_available: true,
             worktree_directory: "/tmp/herdr-worktrees".into(),
+            auto_resize_splits: false,
             release_notes: Some(ClientShellReleaseNotes {
                 version: "0.8.3".into(),
                 body: "### New\n- Update ready".into(),

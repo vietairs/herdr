@@ -171,6 +171,7 @@ mod tests {
             latest_release_notes_available: false,
             integration_updates_available: false,
             worktree_directory: String::new(),
+            auto_resize_splits: false,
             release_notes: None,
             focused_workspace_id: None,
             focused_tab_id: None,
