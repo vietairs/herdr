@@ -185,6 +185,8 @@ mod tests {
             panes: Vec::new(),
             agents: Vec::new(),
             commands: Vec::new(),
+            remote_mount_attempts: Vec::new(),
+            recent_remote_mount_targets: Vec::new(),
         }
     }
 

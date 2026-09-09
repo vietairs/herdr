@@ -13,6 +13,7 @@ pub(crate) struct OverlayRender {
     pub(crate) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
     pub(crate) worktree_search: Rect,
     pub(crate) worktree_rows: Vec<(Rect, usize)>,
+    pub(crate) remote_mount_recents: Vec<(Rect, usize)>,
     pub(crate) help_popup: Rect,
     pub(crate) help_scrollbar: Rect,
     pub(crate) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -75,6 +76,7 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::WorktreeRemove(v) => {
             worktree_overlays::render_worktree_remove_overlay(b, v, p)
         }
+        ClientShellOverlay::MountRemote(v) => render_remote_mount_overlay(b, v, s, p),
         ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_) => None,
     }
 }
@@ -663,6 +665,229 @@ fn render_rename_overlay(
         navigator_rows: Vec::new(),
         worktree_search: Rect::default(),
         worktree_rows: Vec::new(),
+        cursor: Some(crate::protocol::CursorState {
+            x: (input.x + 1 + display_width(&v.input)).min(input.right() - 1),
+            y: input.y,
+            visible: true,
+            shape: 0,
+        }),
+        ..OverlayRender::default()
+    })
+}
+
+const REMOTE_MOUNT_POPUP_WIDTH: u16 = 68;
+const REMOTE_MOUNT_BASE_HEIGHT: u16 = 11;
+
+/// Recents rows are capped at the server's own recents cap
+/// (`AppState::recent_remote_mount_targets`, `src/app/state.rs`), so the
+/// dialog never grows past this regardless of how many targets are stored --
+/// raising the server cap raises this row budget with it instead of leaving
+/// navigable-but-invisible rows.
+fn remote_mount_recents_rows(recents_count: usize) -> usize {
+    recents_count.min(crate::app::state::RECENT_REMOTE_MOUNT_TARGETS_CAP)
+}
+
+fn render_remote_mount_overlay(
+    b: &mut Buffer,
+    v: &ClientRemoteMountOverlay,
+    s: &ClientShellSnapshot,
+    p: &Palette,
+) -> Option<OverlayRender> {
+    let recents_count = s.recent_remote_mount_targets.len();
+    let recents_rows = remote_mount_recents_rows(recents_count);
+    // Grows by one heading row plus one row per recent target -- zero extra
+    // when there are no recents, so the dialog stays compact until a first
+    // successful mount adds history.
+    let requested_extra = if recents_rows > 0 {
+        1 + recents_rows as u16
+    } else {
+        0
+    };
+    let q = popup(
+        b.area,
+        REMOTE_MOUNT_POPUP_WIDTH,
+        REMOTE_MOUNT_BASE_HEIGHT + requested_extra,
+    )?;
+    let i = panel(b, q, p.accent, p.panel_bg)?;
+    if i.height < 8 || i.width < 20 {
+        return Some(OverlayRender::default());
+    }
+
+    put_text(
+        b,
+        i.x,
+        i.y,
+        i.width,
+        "mount remote workspace",
+        Style::default()
+            .fg(p.text)
+            .bg(p.panel_bg)
+            .add_modifier(Modifier::BOLD),
+    );
+    put_text(
+        b,
+        i.x,
+        i.y + 1,
+        i.width,
+        " target",
+        Style::default().fg(p.overlay0).bg(p.panel_bg),
+    );
+    let input = Rect::new(i.x, i.y + 2, i.width, 1);
+    b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
+    put_text(
+        b,
+        input.x,
+        input.y,
+        input.width.saturating_sub(1),
+        &format!(" {}", v.input),
+        Style::default().fg(p.text).bg(p.surface0),
+    );
+    put_text(
+        b,
+        i.x,
+        i.y + 3,
+        i.width,
+        " user@host, space-separated for several",
+        Style::default().fg(p.subtext0).bg(p.panel_bg),
+    );
+
+    // `status_y`/`button_offset` are derived from the actually-clamped inner
+    // rect `i`, not the height this dialog *asked* `popup()` for -- a short
+    // terminal shrinks `i` below that request, and the recents list must
+    // shrink to match rather than paint over the status line or buttons.
+    let list_top = (i.y + 4).min(i.bottom());
+    let status_y = i.bottom().saturating_sub(3);
+    let button_offset = i.height.saturating_sub(1);
+
+    let mut remote_mount_recents = Vec::new();
+    if recents_rows > 0 && status_y > list_top {
+        let list_rect = Rect::new(i.x, list_top, i.width, status_y - list_top);
+        put_text(
+            b,
+            list_rect.x,
+            list_rect.y,
+            list_rect.width,
+            " recent",
+            Style::default().fg(p.overlay0).bg(p.panel_bg),
+        );
+        // Row budget comes from `list_rect` (already clamped above), not
+        // from `recents_rows` -- otherwise a recents row is painted onto,
+        // and steals the click from, the button row below it.
+        let visible_rows = (list_rect.height.saturating_sub(1) as usize).min(recents_rows);
+        for (idx, target) in s
+            .recent_remote_mount_targets
+            .iter()
+            .take(visible_rows)
+            .enumerate()
+        {
+            let row_rect = Rect::new(
+                list_rect.x,
+                list_rect.y + 1 + idx as u16,
+                list_rect.width,
+                1,
+            );
+            let highlighted = v.recents_highlighted == Some(idx);
+            let style = if highlighted {
+                Style::default().fg(contrast(p)).bg(p.accent)
+            } else {
+                Style::default().fg(p.subtext0).bg(p.panel_bg)
+            };
+            b.set_style(row_rect, style);
+            put_text(
+                b,
+                row_rect.x,
+                row_rect.y,
+                row_rect.width,
+                &format!(" {target}"),
+                style,
+            );
+            remote_mount_recents.push((row_rect, idx));
+        }
+    }
+
+    // A failed target's error must stay visible even while sibling targets
+    // are still dialling (a 2+ target submission) -- rendered whenever it is
+    // set, never behind an `else if` that would let "still dialling" shadow
+    // it away until the last target resolves.
+    if status_y < i.bottom().saturating_sub(1) {
+        if let Some(error) = v.error.as_deref() {
+            put_text(
+                b,
+                i.x,
+                status_y,
+                i.width,
+                &format!(" {error}"),
+                Style::default().fg(p.red).bg(p.panel_bg),
+            );
+        } else {
+            let failed: Vec<String> = s
+                .remote_mount_attempts
+                .iter()
+                .filter_map(|attempt| {
+                    attempt
+                        .error
+                        .as_ref()
+                        .map(|reason| format!("{}: {reason}", attempt.target))
+                })
+                .collect();
+            if !failed.is_empty() {
+                put_text(
+                    b,
+                    i.x,
+                    status_y,
+                    i.width,
+                    &format!(" {}", failed.join("; ")),
+                    Style::default().fg(p.red).bg(p.panel_bg),
+                );
+            } else if s
+                .remote_mount_attempts
+                .iter()
+                .any(|attempt| !attempt.mounted && attempt.error.is_none())
+            {
+                put_text(
+                    b,
+                    i.x,
+                    status_y,
+                    i.width,
+                    " mounting…",
+                    Style::default().fg(p.overlay0).bg(p.panel_bg),
+                );
+            }
+        }
+    }
+
+    let buttons = row(i, &[12, 12], 2, button_offset);
+    let [primary, cancel] = buttons.as_slice() else {
+        return None;
+    };
+    button(
+        b,
+        *primary,
+        " ↵ mount ",
+        Style::default()
+            .fg(contrast(p))
+            .bg(p.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+    button(
+        b,
+        *cancel,
+        " esc cancel ",
+        Style::default()
+            .fg(p.text)
+            .bg(p.surface0)
+            .add_modifier(Modifier::BOLD),
+    );
+    Some(OverlayRender {
+        primary: *primary,
+        clear: Rect::default(),
+        cancel: *cancel,
+        navigator_popup: Rect::default(),
+        navigator_search: Rect::default(),
+        navigator_rows: Vec::new(),
+        worktree_search: Rect::default(),
+        worktree_rows: Vec::new(),
+        remote_mount_recents,
         cursor: Some(crate::protocol::CursorState {
             x: (input.x + 1 + display_width(&v.input)).min(input.right() - 1),
             y: input.y,

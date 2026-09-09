@@ -229,6 +229,29 @@ pub(super) fn snapshot(
                 preview: notes.preview,
             });
 
+    let remote_mount_attempts = app
+        .state
+        .remote_mount_attempts
+        .iter()
+        .map(|attempt| {
+            let (mounted, mounted_workspace_id, error) = match &attempt.outcome {
+                app::state::RemoteMountOutcome::Dialling => (false, None, None),
+                app::state::RemoteMountOutcome::Mounted { workspace_id } => {
+                    (true, workspace_id.clone(), None)
+                }
+                app::state::RemoteMountOutcome::Failed { reason } => {
+                    (false, None, Some(reason.clone()))
+                }
+            };
+            protocol::ClientShellRemoteMountAttempt {
+                target: attempt.target.clone(),
+                mounted,
+                mounted_workspace_id,
+                error,
+            }
+        })
+        .collect();
+
     protocol::ClientShellSnapshot {
         boot_id: boot_id.to_owned(),
         revision,
@@ -254,6 +277,8 @@ pub(super) fn snapshot(
         panes,
         agents,
         commands: app.client_shell_command_manifest(),
+        remote_mount_attempts,
+        recent_remote_mount_targets: app.state.recent_remote_mount_targets.clone(),
     }
 }
 
@@ -590,6 +615,67 @@ mod tests {
                 notes.preview
             )),
             Some(("0.8.3", "### Changed\n- Client shell", true))
+        );
+    }
+
+    #[test]
+    fn snapshot_carries_remote_mount_attempts_and_recent_targets() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.remote_mount_attempts = vec![
+            crate::app::state::RemoteMountAttempt {
+                target: "host-a".into(),
+                outcome: crate::app::state::RemoteMountOutcome::Dialling,
+            },
+            crate::app::state::RemoteMountAttempt {
+                target: "host-b".into(),
+                outcome: crate::app::state::RemoteMountOutcome::Mounted {
+                    workspace_id: Some("w2".into()),
+                },
+            },
+            crate::app::state::RemoteMountAttempt {
+                target: "host-c".into(),
+                outcome: crate::app::state::RemoteMountOutcome::Failed {
+                    reason: "connection refused".into(),
+                },
+            },
+        ];
+        app.state.recent_remote_mount_targets = vec!["host-b".into(), "host-a".into()];
+
+        let snapshot = snapshot(&app, "boot", 1, None, None);
+
+        assert_eq!(
+            snapshot.remote_mount_attempts,
+            vec![
+                crate::protocol::ClientShellRemoteMountAttempt {
+                    target: "host-a".into(),
+                    mounted: false,
+                    mounted_workspace_id: None,
+                    error: None,
+                },
+                crate::protocol::ClientShellRemoteMountAttempt {
+                    target: "host-b".into(),
+                    mounted: true,
+                    mounted_workspace_id: Some("w2".into()),
+                    error: None,
+                },
+                crate::protocol::ClientShellRemoteMountAttempt {
+                    target: "host-c".into(),
+                    mounted: false,
+                    mounted_workspace_id: None,
+                    error: Some("connection refused".into()),
+                },
+            ]
+        );
+        assert_eq!(
+            snapshot.recent_remote_mount_targets,
+            vec!["host-b".to_string(), "host-a".to_string()]
         );
     }
 

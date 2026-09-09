@@ -179,6 +179,11 @@ pub(super) struct ShellHitMap {
     pub(super) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
     pub(super) worktree_search: Rect,
     pub(super) worktree_rows: Vec<(Rect, usize)>,
+    /// Rects for the mount-remote dialog's recents rows, indexing into
+    /// `ClientShellSnapshot::recent_remote_mount_targets`. Populated straight
+    /// from the render pass's own (possibly clamped) list rect, so a click
+    /// can never target a row that was not actually drawn.
+    pub(super) remote_mount_recents: Vec<(Rect, usize)>,
     pub(super) help_popup: Rect,
     pub(super) help_scrollbar: Rect,
     pub(super) help_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -339,6 +344,7 @@ pub(super) enum ClientShellOverlayKind {
     WorktreeCreate,
     WorktreeOpen,
     WorktreeRemove,
+    MountRemote,
     ContextMenu,
     GlobalMenu,
     Settings,
@@ -564,6 +570,31 @@ pub(super) struct ClientWorktreeRemoveOverlay {
     pub(super) force_confirmation: bool,
 }
 
+/// Collector state for the `workspace.mount_remote` dialog. Deliberately has
+/// no pending/submitting list of its own -- "which targets are dialling,
+/// mounted, or failed" is a shared runtime fact owned by the server and read
+/// straight from `ClientShellSnapshot::remote_mount_attempts` at render time
+/// (see the design note on `ClientShellRemoteMountAttempt`,
+/// `src/protocol/wire.rs`), so dismissing and reopening this overlay always
+/// shows current truth instead of a client-side guess.
+#[derive(Debug)]
+pub(super) struct ClientRemoteMountOverlay {
+    pub(super) input: String,
+    /// Inline validation/rejection error: set by the client's own "nothing to
+    /// send" check or by a synchronous `invalid_request` from the server
+    /// (e.g. an unparseable target). Per-target dial failures are NOT stored
+    /// here -- they come from `remote_mount_attempts` and are rendered
+    /// independently so a still-dialling sibling can never hide them.
+    pub(super) error: Option<String>,
+    /// `None` means "nothing picked yet". This has to be `Option`, not a bare
+    /// `usize`: a freshly-opened dialog has no recent highlighted while the
+    /// input is still empty, which a plain index cannot express -- with a
+    /// plain index the dialog would either paint the most recent target as
+    /// selected before the user touched anything, or the first Down would
+    /// jump straight past it to index 1.
+    pub(super) recents_highlighted: Option<usize>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientContextMenuAction {
     Rename,
@@ -653,6 +684,7 @@ pub(super) enum ClientShellOverlay {
     WorktreeCreate(ClientWorktreeCreateOverlay),
     WorktreeOpen(ClientWorktreeOpenOverlay),
     WorktreeRemove(ClientWorktreeRemoveOverlay),
+    MountRemote(ClientRemoteMountOverlay),
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
@@ -671,6 +703,7 @@ impl ClientShellOverlay {
             Self::WorktreeCreate(_) => ClientShellOverlayKind::WorktreeCreate,
             Self::WorktreeOpen(_) => ClientShellOverlayKind::WorktreeOpen,
             Self::WorktreeRemove(_) => ClientShellOverlayKind::WorktreeRemove,
+            Self::MountRemote(_) => ClientShellOverlayKind::MountRemote,
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
@@ -704,6 +737,7 @@ pub(super) enum PendingEndpointKind {
     WorktreeRemove {
         forced: bool,
     },
+    RemoteMount,
     SelectionCopy,
     PaneScroll {
         pane_id: String,

@@ -440,6 +440,9 @@ impl ClientShellState {
         if self.insert_worktree_overlay_text(text) {
             return true;
         }
+        if self.insert_remote_mount_overlay_text(text) {
+            return true;
+        }
         match self.overlay.as_mut() {
             Some(ClientShellOverlay::Rename(rename)) => {
                 if rename.replace_on_type {
@@ -621,6 +624,9 @@ impl ClientShellState {
         }
 
         if self.route_worktree_overlay_key(key, outcome) {
+            return;
+        }
+        if self.route_remote_mount_overlay_key(key, outcome) {
             return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Navigator(_))) {

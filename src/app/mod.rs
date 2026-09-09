@@ -342,6 +342,24 @@ fn parse_cjk_ime_agents(names: &[String]) -> Vec<crate::detect::Agent> {
     out
 }
 
+/// Defensive dedup/cap for the `[ui] recent_remote_mount_targets` list.
+/// `ConfigEdit::RecentRemoteMountTargets` (`src/config/write.rs`) never
+/// writes a duplicate or over-cap list itself, but a hand-edited
+/// config.toml could, so both the initial `App::new` load and every
+/// `apply_config_from_disk` reload run the list through this before it
+/// reaches `AppState`.
+fn dedup_capped_recent_remote_mount_targets(targets: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for target in targets {
+        if seen.insert(target.clone()) {
+            out.push(target.clone());
+        }
+    }
+    out.truncate(state::RECENT_REMOTE_MOUNT_TARGETS_CAP);
+    out
+}
+
 fn normalize_theme_name(name: &str) -> String {
     name.to_lowercase().replace([' ', '_'], "-")
 }
@@ -663,6 +681,10 @@ impl App {
             terminal_runtime_shutdowns: Vec::new(),
             remote_mirrors: std::collections::HashMap::new(),
             mount_drive_tasks: std::collections::HashMap::new(),
+            remote_mount_attempts: Vec::new(),
+            recent_remote_mount_targets: dedup_capped_recent_remote_mount_targets(
+                &config.ui.recent_remote_mount_targets,
+            ),
         };
 
         state.terminals = restored_terminals;
@@ -1011,6 +1033,9 @@ impl App {
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
+                self.state.recent_remote_mount_targets = dedup_capped_recent_remote_mount_targets(
+                    &config.ui.recent_remote_mount_targets,
+                );
             }
         }
 

@@ -64,6 +64,8 @@ pub(super) fn snapshot() -> ClientShellSnapshot {
         }],
         agents: Vec::new(),
         commands: Vec::new(),
+        remote_mount_attempts: Vec::new(),
+        recent_remote_mount_targets: Vec::new(),
     }
 }
 
@@ -221,4 +223,5 @@ mod keybindings_settings;
 mod mobile;
 mod mouse_selection;
 mod popup_focus_projection;
+mod remote_mount;
 mod startup_overlays;

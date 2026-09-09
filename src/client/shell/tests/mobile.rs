@@ -484,7 +484,9 @@ fn mobile_menu_keeps_inert_notes_open_and_cancel_without_workspace_in_navigate()
         .hits
         .mobile_targets
         .iter()
-        .find_map(|(rect, target)| matches!(target, ClientMobileTarget::Menu(3)).then_some(*rect))
+        // "what's new" is index 4: settings, keybinds, reload config, mount
+        // remote workspace, what's new.
+        .find_map(|(rect, target)| matches!(target, ClientMobileTarget::Menu(4)).then_some(*rect))
         .expect("what's new row");
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),

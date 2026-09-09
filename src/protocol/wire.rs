@@ -949,6 +949,41 @@ pub struct ClientShellSnapshot {
     pub panes: Vec<ClientShellPane>,
     pub agents: Vec<ClientShellAgent>,
     pub commands: Vec<ClientShellCommand>,
+    /// Live dial state for the most recent `workspace.mount_remote`
+    /// submission this endpoint's server holds, replaced wholesale on the
+    /// next submission -- see `RemoteMountOutcome`'s doc
+    /// (`src/app/state.rs`) for why this lives server-side rather than in a
+    /// per-client dialog collector.
+    ///
+    /// `default` (not `skip_serializing_if`) so an older endpoint's snapshot
+    /// still decodes as "no attempts" -- the field is always encoded, which
+    /// the positional codecs require.
+    #[serde(default)]
+    pub remote_mount_attempts: Vec<ClientShellRemoteMountAttempt>,
+    /// Most-recent-first remote-mount targets this endpoint's server has
+    /// successfully dialled, for the mount dialog's recents list.
+    #[serde(default)]
+    pub recent_remote_mount_targets: Vec<String>,
+}
+
+/// One target's outcome from `AppState::remote_mount_attempts`, flattened
+/// rather than mirroring `RemoteMountOutcome` as an enum so a future outcome
+/// variant cannot desync an older decoder mid-transition. `Dialling` is
+/// "neither field set"; a decoder that has never heard of a new outcome kind
+/// still renders it as still-dialling rather than erroring.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellRemoteMountAttempt {
+    pub target: String,
+    /// Whether the dial finished and the mount materialized. This is an
+    /// explicit flag rather than being inferred from `mounted_workspace_id`
+    /// being set, because a mount that succeeds against a host with no
+    /// workspaces has nothing to name -- inferring the state from absence
+    /// would make that case indistinguishable from "still dialling".
+    pub mounted: bool,
+    /// First workspace the mount materialized; `None` when `mounted` is true
+    /// but the host exposed no workspaces.
+    pub mounted_workspace_id: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2713,6 +2748,27 @@ mod tests {
                 action: ClientShellCommandAction::Shell,
                 description: Some("deploy".into()),
             }],
+            remote_mount_attempts: vec![
+                ClientShellRemoteMountAttempt {
+                    target: "host-a".into(),
+                    mounted: false,
+                    mounted_workspace_id: None,
+                    error: None,
+                },
+                ClientShellRemoteMountAttempt {
+                    target: "host-b".into(),
+                    mounted: true,
+                    mounted_workspace_id: Some("w2".into()),
+                    error: None,
+                },
+                ClientShellRemoteMountAttempt {
+                    target: "host-c".into(),
+                    mounted: false,
+                    mounted_workspace_id: None,
+                    error: Some("connection refused".into()),
+                },
+            ],
+            recent_remote_mount_targets: vec!["host-b".into(), "host-a".into()],
         }));
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =

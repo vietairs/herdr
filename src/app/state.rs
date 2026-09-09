@@ -786,6 +786,55 @@ pub enum TabBarStatusSegment {
     Text(Option<String>),
 }
 
+/// Server-owned outcome of a `workspace.mount_remote` dial for one target.
+/// "Which targets are dialling, which failed, which mounted" is a shared
+/// runtime fact (a federation mount reaches into workspaces, not just this
+/// dialog), so it lives here rather than in a client-only collector —
+/// dismissing the client's mount dialog no longer needs to remember an
+/// abandoned dial, because the server keeps dialling and the next open of
+/// the dialog renders this list as current truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteMountOutcome {
+    Dialling,
+    /// `workspace_id` is the first workspace the mount materialized, and is
+    /// `None` when the mount succeeded but exposed no workspaces. It stays an
+    /// `Option` rather than defaulting to an empty string so a client can tell
+    /// "mounted, nothing to show" apart from a real id.
+    Mounted {
+        workspace_id: Option<String>,
+    },
+    Failed {
+        reason: String,
+    },
+}
+
+/// One target's dial outcome within a `workspace.mount_remote` submission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteMountAttempt {
+    pub target: String,
+    pub outcome: RemoteMountOutcome,
+}
+
+/// Maximum number of recent remote-mount targets remembered/persisted.
+pub const RECENT_REMOTE_MOUNT_TARGETS_CAP: usize = 5;
+
+/// Records `target` as the most-recent successful remote-mount target:
+/// removes any existing exact-string match (a re-mount moves it to the front
+/// instead of duplicating it), inserts it at index 0, then truncates to
+/// `RECENT_REMOTE_MOUNT_TARGETS_CAP`. Pure list-mutation logic, kept free of
+/// I/O so it is testable on a bare `Vec<String>`; persistence is a separate
+/// concern (`ConfigEdit::RecentRemoteMountTargets`, `src/config/write.rs`).
+///
+/// The only call site (`handle_federation_mount_ready`,
+/// `src/app/api/workspaces.rs`) is `#[cfg(unix)]`, so this has zero callers
+/// on `x86_64-pc-windows-msvc`.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn record_recent_remote_mount_target(recents: &mut Vec<String>, target: &str) {
+    recents.retain(|existing| existing != target);
+    recents.insert(0, target.to_string());
+    recents.truncate(RECENT_REMOTE_MOUNT_TARGETS_CAP);
+}
+
 pub struct AppState {
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
@@ -940,6 +989,18 @@ pub struct AppState {
         crate::remote::federation::id::HostKey,
         tokio::task::JoinHandle<()>,
     >,
+    /// One entry per target in the most recent `workspace.mount_remote`
+    /// submission, replaced wholesale on the next submission (see
+    /// `RemoteMountOutcome`'s doc). Read by the client-shell snapshot builder
+    /// so a mount dialog on any client renders live dial state instead of
+    /// tracking its own pending list.
+    pub remote_mount_attempts: Vec<RemoteMountAttempt>,
+    /// Most-recent-first, deduped, capped at `RECENT_REMOTE_MOUNT_TARGETS_CAP`
+    /// list of targets a `workspace.mount_remote` dial has succeeded against.
+    /// Loaded from `config.ui.recent_remote_mount_targets` at startup and on
+    /// every config reload; persisted by `handle_federation_mount_ready` via
+    /// `ConfigEdit::RecentRemoteMountTargets`.
+    pub recent_remote_mount_targets: Vec<String>,
 }
 
 /// Outcome of [`AppState::begin_federation_mount`] (P8 requirement 5, S10.1;
@@ -1013,6 +1074,30 @@ impl AppState {
         host_key: &crate::remote::federation::id::HostKey,
     ) -> bool {
         self.remote_mirrors.contains_key(host_key)
+    }
+
+    /// Resolves the first still-`Dialling` entry for `target` in
+    /// `remote_mount_attempts`, if any. Removes/updates exactly ONE entry,
+    /// never every match: the same target can legitimately be submitted
+    /// twice in one request ("host-a host-a"), which dials twice, and each
+    /// dial must resolve independently — mirrors the deleted client-side
+    /// `RemoteMountState::resolve_pending_target`. Returns whether a
+    /// `Dialling` entry was found, so a caller can decide whether an
+    /// unmatched outcome (e.g. from a submission a wholesale replacement
+    /// already superseded) is worth logging.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn resolve_remote_mount_attempt(
+        &mut self,
+        target: &str,
+        outcome: RemoteMountOutcome,
+    ) -> bool {
+        let Some(attempt) = self.remote_mount_attempts.iter_mut().find(|attempt| {
+            attempt.target == target && attempt.outcome == RemoteMountOutcome::Dialling
+        }) else {
+            return false;
+        };
+        attempt.outcome = outcome;
+        true
     }
 
     /// Every workspace index that closing `index` should also close: the
@@ -1257,6 +1342,8 @@ impl AppState {
             terminal_runtime_shutdowns: Vec::new(),
             remote_mirrors: std::collections::HashMap::new(),
             mount_drive_tasks: std::collections::HashMap::new(),
+            remote_mount_attempts: Vec::new(),
+            recent_remote_mount_targets: Vec::new(),
         }
     }
 
@@ -1598,6 +1685,124 @@ mod tests {
                 "alice@10.0.0.1",
                 "s1"
             ))
+        );
+    }
+
+    #[test]
+    fn record_recent_remote_mount_target_moves_existing_target_to_front_and_caps_at_five() {
+        let mut recents = vec![
+            "host-e".to_string(),
+            "host-d".to_string(),
+            "host-c".to_string(),
+            "host-b".to_string(),
+            "host-a".to_string(),
+        ];
+        // Re-recording an already-present target moves it to the front
+        // instead of duplicating it, and the list stays capped at 5.
+        record_recent_remote_mount_target(&mut recents, "host-c");
+        assert_eq!(
+            recents,
+            vec![
+                "host-c".to_string(),
+                "host-e".to_string(),
+                "host-d".to_string(),
+                "host-b".to_string(),
+                "host-a".to_string(),
+            ]
+        );
+
+        // A brand-new sixth target pushes the least-recent entry out.
+        record_recent_remote_mount_target(&mut recents, "host-f");
+        assert_eq!(
+            recents,
+            vec![
+                "host-f".to_string(),
+                "host-c".to_string(),
+                "host-e".to_string(),
+                "host-d".to_string(),
+                "host-b".to_string(),
+            ]
+        );
+        assert_eq!(recents.len(), RECENT_REMOTE_MOUNT_TARGETS_CAP);
+    }
+
+    #[test]
+    fn resolve_remote_mount_attempt_resolves_only_one_of_two_duplicate_dialling_entries() {
+        // "host-a host-a" is not deduplicated on the way to the server, so it
+        // dials twice. Each dial must resolve independently -- resolving
+        // every matching entry at once would report the submission finished
+        // while the second dial is still outstanding, and then have nothing
+        // left pending to match that dial's real outcome against.
+        let mut state = AppState::test_new();
+        state.remote_mount_attempts = vec![
+            RemoteMountAttempt {
+                target: "host-a".to_string(),
+                outcome: RemoteMountOutcome::Dialling,
+            },
+            RemoteMountAttempt {
+                target: "host-a".to_string(),
+                outcome: RemoteMountOutcome::Dialling,
+            },
+        ];
+
+        assert!(state.resolve_remote_mount_attempt(
+            "host-a",
+            RemoteMountOutcome::Mounted {
+                workspace_id: Some("w1".to_string()),
+            },
+        ));
+        assert_eq!(
+            state
+                .remote_mount_attempts
+                .iter()
+                .filter(|attempt| attempt.outcome == RemoteMountOutcome::Dialling)
+                .count(),
+            1,
+            "one dial is still outstanding"
+        );
+
+        assert!(state.resolve_remote_mount_attempt(
+            "host-a",
+            RemoteMountOutcome::Failed {
+                reason: "connection refused".to_string(),
+            },
+        ));
+        assert_eq!(
+            state
+                .remote_mount_attempts
+                .iter()
+                .filter(|attempt| attempt.outcome == RemoteMountOutcome::Dialling)
+                .count(),
+            0
+        );
+
+        assert!(
+            !state.resolve_remote_mount_attempt(
+                "host-a",
+                RemoteMountOutcome::Mounted {
+                    workspace_id: Some("w2".to_string()),
+                },
+            ),
+            "a third outcome for a target that had only two dials must not resolve anything"
+        );
+        // Both original entries kept their resolved outcome untouched by the
+        // rejected third resolution.
+        assert_eq!(
+            state.remote_mount_attempts,
+            vec![
+                RemoteMountAttempt {
+                    target: "host-a".to_string(),
+                    outcome: RemoteMountOutcome::Mounted {
+                        workspace_id: Some("w1".to_string()),
+                    },
+                },
+                RemoteMountAttempt {
+                    target: "host-a".to_string(),
+                    outcome: RemoteMountOutcome::Failed {
+                        reason: "connection refused".to_string(),
+                    },
+                },
+            ]
         );
     }
 

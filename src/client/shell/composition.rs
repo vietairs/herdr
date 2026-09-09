@@ -572,6 +572,7 @@ impl ClientShellState {
                 self.hits.navigator_rows = rendered.navigator_rows;
                 self.hits.worktree_search = rendered.worktree_search;
                 self.hits.worktree_rows = rendered.worktree_rows;
+                self.hits.remote_mount_recents = rendered.remote_mount_recents;
                 self.hits.help_popup = rendered.help_popup;
                 self.hits.help_scrollbar = rendered.help_scrollbar;
                 self.hits.help_scroll_metrics = rendered.help_scroll_metrics;

@@ -873,6 +873,9 @@ impl ClientShellState {
             | PendingEndpointKind::IntegrationInstall) => {
                 return self.handle_settings_endpoint_result(kind, result);
             }
+            PendingEndpointKind::RemoteMount => {
+                return (self.handle_remote_mount_endpoint_result(result), Vec::new());
+            }
             kind => {
                 return (
                     self.handle_worktree_endpoint_result(kind, result),

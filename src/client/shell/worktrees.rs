@@ -545,7 +545,12 @@ impl ClientShellState {
                 | PendingEndpointKind::WordSelection { .. }
                 | PendingEndpointKind::PaneLinkActivate { .. }
                 | PendingEndpointKind::CopyMotion { .. }
-                | PendingEndpointKind::CopySearch { .. },
+                | PendingEndpointKind::CopySearch { .. }
+                // Unreachable in practice: `handle_endpoint_result`
+                // (`src/client/shell/actions.rs`) intercepts `RemoteMount`
+                // with its own arm before this catch-all is ever reached.
+                // Listed here only so this match stays exhaustive.
+                | PendingEndpointKind::RemoteMount,
                 Err(_),
             ) => true,
         }

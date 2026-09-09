@@ -1411,6 +1411,26 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::MountRemote(_))) {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if super::contains(self.hits.overlay_cancel, point) {
+                    self.overlay = None;
+                    outcome.repaint = true;
+                } else if let Some((_, index)) = self
+                    .hits
+                    .remote_mount_recents
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .copied()
+                {
+                    self.select_remote_mount_recent(index);
+                    outcome.repaint = true;
+                } else if super::contains(self.hits.overlay_primary, point) {
+                    self.submit_remote_mount(outcome);
+                }
+            }
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Settings(_))) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, section)) = self

@@ -111,6 +111,20 @@ impl App {
         let session_name = crate::session::active_name()
             .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
 
+        // Replace wholesale rather than append: this is what keeps resolved
+        // entries from a prior submission from accumulating, with no expiry
+        // timer to get wrong. Every accepted target gets a `Dialling` entry
+        // here, including one that is about to hit the already-mounted
+        // conflict check below -- that path still resolves its entry
+        // asynchronously via the `FederationMountFailed` event it spawns.
+        self.state.remote_mount_attempts = targets
+            .iter()
+            .map(|target| crate::app::state::RemoteMountAttempt {
+                target: target.clone(),
+                outcome: crate::app::state::RemoteMountOutcome::Dialling,
+            })
+            .collect();
+
         for target in &targets {
             let host_key = crate::remote::federation::id::HostKey::new(target, &session_name);
             if self.state.double_attach_conflict(&host_key) {
@@ -259,6 +273,17 @@ impl App {
             Err(err) => {
                 tracing::warn!(%target, %err, "failed to materialize federation mount");
                 self.state.end_federation_mount(&host_key);
+                // The dial itself succeeded, so this is not routed through
+                // `handle_federation_mount_failed` -- but the target's
+                // attempt entry still needs an outcome, or it would stay
+                // `Dialling` forever until the next unrelated submission
+                // wipes it.
+                self.state.resolve_remote_mount_attempt(
+                    &target,
+                    crate::app::state::RemoteMountOutcome::Failed {
+                        reason: err.to_string(),
+                    },
+                );
                 // Mirror the success path's teardown order below (drop
                 // `out_tx` first so the writer task drains and exits,
                 // bounded so a half-open peer can never hang this, then
@@ -274,7 +299,37 @@ impl App {
                 return;
             }
         };
-        let _ = opened;
+        // The first workspace `materialize_federation_mount` opened for this
+        // mount is what the attempt entry reports as "mounted" -- a mount can
+        // materialize more than one remote workspace, but the dialog only
+        // needs one to navigate to. `unwrap_or_default` covers the (unseen in
+        // practice) case where a federation host reports zero materializable
+        // workspaces: an empty id is still a valid `Mounted` outcome rather
+        // than leaving the attempt stuck at `Dialling`.
+        let mounted_workspace_id = opened
+            .first()
+            .map(|&ws_idx| self.public_workspace_id(ws_idx));
+        self.state.resolve_remote_mount_attempt(
+            &target,
+            crate::app::state::RemoteMountOutcome::Mounted {
+                workspace_id: mounted_workspace_id,
+            },
+        );
+        {
+            let mut recents = self.state.recent_remote_mount_targets.clone();
+            crate::app::state::record_recent_remote_mount_target(&mut recents, &target);
+            // Re-mounting the target already at index 0 produces an
+            // identical list; skip the whole read/format/write cycle rather
+            // than rewriting the same bytes on every successful mount.
+            if recents != self.state.recent_remote_mount_targets {
+                self.state.recent_remote_mount_targets = recents.clone();
+                if let Err(err) = crate::config::write_edit(
+                    crate::config::ConfigEdit::RecentRemoteMountTargets(&recents),
+                ) {
+                    tracing::warn!(%err, "failed to persist recent remote mount targets");
+                }
+            }
+        }
 
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
@@ -363,6 +418,12 @@ impl App {
     #[cfg(unix)]
     pub(crate) fn handle_federation_mount_failed(&mut self, target: String, reason: String) {
         tracing::warn!(%target, %reason, "federation mount failed");
+        self.state.resolve_remote_mount_attempt(
+            &target,
+            crate::app::state::RemoteMountOutcome::Failed {
+                reason: reason.clone(),
+            },
+        );
         match self.state.toast_config.delivery {
             crate::config::ToastDelivery::Herdr => {
                 self.state.toast = Some(crate::app::state::ToastNotification {
@@ -3544,5 +3605,259 @@ mod tests {
             Some(app.state.selected),
             "active must track the restored selection"
         );
+    }
+
+    /// A fresh `workspace.mount_remote` submission replaces
+    /// `remote_mount_attempts` wholesale rather than appending -- otherwise a
+    /// resolved entry from an earlier submission would linger forever with
+    /// no expiry timer to clear it. Both targets are pre-mounted so neither
+    /// spawns a real ssh dial (mirrors this file's existing
+    /// already-mounted-conflict tests).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_remote_replaces_attempt_list_wholesale_not_appending() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let session_name = crate::session::active_name()
+            .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+        for host in ["host-a", "host-b"] {
+            let mirror = crate::remote::federation::reducer::RemoteMirror::new(
+                crate::remote::federation::id::Mount {
+                    host_key: crate::remote::federation::id::HostKey::new(host, &session_name),
+                    server_instance_id: crate::remote::federation::id::ServerInstanceId(
+                        "inst-1".to_string(),
+                    ),
+                    mount_generation: 1,
+                },
+            );
+            app.state.begin_federation_mount(mirror).unwrap();
+        }
+
+        app.handle_workspace_mount_remote(
+            "req-1".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["host-a".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        assert_eq!(
+            app.state.remote_mount_attempts,
+            vec![crate::app::state::RemoteMountAttempt {
+                target: "host-a".to_string(),
+                outcome: crate::app::state::RemoteMountOutcome::Dialling,
+            }]
+        );
+
+        app.handle_workspace_mount_remote(
+            "req-2".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["host-b".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        assert_eq!(
+            app.state.remote_mount_attempts,
+            vec![crate::app::state::RemoteMountAttempt {
+                target: "host-b".to_string(),
+                outcome: crate::app::state::RemoteMountOutcome::Dialling,
+            }],
+            "the second submission must replace host-a's entry, not sit alongside it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_failed_toasts_and_resolves_the_dialling_attempt() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.remote_mount_attempts = vec![crate::app::state::RemoteMountAttempt {
+            target: "remote-host".to_string(),
+            outcome: crate::app::state::RemoteMountOutcome::Dialling,
+        }];
+
+        app.handle_federation_mount_failed(
+            "remote-host".to_string(),
+            "connection refused".to_string(),
+        );
+
+        assert!(
+            app.state.toast.is_some(),
+            "the existing sidebar-notice behavior on failure must be unchanged"
+        );
+        assert_eq!(
+            app.state.remote_mount_attempts,
+            vec![crate::app::state::RemoteMountAttempt {
+                target: "remote-host".to_string(),
+                outcome: crate::app::state::RemoteMountOutcome::Failed {
+                    reason: "connection refused".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ready_resolves_attempt_and_persists_recent_target() {
+        // Spawned before the lock so the guard is never held across an
+        // `.await` (clippy's `await_holding_lock`): nothing this test does
+        // after spawning the tunnel is itself async.
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir()
+            .join(format!(
+                "herdr-mount-ready-recents-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.remote_mount_attempts = vec![crate::app::state::RemoteMountAttempt {
+            target: "remote-host".to_string(),
+            outcome: crate::app::state::RemoteMountOutcome::Dialling,
+        }];
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            2,
+            "local plus the materialized workspace"
+        );
+        let materialized_workspace_id = app.state.workspaces[1].id.clone();
+        assert_eq!(
+            app.state.remote_mount_attempts,
+            vec![crate::app::state::RemoteMountAttempt {
+                target: "remote-host".to_string(),
+                outcome: crate::app::state::RemoteMountOutcome::Mounted {
+                    workspace_id: Some(materialized_workspace_id),
+                },
+            }]
+        );
+
+        assert_eq!(
+            app.state.recent_remote_mount_targets,
+            vec!["remote-host".to_string()]
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("recent_remote_mount_targets = [\"remote-host\"]"));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Re-mounting a target already at the front of the recents list
+    /// produces a byte-identical list; the read/format/write cycle must be
+    /// skipped entirely rather than rewriting the same bytes on every
+    /// successful mount. Resets the file to content that lacks the key right
+    /// before the mount, so an incorrect unconditional write is caught by
+    /// the key reappearing (mirrors the deleted client-side
+    /// `record_successful_remote_mount_target_skips_the_write_when_nothing_
+    /// changed` test's technique).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ready_skips_config_write_when_recent_target_unchanged() {
+        // Spawned before the lock so the guard is never held across an
+        // `.await` (clippy's `await_holding_lock`).
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir()
+            .join(format!(
+                "herdr-mount-ready-recents-noop-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        // The target already sits at the front of recents, so the upcoming
+        // mount is a no-op re-record.
+        app.state.recent_remote_mount_targets = vec!["remote-host".to_string()];
+        app.state.remote_mount_attempts = vec![crate::app::state::RemoteMountAttempt {
+            target: "remote-host".to_string(),
+            outcome: crate::app::state::RemoteMountOutcome::Dialling,
+        }];
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("recent_remote_mount_targets"),
+            "a no-op re-mount must not write to the config file, got:\n{content}"
+        );
+        assert_eq!(
+            app.state.recent_remote_mount_targets,
+            vec!["remote-host".to_string()]
+        );
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
