@@ -662,6 +662,13 @@ pub(crate) fn handle_client_handshake(
     // the handshake thread needs blocking I/O for read_message/write_message.
     stream.set_nonblocking(false)?;
 
+    // Keep an ordinary render frame from parking the writer thread on a small
+    // kernel buffer, which would head-of-line block queued control messages.
+    crate::ipc::raise_local_stream_send_buffer(
+        &stream,
+        crate::ipc::CLIENT_STREAM_SEND_BUFFER_BYTES,
+    );
+
     set_client_recv_timeout(
         &stream,
         Some(HANDSHAKE_TIMEOUT),

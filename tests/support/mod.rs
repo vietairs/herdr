@@ -444,18 +444,55 @@ pub fn wait_for_message_variants(
     timeout: Duration,
     variants: &[u32],
 ) -> Result<bool, String> {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .map_err(|e| e.to_string())?;
+    // This waits for a frame the server may write immediately before it exits
+    // (live handoff, shutdown), so it must keep working on a socket whose peer is
+    // already gone:
+    //   * macOS `setsockopt(SO_RCVTIMEO)` fails with EINVAL once the peer closed,
+    //     even though frames written before the close are still buffered, so a
+    //     read timeout cannot be used to pace the loop here.
+    //   * `read_exact` discards the bytes it already consumed when it fails, so a
+    //     frame that is only partially buffered desyncs framing and hides every
+    //     later frame.
+    // Poll non-blocking, never reading past the end of the frame being assembled
+    // so the stream stays frame-aligned for later readers.
+    stream.set_nonblocking(true).map_err(|e| e.to_string())?;
     let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        match read_server_message(stream) {
-            Ok((got, _)) if variants.contains(&got) => return Ok(true),
-            Ok(_) => continue,
-            Err(_) => continue,
+    let mut frame: Vec<u8> = Vec::new();
+    let mut found = false;
+    let mut peer_closed = false;
+    while !found && !peer_closed && Instant::now() < deadline {
+        let wanted = if frame.len() < 4 {
+            4
+        } else {
+            let mut len_buf = [0u8; 4];
+            len_buf.copy_from_slice(&frame[..4]);
+            let len = u32::from_le_bytes(len_buf) as usize;
+            if len == 0 {
+                return Err("zero-length frame".into());
+            }
+            if len > 2 * 1024 * 1024 {
+                return Err(format!("oversized frame: {len} bytes"));
+            }
+            4 + len
+        };
+        if frame.len() == wanted && wanted > 4 {
+            let (got, _) = decode_varint_u32(&frame[4..], 0)?;
+            found = variants.contains(&got);
+            frame.clear();
+            continue;
+        }
+        let mut chunk = vec![0u8; wanted - frame.len()];
+        match stream.read(&mut chunk) {
+            Ok(0) => peer_closed = true,
+            Ok(read) => frame.extend_from_slice(&chunk[..read]),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => peer_closed = true,
         }
     }
-    Ok(false)
+    let _ = stream.set_nonblocking(false);
+    Ok(found)
 }
 
 pub fn wait_for_client_shell_bootstrap(

@@ -107,6 +107,42 @@ pub(crate) fn prepare_socket_path(
     Ok(())
 }
 
+/// Send-buffer size requested for server-to-client local socket connections.
+pub(crate) const CLIENT_STREAM_SEND_BUFFER_BYTES: usize = 512 * 1024;
+
+/// Raises the kernel send buffer of a local socket, best effort.
+///
+/// macOS gives AF_UNIX stream sockets an 8 KiB buffer by default, so a single
+/// render frame larger than that parks the per-client writer thread inside
+/// `write_all` until the client drains the socket. Anything queued behind it —
+/// including control messages such as `ServerShutdown` emitted at live handoff —
+/// is then head-of-line blocked and is lost if the process exits first. Linux
+/// already defaults to roughly 200 KiB, so this only widens the macOS buffer to a
+/// comparable size. Failures are ignored: a small buffer is slower, not wrong.
+#[cfg(unix)]
+pub(crate) fn raise_local_stream_send_buffer(stream: &LocalStream, bytes: usize) {
+    use std::os::unix::io::AsRawFd;
+
+    let LocalStream::UdSocket(stream) = stream;
+    let stream = stream.inner();
+    let size = bytes.min(i32::MAX as usize) as libc::c_int;
+    // SAFETY: `stream` owns the fd for the duration of the call, and the option
+    // value is a correctly sized `c_int` as `SO_SNDBUF` requires.
+    unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            std::ptr::addr_of!(size).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+}
+
+/// Windows local sockets are named pipes; their buffering is set at creation.
+#[cfg(windows)]
+pub(crate) fn raise_local_stream_send_buffer(_stream: &LocalStream, _bytes: usize) {}
+
 fn stale_socket_connect_error(kind: io::ErrorKind) -> bool {
     matches!(
         kind,
