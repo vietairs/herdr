@@ -1580,11 +1580,6 @@ impl AppState {
                 Vec::new()
             }
             AppEvent::WorktreeRuntimeRestoreFailed { .. } => Vec::new(),
-            // The host input-source switch is entirely client-shell owned now
-            // (see `apply_client_shell_input_source_changes` in
-            // `src/client/shell_runtime.rs`); nothing constructs this variant
-            // for `App` to act on any more.
-            AppEvent::PrefixInputSource { .. } => Vec::new(),
             AppEvent::UpdateReady {
                 version,
                 install_command,

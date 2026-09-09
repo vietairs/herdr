@@ -20,9 +20,6 @@ use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle};
 /// regardless of whether bytes come from a local PTY or (future) a remote
 /// relay. Nothing PTY-specific (no fd types, no handoff ops) may live here.
 pub(crate) trait TerminalSource: Send {
-    /// Enqueue user input, waiting for channel capacity if necessary.
-    async fn write_user_input(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>>;
-
     /// Enqueue user input without waiting; fails immediately if the channel
     /// is full or closed.
     fn try_write_user_input(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>>;
@@ -44,14 +41,6 @@ pub(crate) trait TerminalSource: Send {
 }
 
 impl TerminalSource for PtyIoActorHandle {
-    async fn write_user_input(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
-        // Inherent method takes priority over the trait method of the same
-        // name/signature (arch-probe §4: signatures already match, no
-        // drift), so this simply forwards — the trait impl is the seam,
-        // the inherent method remains the single source of truth.
-        PtyIoActorHandle::write_user_input(self, bytes).await
-    }
-
     fn try_write_user_input(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         PtyIoActorHandle::try_write_user_input(self, bytes)
     }
@@ -130,7 +119,6 @@ mod tests {
 
     #[derive(Default)]
     struct RecordedCalls {
-        write_user_input: Vec<Bytes>,
         try_write_user_input: Vec<Bytes>,
         resize: Vec<(u16, u16, u32, u32, Vec<Bytes>)>,
         shutdown_count: u32,
@@ -148,14 +136,6 @@ mod tests {
     }
 
     impl TerminalSource for MockSource {
-        async fn write_user_input(
-            &self,
-            bytes: Bytes,
-        ) -> Result<(), mpsc::error::SendError<Bytes>> {
-            self.0.lock().unwrap().write_user_input.push(bytes);
-            Ok(())
-        }
-
         fn try_write_user_input(
             &self,
             bytes: Bytes,
@@ -194,7 +174,6 @@ mod tests {
         input: Bytes,
         resize_args: (u16, u16, u32, u32, Vec<Bytes>),
     ) {
-        source.write_user_input(input.clone()).await.unwrap();
         source.try_write_user_input(input).unwrap();
         let (rows, cols, cell_width_px, cell_height_px, terminal_responses) = resize_args;
         source.resize(
@@ -215,7 +194,6 @@ mod tests {
         delegate_through_trait(&mock, input.clone(), (24, 80, 1600, 960, responses.clone())).await;
 
         let recorded = mock.0.lock().unwrap();
-        assert_eq!(recorded.write_user_input, vec![input.clone()]);
         assert_eq!(recorded.try_write_user_input, vec![input]);
         assert_eq!(recorded.resize, vec![(24, 80, 1600, 960, responses)]);
         assert_eq!(recorded.shutdown_count, 1);

@@ -110,36 +110,10 @@ struct UserWriteGate {
 }
 
 impl PtyIoActorHandle {
-    /// Enqueues user input, waiting for channel capacity rather than
-    /// failing immediately — the counterpart to `try_write_user_input`
-    /// used by callers (e.g. `TerminalSource::write_user_input`) that can
-    /// tolerate backpressure instead of dropping input.
-    pub(crate) async fn write_user_input(
-        &self,
-        bytes: Bytes,
-    ) -> Result<(), mpsc::error::SendError<Bytes>> {
-        {
-            let user_writes = self
-                .user_writes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !user_writes.accepting {
-                return Err(mpsc::error::SendError(bytes));
-            }
-        }
-        self.data_tx
-            .send(PtyIoDataCommand::WriteUserInput(bytes))
-            .await
-            .map_err(|err| {
-                let PtyIoDataCommand::WriteUserInput(bytes) = err.0 else {
-                    unreachable!("queued write returned another command")
-                };
-                mpsc::error::SendError(bytes)
-            })?;
-        self.wake_actor();
-        Ok(())
-    }
-
+    /// Enqueues user input without waiting; fails immediately if the
+    /// channel is full or closed. All production callers use this
+    /// fail-fast form (`src/pane.rs`'s `try_send_bytes`); there is no
+    /// capacity-waiting counterpart.
     pub(crate) fn try_write_user_input(
         &self,
         bytes: Bytes,

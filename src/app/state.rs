@@ -1687,8 +1687,7 @@ mod tests {
                 &pane_b
             };
             handle
-                .write_user_input(bytes::Bytes::copy_from_slice(bytes))
-                .await
+                .try_write_user_input(bytes::Bytes::copy_from_slice(bytes))
                 .unwrap();
         }
 
