@@ -5015,6 +5015,7 @@ mod tests {
                 agent_status: crate::api::schema::common::AgentStatus::Idle,
                 tokens: Default::default(),
                 worktree: None,
+                federation_origin: None,
             }],
             tabs: vec![crate::api::schema::TabInfo {
                 tab_id: "w1-tab".to_string(),

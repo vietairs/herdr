@@ -88,6 +88,19 @@ pub struct WorkspaceInfo {
     pub tokens: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorkspaceWorktreeInfo>,
+    /// Host address (`user@ip`) this workspace was federation-mounted from;
+    /// `None` for a local workspace. Runtime/session fact, so it is populated
+    /// SERVER-side, not derived by a client from `workspace_id`.
+    ///
+    /// Security property this preserves: it is set exclusively from
+    /// `remote::federation::id::classify(&ws.id)`, and a workspace's `id` is
+    /// only ever set to a `FedRef::to_public_id()` value (`r:<host_key>:...`)
+    /// by the local mount/materialization path, keyed off the *client's own*
+    /// trusted `HostKey` — never anything the remote host sends. No
+    /// remote-influenced string (e.g. `custom_name`, `label`) ever feeds this
+    /// field, so a crafted remote value can neither spoof nor suppress it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub federation_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

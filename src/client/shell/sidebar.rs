@@ -583,6 +583,24 @@ pub(super) fn displayed_workspace_status(
         .unwrap_or(workspace.agent_status)
 }
 
+/// Unspoofable remote-origin badge for a federated workspace's sidebar row;
+/// `None` for a local workspace. `ClientShellWorkspace::federation_origin` is
+/// a runtime/session fact populated server-side from
+/// `WorkspaceInfo::federation_origin` (never derived client-side), which
+/// itself is set exclusively from the workspace's own `id` — never from
+/// `custom_label`/`label`/any other remote-influenced string — so a crafted
+/// remote value can neither fake nor suppress it (see that field's doc).
+///
+/// Deliberately the bare glyph and nothing else: the badge shares one
+/// flexible-width token with the workspace label, and truncation keeps the
+/// prefix and drops the suffix, so a badge carrying the full host address
+/// would consume the whole width budget and truncate the folder name away.
+/// The host itself is shown on the secondary row instead, where it competes
+/// with nothing.
+fn federation_origin_badge(workspace: &ClientShellWorkspace) -> Option<&'static str> {
+    workspace.federation_origin.is_some().then_some("\u{2601}")
+}
+
 pub(in crate::client::shell) fn workspace_rows(
     workspace: &ClientShellWorkspace,
     status: crate::api::schema::AgentStatus,
@@ -598,12 +616,30 @@ pub(in crate::client::shell) fn workspace_rows(
     } else {
         &workspace.label
     };
+    // Badge prefix is applied independent of the `custom_label`/branch
+    // substitution above, so a spoofed custom label can never suppress it.
+    let labeled;
+    let label = match federation_origin_badge(workspace) {
+        Some(badge) => {
+            labeled = format!("{badge} {label}");
+            labeled.as_str()
+        }
+        None => label,
+    };
+    // The dim secondary token: host address for a federated workspace, git
+    // branch for a local one. A federated workspace has no branch to show
+    // (the server already withholds it), so riding the same token here
+    // surfaces the more useful fact rather than leaving the row empty.
+    let secondary = workspace
+        .federation_origin
+        .as_deref()
+        .or(workspace.branch.as_deref());
     let token_values = workspace.tokens.iter().cloned().collect::<HashMap<_, _>>();
     crate::ui::sidebar_space_rows(
         config,
         crate::ui::SpaceTokenContext {
             workspace: label,
-            branch: workspace.branch.as_deref(),
+            branch: secondary,
             state_text: status_text(status),
             ahead_behind: workspace.git_ahead_behind,
             tokens: &token_values,
@@ -709,5 +745,119 @@ pub(in crate::client::shell) fn render_workspace_rows(
                 buffer[(x, y)].set_bg(background);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod federation_badge_tests {
+    use super::*;
+    use crate::api::schema::AgentStatus;
+    use crate::config::SpacesSidebarConfig;
+    use crate::ui::ResolvedTokenKind;
+
+    fn base_workspace() -> ClientShellWorkspace {
+        ClientShellWorkspace {
+            workspace_id: "ws_1".into(),
+            active_tab_id: "tab_1".into(),
+            new_workspace_cwd: "/repo".into(),
+            number: 1,
+            label: "herdr-checkout".into(),
+            custom_label: false,
+            branch: None,
+            git_ahead_behind: None,
+            tokens: Vec::new(),
+            worktree: None,
+            focused: false,
+            agent_status: AgentStatus::Idle,
+            federation_origin: None,
+        }
+    }
+
+    fn workspace_token_text(rows: &[Vec<crate::ui::ResolvedToken>]) -> Option<&str> {
+        rows.iter().flatten().find_map(|token| match &token.kind {
+            ResolvedTokenKind::Workspace(text) => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
+    fn branch_token_text(rows: &[Vec<crate::ui::ResolvedToken>]) -> Option<&str> {
+        rows.iter().flatten().find_map(|token| match &token.kind {
+            ResolvedTokenKind::Branch(text) => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn local_workspace_has_no_remote_badge() {
+        let workspace = base_workspace();
+        let config = SpacesSidebarConfig::default();
+        let rows = workspace_rows(&workspace, AgentStatus::Idle, false, &config);
+        assert_eq!(
+            workspace_token_text(&rows),
+            Some("herdr-checkout"),
+            "a local workspace's label must not carry the badge"
+        );
+    }
+
+    #[test]
+    fn federated_workspace_carries_the_remote_badge() {
+        let mut workspace = base_workspace();
+        workspace.federation_origin = Some("alice@10.0.0.1".to_string());
+        let config = SpacesSidebarConfig::default();
+        let rows = workspace_rows(&workspace, AgentStatus::Idle, false, &config);
+        assert_eq!(workspace_token_text(&rows), Some("\u{2601} herdr-checkout"));
+    }
+
+    /// RT-F8/S11.4 anti-spoof property, ported from the pre-migration
+    /// `ui::sidebar` unit test of the same name: `federation_origin` is a
+    /// server-populated runtime fact, and a `custom_label`/spoofed label can
+    /// never suppress the badge because the badge prefix is applied after —
+    /// and independent of — the `custom_label`/branch-substitution label
+    /// selection above it.
+    #[test]
+    fn spoofed_custom_label_does_not_hide_the_remote_badge() {
+        let mut workspace = base_workspace();
+        workspace.label = "definitely-local-workspace".to_string();
+        workspace.custom_label = true;
+        workspace.federation_origin = Some("alice@10.0.0.1".to_string());
+        let config = SpacesSidebarConfig::default();
+
+        let rows = workspace_rows(&workspace, AgentStatus::Idle, false, &config);
+        let label = workspace_token_text(&rows).expect("workspace token must be present");
+        assert!(
+            label.starts_with('\u{2601}'),
+            "badge must survive a spoofed custom label, got {label:?}"
+        );
+        assert!(label.contains("definitely-local-workspace"));
+    }
+
+    /// Grouped/indented children substitute the label from `branch` when
+    /// `custom_label` is false (see `workspace_rows`) — the badge must still
+    /// prefix the *result* of that substitution, not just a raw label.
+    #[test]
+    fn indented_grouped_child_badge_survives_branch_label_substitution() {
+        let mut workspace = base_workspace();
+        workspace.custom_label = false;
+        workspace.branch = Some("worktree/feature".to_string());
+        workspace.federation_origin = Some("alice@10.0.0.1".to_string());
+        let config = SpacesSidebarConfig::default();
+
+        let rows = workspace_rows(&workspace, AgentStatus::Idle, true, &config);
+        let label = workspace_token_text(&rows).expect("workspace token must be present");
+        assert_eq!(label, "\u{2601} feature");
+    }
+
+    #[test]
+    fn federated_workspace_shows_its_host_where_a_local_one_shows_its_branch() {
+        let mut federated = base_workspace();
+        federated.federation_origin = Some("bob@10.0.0.2".to_string());
+        let config = SpacesSidebarConfig::default();
+        let rows = workspace_rows(&federated, AgentStatus::Idle, false, &config);
+        assert_eq!(branch_token_text(&rows), Some("bob@10.0.0.2"));
+
+        let mut local = base_workspace();
+        local.branch = Some("main".to_string());
+        let rows = workspace_rows(&local, AgentStatus::Idle, false, &config);
+        assert_eq!(branch_token_text(&rows), Some("main"));
     }
 }

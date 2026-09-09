@@ -2275,6 +2275,7 @@ mod tests {
                 agent_status: AgentStatus::Idle,
                 tokens: Default::default(),
                 worktree: None,
+                federation_origin: None,
             }],
             tabs: vec![TabInfo {
                 tab_id: "w1-tab".to_string(),

@@ -1940,6 +1940,7 @@ mod tests {
                 agent_status: AgentStatus::Idle,
                 tokens: Default::default(),
                 worktree: None,
+                federation_origin: None,
             });
             tabs.push(RemoteTabInfo {
                 tab_id: tab_id.clone(),

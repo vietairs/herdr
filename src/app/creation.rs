@@ -426,6 +426,20 @@ impl App {
                     checkout_path: space.checkout_path.display().to_string(),
                     is_linked_worktree: space.is_linked_worktree,
                 }),
+            // Runtime/session fact (CLAUDE.md runtime/client boundary
+            // guardrail): derived exclusively from `ws.id`, never from
+            // `custom_name` or any other remote-influenced string. A
+            // workspace's `id` is only ever set to a `FedRef::to_public_id()`
+            // value (`r:<host_key>:...`) by the local federation
+            // mount/materialization path, keyed off this client's own
+            // trusted `HostKey` — never anything the remote host sends — so
+            // a spoofed remote value can neither fake nor suppress this.
+            federation_origin: match crate::remote::federation::id::classify(&ws.id) {
+                crate::remote::federation::id::IdClass::Remote(host_key) => {
+                    Some(host_key.host_address().to_string())
+                }
+                crate::remote::federation::id::IdClass::Local => None,
+            },
         }
     }
 
@@ -2971,6 +2985,7 @@ mod federation_materialization_tests {
             agent_status: AgentStatus::Idle,
             tokens: Default::default(),
             worktree: None,
+            federation_origin: None,
         }
     }
 
@@ -3164,6 +3179,36 @@ mod federation_materialization_tests {
         }
         opened_raw_ids.sort();
         assert_eq!(opened_raw_ids, vec!["t1".to_string(), "t2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn materialized_federation_workspace_info_carries_federation_origin() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed against a loopback-shaped snapshot");
+        let ws_idx = created[0];
+
+        // The WorkspaceInfo a real client is served must carry the origin
+        // (server-side, derived from the materialized workspace's own
+        // namespaced `id`), and a plain local workspace must not.
+        assert_eq!(
+            app.workspace_info(ws_idx).federation_origin,
+            Some("alice@10.0.0.1".to_string())
+        );
+        let local_idx = app.state.workspaces.len();
+        app.state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("local-one"));
+        assert_eq!(app.workspace_info(local_idx).federation_origin, None);
     }
 
     #[tokio::test]

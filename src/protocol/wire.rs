@@ -1023,6 +1023,16 @@ pub struct ClientShellWorkspace {
     pub focused: bool,
     #[serde(deserialize_with = "deserialize_client_shell_agent_status")]
     pub agent_status: crate::api::schema::AgentStatus,
+    /// Host address (`user@ip`) this workspace was federation-mounted from;
+    /// `None` for a local workspace. This wire type is bincode-encoded
+    /// positionally (not by field name), so — unlike the JSON API schema's
+    /// `WorkspaceInfo::federation_origin` — this field carries no
+    /// `skip_serializing_if`: omitting the byte on `None` would desync the
+    /// encoder/decoder's field count. Never derive this client-side from
+    /// `workspace_id`; it is a runtime/session fact populated server-side
+    /// from `WorkspaceInfo::federation_origin` (see that field's doc for the
+    /// anti-spoofing property this preserves).
+    pub federation_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2656,6 +2666,7 @@ mod tests {
                 worktree: None,
                 focused: true,
                 agent_status: crate::api::schema::AgentStatus::Idle,
+                federation_origin: None,
             }],
             tabs: vec![ClientShellTab {
                 tab_id: "w1:t1".into(),

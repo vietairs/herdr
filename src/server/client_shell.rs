@@ -40,6 +40,7 @@ pub(super) fn snapshot(
         .map(|(workspace_index, (workspace, state))| {
             let mut tokens = workspace.tokens.into_iter().collect::<Vec<_>>();
             tokens.sort_by(|left, right| left.0.cmp(&right.0));
+            let federation_origin = workspace.federation_origin.clone();
             let workspace_id = workspace.workspace_id;
             let active_tab_id = location
                 .and_then(|location| location.active_tab_ids.get(&workspace_id))
@@ -61,7 +62,18 @@ pub(super) fn snapshot(
                 number: workspace.number,
                 label: workspace.label,
                 custom_label: state.custom_name.is_some(),
-                branch: state.branch(),
+                // A federated workspace has no local git repository to
+                // probe: `state.branch()` reads locally-cached git metadata
+                // that nothing populates for a federated workspace's
+                // `identity_cwd` (meaningless remotely). Gate explicitly
+                // rather than relying on that absence, so a future local
+                // git-refresh pass can never accidentally start shelling out
+                // against a federated workspace's local `identity_cwd`.
+                branch: if federation_origin.is_some() {
+                    None
+                } else {
+                    state.branch()
+                },
                 git_ahead_behind: state.git_ahead_behind(),
                 tokens,
                 worktree: workspace
@@ -72,6 +84,7 @@ pub(super) fn snapshot(
                         is_linked_worktree: worktree.is_linked_worktree,
                     }),
                 agent_status: workspace.agent_status,
+                federation_origin,
             }
         })
         .collect();

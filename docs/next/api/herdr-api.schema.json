@@ -1076,6 +1076,13 @@
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
             },
+            "federation_origin": {
+              "description": "Host address (`user@ip`) this workspace was federation-mounted from;\n`None` for a local workspace. Runtime/session fact, so it is populated\nSERVER-side, not derived by a client from `workspace_id`.\n\nSecurity property this preserves: it is set exclusively from\n`remote::federation::id::classify(&ws.id)`, and a workspace's `id` is\nonly ever set to a `FedRef::to_public_id()` value (`r:<host_key>:...`)\nby the local mount/materialization path, keyed off the *client's own*\ntrusted `HostKey` — never anything the remote host sends. No\nremote-influenced string (e.g. `custom_name`, `label`) ever feeds this\nfield, so a crafted remote value can neither spoof nor suppress it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
             },
@@ -10869,6 +10876,13 @@
             },
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "federation_origin": {
+              "description": "Host address (`user@ip`) this workspace was federation-mounted from;\n`None` for a local workspace. Runtime/session fact, so it is populated\nSERVER-side, not derived by a client from `workspace_id`.\n\nSecurity property this preserves: it is set exclusively from\n`remote::federation::id::classify(&ws.id)`, and a workspace's `id` is\nonly ever set to a `FedRef::to_public_id()` value (`r:<host_key>:...`)\nby the local mount/materialization path, keyed off the *client's own*\ntrusted `HostKey` — never anything the remote host sends. No\nremote-influenced string (e.g. `custom_name`, `label`) ever feeds this\nfield, so a crafted remote value can neither spoof nor suppress it.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "focused": {
               "type": "boolean"
