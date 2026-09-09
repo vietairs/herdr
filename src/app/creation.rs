@@ -5103,6 +5103,254 @@ mod federation_materialization_tests {
         );
     }
 
+    /// v0.9.0 multi-client tab views (upstream 6c0bb273) let a client view a
+    /// tab other than the workspace's own `active_tab_id`. When it does,
+    /// `src/server/client_shell.rs` derives `new_workspace_cwd` from THAT
+    /// client's active tab (`resolved_new_workspace_cwd_from_tab(ws_idx,
+    /// client_tab_idx)`), not the workspace's own active tab. A gate that
+    /// only compares against the workspace's own active tab
+    /// (`resolved_new_workspace_cwd_from`) rejects this and falls through to
+    /// a local create — the same regression reopened for any user who
+    /// switched tabs before hitting "new workspace". The gate must accept a
+    /// cwd matching the resolved default for ANY tab of the source
+    /// workspace, not just its own active one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_create_echoing_a_non_active_tabs_default_cwd_still_forwards() {
+        // A bespoke two-tab snapshot whose tabs have DIFFERENT pane cwds —
+        // `two_tab_snapshot`'s two panes share the same literal
+        // "/home/alice/project" cwd, which would make tab 0 and tab 1
+        // resolve to the same default and let this test pass by accident
+        // even against the workspace-active-tab-only comparison.
+        let mut snapshot = two_tab_snapshot();
+        snapshot.panes[1].cwd = Some("/home/alice/other-project".to_string());
+
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&snapshot, EventCursor(0));
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed");
+        let ws_idx = created[0];
+        app.state
+            .remote_mirrors
+            .insert(mount.host_key.clone(), mirror);
+        app.state.active = Some(ws_idx);
+        app.state.selected = ws_idx;
+        while out_rx.try_recv().is_ok() {}
+
+        // `active_tab_id` in `workspace_info()` is "w1-tab" (tab 0); tab 1
+        // ("w1-tab2") is a second, non-active tab a client could still be
+        // viewing.
+        assert_eq!(
+            app.state.workspaces[ws_idx].active_tab_index(),
+            0,
+            "precondition: the workspace's own active tab is index 0"
+        );
+        assert!(
+            app.state.workspaces[ws_idx].tabs.len() > 1,
+            "precondition: the mount has a second, non-active tab"
+        );
+        let active_tab_cwd = app.resolved_new_workspace_cwd_from_tab(ws_idx, Some(0));
+        let non_active_tab_cwd = app.resolved_new_workspace_cwd_from_tab(ws_idx, Some(1));
+        assert_ne!(
+            active_tab_cwd, non_active_tab_cwd,
+            "precondition: the two tabs must resolve to genuinely different default cwds"
+        );
+        let self_id = app.public_workspace_id(ws_idx);
+        let non_active_tab_cwd = non_active_tab_cwd.display().to_string();
+        let before = app.state.workspaces.len();
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "tui.workspace.create".to_string(),
+                method: crate::api::schema::Method::WorkspaceCreate(
+                    crate::api::schema::WorkspaceCreateParams {
+                        source_workspace_id: Some(self_id),
+                        cwd: Some(non_active_tab_cwd),
+                        focus: true,
+                        label: None,
+                        env: Default::default(),
+                    },
+                ),
+            });
+
+        assert!(
+            response.contains("workspace_create_requested"),
+            "echoing the non-active tab's own default cwd must still forward over the mount: {response}"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            before,
+            "no local workspace may be spawned for a remote-targeted create"
+        );
+        let mut sent_request = false;
+        while let Ok(frame) = out_rx.try_recv() {
+            if matches!(frame, FederationMessage::WorkspaceCreateRequest(_)) {
+                sent_request = true;
+            }
+        }
+        assert!(
+            sent_request,
+            "the mount must have received a WorkspaceCreateRequest"
+        );
+        assert_eq!(mount.mount_generation, 1);
+    }
+
+    /// v0.9.0 regression coverage: the no-prompt keybind path
+    /// (`src/client/shell/actions.rs`) now sends `source_workspace_id:
+    /// Some(focused workspace)` instead of leaving it unset. Naming the
+    /// focused federated workspace as its own source is the client echoing
+    /// what it already had focused, not a deliberate different source, so
+    /// this must still forward over the mount exactly like the
+    /// wholly-omitted-fields case above.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_create_naming_the_focused_federated_workspace_as_its_own_source_still_forwards(
+    ) {
+        let (mut app, mount, ws_idx, mut out_rx) = mounted_and_focused_mirror();
+        let before = app.state.workspaces.len();
+        let self_id = app.public_workspace_id(ws_idx);
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "tui.workspace.create".to_string(),
+                method: crate::api::schema::Method::WorkspaceCreate(
+                    crate::api::schema::WorkspaceCreateParams {
+                        source_workspace_id: Some(self_id),
+                        cwd: None,
+                        focus: true,
+                        label: None,
+                        env: Default::default(),
+                    },
+                ),
+            });
+
+        assert!(
+            response.contains("workspace_create_requested"),
+            "naming its own focused workspace as the source must still forward over the mount: {response}"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            before,
+            "no local workspace may be spawned for a remote-targeted create"
+        );
+        let mut sent_request = false;
+        while let Ok(frame) = out_rx.try_recv() {
+            if matches!(frame, FederationMessage::WorkspaceCreateRequest(_)) {
+                sent_request = true;
+            }
+        }
+        assert!(
+            sent_request,
+            "the mount must have received a WorkspaceCreateRequest"
+        );
+        assert_eq!(mount.mount_generation, 1);
+    }
+
+    /// v0.9.0 regression coverage: the name-prompt overlay path
+    /// (`src/client/shell/overlay_input.rs`) sends both
+    /// `source_workspace_id: Some(focused workspace)` AND `cwd:
+    /// Some(that workspace's own `new_workspace_cwd`)` — the default the
+    /// server itself told the client this create would use, not a directory
+    /// the user typed. Echoing the server's own default back must still
+    /// forward over the mount.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_create_echoing_its_own_default_cwd_still_forwards() {
+        let (mut app, mount, ws_idx, mut out_rx) = mounted_and_focused_mirror();
+        let before = app.state.workspaces.len();
+        let self_id = app.public_workspace_id(ws_idx);
+        let own_default_cwd = app
+            .resolved_new_workspace_cwd_from(ws_idx)
+            .display()
+            .to_string();
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "tui.workspace.create".to_string(),
+                method: crate::api::schema::Method::WorkspaceCreate(
+                    crate::api::schema::WorkspaceCreateParams {
+                        source_workspace_id: Some(self_id),
+                        cwd: Some(own_default_cwd),
+                        focus: true,
+                        label: None,
+                        env: Default::default(),
+                    },
+                ),
+            });
+
+        assert!(
+            response.contains("workspace_create_requested"),
+            "echoing the server's own default cwd (the overlay path) must still forward over the mount: {response}"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            before,
+            "no local workspace may be spawned for a remote-targeted create"
+        );
+        let mut sent_request = false;
+        while let Ok(frame) = out_rx.try_recv() {
+            if matches!(frame, FederationMessage::WorkspaceCreateRequest(_)) {
+                sent_request = true;
+            }
+        }
+        assert!(
+            sent_request,
+            "the mount must have received a WorkspaceCreateRequest"
+        );
+        assert_eq!(mount.mount_generation, 1);
+    }
+
+    /// The other fence on the redirect: a `source_workspace_id` naming a
+    /// DIFFERENT workspace than the one that would be used by default is a
+    /// deliberate explicit choice, even while a federated workspace stays
+    /// focused/selected. That must still create locally.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_create_naming_a_different_source_stays_local_even_while_a_federated_workspace_is_focused(
+    ) {
+        let (mut app, _mount, ws_idx, _out_rx) = mounted_and_focused_mirror();
+        app.state
+            .workspaces
+            .push(Workspace::test_new("other-local"));
+        let other_idx = app.state.workspaces.len() - 1;
+        // The federated workspace stays focused/selected — only the
+        // explicit `source_workspace_id` names something else.
+        app.state.active = Some(ws_idx);
+        app.state.selected = ws_idx;
+        let other_id = app.public_workspace_id(other_idx);
+        let before = app.state.workspaces.len();
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "tui.workspace.create".to_string(),
+                method: crate::api::schema::Method::WorkspaceCreate(
+                    crate::api::schema::WorkspaceCreateParams {
+                        source_workspace_id: Some(other_id),
+                        cwd: None,
+                        focus: false,
+                        label: None,
+                        env: Default::default(),
+                    },
+                ),
+            });
+
+        assert!(
+            !response.contains("workspace_create_requested"),
+            "naming a different explicit source must not be routed to the remote host: {response}"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            before + 1,
+            "naming a different explicit source creates a real local workspace"
+        );
+    }
+
     /// Mounts a two-tab mirror, registers it in the live mirror registry and
     /// focuses it, returning the app, the mount, the mirrored workspace index
     /// and the mount's outbound frame receiver. The registry entry is what

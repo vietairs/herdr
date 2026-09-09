@@ -561,20 +561,62 @@ impl App {
         // A plain "new workspace" performed while a mounted remote workspace
         // is in focus grows the *mounted host's* workspace set, mirroring how
         // `pane.split` inside a federated workspace splits on the remote
-        // (`dispatch_remote_pane_split`). Only when no `cwd` was requested and
-        // no explicit `source_workspace_id` was given: an explicit path or
-        // explicit source is a deliberate local-directory choice, and the
-        // remote host's filesystem is a different namespace entirely. Every
-        // TUI path sends neither — including the name-prompt dialog, which
-        // asks for a name only and lets this handler derive the path from
-        // `workspace_creation_source` — so only an API/CLI caller that named a
-        // directory or source itself is treated as having chosen one.
-        if params.cwd.is_none() && params.source_workspace_id.is_none() {
-            if let Some(source_ws_idx) = self.workspace_creation_source() {
-                if let Some(origin) = self.federation_host_key_for_workspace(source_ws_idx) {
+        // (`dispatch_remote_pane_split`). The v0.9.0 client/server split
+        // changed what "plain" means on the wire: both TUI create paths now
+        // echo back what they were already shown instead of sending neither
+        // field. The no-prompt keybind (`src/client/shell/actions.rs`) sends
+        // `source_workspace_id: Some(focused workspace)`, `cwd: None`. The
+        // name-prompt overlay (`src/client/shell/overlay_input.rs`) sends
+        // that same `source_workspace_id` *and* `cwd: Some(...)` — a default
+        // path the server itself told the client this create would use, not
+        // a directory the user typed. So neither field is by itself proof of
+        // a deliberate local choice anymore: only a `source_workspace_id`
+        // naming a workspace OTHER than the one that would be used by
+        // default, or a `cwd` that differs from every one of that
+        // workspace's tabs' resolved default cwds, is a deliberate choice
+        // layered on top of what the client was shown. Everything else is
+        // the client echoing its own defaults back, and must still forward.
+        //
+        // "Every tab", not just the workspace's own active tab: v0.9.0 also
+        // added independent per-client tab views (upstream 6c0bb273), so
+        // `src/server/client_shell.rs` derives the `cwd` it shows each client
+        // from THAT client's own active tab
+        // (`resolved_new_workspace_cwd_from_tab(ws_idx, client_tab_idx)`),
+        // which need not be `Workspace::active_tab_index()`. A client viewing
+        // a non-active tab and hitting "new workspace" would otherwise echo a
+        // cwd this gate cannot recognize as its own default and wrongly fall
+        // through to a local create. The requesting client's tab is
+        // necessarily one of the source workspace's tabs, so accepting a
+        // match against ANY of them closes that hole while a genuinely
+        // foreign path a caller typed still fails every comparison.
+        if let Some(default_source_idx) = self.workspace_creation_source() {
+            let source_is_default_or_absent = match params.source_workspace_id.as_deref() {
+                None => true,
+                Some(workspace_id) => {
+                    self.parse_workspace_id(workspace_id) == Some(default_source_idx)
+                }
+            };
+            let cwd_is_default_or_absent = match params.cwd.as_deref() {
+                None => true,
+                Some(cwd) => {
+                    let cwd = std::path::Path::new(cwd);
+                    let tab_count = self
+                        .state
+                        .workspaces
+                        .get(default_source_idx)
+                        .map(|workspace| workspace.tabs.len())
+                        .unwrap_or(0);
+                    (0..tab_count).any(|tab_idx| {
+                        cwd == self
+                            .resolved_new_workspace_cwd_from_tab(default_source_idx, Some(tab_idx))
+                    })
+                }
+            };
+            if source_is_default_or_absent && cwd_is_default_or_absent {
+                if let Some(origin) = self.federation_host_key_for_workspace(default_source_idx) {
                     return self.dispatch_remote_workspace_create(
                         id,
-                        source_ws_idx,
+                        default_source_idx,
                         origin,
                         params.label,
                         params.focus,
