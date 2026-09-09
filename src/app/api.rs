@@ -406,6 +406,17 @@ impl App {
             return Vec::new();
         }
 
+        #[cfg(unix)]
+        if let AppEvent::RemoteClipboardImageCaptured {
+            workspace_id,
+            target_pane_id,
+            capture,
+        } = ev
+        {
+            self.handle_remote_clipboard_image_captured(workspace_id, target_pane_id, capture);
+            return Vec::new();
+        }
+
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_api_worktree_add_finished(*result);
             return Vec::new();

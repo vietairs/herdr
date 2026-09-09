@@ -67,6 +67,20 @@ impl HeadlessServer {
         self.handoff_in_progress = true;
         self.disconnect_all_clients_for_handoff();
         let _ = reject_pending_client_connections(&self.client_listener);
+        // Revoke the federation controller for the handoff: close admission, bump
+        // the accept-epoch, and free the single-controller slot. Any command still
+        // queued from the current controller now carries a stale epoch and is
+        // rejected, so it cannot mutate the App or reacquire authority if the
+        // handoff rolls back. The revoked connection's own threads are reaped when
+        // this process is replaced on a successful handoff; on rollback,
+        // `rollback_handoff_before_commit` reopens admission. Active stream-close is
+        // deferred (no registry) — the client path likewise relies on shutdown +
+        // connection drop, not a forced socket close.
+        let _revoked = self.federation_lease.begin_revocation();
+        crate::server::federation_actor::sync_terminal_size_ownership(
+            &mut self.app,
+            &self.federation_lease,
+        );
 
         let mut paused_terminal_ids = Vec::new();
         for terminal_id in pane_by_terminal.keys() {
@@ -182,6 +196,13 @@ impl HeadlessServer {
             let _ = std::fs::remove_file(crate::api::socket_path());
         }
         let _ = remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity);
+        // Unlink the federation socket alongside the client socket so the
+        // replacement server can bind it. `restore_public_sockets_after_failed_handoff`
+        // rebinds it if this handoff rolls back.
+        let _ = remove_socket_file_if_owned(
+            &self.federation_socket_path,
+            &self.federation_socket_identity,
+        );
         if let Err(err) = crate::server::handoff::wait_ready(&mut stream) {
             crate::server::handoff::cleanup_failed_import_child(&mut import_child);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
@@ -261,10 +282,23 @@ impl HeadlessServer {
         let client_socket_identity = socket_file_identity(&client_path)?;
         listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
+        // The federation socket was unlinked alongside the client socket
+        // (perform_live_handoff, between send_fds and wait_ready); a failed
+        // handoff rolls back to the old server, so restore it the same way.
+        let federation_path = federation_socket_path(&client_path);
+        prepare_socket_path(&federation_path)?;
+        let federation_listener = bind_local_listener(&federation_path)?;
+        restrict_socket_permissions(&federation_path)?;
+        let federation_socket_identity = socket_file_identity(&federation_path)?;
+        federation_listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+
         self.api_server = Some(api_server);
         self.client_listener = listener;
         self.client_socket_path = client_path;
         self.client_socket_identity = client_socket_identity;
+        self.federation_listener = federation_listener;
+        self.federation_socket_path = federation_path;
+        self.federation_socket_identity = federation_socket_identity;
         Ok(())
     }
 
@@ -276,7 +310,7 @@ impl HeadlessServer {
     }
 
     #[cfg(unix)]
-    fn rollback_handoff_before_commit(
+    pub(super) fn rollback_handoff_before_commit(
         &mut self,
         socket_path: &Path,
         paused_terminal_ids: &[crate::terminal::TerminalId],
@@ -286,6 +320,14 @@ impl HeadlessServer {
                 runtime.set_handoff_reader_paused(false);
             }
         }
+        // Reopen federation admission (the epoch stays at its already-bumped
+        // value — never restored, so pre-revocation connections remain stale) so
+        // a rolled-back handoff does not permanently wedge federation.
+        self.federation_lease.reopen_admission();
+        crate::server::federation_actor::sync_terminal_size_ownership(
+            &mut self.app,
+            &self.federation_lease,
+        );
         self.handoff_in_progress = false;
         let _ = std::fs::remove_file(socket_path);
     }
@@ -371,6 +413,19 @@ impl HeadlessServer {
                     path = %self.client_socket_path.display(),
                     err = %err,
                     "failed to remove client socket on shutdown"
+                );
+            }
+        }
+        #[cfg(unix)]
+        if let Err(err) = remove_socket_file_if_owned(
+            &self.federation_socket_path,
+            &self.federation_socket_identity,
+        ) {
+            if err.kind() != io::ErrorKind::NotFound {
+                warn!(
+                    path = %self.federation_socket_path.display(),
+                    err = %err,
+                    "failed to remove federation socket on shutdown"
                 );
             }
         }

@@ -62,6 +62,34 @@ pub(super) fn endpoint_accepts_local_images(
     active_surface_available && (remote_client_process || !endpoint_id.is_local())
 }
 
+/// An image paste that carries no text payload, as some host terminals report
+/// `Cmd+V` with an image-only clipboard (measured on Warp).
+#[cfg(unix)]
+const EMPTY_BRACKETED_PASTE: &[u8] = b"\x1b[200~\x1b[201~";
+
+/// Whether an unbridgeable trigger must be swallowed instead of forwarded.
+///
+/// A `herdr --remote` client that claims one of these triggers and then finds
+/// no image on *its own* clipboard used to forward the raw bytes on. The
+/// server reads them as an image-paste trigger too, so it would answer by
+/// reading the **server host's** clipboard and staging whatever image happened
+/// to be sitting there — an image the person at this keyboard never saw.
+/// Keeping the empty paste here is free: it carries no payload, so nothing is
+/// lost by not delivering it.
+///
+/// Deliberately narrow. The configured key is still forwarded, because it also
+/// reaches panes that are not federated at all, where it is an ordinary
+/// keystroke the pane app expects (readline quoted-insert, vim visual-block);
+/// only the server knows whether the target pane is federated, and it cannot
+/// yet tell a remote client's input from a local one.
+#[cfg(unix)]
+pub(super) fn suppress_unbridged_clipboard_image_trigger(
+    data: &[u8],
+    is_remote_client: bool,
+) -> bool {
+    is_remote_client && data == EMPTY_BRACKETED_PASTE
+}
+
 #[cfg(unix)]
 pub(super) fn should_bridge_clipboard_image_paste(
     data: &[u8],
@@ -71,13 +99,19 @@ pub(super) fn should_bridge_clipboard_image_paste(
     if !is_remote_client {
         return false;
     }
-    if data == b"\x1b[200~\x1b[201~" {
-        return true;
-    }
-
+    // Checked ahead of the empty-paste branch, not after it: an unset binding
+    // turns the whole feature off, both triggers with it. Reading the
+    // clipboard for the empty paste here would leave the off switch
+    // half-connected — the server-side gate would be honoured while a
+    // `herdr --remote` client kept staging images behind it, which is exactly
+    // what the user set an empty `keys.remote_image_paste` to prevent.
     let Some(remote_image_paste_key) = remote_image_paste_key else {
         return false;
     };
+
+    if data == EMPTY_BRACKETED_PASTE {
+        return true;
+    }
 
     let events = crate::raw_input::parse_raw_input_bytes_sync(data);
     matches!(
@@ -252,3 +286,4 @@ fn recognized_image_extension(extension: &str) -> Option<&'static str> {
         None
     }
 }
+

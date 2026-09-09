@@ -2543,6 +2543,19 @@ impl HeadlessServer {
                     }
                     return runtime.scroll_metrics() != scroll_before;
                 }
+                // A pane mirrored from a federated remote host claims the
+                // image-paste key and image-shaped pastes before they reach
+                // the pane: the file has to be written on the host the agent
+                // runs on, not this one. Returns `events` untouched, and does
+                // no per-event work at all, for every other pane. Placed after
+                // the visibility gate above so input aimed at a pane this
+                // client cannot see never starts a clipboard read.
+                #[cfg(unix)]
+                let events = self.app.intercept_remote_image_paste_events(
+                    workspace_index,
+                    runtime_pane_id,
+                    events,
+                );
                 let interaction = client_pane_input_has_interaction(&events);
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client

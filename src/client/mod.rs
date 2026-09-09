@@ -91,6 +91,8 @@ use attach::{write_attach_semantic_action, AttachInputAction};
 use clipboard_images::{
     client_remote_image_paste_key, endpoint_accepts_local_images, write_remote_image_to_server,
 };
+#[cfg(unix)]
+use clipboard_images::suppress_unbridged_clipboard_image_trigger;
 #[cfg(windows)]
 use clipboard_images::{read_image_file_from_client_events, should_bridge_clipboard_image_events};
 #[cfg(unix)]
@@ -755,6 +757,12 @@ async fn run_client_loop(
                             info!(
                                 "clipboard image paste trigger received, but local clipboard has no image"
                             );
+                            if suppress_unbridged_clipboard_image_trigger(
+                                &data,
+                                image_bridge_active,
+                            ) {
+                                continue;
+                            }
                         }
                         if let Some(image) =
                             read_image_file_from_terminal_drop(&data, image_bridge_active)
@@ -871,6 +879,9 @@ async fn run_client_loop(
                     info!(
                         "clipboard image paste trigger received, but local clipboard has no image"
                     );
+                    if suppress_unbridged_clipboard_image_trigger(&data, image_bridge_active) {
+                        continue;
+                    }
                 }
                 if let Some(image) = read_image_file_from_terminal_drop(&data, image_bridge_active)
                 {

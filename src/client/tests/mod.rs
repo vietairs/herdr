@@ -193,6 +193,16 @@ fn clipboard_image_paste_bridge_triggers_on_configured_key_and_empty_paste() {
     assert!(should_bridge_clipboard_image_paste(
         b"\x1b[200~\x1b[201~",
         true,
+        Some(ctrl_v)
+    ));
+    // An unset binding is the feature's off switch and governs both triggers.
+    // Without this the switch would be half-connected: the server would
+    // honour it while a `herdr --remote` client kept bridging images behind
+    // it, which is exactly what the user set an empty
+    // `keys.remote_image_paste` to prevent.
+    assert!(!should_bridge_clipboard_image_paste(
+        b"\x1b[200~\x1b[201~",
+        true,
         None
     ));
     assert!(!should_bridge_clipboard_image_paste(
@@ -215,6 +225,30 @@ fn clipboard_image_paste_bridge_triggers_on_configured_key_and_empty_paste() {
         b"v",
         true,
         Some(ctrl_v)
+    ));
+}
+
+/// A remote client that claimed the empty-paste trigger and then found nothing
+/// on its own clipboard must not forward the raw bytes: the server reads them
+/// as the same trigger and would answer by staging whatever sits on the
+/// *server host's* clipboard — an image the person at this keyboard never saw.
+/// The configured key is deliberately still forwarded, because it is an
+/// ordinary keystroke to every pane that is not federated.
+#[cfg(unix)]
+#[test]
+fn an_unbridged_empty_paste_is_swallowed_but_the_configured_key_is_forwarded() {
+    assert!(suppress_unbridged_clipboard_image_trigger(
+        b"\x1b[200~\x1b[201~",
+        true
+    ));
+    assert!(!suppress_unbridged_clipboard_image_trigger(
+        b"\x1b[200~\x1b[201~",
+        false
+    ));
+    assert!(!suppress_unbridged_clipboard_image_trigger(&[0x16], true));
+    assert!(!suppress_unbridged_clipboard_image_trigger(
+        b"\x1b[200~hello\x1b[201~",
+        true
     ));
 }
 

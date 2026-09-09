@@ -6334,3 +6334,213 @@ fn no_handle_internal_event_bypass_in_module() {
         bypass_lines.join("\n  ")
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn federation_socket_is_bound_as_a_sibling_of_the_client_socket() {
+    let server = test_headless_server();
+    assert_eq!(
+        server.federation_socket_path.parent(),
+        server.client_socket_path.parent()
+    );
+    assert!(
+        server
+            .federation_socket_path
+            .to_str()
+            .is_some_and(|path| path.ends_with(".sock")),
+        "federation socket path = {:?}",
+        server.federation_socket_path
+    );
+    assert_ne!(server.federation_socket_path, server.client_socket_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_sockets_removes_the_federation_socket() {
+    let server = test_headless_server();
+    let federation_path = server.federation_socket_path.clone();
+    assert!(federation_path.exists());
+
+    server.cleanup_sockets().expect("cleanup sockets");
+
+    assert!(
+        !federation_path.exists(),
+        "federation socket left behind at {federation_path:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rollback_handoff_before_commit_reopens_federation_admission() {
+    use crate::server::federation_lease::Admission;
+
+    let mut server = test_headless_server();
+    server.federation_lease.begin_revocation();
+    let epoch = server.federation_lease.current_epoch();
+    assert_eq!(
+        server.federation_lease.try_acquire(epoch, 1),
+        Admission::Closed,
+        "revocation must close admission"
+    );
+
+    let handoff_socket = std::env::temp_dir().join(format!(
+        "herdr-test-rollback-{}-{}.sock",
+        std::process::id(),
+        epoch
+    ));
+    server.rollback_handoff_before_commit(&handoff_socket, &[]);
+
+    assert!(!server.handoff_in_progress);
+    assert_eq!(
+        server.federation_lease.try_acquire(epoch, 1),
+        Admission::Accepted,
+        "rollback must reopen admission at the already-bumped epoch"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rollback_handoff_before_commit_releases_federation_owned_terminal_sizes() {
+    let mut server = test_headless_server();
+    let terminal_id = crate::terminal::TerminalId::alloc();
+    server
+        .app
+        .state
+        .federation_owned_terminal_sizes
+        .insert(terminal_id);
+    server.federation_lease.begin_revocation();
+
+    let handoff_socket = std::env::temp_dir().join(format!(
+        "herdr-test-rollback-sizes-{}.sock",
+        std::process::id()
+    ));
+    server.rollback_handoff_before_commit(&handoff_socket, &[]);
+
+    assert!(
+        server.app.state.federation_owned_terminal_sizes.is_empty(),
+        "revoking the controller must hand terminal sizing back to this host"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn federation_mount_failed_system_toast_forwards_to_foreground_client() {
+    let mut server = test_headless_server();
+    let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+    server.clients.insert(
+        1,
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(client_tx),
+        ),
+    );
+    server.foreground_client_id = Some(1);
+    server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+
+    let changed = server.handle_internal_event_with_forwarding(AppEvent::FederationMountFailed {
+        target: "host1".into(),
+        reason: "connection refused".into(),
+    });
+
+    assert!(changed);
+    match read_server_message(
+        client_control_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("system toast message"),
+    ) {
+        ServerMessage::Notify {
+            kind,
+            message,
+            body,
+        } => {
+            assert_eq!(kind, protocol::NotifyKind::SystemToast);
+            assert!(message.contains("host1"));
+            assert!(body
+                .as_deref()
+                .is_some_and(|body| body.contains("connection refused")));
+        }
+        other => panic!("expected system toast notify, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn federation_mount_failed_terminal_toast_forwards_to_foreground_client() {
+    let mut server = test_headless_server();
+    let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+    server.clients.insert(
+        1,
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(client_tx),
+        ),
+    );
+    server.foreground_client_id = Some(1);
+    server.app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
+
+    let changed = server.handle_internal_event_with_forwarding(AppEvent::FederationMountFailed {
+        target: "host1".into(),
+        reason: "connection refused".into(),
+    });
+
+    assert!(changed);
+    match read_server_message(
+        client_control_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("terminal toast message"),
+    ) {
+        ServerMessage::Notify {
+            kind,
+            message,
+            body,
+        } => {
+            assert_eq!(kind, protocol::NotifyKind::Toast);
+            assert!(message.contains("host1"));
+            assert!(body
+                .as_deref()
+                .is_some_and(|body| body.contains("connection refused")));
+        }
+        other => panic!("expected terminal toast notify, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn federation_mount_failed_with_toasts_off_sends_no_client_notify() {
+    let mut server = test_headless_server();
+    let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+    server.clients.insert(
+        1,
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(client_tx),
+        ),
+    );
+    server.foreground_client_id = Some(1);
+    server.app.state.toast_config.delivery = crate::config::ToastDelivery::Off;
+
+    let changed = server.handle_internal_event_with_forwarding(AppEvent::FederationMountFailed {
+        target: "host1".into(),
+        reason: "connection refused".into(),
+    });
+
+    assert!(changed);
+    assert!(
+        client_control_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err(),
+        "toast delivery off must not forward a client notify"
+    );
+}
