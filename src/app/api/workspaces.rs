@@ -3320,11 +3320,16 @@ mod tests {
         app.state.ensure_test_terminals();
         let unrelated_id = app.state.workspaces[2].id.clone();
 
+        // `close_group` must be set explicitly: closing a member of a
+        // multi-workspace worktree space without it is refused with
+        // `workspace_group_close_required` (covered separately). What this test
+        // guards is that once asked, the whole group still goes — federation's
+        // single-workspace close path must not have narrowed it.
         let response = app.handle_workspace_close(
             "req".into(),
             WorkspaceCloseParams {
                 workspace_id: app.state.workspaces[0].id.clone(),
-                close_group: false,
+                close_group: true,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
