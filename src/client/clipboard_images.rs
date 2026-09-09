@@ -286,4 +286,3 @@ fn recognized_image_extension(extension: &str) -> Option<&'static str> {
         None
     }
 }
-

@@ -88,11 +88,11 @@ use attach::direct_attach_pixel_mouse;
 use attach::AttachEscapeState;
 #[cfg(unix)]
 use attach::{write_attach_semantic_action, AttachInputAction};
+#[cfg(unix)]
+use clipboard_images::suppress_unbridged_clipboard_image_trigger;
 use clipboard_images::{
     client_remote_image_paste_key, endpoint_accepts_local_images, write_remote_image_to_server,
 };
-#[cfg(unix)]
-use clipboard_images::suppress_unbridged_clipboard_image_trigger;
 #[cfg(windows)]
 use clipboard_images::{read_image_file_from_client_events, should_bridge_clipboard_image_events};
 #[cfg(unix)]

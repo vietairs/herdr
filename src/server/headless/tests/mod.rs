@@ -60,7 +60,11 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         federation_listener
             .set_nonblocking(ListenerNonblockingMode::Accept)
             .expect("set federation listener nonblocking");
-        (federation_listener, federation_path, federation_socket_identity)
+        (
+            federation_listener,
+            federation_path,
+            federation_socket_identity,
+        )
     };
     let (server_event_tx, server_event_rx) = mpsc::channel(64);
     let should_quit = Arc::new(AtomicBool::new(false));

@@ -5856,10 +5856,11 @@ mod remote_spawn_tests {
             )
             .expect("remote pane accepts a queued submission");
 
-        let text_message = tokio::time::timeout(std::time::Duration::from_millis(50), out_rx.recv())
-            .await
-            .expect("submission text must reach the mount's out_tx immediately")
-            .expect("out_tx sender still alive");
+        let text_message =
+            tokio::time::timeout(std::time::Duration::from_millis(50), out_rx.recv())
+                .await
+                .expect("submission text must reach the mount's out_tx immediately")
+                .expect("out_tx sender still alive");
         assert!(matches!(
             text_message,
             FederationMessage::Terminal(TerminalChannelMessage::Input {
@@ -5874,10 +5875,11 @@ mod remote_spawn_tests {
             tokio::time::timeout(std::time::Duration::from_millis(5), out_rx.recv()).await;
         assert!(too_early.is_err(), "delayed enter fired before its delay");
 
-        let enter_message = tokio::time::timeout(std::time::Duration::from_millis(200), out_rx.recv())
-            .await
-            .expect("delayed enter must eventually reach the mount's out_tx")
-            .expect("out_tx sender still alive");
+        let enter_message =
+            tokio::time::timeout(std::time::Duration::from_millis(200), out_rx.recv())
+                .await
+                .expect("delayed enter must eventually reach the mount's out_tx")
+                .expect("out_tx sender still alive");
         assert!(matches!(
             enter_message,
             FederationMessage::Terminal(TerminalChannelMessage::Input {

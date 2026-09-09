@@ -658,8 +658,7 @@ pub(crate) fn clipboard_stage_failure_context(failure: ClipboardStageFailure) ->
 // re-derived from focus, and a press can no longer race a focus change.
 
 /// Toast context for a mount whose peer never negotiated file staging.
-pub(crate) const TOAST_REMOTE_TOO_OLD: &str =
-    "remote herdr is too old for image paste; update it";
+pub(crate) const TOAST_REMOTE_TOO_OLD: &str = "remote herdr is too old for image paste; update it";
 
 /// Toast context for a press whose clipboard holds no pasteable image.
 const TOAST_NO_CLIPBOARD_IMAGE: &str = "clipboard has no image (png/jpg/gif/webp/bmp)";
@@ -727,10 +726,7 @@ pub(crate) fn spawn_clipboard_image_capture<F>(
 /// `None` means "not a federated workspace" and is the answer on every local
 /// pane, so it is also the fast path: a workspace with no federation space
 /// membership never touches the mirror table.
-fn mount_file_staging_support(
-    state: &crate::app::state::AppState,
-    ws_idx: usize,
-) -> Option<bool> {
+fn mount_file_staging_support(state: &crate::app::state::AppState, ws_idx: usize) -> Option<bool> {
     use crate::remote::federation::protocol::Capability;
 
     // A federated workspace carries the mount's host key in its space
@@ -2518,7 +2514,9 @@ mod tests {
         let workspace_id = app.state.workspaces[0].id.clone();
 
         app.begin_remote_clipboard_image_capture(0, pane_id, || None);
-        assert!(app.remote_clipboard_image_reads_in_flight.contains(&pane_id));
+        assert!(app
+            .remote_clipboard_image_reads_in_flight
+            .contains(&pane_id));
 
         app.handle_internal_event(AppEvent::RemoteClipboardImageCaptured {
             workspace_id,
@@ -2526,7 +2524,8 @@ mod tests {
             capture: ClipboardImageCapture::NoImage,
         });
         assert!(
-            !app.remote_clipboard_image_reads_in_flight.contains(&pane_id),
+            !app.remote_clipboard_image_reads_in_flight
+                .contains(&pane_id),
             "a 'no image' answer must not leave the pane unable to try again"
         );
     }
@@ -2742,7 +2741,10 @@ mod tests {
 
         let kept = app.intercept_remote_image_paste_events(0, pane_id, events.clone());
 
-        assert_eq!(kept, events, "ordinary typing must reach the pane unchanged");
+        assert_eq!(
+            kept, events,
+            "ordinary typing must reach the pane unchanged"
+        );
         assert_eq!(
             clipboard_reads_started(&mut app).await,
             0,
@@ -2763,16 +2765,22 @@ mod tests {
         let other_pane = PaneId::alloc();
 
         app.remote_image_paste_unsupported_notices.insert(pane_id);
-        app.remote_image_paste_unsupported_notices.insert(other_pane);
+        app.remote_image_paste_unsupported_notices
+            .insert(other_pane);
         app.remote_clipboard_image_reads_in_flight.insert(pane_id);
-        app.remote_clipboard_image_reads_in_flight.insert(other_pane);
+        app.remote_clipboard_image_reads_in_flight
+            .insert(other_pane);
 
         let mut closing = std::collections::HashSet::new();
         closing.insert(app.state.workspaces[0].id.clone());
         app.purge_remote_image_paste_pane_state_for_workspaces(&closing);
 
-        assert!(!app.remote_image_paste_unsupported_notices.contains(&pane_id));
-        assert!(!app.remote_clipboard_image_reads_in_flight.contains(&pane_id));
+        assert!(!app
+            .remote_image_paste_unsupported_notices
+            .contains(&pane_id));
+        assert!(!app
+            .remote_clipboard_image_reads_in_flight
+            .contains(&pane_id));
         assert!(
             app.remote_image_paste_unsupported_notices
                 .contains(&other_pane),

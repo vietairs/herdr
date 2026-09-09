@@ -1471,7 +1471,6 @@ mod tests {
         })
     }
 
-
     // A duplicate `HostKey` mount is rejected with a typed error naming the
     // colliding host; the first mount stays live (narrowed from P8's "any
     // second mount" per Phase B requirement 5/6).

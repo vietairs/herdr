@@ -1102,7 +1102,10 @@ impl PtyIoActorRunner {
     /// submission boundary or an in-flight nudge restore is due, whichever
     /// comes first; the idle poll interval when neither is pending.
     fn poll_timeout_ms(&self) -> i32 {
-        match (self.submission_poll_timeout_ms(), self.nudge_poll_timeout_ms()) {
+        match (
+            self.submission_poll_timeout_ms(),
+            self.nudge_poll_timeout_ms(),
+        ) {
             (Some(a), Some(b)) => a.min(b),
             (Some(a), None) => a,
             (None, Some(b)) => b,

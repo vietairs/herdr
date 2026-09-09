@@ -2289,14 +2289,13 @@ mod tests {
         assert_eq!(app.state.workspaces.len(), 1);
         assert!(app.state.remote_mirrors.is_empty());
         assert!(app.state.toast.is_some());
-        assert!(
-            app.state
-                .toast
-                .as_ref()
-                .unwrap()
-                .title
-                .contains("remote-host")
-        );
+        assert!(app
+            .state
+            .toast
+            .as_ref()
+            .unwrap()
+            .title
+            .contains("remote-host"));
     }
 
     // Terminal/System delivery must never populate `state.toast` (that
@@ -2469,12 +2468,10 @@ mod tests {
         );
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_request");
-        assert!(
-            error
-                .error
-                .message
-                .contains("-oProxyCommand=touch /tmp/pwn")
-        );
+        assert!(error
+            .error
+            .message
+            .contains("-oProxyCommand=touch /tmp/pwn"));
 
         assert!(app.state.remote_mirrors.is_empty());
         // No dial and no async event: nothing was spawned for this request.
@@ -2729,18 +2726,15 @@ mod tests {
 
         assert!(app.state.remote_mirrors.is_empty());
         assert_eq!(app.state.workspaces.len(), 1);
-        assert!(
-            app.state
-                .workspaces
-                .iter()
-                .all(|ws| ws.worktree_space().is_none())
-        );
-        assert!(
-            event_hub
-                .events_after(0)
-                .iter()
-                .any(|(_, event)| matches!(&event.data, EventData::WorkspaceClosed { .. }))
-        );
+        assert!(app
+            .state
+            .workspaces
+            .iter()
+            .all(|ws| ws.worktree_space().is_none()));
+        assert!(event_hub
+            .events_after(0)
+            .iter()
+            .any(|(_, event)| matches!(&event.data, EventData::WorkspaceClosed { .. })));
     }
 
     /// Memory-leak regression: the locally-initiated close path purges
@@ -3018,12 +3012,11 @@ mod tests {
             "pending splits for the closed workspace must be purged before removal"
         );
         assert_eq!(app.state.workspaces.len(), 1);
-        assert!(
-            app.state
-                .workspaces
-                .iter()
-                .all(|ws| ws.worktree_space().is_none())
-        );
+        assert!(app
+            .state
+            .workspaces
+            .iter()
+            .all(|ws| ws.worktree_space().is_none()));
     }
 
     /// Every workspace of a mount shares one worktree-space key
@@ -3187,12 +3180,11 @@ mod tests {
             "closing the mount's last workspace must cancel its drive task"
         );
         assert_eq!(app.state.workspaces.len(), 1);
-        assert!(
-            app.state
-                .workspaces
-                .iter()
-                .all(|ws| ws.worktree_space().is_none())
-        );
+        assert!(app
+            .state
+            .workspaces
+            .iter()
+            .all(|ws| ws.worktree_space().is_none()));
         app.state.assert_invariants_for_test();
     }
 
