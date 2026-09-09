@@ -384,3 +384,201 @@ fn close_confirmation_error_becomes_client_owned_overlay_and_stable_group_close(
             if params.workspace_id == "ws_1" && params.close_group
     ));
 }
+
+/// Builds a snapshot whose single workspace/tab is federation-mounted from
+/// `origin`, using a remote-shaped `workspace_id` so the tests below can tell
+/// apart "the client trusted the server's origin field" from "the client
+/// re-parsed the id".
+fn federated_snapshot(origin: Option<&str>, remote_shaped_id: bool) -> ClientShellSnapshot {
+    let mut snapshot = snapshot();
+    if remote_shaped_id {
+        let workspace_id = "r:host-key-1:1".to_string();
+        snapshot.focused_workspace_id = Some(workspace_id.clone());
+        snapshot.workspaces[0].workspace_id = workspace_id.clone();
+        snapshot.tabs[0].workspace_id = workspace_id.clone();
+        snapshot.panes[0].workspace_id = workspace_id;
+    }
+    snapshot.workspaces[0].federation_origin = origin.map(str::to_owned);
+    snapshot
+}
+
+fn workspace_menu_labels(state: &ClientShellState) -> Vec<&'static str> {
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => {
+            menu.items().iter().map(|item| item.label).collect()
+        }
+        _ => panic!("context menu overlay"),
+    }
+}
+
+/// The federated-target gate reads the server-populated `federation_origin`,
+/// never the shape of `workspace_id`. A remote-looking id with no origin must
+/// not surface the action, and a local-looking id the server marked federated
+/// must.
+#[test]
+fn close_on_host_follows_the_server_origin_field_not_the_workspace_id_shape() {
+    let open = |snapshot: ClientShellSnapshot| {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let workspace_id = snapshot.workspaces[0].workspace_id.clone();
+        state.set_snapshot(Box::new(snapshot));
+        state.open_workspace_context_menu(workspace_id, 0, 0);
+        workspace_menu_labels(&state)
+    };
+
+    // Remote-shaped id, but the server did not mark it federated.
+    assert!(
+        !open(federated_snapshot(None, true)).contains(&"Close on host"),
+        "a remote-shaped workspace_id must not by itself unlock close-on-host"
+    );
+    // Local-shaped id the server did mark federated.
+    assert!(
+        open(federated_snapshot(Some("dev@10.0.0.5"), false)).contains(&"Close on host"),
+        "the server's federation_origin must unlock close-on-host"
+    );
+    assert!(!open(snapshot()).contains(&"Close on host"));
+}
+
+/// Menu rows are activated by index, so a conditional item must never displace
+/// an unconditional one. Close-on-host is appended last for exactly that
+/// reason.
+#[test]
+fn close_on_host_appends_last_and_never_shifts_the_items_above_it() {
+    let labels_for = |origin: Option<&str>| {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let snapshot = federated_snapshot(origin, true);
+        let workspace_id = snapshot.workspaces[0].workspace_id.clone();
+        state.set_snapshot(Box::new(snapshot));
+        state.open_workspace_context_menu(workspace_id, 0, 0);
+        workspace_menu_labels(&state)
+    };
+
+    let local = labels_for(None);
+    let federated = labels_for(Some("dev@10.0.0.5"));
+    assert_eq!(
+        federated.len(),
+        local.len() + 1,
+        "close-on-host should add exactly one row"
+    );
+    assert_eq!(
+        &federated[..local.len()],
+        &local[..],
+        "close-on-host must not reorder the rows above it"
+    );
+    assert_eq!(federated.last().copied(), Some("Close on host"));
+}
+
+#[test]
+fn close_on_host_asks_the_serving_host_to_close_its_own_workspace() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let snapshot = federated_snapshot(Some("dev@10.0.0.5"), true);
+    let workspace_id = snapshot.workspaces[0].workspace_id.clone();
+    state.set_snapshot(Box::new(snapshot));
+    state.open_workspace_context_menu(workspace_id.clone(), 0, 0);
+    let index = workspace_menu_labels(&state)
+        .iter()
+        .position(|label| *label == "Close on host")
+        .expect("close on host item");
+
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut outcome);
+
+    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+        panic!("close on host should use the endpoint API");
+    };
+    assert!(
+        matches!(
+            &request.method,
+            crate::api::schema::Method::WorkspaceCloseRemote(target)
+                if target.workspace_id == workspace_id
+        ),
+        "expected workspace.close_remote for the menu target, got {:?}",
+        request.method
+    );
+}
+
+/// A tab carries no origin of its own, so its close-on-host gate must resolve
+/// through the workspace it belongs to.
+#[test]
+fn tab_close_on_host_resolves_through_the_owning_workspace_origin() {
+    let open = |origin: Option<&str>| {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let snapshot = federated_snapshot(origin, true);
+        state.set_snapshot(Box::new(snapshot));
+        state.open_tab_context_menu("tab_1".into(), 0, 0);
+        state
+    };
+
+    assert!(!workspace_menu_labels(&open(None)).contains(&"Close on host"));
+
+    let mut state = open(Some("dev@10.0.0.5"));
+    let labels = workspace_menu_labels(&state);
+    assert_eq!(labels.last().copied(), Some("Close on host"));
+    let index = labels.len() - 1;
+
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut outcome);
+
+    let close_remote = outcome.actions.iter().any(|action| {
+        matches!(
+            action,
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(
+                    &request.method,
+                    crate::api::schema::Method::TabCloseRemote(target) if target.tab_id == "tab_1"
+                )
+        )
+    });
+    assert!(
+        close_remote,
+        "expected tab.close_remote for the menu target"
+    );
+}
+
+/// Exercises the row the user actually clicks, not just `items()`, so an
+/// index/label drift between the menu model and the rendered rows fails here.
+#[test]
+fn balance_splits_row_rebalances_the_clicked_panes_tab() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("composed frame");
+
+    let pane = state.hits.panes[0].rect;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: pane.x + 1,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.compose(106, 20).expect("pane context menu");
+
+    let balance_index = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu
+            .items()
+            .iter()
+            .position(|item| item.action == ClientContextMenuAction::BalanceSplits)
+            .expect("balance splits item"),
+        _ => panic!("pane context menu"),
+    };
+    let row = state.hits.context_menu_rows[balance_index].0;
+    let outcome =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x + 1,
+            row: row.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+
+    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+        panic!("balance splits should use the endpoint API");
+    };
+    assert!(
+        matches!(
+            &request.method,
+            crate::api::schema::Method::LayoutBalance(params)
+                if params.pane_id.as_deref() == Some("pane_1") && params.tab_id.is_none()
+        ),
+        "expected layout.balance scoped to the clicked pane, got {:?}",
+        request.method
+    );
+}

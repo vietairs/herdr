@@ -579,8 +579,12 @@ pub(super) enum ClientContextMenuAction {
     SplitRight,
     SplitDown,
     Zoom,
+    BalanceSplits,
     ToggleRightClickPassthrough,
     ClosePane,
+    /// Ask the SERVING host to close its own workspace/tab, rather than just
+    /// unmounting the local mirror of it. Only offered on a federated target.
+    CloseOnHost,
 }
 
 #[derive(Debug)]
@@ -591,10 +595,17 @@ pub(super) enum ClientContextMenuTarget {
         is_linked_worktree: bool,
         has_worktree_children: bool,
         collapsed: bool,
+        /// Whether this workspace is federation-mounted from another host,
+        /// taken from the server-populated `federation_origin` rather than
+        /// parsed out of `workspace_id` client-side.
+        federated: bool,
     },
     Tab {
         tab_id: String,
         workspace_id: String,
+        /// Whether the tab's workspace is federation-mounted; see the
+        /// workspace variant's field.
+        federated: bool,
     },
     Pane {
         pane_id: String,

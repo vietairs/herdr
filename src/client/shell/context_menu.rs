@@ -5,47 +5,78 @@ impl ClientContextMenuOverlay {
         use ClientContextMenuAction as Action;
 
         let item = |label, action| ClientContextMenuItem { label, action };
-        match &self.target {
-            ClientContextMenuTarget::Workspace { is_git: false, .. } => {
-                vec![item("Rename", Action::Rename), item("Close", Action::Close)]
+
+        // "Close on host" is only reachable on a federated target, and always
+        // sits last so that adding it never shifts the index of an item above
+        // it -- menu rows are activated by index.
+        let with_close_on_host = |mut items: Vec<ClientContextMenuItem>, federated: bool| {
+            if federated {
+                items.push(item("Close on host", Action::CloseOnHost));
             }
+            items
+        };
+
+        match &self.target {
+            ClientContextMenuTarget::Workspace {
+                is_git: false,
+                federated,
+                ..
+            } => with_close_on_host(
+                vec![item("Rename", Action::Rename), item("Close", Action::Close)],
+                *federated,
+            ),
             ClientContextMenuTarget::Workspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
+                federated,
                 ..
-            } => vec![
-                item("Rename", Action::Rename),
-                item("Close", Action::Close),
-                item("New worktree", Action::NewWorktree),
-                item("Open worktree...", Action::OpenWorktree),
-            ],
+            } => with_close_on_host(
+                vec![
+                    item("Rename", Action::Rename),
+                    item("Close", Action::Close),
+                    item("New worktree", Action::NewWorktree),
+                    item("Open worktree...", Action::OpenWorktree),
+                ],
+                *federated,
+            ),
             ClientContextMenuTarget::Workspace {
                 is_linked_worktree: true,
+                federated,
                 ..
-            } => vec![
-                item("Rename", Action::Rename),
-                item("Close", Action::Close),
-                item("Delete worktree checkout...", Action::RemoveWorktree),
-            ],
+            } => with_close_on_host(
+                vec![
+                    item("Rename", Action::Rename),
+                    item("Close", Action::Close),
+                    item("Delete worktree checkout...", Action::RemoveWorktree),
+                ],
+                *federated,
+            ),
             ClientContextMenuTarget::Workspace {
                 has_worktree_children: true,
                 collapsed,
+                federated,
                 ..
-            } => vec![
-                item("Rename", Action::Rename),
-                item("Close group", Action::Close),
-                item("New worktree", Action::NewWorktree),
-                item("Open worktree...", Action::OpenWorktree),
-                item(
-                    if *collapsed { "Expand" } else { "Collapse" },
-                    Action::ToggleGroup,
-                ),
-            ],
-            ClientContextMenuTarget::Tab { .. } => vec![
-                item("New tab", Action::NewTab),
-                item("Rename", Action::Rename),
-                item("Close", Action::Close),
-            ],
+            } => with_close_on_host(
+                vec![
+                    item("Rename", Action::Rename),
+                    item("Close group", Action::Close),
+                    item("New worktree", Action::NewWorktree),
+                    item("Open worktree...", Action::OpenWorktree),
+                    item(
+                        if *collapsed { "Expand" } else { "Collapse" },
+                        Action::ToggleGroup,
+                    ),
+                ],
+                *federated,
+            ),
+            ClientContextMenuTarget::Tab { federated, .. } => with_close_on_host(
+                vec![
+                    item("New tab", Action::NewTab),
+                    item("Rename", Action::Rename),
+                    item("Close", Action::Close),
+                ],
+                *federated,
+            ),
             ClientContextMenuTarget::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -63,6 +94,7 @@ impl ClientContextMenuOverlay {
                     item("Split right", Action::SplitRight),
                     item("Split down", Action::SplitDown),
                     item("Zoom", Action::Zoom),
+                    item("Balance splits", Action::BalanceSplits),
                     item(
                         if *right_click_passthrough {
                             "Use Herdr right-click menu"
@@ -115,6 +147,7 @@ impl ClientShellState {
                 is_linked_worktree: worktree.is_some_and(|worktree| worktree.is_linked_worktree),
                 has_worktree_children,
                 collapsed,
+                federated: workspace.federation_origin.is_some(),
             },
             x,
             y,
@@ -123,17 +156,24 @@ impl ClientShellState {
     }
 
     pub(super) fn open_tab_context_menu(&mut self, tab_id: String, x: u16, y: u16) {
-        let Some(tab) = self
-            .snapshot
-            .as_deref()
-            .and_then(|snapshot| snapshot.tabs.iter().find(|tab| tab.tab_id == tab_id))
-        else {
+        let Some(snapshot) = self.snapshot.as_deref() else {
             return;
         };
+        let Some(tab) = snapshot.tabs.iter().find(|tab| tab.tab_id == tab_id) else {
+            return;
+        };
+        // A tab is federated exactly when its workspace is; the tab snapshot
+        // carries no origin of its own.
+        let federated = snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == tab.workspace_id)
+            .is_some_and(|workspace| workspace.federation_origin.is_some());
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id: tab.workspace_id.clone(),
+                federated,
             },
             x,
             y,
@@ -197,6 +237,7 @@ impl ClientShellState {
             ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id,
+                ..
             } => self.activate_tab_context_action(tab_id, workspace_id, action, outcome),
             ClientContextMenuTarget::Pane {
                 pane_id,
@@ -285,6 +326,12 @@ impl ClientShellState {
                     self.persist_chrome_preferences(outcome);
                 }
             }
+            ClientContextMenuAction::CloseOnHost => self.push_endpoint_method(
+                crate::api::schema::Method::WorkspaceCloseRemote(
+                    crate::api::schema::WorkspaceTarget { workspace_id },
+                ),
+                outcome,
+            ),
             _ => {}
         }
     }
@@ -362,6 +409,9 @@ impl ClientShellState {
             }
             ClientContextMenuAction::Close => {
                 self.push_endpoint_method(Method::TabClose(TabTarget { tab_id }), outcome);
+            }
+            ClientContextMenuAction::CloseOnHost => {
+                self.push_endpoint_method(Method::TabCloseRemote(TabTarget { tab_id }), outcome);
             }
             _ => {}
         }
@@ -446,6 +496,13 @@ impl ClientShellState {
                 Method::PaneZoom(PaneZoomParams {
                     pane_id: Some(pane_id),
                     mode: PaneZoomMode::Toggle,
+                }),
+                outcome,
+            ),
+            ClientContextMenuAction::BalanceSplits => self.push_endpoint_method(
+                Method::LayoutBalance(crate::api::schema::LayoutExportParams {
+                    tab_id: None,
+                    pane_id: Some(pane_id),
                 }),
                 outcome,
             ),
