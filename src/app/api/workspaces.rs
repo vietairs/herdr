@@ -2533,7 +2533,6 @@ mod tests {
     // before any `tokio::spawn`, so the collector (dialog or CLI) sees the
     // rejection immediately and no dial or mirror mutation ever happens for
     // an invalid target.
-    #[cfg(unix)]
     #[tokio::test]
     async fn mount_remote_rejects_option_like_target_without_spawning_a_dial() {
         let event_hub = crate::api::EventHub::default();
@@ -2573,7 +2572,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn mount_remote_rejects_localhost_target() {
         let event_hub = crate::api::EventHub::default();
@@ -2605,7 +2603,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn mount_remote_rejects_blank_only_targets() {
         let event_hub = crate::api::EventHub::default();
@@ -2638,6 +2635,9 @@ mod tests {
     // (`src/app/api/workspaces.rs:82-89`), so this test asserts on the
     // mirror count staying untouched and the ack being a success response,
     // never on "no event at all".
+    // Unlike the three rejection tests above, this one is accepted, so it
+    // really does spawn dial tasks against `ssh`. Kept Unix-only rather than
+    // making CI depend on how a Windows runner's `ssh` behaves.
     #[cfg(unix)]
     #[tokio::test]
     async fn mount_remote_accepts_plain_and_user_at_host_targets() {
