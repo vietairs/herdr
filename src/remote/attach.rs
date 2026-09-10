@@ -544,9 +544,6 @@ pub(crate) struct LiveTunnel {
 /// so the caller can drive a live mount over the returned reader/writer
 /// instead of a one-shot snapshot. Live: called by
 /// `federation::session::dial_and_mount`.
-// Reached only through `federation::session::dial_and_mount`, whose own
-// caller is `cfg(unix)`.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) async fn dial_federation(
     target: &str,
     remote_herdr: &RemoteHerdr,
@@ -705,7 +702,6 @@ pub(crate) fn run_remote(remote: FederatedRemoteLaunch) -> io::Result<()> {
 /// `ensure_remote_server_ready`) are moved to a blocking thread so they never
 /// stall the daemon's async executor, then `session::dial_and_mount` runs the
 /// live tunnel dial + federation handshake/mount.
-#[cfg(unix)]
 pub(crate) async fn prepare_and_mount_federation_target(
     target: String,
     session_name: String,

@@ -24,7 +24,6 @@ use crate::remote::{
 
 /// Local-capability set advertised to the federation host — identical to the
 /// one-shot `attempt_federation_mount` snapshot dial (P4).
-#[cfg_attr(not(unix), allow(dead_code))]
 fn local_capabilities() -> std::collections::BTreeSet<Capability> {
     [
         Capability::new(Capability::SCROLLBACK_REPLAY),
@@ -33,6 +32,11 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
         // sends bytes and reads back a path, it touches no filesystem, so it
         // has nothing to gate on the local platform. Whether a stage request
         // is ever sent is decided by what the *host* also advertised.
+        //
+        // On a non-Unix client the advert is true only by omission: the sole
+        // initiator, `app::remote_clipboard_stage`, is `#[cfg(unix)]`, so no
+        // stage frame can be built at all. Un-gating that module means
+        // un-gating this promise with it.
         Capability::new(Capability::FILE_STAGING),
         // Gates `workspace.close_remote`/`tab.close_remote` forwarding
         // (federation close forwarding for the multi-workspace/tab case).
@@ -51,7 +55,6 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
 /// (REVISED Phase A step 3) so the server daemon's own async task can reuse
 /// exactly this dial+mount sequence without pulling in any of
 /// `run_federated_session`'s terminal-mode setup.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct DialAndMountOutcome {
     pub(crate) mirror: crate::remote::federation::reducer::RemoteMirror,
     pub(crate) generation: u64,
@@ -65,8 +68,6 @@ pub(crate) struct DialAndMountOutcome {
 /// `run_federated_session` always has. No `App`, no TTY — pure async I/O,
 /// `Send`-shaped, safe to `tokio::spawn` from any tokio context (server
 /// daemon or CLI process alike).
-// `prepare_and_mount_federation_target`, the only caller, is `cfg(unix)`.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) async fn dial_and_mount(
     target: &str,
     remote_herdr: &RemoteHerdr,

@@ -342,7 +342,6 @@ fn ensure_server_running(saved_federation: bool) -> io::Result<()> {
 /// `app::api::workspaces::handle_workspace_mount_remote`), then attaches as
 /// a normal thin client. No federation-aware code runs in this process; a
 /// failed mount request only logs a warning; the local session still starts.
-#[cfg(unix)]
 pub fn auto_detect_launch_with_mount(targets: Vec<String>) -> io::Result<()> {
     ensure_server_running(false)?;
 

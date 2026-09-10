@@ -199,21 +199,15 @@ pub enum AppEvent {
     /// A server-owned `workspace.mount_remote` dial+mount task succeeded.
     /// `App::run`'s own tick materializes the mirror into real
     /// workspaces/tabs/panes (needs `&mut App`, which the spawned task
-    /// itself cannot hold) and spawns the ongoing drive task. Unix-only:
-    /// mirrors the `#[cfg(unix)]` gate on `remote::unix`, which owns the
-    /// dial/mount primitives this payload carries.
+    /// itself cannot hold) and spawns the ongoing drive task.
     // Produced only by `handle_workspace_mount_remote`, the daemon-owned
-    // multi-remote mount API, which is Unix-only. The single-remote
-    // federated session a Windows client runs never raises these.
-    #[cfg(unix)]
+    // multi-remote mount API.
     FederationMountReady(Box<FederationMountReady>),
     /// A server-owned `workspace.mount_remote` dial+mount task failed
     /// (SSH/timeout/unsupported/empty mirror). Local workspace(s) and the
     /// server daemon itself are unaffected; surfaces as a sidebar notice.
     // Produced only by `handle_workspace_mount_remote`, the daemon-owned
-    // multi-remote mount API, which is Unix-only. The single-remote
-    // federated session a Windows client runs never raises these.
-    #[cfg(unix)]
+    // multi-remote mount API.
     FederationMountFailed { target: String, reason: String },
     /// A federation link's drive task ended (closed, faulted, or errored).
     ///
@@ -223,8 +217,7 @@ pub enum AppEvent {
     /// still matches a fresh remount. `connection_epoch` is minted locally,
     /// once per successful mount, and is therefore the value that
     /// distinguishes this connection from one that has already been replaced.
-    // Daemon-owned multi-remote mount path only; Unix-only producer.
-    #[cfg(unix)]
+    // Daemon-owned multi-remote mount path only.
     FederationMountEnded {
         host_key: crate::remote::federation::id::HostKey,
         generation: u64,
@@ -570,8 +563,7 @@ impl std::fmt::Debug for FederationSplitPaneReady {
 /// `App::materialize_federation_mount` + the ongoing drive task need, handed
 /// back from the server-owned dial+mount task spawned by the
 /// `workspace.mount_remote` API handler.
-// Daemon-owned multi-remote mount path only; Unix-only producer.
-#[cfg(unix)]
+// Daemon-owned multi-remote mount path only.
 pub struct FederationMountReady {
     pub target: String,
     pub mirror: crate::remote::federation::reducer::RemoteMirror,
@@ -584,7 +576,6 @@ pub struct FederationMountReady {
 // `RemoteMirror`/`ChildGuard` don't derive `Debug` (out of this phase's file
 // ownership to change), so `AppEvent`'s own `#[derive(Debug)]` needs a manual
 // impl here rather than pulling the whole enum off the derive.
-#[cfg(unix)]
 impl std::fmt::Debug for FederationMountReady {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FederationMountReady")

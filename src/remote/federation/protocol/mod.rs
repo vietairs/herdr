@@ -107,12 +107,9 @@ impl Capability {
     /// it today, so non-test builds see it as unreferenced.
     #[allow(dead_code)]
     pub const CLIPBOARD: &'static str = "clipboard";
-    /// Advertised only by the `#[cfg(unix)]` handshake paths (`remote::unix`,
-    /// `federation::session`, `server::federation_accept`), so non-Unix builds
-    /// see these as unreferenced outside tests.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// Advertised by every mounting client, on every platform, through
+    /// `federation::session::local_capabilities`.
     pub const SCROLLBACK_REPLAY: &'static str = "scrollback_replay";
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub const AGENT_STATUS: &'static str = "agent_status";
     /// Gates the stage-then-inject file RPC (`ClipboardStageRequest` /
     /// `ClipboardStageResponse`): the mounting client ships bytes over the
@@ -156,9 +153,6 @@ impl Capability {
     /// `FEDERATION_PROTOCOL_VERSION`; the capability then gates sends within
     /// v6 itself, where negotiation is additive and an older v6 peer simply
     /// drops an unrecognized capability name from the agreed set.
-    // Federation only negotiates capabilities on Unix, so this constant has
-    // no reader in a Windows build; matches `SCROLLBACK_REPLAY` above.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub const WORKSPACE_TAB_CLOSE: &'static str = "workspace_tab_close";
 
     pub fn new(name: impl Into<String>) -> Self {

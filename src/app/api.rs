@@ -178,19 +178,16 @@ impl App {
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationMountReady(ready) = ev {
             self.handle_federation_mount_ready(*ready);
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationMountFailed { target, reason } = ev {
             self.handle_federation_mount_failed(target, reason);
             return Vec::new();
         }
 
-        #[cfg(unix)]
         if let AppEvent::FederationMountEnded {
             host_key,
             generation,

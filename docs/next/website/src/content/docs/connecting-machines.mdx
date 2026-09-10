@@ -17,7 +17,7 @@ ssh workbox
 
 `workbox` can be a host from your SSH config. You can also use a target such as `ssh://you@server:2222`.
 
-Multi-machine connections are supported on Linux and macOS clients, connecting to Linux and macOS servers on x86_64 or aarch64. Multi-machine connections are not yet verified or supported on Windows; standalone `herdr --remote` remains supported on Windows. Native Windows servers are not supported as SSH targets. See [Remote attach over SSH](/docs/persistence-remote/#remote-attach-over-ssh) for SSH configuration, authentication, and custom binaries.
+Multi-machine connections are supported on Linux, macOS, and Windows clients, connecting to Linux and macOS servers on x86_64 or aarch64. On Windows the connection is not yet verified against a live host, and OpenSSH there has no connection multiplexing, so key or agent authentication is effectively required. Native Windows servers are not supported as SSH targets. See [Remote attach over SSH](/docs/persistence-remote/#remote-attach-over-ssh) for SSH configuration, authentication, and custom binaries.
 
 ## Add a machine
 
