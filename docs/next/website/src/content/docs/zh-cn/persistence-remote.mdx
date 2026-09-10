@@ -104,6 +104,73 @@ HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
 herdr --remote workbox --session agents
 ```
 
+## 联邦工作区
+
+经典的 `herdr --remote` 会让你的本地 Herdr 成为某个远程服务器的全屏瘦客户端。**联邦(Federation)**
+则不同,它把该远程服务器挂载为*本地 Herdr 侧边栏中的一个新工作区*,让本地和远程工作区
+——连同各自的智能体和原生状态——共存于同一视图中,并支持重连后的冷恢复(cold-resume)。
+
+在 `--remote` 连接命令上加 `--remote-workspace`,或设置 `HERDR_REMOTE_FEDERATION=1` 即可启用:
+
+```bash
+herdr --remote ssh://you@server --remote-workspace
+# equivalently
+HERDR_REMOTE_FEDERATION=1 herdr --remote workbox
+```
+
+在底层,Herdr 会在远程运行一个专用的无头联邦服务器(`herdr federation-serve`),
+复用既有的 SSH 隧道——这是一套专门构建、带版本号的联邦协议,而不是渲染后的
+连接流。不需要额外开放端口。
+
+通过对每台主机重复该命令,可以把多台机器挂载到同一个侧边栏中;每台主机都会
+挂载在各自独立的分组下:
+
+```bash
+herdr --remote appn-ltu-vm-100 --remote-workspace
+herdr --remote appn-ltu-vm-105 --remote-workspace
+```
+
+注意事项:
+
+- **两端都必须安装支持联邦功能的 Herdr。** 远程二进制文件的解析方式与经典远程连接
+  相同(先查远程 `PATH`,再查常见安装路径,最后是 `~/.local/bin`);可用
+  `HERDR_REMOTE_BINARY` 推送本地构建的版本。
+- 将 `--session <name>` 与 `--remote-workspace` 组合使用,即可挂载一个命名的远程会话。
+- `--remote-workspace` 依赖 `--remote`;单独使用会报错。
+- **能力回退:** 如果远程的 Herdr 不支持联邦(二进制版本较旧或版本不匹配),Herdr 会
+  回退到经典的全屏 `--remote` 连接并给出提示,而不是直接失败。若某台主机已经在
+  本地以联邦方式挂载,再对其发起经典连接会被防止重复挂载。
+- 联邦工作区以远程主机命名标记,且从不运行本地 git shell 命令,因此远程工作区
+  无法伪装成受信任的本地工作区。
+
+### 从正在运行的会话内部挂载远程工作区
+
+你不需要重启 Herdr 就能添加远程工作区。在正在运行的本地 Herdr 中,打开全局菜单
+并选择 `mount remote workspace`(仅限 unix)。输入一个或多个以空格分隔的目标,
+然后按回车或点击主按钮。每个目标都会原样传给 `ssh`,因此请使用 `ssh` 本身能接受
+的形式:纯 `host`、`user@host`、`ssh_config` 中的 `Host` 别名,或用于非默认端口的
+`ssh://user@host:port` URI 形式。裸的 `host:port`(不带 `ssh://`)不会被解析为端口,
+会导致失败。
+
+限制:
+
+- 不接受 `localhost`;请改用本地工作区。
+- 目标不能以 `-` 开头。
+- 认证仅支持基于密钥的 SSH。拨号过程不以批处理模式运行,因此交互式的密码或
+  口令提示不会在 Herdr 中的任何地方显示;如果密钥需要口令,请先将其加载到
+  `ssh-agent` 中。
+- 挂载运行期间对话框会保持打开,显示进行中状态,并在所有目标都成功后自动关闭。
+  挂载成功会在侧边栏中显示为新的工作区。校验失败的目标(空输入、类似选项的
+  token、`localhost`)会被立即拒绝并在原地显示。已拨号但随后失败的目标会让
+  对话框保持打开,原地显示失败原因,并通过你配置的通知渠道
+  (`ui.toast.delivery`)报告。
+- 用 `Esc` 关闭对话框不会取消已经在拨号中的挂载。它会在后台继续进行,如果
+  成功,仍会出现在侧边栏中。
+
+如果 `ui.toast.delivery` 是 `terminal` 或 `system`,且本地终端通知已被禁用,
+之后的挂载失败只会写入日志,不会有可见的通知。请检查 `herdr-server.log` 中的
+`federation mount failed`。参见[查找诊断日志](/docs/troubleshooting/#find-diagnostic-logs)。
+
 ## 直接终端附加
 
 完整的 Herdr 连接会打开整个工作区 UI。直接附加则在你当前的终端中打开一个由服务器拥有的终端。
