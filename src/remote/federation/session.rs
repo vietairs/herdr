@@ -24,6 +24,7 @@ use crate::remote::{
 
 /// Local-capability set advertised to the federation host — identical to the
 /// one-shot `attempt_federation_mount` snapshot dial (P4).
+#[cfg_attr(not(unix), allow(dead_code))]
 fn local_capabilities() -> std::collections::BTreeSet<Capability> {
     [
         Capability::new(Capability::SCROLLBACK_REPLAY),
@@ -50,6 +51,7 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
 /// (REVISED Phase A step 3) so the server daemon's own async task can reuse
 /// exactly this dial+mount sequence without pulling in any of
 /// `run_federated_session`'s terminal-mode setup.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct DialAndMountOutcome {
     pub(crate) mirror: crate::remote::federation::reducer::RemoteMirror,
     pub(crate) generation: u64,
@@ -63,6 +65,8 @@ pub(crate) struct DialAndMountOutcome {
 /// `run_federated_session` always has. No `App`, no TTY — pure async I/O,
 /// `Send`-shaped, safe to `tokio::spawn` from any tokio context (server
 /// daemon or CLI process alike).
+// `prepare_and_mount_federation_target`, the only caller, is `cfg(unix)`.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) async fn dial_and_mount(
     target: &str,
     remote_herdr: &RemoteHerdr,

@@ -793,6 +793,10 @@ pub enum TabBarStatusSegment {
 /// dismissing the client's mount dialog no longer needs to remember an
 /// abandoned dial, because the server keeps dialling and the next open of
 /// the dialog renders this list as current truth.
+// `Mounted`/`Failed` are only ever constructed by the mount-remote API
+// handler, which is `cfg(unix)`; the type itself stays cross-platform so the
+// state shape does not fork per target.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteMountOutcome {
     Dialling,
@@ -1106,6 +1110,9 @@ impl AppState {
     /// a linked worktree). Shared body with `close_selected_workspace`'s
     /// inline grouping so any other close path (e.g. a federation mount
     /// ending) closes the same sibling set the manual close flow does.
+    // The only non-test caller is the federation mount-ended path, which is
+    // `cfg(unix)`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn close_indices_for(&self, index: usize) -> Vec<usize> {
         self.workspaces
             .get(index)

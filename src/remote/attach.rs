@@ -544,6 +544,9 @@ pub(crate) struct LiveTunnel {
 /// so the caller can drive a live mount over the returned reader/writer
 /// instead of a one-shot snapshot. Live: called by
 /// `federation::session::dial_and_mount`.
+// Reached only through `federation::session::dial_and_mount`, whose own
+// caller is `cfg(unix)`.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) async fn dial_federation(
     target: &str,
     remote_herdr: &RemoteHerdr,
