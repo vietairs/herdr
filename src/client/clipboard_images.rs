@@ -159,7 +159,7 @@ pub(super) fn read_image_file_from_terminal_drop(
     is_remote_client: bool,
 ) -> Option<crate::platform::ClipboardImage> {
     let (path, extension) = image_path_from_terminal_drop(data, is_remote_client)?;
-    read_image_file(path, extension)
+    crate::image_path::read_local_image_file(&path, extension)
 }
 
 #[cfg(windows)]
@@ -176,6 +176,11 @@ pub(super) fn read_image_file_from_client_events(
     read_image_file(path, extension)
 }
 
+/// The Windows-side read. Unix callers go through
+/// `crate::image_path::read_local_image_file` instead, which is the same read
+/// with the open-before-stat hardening that module owns; `image_path` is
+/// `cfg(unix)`, so the Windows client-event bridge needs this local copy.
+#[cfg(windows)]
 fn read_image_file(
     path: PathBuf,
     extension: &'static str,
