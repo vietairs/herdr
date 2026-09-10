@@ -1080,6 +1080,16 @@ impl App {
             self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
         }
 
+        if !invalid_section("remote") {
+            // The clipboard-write policy is read per event rather than captured
+            // at mount time precisely so that turning acceptance off takes
+            // effect on the next remote write instead of the next restart. That
+            // only holds if the reload refreshes the field here; without this
+            // line a user who sets `accept_clipboard_writes = false` and
+            // reloads keeps accepting remote writes until the server restarts.
+            self.state.accept_remote_clipboard_writes = config.remote.accept_clipboard_writes;
+        }
+
         if !invalid_section("update") {
             let now = Instant::now();
             let previous_version_check_enabled = self.update_version_check_enabled;
@@ -1914,6 +1924,44 @@ mod tests {
         assert_eq!(toast.kind, crate::app::state::ToastKind::UpdateInstalled);
         assert_eq!(toast.title, "reloaded config");
         assert_eq!(toast.context, "using config.toml");
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_applies_remote_clipboard_write_policy() {
+        // The refusal is evaluated per clipboard event rather than captured at
+        // mount time so that revoking acceptance takes effect immediately. That
+        // promise is only kept if the reload refreshes the field, so assert the
+        // toggle actually moves without a restart -- and in the direction that
+        // matters, permissive to restrictive.
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-remote-clipboard");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[remote]\naccept_clipboard_writes = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert!(
+            app.state.accept_remote_clipboard_writes,
+            "default accepts remote clipboard writes"
+        );
+
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(
+            !app.state.accept_remote_clipboard_writes,
+            "reload must revoke acceptance without a restart"
+        );
+
+        std::fs::write(&path, "[remote]\naccept_clipboard_writes = true\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(
+            app.state.accept_remote_clipboard_writes,
+            "reload must restore acceptance too"
+        );
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
