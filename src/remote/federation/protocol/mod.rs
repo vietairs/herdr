@@ -184,9 +184,11 @@ impl Capability {
     ///
     /// Negotiation is additive, so a peer that predates this name simply
     /// drops it from the agreed set and lands on the second branch.
-    // Federation only negotiates capabilities on Unix; matches
-    // `SCROLLBACK_REPLAY` and `WORKSPACE_TAB_CLOSE` above.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    ///
+    /// Advertised by every mounting client, on every platform, through
+    /// `federation::session::local_capabilities`. What it asserts is a
+    /// property of this build's `PaneInfo` schema, not of its operating
+    /// system, so it is never platform-gated.
     pub const PANE_NAME_SOURCE: &'static str = "pane_name_source";
 
     pub fn new(name: impl Into<String>) -> Self {

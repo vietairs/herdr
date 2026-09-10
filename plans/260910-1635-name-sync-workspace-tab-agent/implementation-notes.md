@@ -378,3 +378,33 @@ added there is not automatically advertised by the snapshot dial.
 compared comment-stripped projections of all 25 files: the only surviving
 differences are the 6 assertion-message strings above. No expression, control
 flow, signature, attribute or assertion semantics changed.
+
+- What: corrected the entry above (line 276). `Capability::PANE_NAME_SOURCE` is NOT gated by the
+  `#[cfg_attr(not(unix), allow(dead_code))]` convention, and the handshake paths that advertise it
+  are no longer `#[cfg(unix)]`.
+- Why: the rebase onto 3fcce70f falsified that premise. PR #25 (ea826ae3, 97a03e68) un-gated
+  `local_capabilities`, `dial_and_mount` and the mount entry points so Windows clients can mount,
+  and deliberately DELETED the same attribute from `SCROLLBACK_REPLAY`, `AGENT_STATUS`,
+  `WORKSPACE_TAB_CLOSE` and `HostKey::new` because the un-gating made their comments untrue. The
+  new constant was written against the pre-rebase tree and reintroduced exactly the pattern master
+  had just removed, with a comment pointing at siblings that no longer carry it. What the
+  capability asserts is a property of this build's `PaneInfo` schema, not of its operating system.
+- Evidence: two independent pre-merge reviewers found it at `protocol/mod.rs:187`; `git show
+  97a03e68 -- src/remote/federation/protocol/mod.rs` shows the byte-identical justification being
+  deleted from `WORKSPACE_TAB_CLOSE`; windows-msvc clippy passes with `-D warnings` with the
+  attribute removed, which only holds if the constant has a live Windows reader.
+- Reversibility: trivial — comment and attribute only, no behavior.
+
+- What: did NOT add a test for the "agreed capability + explicitly-named label" case, contrary to
+  the two reviewers' suggestion.
+- Why: that case is not behaviourally distinguishable, so no test of it can fail. With
+  `name_source = Override` and `label = Some("deploy box")`, the agreed branch returns
+  `label_worth_mirroring(..) == Some("deploy box")` and the not-agreed branch returns
+  `pane_info.label.clone() == Some("deploy box")` — the same value. A test asserting it passes
+  whichever branch runs.
+- Evidence: wrote the test, then mutated the gate to `peer_reports_name_source && false` (forcing
+  every mount down the not-agreed branch) and re-ran it: it still PASSED. The two existing tests do
+  pin both branches, each on an input where they genuinely differ — `agreed + AgentIdentity` must
+  drop the label, `not agreed + Ordinal` must keep it. Coverage of the gate is complete; the
+  suggested third case is a non-issue, not a gap.
+- Reversibility: n/a. A test that cannot fail is worse than no test, because it reads as assurance.

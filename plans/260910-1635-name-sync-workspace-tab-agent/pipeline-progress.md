@@ -189,3 +189,38 @@ REMAINING: watch CI, then stage 13 (`/ak-review-pr --fix --reply`). Cortex does 
 Post-merge, user-owned: `git pull --ff-only` on the base, remove the local worktree at
 /Users/hvnguyen/Projects/worktrees/herdr-name-sync, then `/hvn:plan-gc archive`. Never delete the
 remote branch.
+
+## REBASED AND CI GREEN (2026-09-11)
+
+The branch had gone stale during the review rounds: PRs #24 and #25 landed on master and GitHub
+marked #26 CONFLICTING. Rebased c2f4166a -> 3fcce70f. Two conflicts:
+
+1. `src/remote/federation/session.rs` `local_capabilities`. Master carried the old doc comment
+   claiming the set is "identical to the one-shot attempt_federation_mount snapshot dial (P4)" (false
+   even before this branch); this branch carried the corrected comment plus
+   `#[cfg_attr(not(unix), allow(dead_code))]`. Kept the corrected comment, DROPPED the attribute:
+   PR #25 made Windows clients mount federated workspaces, so this function is now live on Windows
+   and the allow is obsolete. Verified empirically, not by argument — windows-msvc clippy passes with
+   `-D warnings` and no dead-code lint, which only holds if the function is genuinely reachable there.
+2. `docs/next/CHANGELOG.md` — kept both master's Windows Added/Fixed entries and this branch's Changed
+   entries.
+
+All gates re-run on the REBASED tree (a clean textual merge proves nothing semantically):
+  fmt clean; unix clippy zero lints; windows-msvc clippy zero lints;
+  3676 tests, 3675 passed (same known pre-existing failure); docs contract 12 pass.
+
+GitHub checks, all 7 PASS: build, validate, conventional-commits, Windows ConPTY package,
+check (ubuntu-latest), check (macos-latest), check (windows-latest).
+
+NOTE ON MASTER'S OWN CI: master is currently RED (run 34459576931) on two jobs —
+`check (windows-latest)` failing the single unrelated test
+`sound::tests::windows_media_player_reports_invalid_media_without_waiting_for_timeout`, and
+`conventional-commits` failing on the merge commit subject. That same Windows job PASSES on this
+branch. This branch did not fix it; the sound test is timeout-sensitive and looks flaky. Recorded so
+a future run does not read an inherited failure as a regression here, and does not credit this branch
+with a fix it did not make.
+
+Commits: 8407ba62 (feature), 6ad0715b (plan artifacts). Pre-merge review dispatched as
+`wf_fa82ea87-3f4`, scoped to the genuinely new surface — the two conflict resolutions, the semantic
+interaction with the new Windows federation mounting, and whether any earlier fix now rests on a
+stale c2f4166a baseline.
