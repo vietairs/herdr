@@ -115,8 +115,8 @@ use windows_sys::{
                 GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenThread,
                 QueryFullProcessImageNameW, ResumeThread, TerminateProcess, CREATE_NO_WINDOW,
                 CREATE_SUSPENDED, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
-                PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
-                THREAD_SUSPEND_RESUME,
+                PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+                PROCESS_VM_READ, THREAD_SUSPEND_RESUME,
             },
         },
         UI::{
@@ -1957,11 +1957,22 @@ pub fn signal_processes(pids: &[u32], signal: Signal) {
     }
 
     for &pid in pids {
-        let Some(process) = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
+        // `TerminateProcess` requires the `PROCESS_TERMINATE` access right. Opening the
+        // process with query rights alone makes every terminate fail with access denied,
+        // which leaves the child alive and the pane's `child.wait()` watcher blocked
+        // forever.
+        let Some(process) =
+            ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE)
+        else {
+            tracing::debug!(pid, "could not open process to terminate it");
             continue;
         };
-        unsafe {
-            TerminateProcess(process.0, 1);
+        if unsafe { TerminateProcess(process.0, 1) } == 0 {
+            tracing::warn!(
+                pid,
+                err = %std::io::Error::last_os_error(),
+                "TerminateProcess failed"
+            );
         }
     }
 }
