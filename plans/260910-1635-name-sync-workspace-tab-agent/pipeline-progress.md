@@ -152,3 +152,40 @@ WORKSPACE_TAB_CLOSE) and one entry more false now.
 
 Cleanup dispatched as `wf_41b07fb3-49c`. After it lands: stages 9-14 (impl-notes review, code-review
 closure, ship-gate, open PR, PR review + fix, docs).
+
+## SHIPPED TO PR (2026-09-11)
+
+Comment cleanup `wf_41b07fb3-49c` verified by an unusually strong method: the verifier wrote a Rust
+comment-stripper (handling raw strings, byte strings, escapes, char-vs-lifetime, nested block
+comments), stripped the pre- and post-cleanup trees, and diffed them pairwise across all 64 files.
+Result: 2 files differ, 6 lines, every one an assert! trailing message argument — zero expression,
+control-flow, signature, attribute or assertion-semantics changes. 0 ephemeral codes remain on added
+lines. It also self-disclosed a scope gap (src/workspace/naming.rs is untracked so it appears in no
+diff) and covered it by direct inspection instead of quietly ignoring it.
+
+Full `just check` equivalent run by the orchestrator (`just` is not installed; each recipe run
+directly):
+  cargo fmt --check                                              exit 0
+  cargo clippy --all-targets --locked -D warnings                zero lints (forced re-lint)
+  cargo clippy --target x86_64-pc-windows-msvc -D warnings       zero lints
+  cargo nextest run --no-fail-fast --test-threads=4              3676 run, 3675 passed, 2 skipped
+  bun test ./scripts/docs                                        12 pass
+Sole failure is the known pre-existing live_handoff test.
+
+MEMORY CORRECTED (second stale-memory hit this run): `herdr-windows-typecheck-via-mingw` said the
+windows-gnu target works locally and msvc does not. That is now exactly backwards — build.rs:16
+panics `unsupported target for libghostty-vt build: x86_64-pc-windows-gnu`, while the msvc target
+that `just windows-lint` actually uses completes clean in 33s. Had I trusted the memory I would have
+shipped without any Windows lint at all, on a branch that adds `#[cfg_attr(not(unix), allow(dead_code))]`
+capability constants.
+
+Docs were already updated in-branch, including the ja and zh translations the release gate compares
+by heading outline.
+
+Commit b2a872f3 (amended: I had written a fabricated `refs #26` into the message with no issue behind
+it, and removed it). Branch pushed. PR: https://github.com/vietairs/herdr/pull/26
+
+REMAINING: watch CI, then stage 13 (`/ak-review-pr --fix --reply`). Cortex does NOT merge.
+Post-merge, user-owned: `git pull --ff-only` on the base, remove the local worktree at
+/Users/hvnguyen/Projects/worktrees/herdr-name-sync, then `/hvn:plan-gc archive`. Never delete the
+remote branch.
