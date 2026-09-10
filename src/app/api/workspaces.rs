@@ -6,7 +6,6 @@ use crate::api::schema::{
     WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget,
 };
 use crate::app::App;
-#[cfg(unix)]
 use crate::app::ToastKind;
 
 use super::super::api_helpers::{normalize_metadata_source, normalize_metadata_ttl};
@@ -33,19 +32,6 @@ impl App {
     /// failure surfaces as a sidebar notice
     /// (`AppEvent::FederationMountFailed`). Neither outcome ever tears down
     /// the local session or the server daemon itself.
-    #[cfg(not(unix))]
-    pub(super) fn handle_workspace_mount_remote(
-        &mut self,
-        id: String,
-        _params: WorkspaceMountRemoteParams,
-    ) -> String {
-        encode_error(
-            id,
-            "unsupported_platform",
-            "workspace.mount_remote is not supported on this platform",
-        )
-    }
-
     /// Phase B requirement 3/9: one request carries the full target list;
     /// each non-empty, non-duplicate target is spawned as its own
     /// `tokio::spawn` dial+mount task. Because each task is independently
@@ -69,7 +55,6 @@ impl App {
     /// leading-`-` argv element as an option, not a hostname. Rejections are
     /// synchronous `invalid_request` errors returned before any dial is
     /// spawned, so a caller (dialog or CLI) sees the failure immediately.
-    #[cfg(unix)]
     pub(super) fn handle_workspace_mount_remote(
         &mut self,
         id: String,
@@ -187,7 +172,6 @@ impl App {
     /// mount-time snapshot in `AppState.remote_mirror` for bookkeeping
     /// (`double_attach_conflict`), then hands the live-syncing mirror off to
     /// a spawned drive task exactly like `run_federated_session` does.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_mount_ready(
         &mut self,
         ready: crate::events::FederationMountReady,
@@ -415,7 +399,6 @@ impl App {
     /// `AppEvent::FederationMountFailed` handler: surfaces a sidebar notice
     /// through the existing toast mechanism — local session and server
     /// daemon stay up unaffected (requirement 3).
-    #[cfg(unix)]
     pub(crate) fn handle_federation_mount_failed(&mut self, target: String, reason: String) {
         tracing::warn!(%target, %reason, "federation mount failed");
         self.state.resolve_remote_mount_attempt(
@@ -467,7 +450,6 @@ impl App {
     /// drive task matches a fresh remount to the same host just as well as
     /// the live one. `connection_epoch` is minted locally, once per
     /// successful mount, and is the value that tells the two apart.
-    #[cfg(unix)]
     pub(crate) fn handle_federation_mount_ended(
         &mut self,
         host_key: crate::remote::federation::id::HostKey,
@@ -514,7 +496,12 @@ impl App {
         // dies on that path would otherwise leak its in-flight stages until
         // each one's budget expires. Keyed by connection as well as host, so it
         // can only ever reach the work of the connection that actually ended.
+        // Clipboard file staging is driven from the Unix client only, so on
+        // other platforms there are never any pending stages to purge.
+        #[cfg(unix)]
         self.purge_pending_remote_clipboard_stages_for_origin(&host_key, connection_epoch);
+        #[cfg(not(unix))]
+        let _ = connection_epoch;
 
         self.state.end_federation_mount(&host_key);
 

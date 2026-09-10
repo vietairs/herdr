@@ -1812,11 +1812,8 @@ impl AppState {
             // the terminal-channel/router state this event needs and
             // `return`s before this fallback ever runs — arms exist here
             // only to satisfy the exhaustive match over `AppEvent`.
-            #[cfg(unix)]
             AppEvent::FederationMountReady(_) => Vec::new(),
-            #[cfg(unix)]
             AppEvent::FederationMountFailed { .. } => Vec::new(),
-            #[cfg(unix)]
             AppEvent::FederationMountEnded { .. } => Vec::new(),
             AppEvent::FederationSplitPaneReady(_) => Vec::new(),
             AppEvent::FederationSplitPaneFailed { .. } => Vec::new(),
