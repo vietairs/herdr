@@ -638,6 +638,11 @@ fn render_pane_border_titles(
 ) {
     let buf = frame.buffer_mut();
     let area = buf.area;
+    // D3/R2: all rendered panes belong to the workspace's currently active
+    // tab, so its rung-1 USER override only (if any — never the tab's
+    // rung-1.5 mirrored remote label, see `tab_override_for_pane_inheritance`)
+    // can be read once here rather than looked up per pane.
+    let inherited_tab_override = ws.tab_override_for_pane_inheritance(ws.active_tab);
     for info in pane_infos {
         if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
             continue;
@@ -645,7 +650,12 @@ fn render_pane_border_titles(
         let Some(title) = ws
             .pane_state(info.id)
             .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+            .and_then(|terminal| {
+                terminal.border_label(
+                    app.show_agent_labels_on_pane_borders,
+                    inherited_tab_override,
+                )
+            })
             .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
         else {
             continue;
@@ -917,6 +927,44 @@ mod tests {
         assert_eq!(buffer[(4, 0)].symbol(), "模");
         assert_eq!(buffer[(5, 0)].symbol(), " ");
         assert_eq!(buffer[(6, 0)].symbol(), "块");
+    }
+
+    /// D3/perf: `render_pane_border_titles` reads the active tab's resolved
+    /// override once (`ws.tab_override_for_pane_inheritance(ws.active_tab)`)
+    /// and passes it straight through to `border_label`, with no per-pane
+    /// lookup. A pane with no `manual_label` and no detected agent inherits
+    /// its tab's rename.
+    #[test]
+    fn border_titles_pass_the_resolved_tab_override_without_a_lookup() {
+        let mut app = AppState::test_new();
+        app.view.terminal_area = Rect::new(0, 0, 12, 3);
+        let mut ws = Workspace::test_new("test");
+        ws.tabs[0].custom_name = Some("work".to_string());
+        let pane_id = ws.tabs[0].root_pane;
+        app.view.pane_infos = vec![PaneInfo {
+            id: pane_id,
+            rect: Rect::new(0, 0, 12, 3),
+            inner_rect: Rect::default(),
+            scrollbar_rect: None,
+            borders: Borders::ALL,
+            is_focused: false,
+        }];
+
+        let terminal_id = ws.tabs[0].panes[&pane_id].attached_terminal_id.clone();
+        let terminal_state = TerminalState::new(terminal_id.clone(), "/tmp".into());
+        app.terminals.insert(terminal_id, terminal_state);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 3)).unwrap();
+        terminal
+            .draw(|frame| render_view_pane_borders(&app, &ws, &[], frame))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let title: String = (1..7)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        assert_eq!(title, " work ");
     }
 
     #[test]

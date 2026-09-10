@@ -2321,7 +2321,7 @@ mod tests {
             let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
             terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
             if let Some(agent_name) = agent_name {
-                terminal.set_agent_name(agent_name.into());
+                terminal.set_agent_name(agent_name.into(), crate::terminal::AgentNameAuthor::User);
             }
 
             app.handle_internal_event(AppEvent::StateChanged {
@@ -2376,7 +2376,7 @@ mod tests {
                 observed_at + std::time::Duration::from_secs(1),
             )
             .unwrap();
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), crate::terminal::AgentNameAuthor::User);
 
         app.handle_internal_event(AppEvent::StateChanged {
             pane_id,
@@ -2509,7 +2509,7 @@ mod tests {
             .get_mut(&terminal_id)
             .expect("test terminal should exist");
         terminal.respawn_shell_on_exit = true;
-        terminal.set_agent_name("codex".into());
+        terminal.set_agent_name("codex".into(), crate::terminal::AgentNameAuthor::User);
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
             source: "herdr:codex".into(),
             agent: "codex".into(),

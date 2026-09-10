@@ -668,10 +668,13 @@ mod tests {
         });
 
         assert_eq!(
-            terminal.border_label(false).as_deref(),
+            terminal.border_label(false, None).as_deref(),
             Some("Prompt title")
         );
-        assert_eq!(terminal.border_label(true).as_deref(), Some("Prompt title"));
+        assert_eq!(
+            terminal.border_label(true, None).as_deref(),
+            Some("Prompt title")
+        );
     }
 
     #[test]

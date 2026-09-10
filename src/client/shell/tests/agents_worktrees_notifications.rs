@@ -105,6 +105,7 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
         new_workspace_cwd: "/repo/feature".into(),
         number: 2,
         label: "repo-feature".into(),
+        name_source: crate::workspace::naming::NameSource::Cwd,
         custom_label: false,
         branch: Some("worktree/feature".into()),
         git_ahead_behind: None,
@@ -353,6 +354,8 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             name: Some("first".into()),
+            label: None,
+            name_source: Default::default(),
             display_agent: None,
             agent: None,
             title: None,
@@ -369,6 +372,8 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             name: Some("second".into()),
+            label: None,
+            name_source: Default::default(),
             display_agent: None,
             agent: None,
             title: None,
@@ -443,6 +448,8 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             name: Some("pi one".into()),
+            label: None,
+            name_source: Default::default(),
             display_agent: None,
             agent: Some("pi".into()),
             title: None,
@@ -459,6 +466,8 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             name: Some("pi two".into()),
+            label: None,
+            name_source: Default::default(),
             display_agent: None,
             agent: Some("pi".into()),
             title: None,
@@ -588,6 +597,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             name: Some("first".into()),
+            label: None,
+            name_source: Default::default(),
             display_agent: None,
             agent: Some("pi".into()),
             title: None,
@@ -604,6 +615,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             name: Some("second".into()),
+            label: None,
+            name_source: Default::default(),
             display_agent: None,
             agent: Some("pi".into()),
             title: None,
@@ -620,6 +633,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             name: Some("third".into()),
+            label: None,
+            name_source: Default::default(),
             display_agent: None,
             agent: Some("pi".into()),
             title: None,
@@ -694,6 +709,8 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
         workspace_id: "ws_1".into(),
         tab_id: "tab_1".into(),
         name: Some("pi".into()),
+        label: None,
+        name_source: Default::default(),
         display_agent: None,
         agent: Some("pi".into()),
         title: None,
@@ -771,7 +788,7 @@ fn workspace_actions_preserve_selected_target_and_client_confirmation() {
     assert!(matches!(
         &request.method,
         crate::api::schema::Method::WorkspaceRename(params)
-            if params.workspace_id == "ws_2" && params.label == "renamed"
+            if params.workspace_id == "ws_2" && params.label.as_deref() == Some("renamed")
     ));
 
     state.navigate_workspace_id = Some("ws_2".into());
@@ -1138,6 +1155,8 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
         workspace_id: "ws_2".into(),
         tab_id: "tab_2".into(),
         name: None,
+        label: None,
+        name_source: Default::default(),
         display_agent: Some("codex".into()),
         agent: Some("codex".into()),
         title: None,
@@ -1280,4 +1299,96 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
     assert!(repaint);
     assert!(state.visible_notification.is_none());
     assert_eq!(state.pending_notifications.len(), 1);
+}
+
+/// End-to-end for the reported symptom: renaming a tab must change what the
+/// agent row shows. The server resolves the pane/agent ladder and reports
+/// `Inherited`; the sidebar's `{agent}` token must render that name instead
+/// of the agent kind. The addressable handle (`ClientShellAgent::name`) is
+/// deliberately left alone, so `herdr agent send` keeps working.
+#[test]
+fn agent_row_shows_the_inherited_tab_name_instead_of_the_agent_kind() {
+    let mut snapshot = snapshot();
+    snapshot.tabs[0].label = "reviewer-tab".into();
+    snapshot.tabs[0].name_source = crate::workspace::naming::NameSource::Override;
+    snapshot.agents = vec![ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("reviewer".into()),
+        label: Some("reviewer-tab".into()),
+        name_source: crate::workspace::naming::NameSource::Inherited,
+        display_agent: Some("claude".into()),
+        agent: Some("claude".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+    }];
+
+    let config = ClientShellConfig::from_config(&Config::default());
+    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None);
+    let agent_tokens: Vec<String> = rows
+        .iter()
+        .flat_map(|row| row.rows.iter())
+        .flat_map(|line| line.iter())
+        .filter_map(|token| match &token.kind {
+            crate::ui::ResolvedTokenKind::Agent(value) => Some(value.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        agent_tokens.iter().any(|value| value == "reviewer-tab"),
+        "agent row must show the tab name it inherited, got {agent_tokens:?}"
+    );
+    assert!(
+        !agent_tokens.iter().any(|value| value == "claude"),
+        "the agent kind must not still be shown, got {agent_tokens:?}"
+    );
+    assert_eq!(
+        snapshot.agents[0].name.as_deref(),
+        Some("reviewer"),
+        "the addressable handle is untouched"
+    );
+}
+
+/// An agent whose scope nobody named still shows the agent kind.
+#[test]
+fn agent_row_falls_back_to_the_agent_kind_when_no_scope_was_named() {
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: None,
+        label: Some("claude".into()),
+        name_source: crate::workspace::naming::NameSource::AgentIdentity,
+        display_agent: Some("claude".into()),
+        agent: Some("claude".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+    }];
+
+    let config = ClientShellConfig::from_config(&Config::default());
+    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None);
+    let agent_tokens: Vec<String> = rows
+        .iter()
+        .flat_map(|row| row.rows.iter())
+        .flat_map(|line| line.iter())
+        .filter_map(|token| match &token.kind {
+            crate::ui::ResolvedTokenKind::Agent(value) => Some(value.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(agent_tokens.iter().any(|value| value == "claude"));
 }

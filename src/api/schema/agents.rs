@@ -188,6 +188,18 @@ pub struct AgentInfo {
     pub terminal_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// This pane's fully resolved naming-ladder label — see
+    /// `PaneInfo::label`'s doc. Deliberately separate from `name`: `name`
+    /// is the addressable `herdr agent send` handle (its own uniqueness and
+    /// charset rules, untouched by any of this), `label` is what the agent
+    /// sidebar and any JSON consumer should DISPLAY, and the two diverge on
+    /// purpose the moment a tab rename or mirrored remote label applies
+    /// without the handle changing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Which rung of the ladder produced `label`. See `TabInfo::name_source`.
+    #[serde(default)]
+    pub name_source: crate::workspace::naming::NameSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

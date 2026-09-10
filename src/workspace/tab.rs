@@ -46,6 +46,19 @@ pub struct Tab {
     #[cfg(test)]
     pub runtimes: HashMap<PaneId, TerminalRuntime>,
     pub zoomed: bool,
+    /// Rung-3 derived label for this tab, computed once on the ~1.5s
+    /// workspace git-refresh pass (`src/app/actions.rs::apply_workspace_git_statuses`)
+    /// and never on a render or PTY-parse path. `None` when no cwd
+    /// resolved or the label collided with a sibling tab's. Never
+    /// persisted; recomputed after every restore.
+    pub cached_auto_label: Option<String>,
+    /// The root pane's cwd the above label was derived from, so a stale
+    /// cache is distinguishable from "no cwd yet" without reformatting.
+    pub cached_auto_label_cwd: Option<std::path::PathBuf>,
+    /// Remote-resolved label for a federation-mounted tab. Never
+    /// persisted, never a user override; the naming resolver's rung 1.5
+    /// reads it and stops before rungs 2-4 run against local data.
+    pub mirrored_name: Option<String>,
     pub events: mpsc::Sender<AppEvent>,
     pub(crate) render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<RenderSignal>,
@@ -187,6 +200,9 @@ impl Tab {
                 panes,
                 #[cfg(test)]
                 runtimes: HashMap::new(),
+                cached_auto_label: None,
+                cached_auto_label_cwd: None,
+                mirrored_name: None,
                 zoomed: false,
                 events,
                 render_notify,
@@ -197,12 +213,26 @@ impl Tab {
         ))
     }
 
+    /// Test-only since the wire's override flag stopped reading it: that
+    /// flag is now derived from the rung that actually produced the tab's
+    /// label, so a federation-mirrored label is reported as named too.
+    /// Kept because its characterization test pins the meaning the flag
+    /// must keep carrying.
+    #[cfg(test)]
     pub fn is_auto_named(&self) -> bool {
         self.custom_name.is_none()
     }
 
     pub fn set_custom_name(&mut self, name: String) {
         self.custom_name = Some(name);
+    }
+
+    /// Clears the override — the tab snaps back to its live
+    /// derived name (rung 1.5/3/4) at next resolve, with zero refresh
+    /// delay (D2's already-proven mechanism; this just makes it reachable
+    /// through the rename API instead of only by never setting an override).
+    pub fn clear_custom_name(&mut self) {
+        self.custom_name = None;
     }
 
     pub fn split_focused_command(
@@ -450,6 +480,9 @@ impl Tab {
             panes,
             #[cfg(test)]
             runtimes: HashMap::new(),
+            cached_auto_label: None,
+            cached_auto_label_cwd: None,
+            mirrored_name: None,
             zoomed: false,
             events,
             render_notify,
@@ -555,5 +588,69 @@ impl Tab {
         terminal_runtimes
             .get(terminal_id)
             .and_then(|rt| rt.foreground_cwd())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::TerminalState;
+
+    /// Policy C: pins
+    /// `is_auto_named` as exactly the negation of `custom_name.is_some()`,
+    /// with no other rung in the mix. The resolver's rung-1 check must stay
+    /// behaviorally identical to this today.
+    #[test]
+    fn char_is_auto_named_is_exactly_custom_name_is_none() {
+        let mut ws = crate::workspace::Workspace::test_new("t");
+        let tab = &mut ws.tabs[0];
+        assert!(tab.custom_name.is_none());
+        assert!(tab.is_auto_named());
+
+        tab.set_custom_name("renamed".to_string());
+        assert_eq!(tab.custom_name.as_deref(), Some("renamed"));
+        assert!(!tab.is_auto_named());
+
+        tab.custom_name = None;
+        assert!(tab.is_auto_named());
+    }
+
+    /// `cwd_for_pane` (tab.rs:532-547) prefers the live
+    /// `TerminalRuntime`'s reported cwd over the terminal's cached `cwd`
+    /// field, falling back to the terminal only when no runtime is
+    /// registered for the pane. `src/workspace/naming.rs` is forbidden from
+    /// calling this function directly — the resolver reads only the cached
+    /// scalar `Tab::cached_auto_label` fed by the ~1.5s git pass, never
+    /// this per-render cwd lookup.
+    #[tokio::test]
+    async fn char_cwd_for_pane_prefers_runtime_cwd_over_terminal_cwd() {
+        let mut ws = crate::workspace::Workspace::test_new("t");
+        let tab = &mut ws.tabs[0];
+        let root_pane = tab.root_pane;
+        let terminal_id = tab.terminal_id(root_pane).unwrap().clone();
+
+        let mut terminals = HashMap::new();
+        terminals.insert(
+            terminal_id.clone(),
+            TerminalState::new(terminal_id.clone(), PathBuf::from("/terminal/cwd")),
+        );
+
+        let (runtime, _rx) = TerminalRuntime::test_with_channel(80, 24);
+        runtime.test_set_reported_cwd(PathBuf::from("/runtime/cwd"));
+        let mut registry = TerminalRuntimeRegistry::new();
+        registry.insert(terminal_id.clone(), runtime);
+
+        assert_eq!(
+            tab.cwd_for_pane(root_pane, &terminals, &registry),
+            Some(PathBuf::from("/runtime/cwd")),
+            "a registered runtime's reported cwd must win over the terminal's cached cwd"
+        );
+
+        let empty_registry = TerminalRuntimeRegistry::new();
+        assert_eq!(
+            tab.cwd_for_pane(root_pane, &terminals, &empty_registry),
+            Some(PathBuf::from("/terminal/cwd")),
+            "with no runtime registered, cwd_for_pane falls back to the terminal's cwd"
+        );
     }
 }

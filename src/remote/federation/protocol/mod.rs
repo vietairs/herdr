@@ -155,6 +155,40 @@ impl Capability {
     /// drops an unrecognized capability name from the agreed set.
     pub const WORKSPACE_TAB_CLOSE: &'static str = "workspace_tab_close";
 
+    /// States that this peer reports `PaneInfo::name_source` — which rung of
+    /// the naming ladder produced the `PaneInfo::label` it sends.
+    ///
+    /// That field is `#[serde(default)]` and `NameSource`'s `Default` is
+    /// `Ordinal`, so a peer built before the field existed sends a
+    /// `PaneInfo` without it and this side deserializes a concrete
+    /// `Ordinal` that peer never asserted. Reading that absence as a
+    /// resolved fact classifies every label such a peer sends as locally
+    /// derived, and the mirroring decision drops it — so a pane the remote
+    /// user genuinely renamed would display this host's own agent identity
+    /// instead of the name they typed.
+    ///
+    /// Unlike `WORKSPACE_TAB_CLOSE` this gates no frame: `PaneInfo` has the
+    /// same wire shape either way and every peer on this protocol version
+    /// decodes it, so there is nothing to gate on the send side and no
+    /// version bump to make. What it gates is *interpretation*, so it is
+    /// read where a peer's `PaneInfo` is turned into a local pane
+    /// (`App::build_remote_pane` and `remote::federation::client`'s resync
+    /// materialization):
+    ///
+    /// - agreed: the peer really reports `name_source`, so only a label
+    ///   somebody set on the remote is pinned into the rung-1.5 mirror slot
+    ///   and a merely-derived agent identity is not frozen there;
+    /// - not agreed: that peer only ever fills `PaneInfo::label` from a
+    ///   pane's own override slot, so every label it sends is one somebody
+    ///   set and is mirrored unconditionally.
+    ///
+    /// Negotiation is additive, so a peer that predates this name simply
+    /// drops it from the agreed set and lands on the second branch.
+    // Federation only negotiates capabilities on Unix; matches
+    // `SCROLLBACK_REPLAY` and `WORKSPACE_TAB_CLOSE` above.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub const PANE_NAME_SOURCE: &'static str = "pane_name_source";
+
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }

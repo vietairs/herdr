@@ -1318,6 +1318,7 @@ mod tests {
                 branch: Some("render-dirty-test".into()),
                 ahead_behind: Some((1, 0)),
                 space: None,
+                tab_auto_labels: Vec::new(),
             }],
             cache_updates: Vec::new(),
         });
@@ -2500,6 +2501,12 @@ mod tests {
         assert_eq!(tab.pane_count, 1);
     }
 
+    /// R4: rung-4's fallback ordinal must be `tab.number` (the stable
+    /// public tab number), never `tab_idx + 1`. Deriving the fallback label
+    /// from array position instead makes this closed-tab scenario
+    /// (positional index 1, public number 3) produce the wrong label "2";
+    /// the resolver feeds it `public_tab_number`, so the label tracks
+    /// `tab.number`.
     #[test]
     fn tab_info_number_uses_stable_public_tab_number() {
         let mut app = test_app();
@@ -2520,7 +2527,7 @@ mod tests {
 
         assert_eq!(tab.tab_id, format!("{}:t3", app.state.workspaces[0].id));
         assert_eq!(tab.number, 3);
-        assert_eq!(tab.label, "2");
+        assert_eq!(tab.label, "3");
     }
 
     #[test]
@@ -2553,6 +2560,93 @@ mod tests {
             app.parse_tab_id(&format!("{}:4", app.state.workspaces[0].id)),
             Some((0, fourth_position_idx))
         );
+    }
+
+    /// Policy C: `App::tab_info` (creation.rs:236) sources its `label`
+    /// field from `Workspace::tab_display_name` and nothing else — a W×T
+    /// sweep over two workspaces with three tabs each, one workspace
+    /// containing a moved tab (so index and public number diverge),
+    /// asserting the two stay identical for every pair.
+    ///
+    /// Whatever `tab_display_name` resolves to may change (see
+    /// `tab_display_name_uses_public_tab_number_not_index` in
+    /// workspace.rs), so the labels this test captures may change with it —
+    /// but the *equality* `tab_info(w, t).label == tab_display_name(t)`
+    /// must hold regardless, since `tab_info` only ever wraps that call.
+    #[test]
+    fn char_tab_info_label_equals_tab_display_name_for_every_tab() {
+        let mut app = test_app();
+
+        let mut ws_a = Workspace::test_new("ws-a");
+        ws_a.test_add_tab(Some("foo"));
+        let final_auto_idx = ws_a.test_add_tab(None);
+        ws_a.switch_tab(final_auto_idx);
+        // Move tab 0 to the end so array position and public tab number
+        // diverge inside this workspace.
+        assert!(ws_a.move_tab(0, ws_a.tabs.len()));
+
+        let mut ws_b = Workspace::test_new("ws-b");
+        ws_b.test_add_tab(None);
+        ws_b.test_add_tab(Some("bar"));
+
+        app.state.workspaces = vec![ws_a, ws_b];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        for ws_idx in 0..app.state.workspaces.len() {
+            let tab_count = app.state.workspaces[ws_idx].tabs.len();
+            assert_eq!(
+                tab_count, 3,
+                "fixture must have 3 tabs in workspace {ws_idx}"
+            );
+            for tab_idx in 0..tab_count {
+                let info = app
+                    .tab_info(ws_idx, tab_idx)
+                    .unwrap_or_else(|| panic!("tab_info({ws_idx}, {tab_idx}) must resolve"));
+                let expected = app.state.workspaces[ws_idx]
+                    .tab_display_name(tab_idx)
+                    .unwrap();
+                assert_eq!(
+                    info.label, expected,
+                    "tab_info label must equal tab_display_name at ws {ws_idx} tab {tab_idx}"
+                );
+            }
+        }
+    }
+
+    /// `App::workspace_info` (creation.rs:411)
+    /// sources its `label` field from `Workspace::display_name_from` and
+    /// nothing else — an override, a cache hit, and a fallback all agree
+    /// between the two.
+    #[test]
+    fn char_workspace_info_label_equals_display_name_from() {
+        let mut app = test_app();
+        let mut ws_override = Workspace::test_new("named-workspace");
+        ws_override.identity_cwd = std::path::PathBuf::from("/irrelevant/for/an/override");
+
+        let mut ws_auto = Workspace::test_new("ignored");
+        ws_auto.custom_name = None;
+        ws_auto.identity_cwd = std::path::PathBuf::from("/cached/auto/repo");
+        ws_auto.cached_identity_cwd = std::path::PathBuf::from("/cached/auto/repo");
+        ws_auto.cached_auto_label = "auto-repo".into();
+
+        app.state.workspaces = vec![ws_override, ws_auto];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        for ws_idx in 0..app.state.workspaces.len() {
+            let info = app.workspace_info(ws_idx);
+            let expected = app.state.workspaces[ws_idx]
+                .display_name_from(&app.state.terminals, &app.terminal_runtimes);
+            assert_eq!(
+                info.label, expected,
+                "workspace_info label must equal display_name_from at ws {ws_idx}"
+            );
+        }
+        assert_eq!(app.workspace_info(0).label, "named-workspace");
+        assert_eq!(app.workspace_info(1).label, "auto-repo");
     }
 
     #[test]
@@ -2766,7 +2860,7 @@ mod tests {
             .terminals
             .get_mut(&attached_terminal_id)
             .unwrap()
-            .set_agent_name("reviewer".into());
+            .set_agent_name("reviewer".into(), crate::terminal::AgentNameAuthor::User);
         app.state.active = Some(0);
         app.state.selected = 0;
 
@@ -2789,7 +2883,7 @@ mod tests {
             Some(crate::detect::Agent::Pi),
             crate::detect::AgentState::Idle,
         );
-        terminal.set_agent_name("p_1".into());
+        terminal.set_agent_name("p_1".into(), crate::terminal::AgentNameAuthor::User);
 
         let resolved = app.resolve_agent_target("p_1").unwrap();
 
@@ -2831,7 +2925,7 @@ mod tests {
             .terminals
             .get_mut(&first_terminal_id)
             .unwrap()
-            .set_agent_name("worker".into());
+            .set_agent_name("worker".into(), crate::terminal::AgentNameAuthor::User);
         let second_terminal_id = app.state.workspaces[0]
             .pane_state(second)
             .unwrap()
@@ -2841,7 +2935,7 @@ mod tests {
             .terminals
             .get_mut(&second_terminal_id)
             .unwrap()
-            .set_agent_name("worker".into());
+            .set_agent_name("worker".into(), crate::terminal::AgentNameAuthor::User);
         app.state.active = Some(0);
         app.state.selected = 0;
 

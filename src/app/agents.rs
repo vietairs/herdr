@@ -128,7 +128,7 @@ impl App {
             return Err(AgentRenameError::NotAgent);
         }
         match normalized_name {
-            Some(name) => terminal.set_agent_name(name),
+            Some(name) => terminal.set_agent_name(name, crate::terminal::AgentNameAuthor::User),
             None => terminal.clear_agent_name(),
         }
         self.state.mark_session_dirty();
@@ -378,6 +378,8 @@ impl App {
         Some(crate::api::schema::AgentInfo {
             terminal_id: pane.terminal_id,
             name: terminal.agent_name.clone(),
+            label: pane.label,
+            name_source: pane.name_source,
             agent: pane.agent,
             title: pane.title,
             terminal_title: pane.terminal_title,

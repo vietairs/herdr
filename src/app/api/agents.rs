@@ -445,7 +445,7 @@ mod tests {
             .attached_terminal_id
             .clone();
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), crate::terminal::AgentNameAuthor::User);
         terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Working);
         let (runtime, mut rx) =
             crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
@@ -522,7 +522,7 @@ mod tests {
             .attached_terminal_id
             .clone();
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), crate::terminal::AgentNameAuthor::User);
         terminal.set_detected_state(Some(Agent::GithubCopilot), AgentState::Blocked);
         let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         app.state.insert_test_runtime(pane_id, runtime);
@@ -558,7 +558,7 @@ mod tests {
             .attached_terminal_id
             .clone();
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), crate::terminal::AgentNameAuthor::User);
         terminal.set_detected_state(Some(Agent::GithubCopilot), AgentState::Idle);
         let (runtime, mut rx) =
             crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
@@ -597,7 +597,7 @@ mod tests {
             .attached_terminal_id
             .clone();
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), crate::terminal::AgentNameAuthor::User);
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         app.state.insert_test_runtime(pane_id, runtime);
@@ -695,8 +695,15 @@ mod tests {
         assert_eq!(agent.agent_status, AgentStatus::Idle);
     }
 
+    /// Store vs resolution: an agent rename writes `agent_name` and never
+    /// touches `manual_label`, which is the pane's own rung-1 override.
+    /// Resolution is where the two meet — a pane with no `manual_label` may
+    /// display a name inherited from its tab (D3), and that inheritance is
+    /// gated on `AgentNameAuthor` so a hand-set handle is never clobbered.
+    /// This test protects the *store* split only; the resolution coupling
+    /// is covered in `src/workspace/naming.rs`.
     #[test]
-    fn agent_rename_does_not_replace_the_pane_label() {
+    fn agent_rename_leaves_manual_pane_label_untouched() {
         let mut app = app_with_agent();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]

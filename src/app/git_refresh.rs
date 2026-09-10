@@ -11,12 +11,18 @@ struct WorkspaceGitRefreshItem {
     workspace_id: String,
     resolved_identity_cwd: PathBuf,
     cache_key_hint: Option<PathBuf>,
+    /// D1/R4 — each tab's root-pane cwd, resolved HERE (the only place
+    /// `cwd_for_pane` may be called for naming) using live App state before
+    /// the heavier git work moves to a background thread. `(tab.number,
+    /// cwd)`, never `(tab_idx, cwd)` — tab identity is the public number.
+    tabs: Vec<(usize, PathBuf)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspaceGitRefreshTarget {
     workspace_id: String,
     resolved_identity_cwd: PathBuf,
+    tabs: Vec<(usize, PathBuf)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +114,24 @@ impl App {
                 _ => {}
             }
         }
+        // P3 — without this, a sidebar config with neither token above
+        // leaves `git_refresh_demand().is_empty()` true forever, so
+        // `git_refresh_deadline` never fires and every auto-named
+        // workspace/tab label goes permanently stale.
+        //
+        // A federation-materialized workspace is EXCLUDED here.
+        // Policy C deliberately leaves `custom_name` empty on a mounted
+        // scope (its label comes from `mirrored_name`, rung 1.5, not a
+        // local derivation), so without this exclusion every mount-only
+        // session reads as permanently "auto-named" and keeps the ~1.5s
+        // git pass running forever, resolving remote cwds and walking the
+        // LOCAL filesystem for git roots under remote-only paths — work
+        // whose result the resolver then discards anyway (a remote scope
+        // never runs rungs 2-4 against local data).
+        demand.auto_names = self.state.workspaces.iter().any(|ws| {
+            !ws.is_federation_materialized()
+                && (ws.custom_name.is_none() || ws.tabs.iter().any(|tab| tab.custom_name.is_none()))
+        });
         demand
     }
 
@@ -118,15 +142,33 @@ impl App {
         self.state
             .workspaces
             .iter()
+            // A federation-materialized workspace has no local git
+            // repository to refresh — see the exclusion note on
+            // `git_refresh_demand`'s `auto_names` above. Skip it before any
+            // cwd/git work runs, not just before storing the result.
+            .filter(|ws| !ws.is_federation_materialized())
             .filter_map(|ws| {
                 let cwd =
                     ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
                 let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
                     .then(|| ws.cached_git_status_key.clone());
+                let tabs = ws
+                    .tabs
+                    .iter()
+                    .filter_map(|tab| {
+                        tab.cwd_for_pane(
+                            tab.root_pane,
+                            &self.state.terminals,
+                            &self.terminal_runtimes,
+                        )
+                        .map(|tab_cwd| (tab.number, tab_cwd))
+                    })
+                    .collect();
                 Some(WorkspaceGitRefreshItem {
                     workspace_id: ws.id.clone(),
                     resolved_identity_cwd: cwd,
                     cache_key_hint,
+                    tabs,
                 })
             })
             .collect()
@@ -149,6 +191,7 @@ fn deduplicate_git_refresh_items(
         let target = WorkspaceGitRefreshTarget {
             workspace_id: item.workspace_id,
             resolved_identity_cwd: item.resolved_identity_cwd,
+            tabs: item.tabs,
         };
         if let Some(&index) = indexes.get(&cache_key) {
             jobs[index].cached = jobs[index].cached.take().filter(|_| !reconcile);
@@ -186,12 +229,28 @@ fn refresh_workspace_git_statuses_with_cache_and_demand(
             cache_updates.push((job.cache_key.clone(), cache_entry));
         }
         results.extend(job.targets.into_iter().map(move |target| {
-            snapshot.clone().into_workspace_status(
+            // D1/U1: derived once here, off the render path, using only the
+            // (tab.number, cwd) scalars resolved on the main thread above —
+            // never `cwd_for_pane` itself, which needs live App state this
+            // background pass does not have.
+            let mut tab_auto_labels: Vec<(usize, PathBuf, Option<String>)> = target
+                .tabs
+                .iter()
+                .map(|(number, cwd)| {
+                    let label =
+                        crate::workspace::derive_tab_auto_label(&target.resolved_identity_cwd, cwd);
+                    (*number, cwd.clone(), label)
+                })
+                .collect();
+            crate::workspace::apply_tab_label_distinctness(&mut tab_auto_labels);
+            let mut status = snapshot.clone().into_workspace_status(
                 target.workspace_id,
                 target.resolved_identity_cwd,
                 job.cache_key.clone(),
                 demand,
-            )
+            );
+            status.tab_auto_labels = tab_auto_labels;
+            status
         }));
     }
 
@@ -227,11 +286,13 @@ mod tests {
                     workspace_id: "one".into(),
                     resolved_identity_cwd: nested.clone(),
                     cache_key_hint: None,
+                    tabs: Vec::new(),
                 },
                 WorkspaceGitRefreshItem {
                     workspace_id: "two".into(),
                     resolved_identity_cwd: other.clone(),
                     cache_key_hint: None,
+                    tabs: Vec::new(),
                 },
             ],
             &HashMap::new(),
@@ -277,6 +338,7 @@ mod tests {
                 workspace_id: name.into(),
                 resolved_identity_cwd: cache_key.join(name),
                 cache_key_hint: Some(cache_key.clone()),
+                tabs: Vec::new(),
             })
             .collect();
 
@@ -375,33 +437,54 @@ mod tests {
         assert!(!app.git_identity_refresh_requested);
     }
 
+    /// Renamed from
+    /// `due_git_refresh_does_not_start_without_sidebar_consumer`: the
+    /// `auto_names` flag means "no sidebar consumer" alone no longer
+    /// suppresses the periodic pass whenever anything is auto-named —
+    /// `Workspace::test_new`'s single tab always is. What the original name
+    /// promised — a fully-named workspace with no sidebar consumer starts
+    /// no periodic work — still holds and is what this now asserts.
     #[test]
-    fn due_git_refresh_does_not_start_without_sidebar_consumer() {
+    fn due_git_refresh_does_not_start_for_a_fully_named_workspace_with_no_sidebar_consumer() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
-        app.state.workspaces.push(Workspace::test_new("test"));
+        let mut ws = Workspace::test_new("test");
+        ws.tabs[0].custom_name = Some("also-named".to_string());
+        app.state.workspaces.push(ws);
         let now = Instant::now();
         app.last_git_remote_status_refresh = now - GIT_REMOTE_STATUS_REFRESH_INTERVAL;
 
+        assert!(app.git_refresh_demand().is_empty());
         app.start_git_status_refresh_if_due(now);
 
         assert!(!app.git_refresh_in_flight);
         assert!(app.event_rx.try_recv().is_err());
     }
 
+    /// Every case also carries `auto_names: true`, because
+    /// `Workspace::test_new`'s single tab is always auto-named
+    /// (`custom_name: None`) and the flag is set from live workspace/tab
+    /// state, independent of the sidebar token under test. `branch` and
+    /// `ahead_behind` — what a sidebar token actually controls — are
+    /// unaffected and still asserted per-case.
     #[test]
     fn git_refresh_demand_matches_sidebar_rows() {
         let cases = [
             (
                 crate::config::SpaceSidebarToken::Workspace,
-                GitStatusRefreshDemand::default(),
+                GitStatusRefreshDemand {
+                    branch: false,
+                    ahead_behind: false,
+                    auto_names: true,
+                },
             ),
             (
                 crate::config::SpaceSidebarToken::Branch,
                 GitStatusRefreshDemand {
                     branch: true,
                     ahead_behind: false,
+                    auto_names: true,
                 },
             ),
             (
@@ -409,6 +492,7 @@ mod tests {
                 GitStatusRefreshDemand {
                     branch: false,
                     ahead_behind: true,
+                    auto_names: true,
                 },
             ),
         ];
@@ -428,6 +512,50 @@ mod tests {
         }
     }
 
+    /// A federation-materialized workspace must never drive
+    /// `auto_names` demand, and must never be included in
+    /// `workspace_git_refresh_items` — without the exclusion, a mount-only
+    /// session (no local workspace at all) would run the periodic
+    /// ~1.5s git pass forever, resolving cwds and walking the LOCAL
+    /// filesystem for git roots under a REMOTE path, for a label the
+    /// resolver discards anyway.
+    #[test]
+    fn federation_materialized_workspace_is_excluded_from_git_refresh_demand_and_items() {
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        let mut app = test_app(&config);
+        let mut ws = Workspace::test_new("mounted");
+        ws.id = format!("r:mount-host:{}", ws.id);
+        // Policy C: a mounted scope's label comes from `mirrored_name`, not
+        // a local override, so `custom_name` stays `None` in real usage —
+        // `Workspace::test_new` defaults it to a renamed workspace, so
+        // clear it explicitly to model the real mounted-workspace shape.
+        // If `auto_names` did not exclude federation-materialized
+        // workspaces, this alone would keep it permanently true.
+        ws.custom_name = None;
+        assert!(ws.is_federation_materialized());
+        app.state.workspaces.push(ws);
+
+        let demand = app.git_refresh_demand();
+        assert!(
+            !demand.auto_names,
+            "a federation-materialized workspace must not drive auto_names demand"
+        );
+        assert!(app.git_refresh_deadline().is_none());
+        assert!(
+            app.workspace_git_refresh_items(false).is_empty(),
+            "a federation-materialized workspace must never be walked for local git roots"
+        );
+    }
+
+    /// Before the `auto_names` flag existed this asserted a `None`
+    /// deadline outright. `Workspace::test_new`'s single tab is
+    /// always auto-named (`custom_name: None`), so the periodic pass must
+    /// now run regardless of the sidebar's Branch/GitStatus tokens to keep
+    /// `Tab::cached_auto_label` fresh — the deadline firing is not a
+    /// regression. What this test actually guards — an unnamed linked
+    /// worktree must not force the expensive `branch`/`ahead_behind` git
+    /// subprocess demand — still holds and is asserted directly.
     #[test]
     fn unnamed_linked_worktree_does_not_force_periodic_branch_refresh() {
         let mut config = crate::config::Config::default();
@@ -444,9 +572,16 @@ mod tests {
         });
         app.state.workspaces.push(child);
 
-        assert_eq!(app.git_refresh_deadline(), None);
+        let demand = app.git_refresh_demand();
+        assert!(!demand.branch);
+        assert!(!demand.ahead_behind);
+        assert!(demand.auto_names);
+        assert!(app.git_refresh_deadline().is_some());
     }
 
+    /// See the comment on the sibling test above — same
+    /// reasoning, applied to a custom-named workspace whose single tab is
+    /// still auto-named by `Workspace::test_new`.
     #[test]
     fn custom_named_linked_worktree_does_not_require_branch_refresh() {
         let mut config = crate::config::Config::default();
@@ -462,7 +597,11 @@ mod tests {
         });
         app.state.workspaces.push(child);
 
-        assert_eq!(app.git_refresh_deadline(), None);
+        let demand = app.git_refresh_demand();
+        assert!(!demand.branch);
+        assert!(!demand.ahead_behind);
+        assert!(demand.auto_names);
+        assert!(app.git_refresh_deadline().is_some());
     }
 
     #[test]

@@ -534,8 +534,21 @@ pub struct PaneInfo {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_cwd: Option<String>,
+    /// The pane's fully resolved naming-ladder label — own override
+    /// (rung 1), or the tab's rung-1 override inherited onto this pane (D3,
+    /// suppressed by the R3 gate for a pane with a User-authored agent
+    /// name — see `TerminalState::border_label`), or this pane's own
+    /// mirrored remote label (rung 1.5), or its agent identity (rung 2) —
+    /// the SAME ladder `border_label` renders in the TUI pane border,
+    /// computed once here on the server/API path so a JSON snapshot, the
+    /// agent sidebar, and the OS window title never go stale relative to
+    /// what the TUI shows. `None` only when no rung resolves at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Which rung of the ladder produced `label`. `#[serde(default)]` so an
+    /// older client tolerates the field's absence; see `TabInfo::name_source`.
+    #[serde(default)]
+    pub name_source: crate::workspace::naming::NameSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

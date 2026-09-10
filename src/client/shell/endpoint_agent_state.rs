@@ -125,6 +125,8 @@ mod tests {
             workspace_id: "workspace".into(),
             tab_id: "tab".into(),
             name: None,
+            label: None,
+            name_source: Default::default(),
             display_agent: None,
             agent: None,
             title: None,

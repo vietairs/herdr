@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 23,
+  "protocol": 24,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -757,6 +757,41 @@
           ],
           "type": "string"
         },
+        "NameSource": {
+          "description": "Why the resolved text is what it is. Sent to clients alongside the\nresolved name (`docs/next/website/src/content/docs/socket-api.mdx`);\nclients never re-derive. `Default` is `Ordinal` only so `#[serde(default)]`\nhas something to deserialize an absent/legacy field to — never treat a\ndeserialized `Ordinal` as evidence the source really was the ordinal\nrung; a real absence should not be confused with a resolved fact.",
+          "oneOf": [
+            {
+              "const": "override",
+              "description": "Rung 1: a user-typed override, at this scope or inherited.",
+              "type": "string"
+            },
+            {
+              "const": "inherited",
+              "description": "Rung 1, tab -> pane/agent specifically: inherited from the tab.",
+              "type": "string"
+            },
+            {
+              "const": "mirrored",
+              "description": "Rung 1.5: a federation-mounted scope's remote-resolved label.",
+              "type": "string"
+            },
+            {
+              "const": "agent_identity",
+              "description": "Rung 2: the pane's agent identity.",
+              "type": "string"
+            },
+            {
+              "const": "cwd",
+              "description": "Rung 3: cwd / git-root derivation.",
+              "type": "string"
+            },
+            {
+              "const": "ordinal",
+              "description": "Rung 4: the stable public ordinal.",
+              "type": "string"
+            }
+          ]
+        },
         "PaneInfo": {
           "properties": {
             "agent": {
@@ -800,10 +835,16 @@
               ]
             },
             "label": {
+              "description": "The pane's fully resolved naming-ladder label — own override\n(rung 1), or the tab's rung-1 override inherited onto this pane (D3,\nsuppressed by the R3 gate for a pane with a User-authored agent\nname — see `TerminalState::border_label`), or this pane's own\nmirrored remote label (rung 1.5), or its agent identity (rung 2) —\nthe SAME ladder `border_label` renders in the TUI pane border,\ncomputed once here on the server/API path so a JSON snapshot, the\nagent sidebar, and the OS window title never go stale relative to\nwhat the TUI shows. `None` only when no rung resolves at all.",
               "type": [
                 "string",
                 "null"
               ]
+            },
+            "name_source": {
+              "$ref": "#/schemas/event/$defs/NameSource",
+              "default": "ordinal",
+              "description": "Which rung of the ladder produced `label`. `#[serde(default)]` so an\nolder client tolerates the field's absence; see `TabInfo::name_source`."
             },
             "pane_id": {
               "type": "string"
@@ -1040,6 +1081,11 @@
             "label": {
               "type": "string"
             },
+            "name_source": {
+              "$ref": "#/schemas/event/$defs/NameSource",
+              "default": "ordinal",
+              "description": "Which rung of the naming ladder produced `label`\n(`docs/next/website/src/content/docs/concepts.mdx`). Clients switch\non this instead of re-deriving what an auto-named tab \"means\" —\ne.g. only `Ordinal` should ever be styled as a bare position/dimmed."
+            },
             "number": {
               "format": "uint",
               "minimum": 0,
@@ -1088,6 +1134,11 @@
             },
             "label": {
               "type": "string"
+            },
+            "name_source": {
+              "$ref": "#/schemas/event/$defs/NameSource",
+              "default": "ordinal",
+              "description": "Which rung of the naming ladder produced `label`\n(`docs/next/website/src/content/docs/concepts.mdx`)."
             },
             "number": {
               "format": "uint",
@@ -4407,15 +4458,18 @@
         "TabRenameParams": {
           "properties": {
             "label": {
-              "type": "string"
+              "description": "`None` clears the override and snaps the tab back to its live\nderived name (rung 1.5/3/4), mirroring `AgentRenameParams::name`\n(`herdr agent rename <target> --clear`). A bare JSON string still\ndeserializes into `Some(..)` for a caller that never omits this.\n\nGated with `skip_serializing_if` so a clear serializes as an omitted\nkey, never as a literal `null`: a server built before this field was\nnullable rejects `null` with a serde type error, where an absent key\nis the harmless no-op it always was.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_id": {
               "type": "string"
             }
           },
           "required": [
-            "tab_id",
-            "label"
+            "tab_id"
           ],
           "type": "object"
         },
@@ -4546,15 +4600,18 @@
         "WorkspaceRenameParams": {
           "properties": {
             "label": {
-              "type": "string"
+              "description": "`None` clears the override and snaps the workspace back to its live\nderived name. Same `skip_serializing_if` gating and same reason as\n`TabRenameParams::label`.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "workspace_id": {
               "type": "string"
             }
           },
           "required": [
-            "workspace_id",
-            "label"
+            "workspace_id"
           ],
           "type": "object"
         },
@@ -6743,6 +6800,13 @@
             "interactive_ready": {
               "type": "boolean"
             },
+            "label": {
+              "description": "This pane's fully resolved naming-ladder label — see\n`PaneInfo::label`'s doc. Deliberately separate from `name`: `name`\nis the addressable `herdr agent send` handle (its own uniqueness and\ncharset rules, untouched by any of this), `label` is what the agent\nsidebar and any JSON consumer should DISPLAY, and the two diverge on\npurpose the moment a tab rename or mirrored remote label applies\nwithout the handle changing.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "launch_pending": {
               "type": "boolean"
             },
@@ -6751,6 +6815,11 @@
                 "string",
                 "null"
               ]
+            },
+            "name_source": {
+              "$ref": "#/schemas/success_response/$defs/NameSource",
+              "default": "ordinal",
+              "description": "Which rung of the ladder produced `label`. See `TabInfo::name_source`."
             },
             "pane_id": {
               "type": "string"
@@ -7923,6 +7992,41 @@
             }
           ]
         },
+        "NameSource": {
+          "description": "Why the resolved text is what it is. Sent to clients alongside the\nresolved name (`docs/next/website/src/content/docs/socket-api.mdx`);\nclients never re-derive. `Default` is `Ordinal` only so `#[serde(default)]`\nhas something to deserialize an absent/legacy field to — never treat a\ndeserialized `Ordinal` as evidence the source really was the ordinal\nrung; a real absence should not be confused with a resolved fact.",
+          "oneOf": [
+            {
+              "const": "override",
+              "description": "Rung 1: a user-typed override, at this scope or inherited.",
+              "type": "string"
+            },
+            {
+              "const": "inherited",
+              "description": "Rung 1, tab -> pane/agent specifically: inherited from the tab.",
+              "type": "string"
+            },
+            {
+              "const": "mirrored",
+              "description": "Rung 1.5: a federation-mounted scope's remote-resolved label.",
+              "type": "string"
+            },
+            {
+              "const": "agent_identity",
+              "description": "Rung 2: the pane's agent identity.",
+              "type": "string"
+            },
+            {
+              "const": "cwd",
+              "description": "Rung 3: cwd / git-root derivation.",
+              "type": "string"
+            },
+            {
+              "const": "ordinal",
+              "description": "Rung 4: the stable public ordinal.",
+              "type": "string"
+            }
+          ]
+        },
         "NotificationShowReason": {
           "enum": [
             "shown",
@@ -8057,10 +8161,16 @@
               ]
             },
             "label": {
+              "description": "The pane's fully resolved naming-ladder label — own override\n(rung 1), or the tab's rung-1 override inherited onto this pane (D3,\nsuppressed by the R3 gate for a pane with a User-authored agent\nname — see `TerminalState::border_label`), or this pane's own\nmirrored remote label (rung 1.5), or its agent identity (rung 2) —\nthe SAME ladder `border_label` renders in the TUI pane border,\ncomputed once here on the server/API path so a JSON snapshot, the\nagent sidebar, and the OS window title never go stale relative to\nwhat the TUI shows. `None` only when no rung resolves at all.",
               "type": [
                 "string",
                 "null"
               ]
+            },
+            "name_source": {
+              "$ref": "#/schemas/success_response/$defs/NameSource",
+              "default": "ordinal",
+              "description": "Which rung of the ladder produced `label`. `#[serde(default)]` so an\nolder client tolerates the field's absence; see `TabInfo::name_source`."
             },
             "pane_id": {
               "type": "string"
@@ -10841,6 +10951,11 @@
             "label": {
               "type": "string"
             },
+            "name_source": {
+              "$ref": "#/schemas/success_response/$defs/NameSource",
+              "default": "ordinal",
+              "description": "Which rung of the naming ladder produced `label`\n(`docs/next/website/src/content/docs/concepts.mdx`). Clients switch\non this instead of re-deriving what an auto-named tab \"means\" —\ne.g. only `Ordinal` should ever be styled as a bare position/dimmed."
+            },
             "number": {
               "format": "uint",
               "minimum": 0,
@@ -10889,6 +11004,11 @@
             },
             "label": {
               "type": "string"
+            },
+            "name_source": {
+              "$ref": "#/schemas/success_response/$defs/NameSource",
+              "default": "ordinal",
+              "description": "Which rung of the naming ladder produced `label`\n(`docs/next/website/src/content/docs/concepts.mdx`)."
             },
             "number": {
               "format": "uint",

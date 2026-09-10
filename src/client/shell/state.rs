@@ -371,6 +371,13 @@ pub(super) enum ClientRenameTarget {
     },
     Pane {
         pane_id: String,
+        /// The text the box was prefilled with. Since the prefill is now
+        /// the pane's fully resolved name — which may be an inherited tab
+        /// rename, a mirrored remote label or its agent identity rather
+        /// than anything typed on this pane — saving it back unchanged must
+        /// stay a no-op instead of pinning a derived string as a real
+        /// override.
+        original_name: String,
     },
 }
 

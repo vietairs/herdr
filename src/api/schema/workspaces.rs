@@ -44,7 +44,11 @@ pub struct WorkspaceCloseParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceRenameParams {
     pub workspace_id: String,
-    pub label: String,
+    /// `None` clears the override and snaps the workspace back to its live
+    /// derived name. Same `skip_serializing_if` gating and same reason as
+    /// `TabRenameParams::label`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -78,6 +82,10 @@ pub struct WorkspaceInfo {
     pub workspace_id: String,
     pub number: usize,
     pub label: String,
+    /// Which rung of the naming ladder produced `label`
+    /// (`docs/next/website/src/content/docs/concepts.mdx`).
+    #[serde(default)]
+    pub name_source: crate::workspace::naming::NameSource,
     pub focused: bool,
     pub pane_count: usize,
     pub tab_count: usize,

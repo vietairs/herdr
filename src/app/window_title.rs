@@ -70,10 +70,17 @@ impl App {
                     }
                 }
                 WindowTitlePart::Token(WindowTitleToken::Pane) => {
-                    if let Some(label) = self
-                        .focused_terminal_state()
-                        .and_then(|terminal| terminal.manual_label.as_deref())
-                    {
+                    // Fall back to `mirrored_label` too, so a
+                    // federation-mounted pane's remote label — which lives
+                    // in the mirror slot, never in the `manual_label`
+                    // override slot — still reaches the OS window title
+                    // instead of silently vanishing.
+                    if let Some(label) = self.focused_terminal_state().and_then(|terminal| {
+                        terminal
+                            .manual_label
+                            .as_deref()
+                            .or(terminal.mirrored_label.as_deref())
+                    }) {
                         title.push_str(label);
                     }
                 }

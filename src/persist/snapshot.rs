@@ -101,6 +101,11 @@ pub struct PaneSnapshot {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Authorship of `agent_name` (R3). `#[serde(default)]` so a legacy
+    /// snapshot restores `None`, which `restore.rs` treats as `User` —
+    /// unknown means protected, never means safe to overwrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name_author: Option<crate::terminal::AgentNameAuthor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_agent_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -377,11 +382,12 @@ fn capture_tab(
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id));
         let label = terminal.and_then(|terminal| terminal.manual_label.clone());
-        let (agent_name, managed_agent_kind) = terminal
+        let (agent_name, agent_name_author, managed_agent_kind) = terminal
             .filter(|terminal| !terminal.managed_agent_launch_pending())
             .map(|terminal| {
                 (
                     terminal.agent_name.clone(),
+                    terminal.agent_name_author,
                     terminal
                         .managed_agent_kind()
                         .map(|agent| crate::detect::agent_label(agent).to_string()),
@@ -416,6 +422,7 @@ fn capture_tab(
                 cwd,
                 label,
                 agent_name,
+                agent_name_author,
                 managed_agent_kind,
                 agent_session,
                 launch_argv,
@@ -693,6 +700,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
                 agent_name: None,
+                agent_name_author: None,
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
@@ -704,6 +712,7 @@ mod tests {
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
                 agent_name: None,
+                agent_name_author: None,
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
@@ -1100,6 +1109,35 @@ mod tests {
         assert_eq!(workspace.next_public_tab_number, 3);
     }
 
+    /// `capture` (:256, :308-317) filters out any
+    /// workspace `is_federation_materialized` — a live federation mount is
+    /// re-derived from its `RemoteMirror` on every remount, never restored
+    /// as a local session, so persisting it would duplicate the mount's
+    /// own workspaces next time.
+    #[test]
+    fn char_federation_materialized_workspaces_are_excluded_from_capture() {
+        let mut state = state_with_workspaces(&["local"]);
+        let mut mounted = Workspace::test_new("mounted");
+        mounted.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "federation:alice@10.0.0.1#s1".into(),
+            label: "alice@10.0.0.1".into(),
+            repo_root: PathBuf::new(),
+            checkout_path: PathBuf::new(),
+            is_linked_worktree: false,
+        });
+        state.workspaces.push(mounted);
+        state.ensure_test_terminals();
+
+        let snapshot = capture_from_state(&state);
+
+        assert_eq!(
+            snapshot.workspaces.len(),
+            1,
+            "only the non-federated workspace is captured"
+        );
+        assert_eq!(snapshot.workspaces[0].custom_name.as_deref(), Some("local"));
+    }
+
     #[test]
     fn capture_contract_tracks_workspace_identity_and_pane_cwds() {
         let mut state = state_with_workspaces(&["one"]);
@@ -1305,6 +1343,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
                 agent_name: None,
+                agent_name_author: None,
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
@@ -1318,6 +1357,7 @@ mod tests {
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),
                 label: None,
                 agent_name: None,
+                agent_name_author: None,
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,

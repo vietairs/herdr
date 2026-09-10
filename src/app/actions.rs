@@ -1554,6 +1554,25 @@ impl AppState {
                 ws.cached_auto_label = result.auto_label;
                 changed |= ws.custom_name.is_none();
             }
+            // D1/D2 — write each tab's derived label, matching by the
+            // STABLE public tab.number (never tab_idx: a moved tab's index
+            // shifts, its number does not). Flag the redraw signal only for
+            // an auto-named tab whose visible label actually changed, the
+            // same gating the workspace label uses just above.
+            for (number, cwd, label) in result.tab_auto_labels {
+                let Some(tab) = ws.tabs.iter_mut().find(|tab| tab.number == number) else {
+                    continue;
+                };
+                if tab.cached_auto_label != label
+                    || tab.cached_auto_label_cwd.as_ref() != Some(&cwd)
+                {
+                    let was_visible_change =
+                        tab.custom_name.is_none() && tab.cached_auto_label != label;
+                    tab.cached_auto_label = label;
+                    tab.cached_auto_label_cwd = Some(cwd);
+                    changed |= was_visible_change;
+                }
+            }
             if ws.cached_git_status_key != result.status_cache_key {
                 ws.cached_git_status_key = result.status_cache_key;
             }
@@ -2524,6 +2543,89 @@ mod tests {
     }
 
     #[test]
+    fn apply_workspace_git_statuses_matches_tabs_by_public_number_not_index() {
+        let mut state = app_with_workspaces(&["one"]);
+        let workspace_id = state.workspaces[0].id.clone();
+        let cwd = state.workspaces[0].resolved_identity_cwd().unwrap();
+        // Two extra tabs, then close the first of the three so the
+        // survivors' indexes (0, 1) no longer match their public numbers
+        // (2, 3) — the exact divergence `public_tab_number` exists for.
+        state.workspaces[0].test_add_tab(None);
+        state.workspaces[0].test_add_tab(None);
+        assert!(state.workspaces[0].close_tab(0));
+        assert_eq!(state.workspaces[0].tabs.len(), 2);
+        let numbers: Vec<usize> = state.workspaces[0].tabs.iter().map(|t| t.number).collect();
+        assert_eq!(numbers, vec![2, 3]);
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let changed = state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![WorkspaceGitStatus {
+                workspace_id,
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                auto_label: "one".into(),
+                branch: None,
+                ahead_behind: None,
+                space: None,
+                // Deliberately out of index order and keyed by public
+                // number: index 0 is tab number 3, index 1 is tab number 2.
+                tab_auto_labels: vec![
+                    (
+                        3,
+                        std::path::PathBuf::from("/repo/three"),
+                        Some("three".into()),
+                    ),
+                    (2, std::path::PathBuf::from("/repo/two"), Some("two".into())),
+                ],
+            }],
+        );
+
+        assert!(changed);
+        let tab_by_number = |n: usize| {
+            state.workspaces[0]
+                .tabs
+                .iter()
+                .find(|t| t.number == n)
+                .unwrap()
+        };
+        assert_eq!(
+            tab_by_number(2).cached_auto_label.as_deref(),
+            Some("two"),
+            "tab number 2 must get the label keyed to number 2, not to its current index"
+        );
+        assert_eq!(tab_by_number(3).cached_auto_label.as_deref(), Some("three"));
+    }
+
+    /// D2: clearing a workspace's override snaps straight to a meaningful
+    /// derived name, without waiting for the next ~1.5s git-refresh pass to
+    /// populate `cached_auto_label` — `automatic_display_name_for_cwd`
+    /// falls back to a pure, allocation-only basename derivation
+    /// (`fallback_label_from_cwd`) whenever the live cwd hasn't been
+    /// admitted into the cache yet.
+    #[test]
+    fn clearing_a_workspace_override_snaps_to_the_live_derived_name() {
+        let mut state = app_with_workspaces(&["renamed"]);
+        state.workspaces[0].identity_cwd = std::path::PathBuf::from("/home/alice/project");
+        // The cache has not caught up to the live identity cwd yet — no
+        // git-refresh pass has run in this test.
+        assert_ne!(
+            state.workspaces[0].cached_identity_cwd,
+            state.workspaces[0].identity_cwd
+        );
+
+        state.workspaces[0].custom_name = None;
+
+        assert_eq!(
+            state.workspaces[0].display_name(),
+            "project",
+            "clearing the override must resolve immediately to the live cwd's basename, \
+             not wait for the cache to refresh"
+        );
+    }
+
+    #[test]
     fn apply_workspace_git_statuses_updates_matching_workspace() {
         let mut state = app_with_workspaces(&["one", "two"]);
         let first_id = state.workspaces[0].id.clone();
@@ -2542,6 +2644,7 @@ mod tests {
                 branch: Some("main".into()),
                 ahead_behind: Some((2, 1)),
                 space: None,
+                tab_auto_labels: Vec::new(),
             }],
         );
 
@@ -2571,6 +2674,7 @@ mod tests {
                 branch: Some("main".into()),
                 ahead_behind: Some((0, 1)),
                 space: None,
+                tab_auto_labels: Vec::new(),
             }],
         );
 
@@ -2597,11 +2701,13 @@ mod tests {
                 demand: crate::workspace::GitStatusRefreshDemand {
                     branch: false,
                     ahead_behind: true,
+                    auto_names: false,
                 },
                 auto_label: "one".into(),
                 branch: Some("new".into()),
                 ahead_behind: None,
                 space: None,
+                tab_auto_labels: Vec::new(),
             }],
         );
 
@@ -2629,6 +2735,7 @@ mod tests {
                 branch: None,
                 ahead_behind: None,
                 space: None,
+                tab_auto_labels: Vec::new(),
             }],
         );
 
@@ -2663,6 +2770,7 @@ mod tests {
                     repo_root: "/other/repo".into(),
                     is_linked_worktree: false,
                 }),
+                tab_auto_labels: Vec::new(),
             }],
         );
 
@@ -3553,7 +3661,7 @@ mod tests {
             None,
             Some(1),
         );
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), crate::terminal::AgentNameAuthor::User);
         state.session_dirty = false;
 
         let updates = state.handle_app_event(AppEvent::HookAgentReleased {

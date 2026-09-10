@@ -8,6 +8,7 @@ fn tab_overflow_controls_scroll_the_client_owned_tab_bar() {
         workspace_id: "ws_1".into(),
         number,
         label: number.to_string(),
+        name_source: crate::workspace::naming::NameSource::Ordinal,
         custom_label: false,
         zoomed: false,
         focused: false,
@@ -677,6 +678,7 @@ fn pane_menu_rows_are_pinned_for_every_label_combination() {
         snapshot.auto_resize_splits = auto_resize;
         if has_manual_label {
             snapshot.panes[0].label = Some("build".into());
+            snapshot.panes[0].name_source = crate::workspace::naming::NameSource::Override;
         }
         snapshot.focused_pane_id = other_pane_focused.then(|| "pane_other".into());
         state.set_snapshot(Box::new(snapshot));

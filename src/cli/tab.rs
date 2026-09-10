@@ -152,13 +152,20 @@ fn tab_focus(args: &[String]) -> std::io::Result<i32> {
 
 fn tab_rename(args: &[String]) -> std::io::Result<i32> {
     if args.len() < 2 {
-        eprintln!("usage: herdr tab rename <tab_id> <label>");
+        eprintln!("usage: herdr tab rename <tab_id> <label>|--clear");
         return Ok(2);
     }
+    // `--clear` snaps the tab back to its live derived name,
+    // mirroring `herdr agent rename <target> --clear`.
+    let label = if args[1..] == ["--clear".to_string()] {
+        None
+    } else {
+        Some(args[1..].join(" "))
+    };
 
     super::runtime::tab_rename(TabRenameParams {
         tab_id: super::normalize_tab_id(&args[0]),
-        label: args[1..].join(" "),
+        label,
     })
 }
 
@@ -196,7 +203,7 @@ fn print_tab_help() {
     );
     eprintln!("  herdr tab get <tab_id>");
     eprintln!("  herdr tab focus <tab_id>");
-    eprintln!("  herdr tab rename <tab_id> <label>");
+    eprintln!("  herdr tab rename <tab_id> <label>|--clear");
     eprintln!("  herdr tab close <tab_id>          close your local mirror only; leaves the host's copy running");
     eprintln!("  herdr tab close-remote <tab_id>   close a mirrored tab on its serving host");
 }

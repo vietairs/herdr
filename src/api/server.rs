@@ -1007,6 +1007,7 @@ mod tests {
             cwd: None,
             foreground_cwd: None,
             label: None,
+            name_source: crate::workspace::naming::NameSource::default(),
             agent: Some("pi".into()),
             title: None,
             terminal_title: None,

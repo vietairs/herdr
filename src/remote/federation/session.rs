@@ -22,8 +22,12 @@ use crate::remote::{
     FEDERATION_MOUNT_TIMEOUT,
 };
 
-/// Local-capability set advertised to the federation host — identical to the
-/// one-shot `attempt_federation_mount` snapshot dial (P4).
+/// Local-capability set advertised to the federation host. It is a strict
+/// superset of the one-shot `attempt_federation_mount` snapshot dial, which
+/// advertises only `SCROLLBACK_REPLAY` and `AGENT_STATUS`: a live mount also
+/// advertises `FILE_STAGING`, `WORKSPACE_TAB_CLOSE` and `PANE_NAME_SOURCE`.
+/// A capability added here is therefore not automatically advertised by the
+/// snapshot dial — update both when a new one must apply to each.
 fn local_capabilities() -> std::collections::BTreeSet<Capability> {
     [
         Capability::new(Capability::SCROLLBACK_REPLAY),
@@ -44,6 +48,12 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
         // ever sends the request and reads back a response, so there is
         // nothing local to gate on.
         Capability::new(Capability::WORKSPACE_TAB_CLOSE),
+        // States that this build reports `PaneInfo::name_source`, so a peer
+        // may read that field's absence as absent rather than as the
+        // `Ordinal` its `serde` default would otherwise manufacture.
+        // Advertised unconditionally: it describes what this build's own
+        // `PaneInfo` carries, which no local platform fact can change.
+        Capability::new(Capability::PANE_NAME_SOURCE),
     ]
     .into_iter()
     .collect()

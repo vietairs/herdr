@@ -47,6 +47,8 @@ Local opens immediately on startup without waiting for SSH connections. A stalle
 
 When a connection is lost, the last workspace and agent state remains visible but dimmed. That is cached information, not live state. Input and navigation into those cached panes stay disabled until a fresh connection and matching screen arrive. Reconnecting never takes selection away from the machine you are using.
 
+Renaming a mounted remote workspace or tab is local-only: it changes what you see, but it is never sent to the serving host, is not saved, and is lost the next time that workspace or tab is remounted. It also does not affect the name the workspace or tab owner sees on the serving host itself.
+
 ## Rename, disable, or remove
 
 Read profile IDs from the list rather than deriving them from labels or hostnames:

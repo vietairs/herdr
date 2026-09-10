@@ -100,16 +100,22 @@ pub(crate) fn render_tab_bar(
             break;
         }
         let rect = Rect::new(x, area.y, width, 1);
+        // U3 fix: only NameSource::Ordinal (a bare position number) is
+        // meaningless enough to read as disabled/dim — a derived name, an
+        // inherited rename, a mirrored remote label, or a real override are
+        // all meaningful text and must render like one.
+        let is_meaningfully_named =
+            tab.name_source != crate::workspace::naming::NameSource::Ordinal;
         let style = if tab.focused {
             let base = Style::default()
                 .fg(panel_contrast_fg(palette))
                 .bg(palette.accent);
-            if tab.custom_label {
+            if is_meaningfully_named {
                 base.add_modifier(Modifier::BOLD)
             } else {
                 base
             }
-        } else if tab.custom_label {
+        } else if is_meaningfully_named {
             Style::default().fg(palette.overlay1).bg(palette.surface0)
         } else {
             Style::default()

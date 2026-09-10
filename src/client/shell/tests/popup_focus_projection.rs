@@ -41,6 +41,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
         replace_on_type: false,
         target: ClientRenameTarget::Pane {
             pane_id: "pane_1".into(),
+            original_name: String::new(),
         },
     }));
     assert!(state.modal_paste_target_active());
@@ -924,6 +925,8 @@ fn sidebar_scrollbars_use_proportional_shared_geometry_and_drag() {
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             name: Some(format!("agent-{index}")),
+            label: None,
+            name_source: Default::default(),
             display_agent: None,
             agent: Some("codex".into()),
             title: None,

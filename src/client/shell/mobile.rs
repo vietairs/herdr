@@ -644,9 +644,13 @@ fn mobile_items(
                 .tabs
                 .iter()
                 .find(|tab| tab.tab_id == agent.tab_id);
+            // Same `{agent}` precedence as `agent_sidebar.rs`: a name
+            // somebody actually gave this scope wins over the agent kind.
             let agent_label = agent
-                .display_agent
+                .label
                 .as_deref()
+                .filter(|_| agent.name_source.is_explicitly_named())
+                .or(agent.display_agent.as_deref())
                 .or(agent.name.as_deref())
                 .or(agent.agent.as_deref())
                 .unwrap_or("agent");
@@ -660,7 +664,15 @@ fn mobile_items(
                 .iter()
                 .filter(|candidate| candidate.workspace_id == agent.workspace_id)
                 .count();
-            if let Some(tab) = tab.filter(|tab| tab.custom_label || workspace_tab_count > 1) {
+            // Same single-tab row-visibility rule as `agent_sidebar.rs`:
+            // treat a mirrored remote label like a local override.
+            if let Some(tab) = tab.filter(|tab| {
+                matches!(
+                    tab.name_source,
+                    crate::workspace::naming::NameSource::Override
+                        | crate::workspace::naming::NameSource::Mirrored
+                ) || workspace_tab_count > 1
+            }) {
                 detail.push(tab.label.clone());
             }
             let status_key = status_text(agent.agent_status);
@@ -773,7 +785,9 @@ fn mobile_items(
             } else {
                 ""
             };
-            let name = if entry.indented && !workspace.custom_label {
+            let name = if entry.indented
+                && workspace.name_source != crate::workspace::naming::NameSource::Override
+            {
                 workspace
                     .branch
                     .as_deref()
@@ -883,10 +897,13 @@ fn mobile_items(
             } else {
                 palette.panel_bg
             };
-            let label = if tab.custom_label {
-                format!("{} · {}", index + 1, tab.label)
-            } else {
+            // U3 fix: only a bare ordinal ("1", "2", ...) reads sensibly with
+            // the "tab " prefix — a derived name (e.g. "src/detect") must
+            // never be prefixed into "tab src/detect".
+            let label = if tab.name_source == crate::workspace::naming::NameSource::Ordinal {
                 format!("tab {}", tab.label)
+            } else {
+                format!("{} · {}", index + 1, tab.label)
             };
             let label = format!(
                 "  {}",

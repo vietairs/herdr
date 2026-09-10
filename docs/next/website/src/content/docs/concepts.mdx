@@ -23,6 +23,12 @@ A pane is a real terminal. Herdr renders the terminal output, sends input back t
 
 Panes can be split right or down. They can be renamed manually, read from the CLI, sent input, and closed.
 
+## Naming
+
+Workspace, tab, and pane/agent names are all resolved by the same precedence: a name you set outweighs everything else; failing that, a mirrored name from a live remote mount (federation-scoped only); failing that, the occupying agent's own identity; failing that, a name derived from the working directory or git root; failing that, a stable position number.
+
+Renaming a workspace never renames its tabs — workspace and tab names are independent, and a tab keeps its own name (or auto-derived name) across a workspace rename. Renaming a tab, by contrast, is inherited by every pane/agent in it that has no name of its own — except an agent whose name you set explicitly, which keeps the name you gave it. A tab rename changing an agent's *displayed* label never changes the stable handle you address it with via `herdr agent send <name>`.
+
 ## Mouse UI
 
 Herdr is mouse-native. You can click panes, tabs, workspaces, and agents. You can drag split borders, select text, and use right-click menus. Everything below is also reachable by mouse; keyboard bindings are an optional layer.

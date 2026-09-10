@@ -328,15 +328,26 @@ impl App {
         else {
             return tab_not_found(id, &params.tab_id);
         };
-        tab.set_custom_name(params.label.clone());
+        // `None` or an empty/whitespace-only string clears the
+        // override instead of setting it, snapping the tab back to its
+        // live derived name — same empty-clears convention already used by
+        // `handle_pane_rename` (PaneRenameParams), so a caller cannot store
+        // `Some("")` by accident.
+        match params.label.map(|label| label.trim().to_string()) {
+            Some(label) if !label.is_empty() => tab.set_custom_name(label),
+            _ => tab.clear_custom_name(),
+        }
         crate::logging::tab_renamed(&workspace_id, &tab_id);
         self.schedule_session_save();
+        // Report the RESOLVED display label (not the raw override), so a
+        // clear reports the name it snapped back to instead of `None`.
+        let resolved_label = self.state.workspaces[ws_idx].tab_display_name(tab_idx);
         self.emit_event(EventEnvelope {
             event: EventKind::TabRenamed,
             data: EventData::TabRenamed {
                 tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
                 workspace_id: self.public_workspace_id(ws_idx),
-                label: params.label,
+                label: resolved_label.unwrap_or_default(),
             },
         });
         let tab = self.tab_info(ws_idx, tab_idx).unwrap();
@@ -700,6 +711,347 @@ mod tests {
         workspace::Workspace,
     };
 
+    /// D3: renaming a tab changes the resolved border label of every pane
+    /// in it that has no `manual_label` of its own and no User-authored
+    /// agent name — the inheritance `TerminalState::border_label` applies
+    /// via `Workspace::tab_override_for_pane_inheritance`.
+    #[test]
+    fn renaming_a_tab_changes_every_auto_named_pane_label_in_it() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let mut ws = Workspace::test_new("tabs");
+        let root_pane = ws.tabs[0].root_pane;
+        let split_pane = ws.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        let response = app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id,
+                label: Some("work".to_string()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::TabInfo { .. }));
+
+        let ws = &app.state.workspaces[0];
+        let inherited = ws.tab_override_for_pane_inheritance(0);
+        for pane_id in [root_pane, split_pane] {
+            let terminal_id = ws.tabs[0].panes[&pane_id].attached_terminal_id.clone();
+            let terminal = &app.state.terminals[&terminal_id];
+            assert_eq!(
+                terminal.border_label(false, inherited).as_deref(),
+                Some("work"),
+                "pane {pane_id:?} must inherit the tab's rename"
+            );
+        }
+    }
+
+    /// Sending `label: None` (or an empty/whitespace label) on an
+    /// already-overridden tab clears the override, and the tab snaps back
+    /// to its live derived name instead of keeping the stale override or
+    /// going nameless.
+    #[test]
+    fn clearing_a_tab_override_snaps_back_to_the_derived_name() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let mut ws = Workspace::test_new("tabs");
+        // Model a tab with no custom name yet, so the derived name is
+        // whatever the ordinal/cwd ladder produces, not another override.
+        ws.tabs[0].clear_custom_name();
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        let derived_before = app.state.workspaces[0].tab_display_name(0);
+
+        // Set an override.
+        let response = app.handle_tab_rename(
+            "req1".into(),
+            TabRenameParams {
+                tab_id: tab_id.clone(),
+                label: Some("custom-name".to_string()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::TabInfo { .. }));
+        assert_eq!(
+            app.state.workspaces[0].tab_display_name(0),
+            Some("custom-name".to_string())
+        );
+
+        // Clear it.
+        let response = app.handle_tab_rename(
+            "req2".into(),
+            TabRenameParams {
+                tab_id,
+                label: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::TabInfo { .. }));
+        assert_eq!(
+            app.state.workspaces[0].tab_display_name(0),
+            derived_before,
+            "clearing the override must snap the tab back to its derived name"
+        );
+        assert!(app.state.workspaces[0].tabs[0].custom_name.is_none());
+    }
+
+    /// R3: a tab rename must never clobber a hand-set (User-authored)
+    /// agent name on one of its panes — the pane keeps displaying its own
+    /// agent identity instead of inheriting the tab's new name.
+    #[test]
+    fn renaming_a_tab_does_not_change_a_user_named_agents_label() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let ws = Workspace::test_new("tabs");
+        let root_pane = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root_pane]
+            .attached_terminal_id
+            .clone();
+        {
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+            terminal.set_agent_name(
+                "my-claude".to_string(),
+                crate::terminal::AgentNameAuthor::User,
+            );
+        }
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id,
+                label: Some("work".to_string()),
+            },
+        );
+
+        let ws = &app.state.workspaces[0];
+        let inherited = ws.tab_override_for_pane_inheritance(0);
+        assert_eq!(inherited, Some("work"), "the tab rename did take effect");
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(
+            terminal.border_label(true, inherited).as_deref(),
+            Some("claude"),
+            "a User-authored agent name gates inheritance off; the pane falls through to \
+             its own agent identity instead of the tab's new name"
+        );
+    }
+
+    /// A federation-mounted tab's mirrored remote label must not inherit
+    /// onto its panes: `mirrored_name` (rung 1.5) must never feed
+    /// `tab_override_for_pane_inheritance` — only a genuine
+    /// user override (`custom_name`, rung 1) inherits downward. Otherwise
+    /// every pane in the mounted tab would render the TAB's mirrored label,
+    /// shadowing each pane's own `mirrored_label` (rung 1.5) and agent
+    /// identity (rung 2) — the exact D3 misfire Federation Naming Contract
+    /// v1 exists to prevent.
+    #[test]
+    fn mirrored_tab_label_does_not_inherit_onto_panes_with_their_own_identity() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let mut ws = Workspace::test_new("tabs");
+        // Classify this workspace as federation-mounted (`r:<host>:<id>`,
+        // the same non-spoofable prefix `id::classify` checks) so
+        // `is_federation_materialized()` is true and rung 1.5 is legal.
+        ws.id = format!("r:mount-host:{}", ws.id);
+        ws.tabs[0].mirrored_name = Some("remote-tab-label".to_string());
+        let mirrored_pane = ws.tabs[0].root_pane;
+        let agent_pane = ws.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+
+        let mirrored_terminal_id = app.state.workspaces[0].tabs[0].panes[&mirrored_pane]
+            .attached_terminal_id
+            .clone();
+        {
+            let terminal = app.state.terminals.get_mut(&mirrored_terminal_id).unwrap();
+            terminal.mirrored_label = Some("remote-pane-label".to_string());
+        }
+        let agent_terminal_id = app.state.workspaces[0].tabs[0].panes[&agent_pane]
+            .attached_terminal_id
+            .clone();
+        {
+            let terminal = app.state.terminals.get_mut(&agent_terminal_id).unwrap();
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        }
+
+        let ws = &app.state.workspaces[0];
+        let inherited = ws.tab_override_for_pane_inheritance(0);
+        assert_eq!(
+            inherited, None,
+            "a mirrored tab label (rung 1.5) must never surface as an \
+             inheritable rung-1 override"
+        );
+
+        let mirrored_terminal = &app.state.terminals[&mirrored_terminal_id];
+        let agent_terminal = &app.state.terminals[&agent_terminal_id];
+        let mirrored_label = mirrored_terminal.border_label(true, inherited);
+        let agent_label = agent_terminal.border_label(true, inherited);
+        assert_eq!(mirrored_label.as_deref(), Some("remote-pane-label"));
+        assert_eq!(agent_label.as_deref(), Some("claude"));
+        assert_ne!(
+            mirrored_label, agent_label,
+            "the two panes must resolve different names, not both shadowed \
+             by the tab's mirrored label"
+        );
+    }
+
+    /// A tab rename must reach the JSON API path
+    /// (`App::pane_info`/`App::agent_info`), not just the TUI's
+    /// `border_label`. Before the fix, `PaneInfo.label` was exactly
+    /// `terminal.manual_label` — a tab rename never touched it, so
+    /// `herdr agent list`/`pane get` kept showing the pre-rename (or
+    /// absent) label while the TUI border already updated.
+    #[test]
+    fn renaming_a_tab_reaches_pane_info_and_agent_info_over_the_json_api() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let ws = Workspace::test_new("tabs");
+        let root_pane = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root_pane]
+            .attached_terminal_id
+            .clone();
+        {
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        }
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        app.handle_tab_rename(
+            "req".into(),
+            TabRenameParams {
+                tab_id,
+                label: Some("work".to_string()),
+            },
+        );
+
+        let pane_info = app.pane_info(0, root_pane).unwrap();
+        assert_eq!(
+            pane_info.label.as_deref(),
+            Some("work"),
+            "PaneInfo.label must follow the tab rename, not stay stuck on \
+             manual_label/agent identity"
+        );
+        assert_eq!(
+            pane_info.name_source,
+            crate::workspace::naming::NameSource::Inherited
+        );
+
+        let agent_info = app.agent_info(0, root_pane).unwrap();
+        assert_eq!(
+            agent_info.label.as_deref(),
+            Some("work"),
+            "AgentInfo.label (what the agent sidebar should display) must \
+             follow the tab rename the same way the border does"
+        );
+        assert_eq!(
+            agent_info.name, None,
+            "the addressable agent_name handle must stay untouched by a tab \
+             rename — only the display label follows"
+        );
+    }
+
+    /// A federation-mounted pane's own mirrored remote label must reach
+    /// `PaneInfo.label`. It lives in `mirrored_label`, not in the
+    /// `manual_label` override slot, and vanished from the API entirely
+    /// back when `PaneInfo.label` read only `manual_label`.
+    #[test]
+    fn mounted_panes_mirrored_label_reaches_pane_info() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let mut ws = Workspace::test_new("tabs");
+        ws.id = format!("r:mount-host:{}", ws.id);
+        let root_pane = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root_pane]
+            .attached_terminal_id
+            .clone();
+        {
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.mirrored_label = Some("remote-pane".to_string());
+        }
+
+        let pane_info = app.pane_info(0, root_pane).unwrap();
+        assert_eq!(pane_info.label.as_deref(), Some("remote-pane"));
+        assert_eq!(
+            pane_info.name_source,
+            crate::workspace::naming::NameSource::Mirrored
+        );
+    }
+
     #[test]
     fn api_tab_close_last_tab_closes_workspace_and_emits_both_events() {
         let event_hub = crate::api::EventHub::default();
@@ -957,6 +1309,7 @@ mod tests {
                 workspace_id: "w1".to_string(),
                 number: 1,
                 label: "remote workspace".to_string(),
+                name_source: crate::workspace::naming::NameSource::Mirrored,
                 focused: false,
                 pane_count: 2,
                 tab_count: 2,
@@ -972,6 +1325,7 @@ mod tests {
                     workspace_id: "w1".to_string(),
                     number: 1,
                     label: "first remote tab".to_string(),
+                    name_source: crate::workspace::naming::NameSource::Mirrored,
                     focused: false,
                     pane_count: 1,
                     agent_status: AgentStatus::Idle,
@@ -981,6 +1335,7 @@ mod tests {
                     workspace_id: "w1".to_string(),
                     number: 2,
                     label: "second remote tab".to_string(),
+                    name_source: crate::workspace::naming::NameSource::Mirrored,
                     focused: false,
                     pane_count: 1,
                     agent_status: AgentStatus::Idle,
@@ -996,6 +1351,7 @@ mod tests {
                     cwd: Some("/home/alice/project".to_string()),
                     foreground_cwd: None,
                     label: Some("remote pane 1".to_string()),
+                    name_source: crate::workspace::naming::NameSource::default(),
                     agent: None,
                     title: None,
                     terminal_title: None,
@@ -1017,6 +1373,7 @@ mod tests {
                     cwd: Some("/home/alice/project".to_string()),
                     foreground_cwd: None,
                     label: Some("remote pane 2".to_string()),
+                    name_source: crate::workspace::naming::NameSource::default(),
                     agent: None,
                     title: None,
                     terminal_title: None,

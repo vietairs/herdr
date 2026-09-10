@@ -621,6 +621,7 @@ mod tests {
             cwd: None,
             foreground_cwd: None,
             label: None,
+            name_source: crate::workspace::naming::NameSource::default(),
             agent: None,
             title: None,
             terminal_title: None,

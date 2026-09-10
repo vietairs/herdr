@@ -410,6 +410,10 @@ fn restore_workspace(
         Some(Workspace {
             id: workspace_id,
             custom_name: snap.custom_name.clone(),
+            // Federation-materialized workspaces are excluded from capture
+            // (persist/snapshot.rs::is_federation_materialized), so a
+            // restored workspace is never a mount mirror.
+            mirrored_name: None,
             identity_cwd: snap.identity_cwd.clone(),
             cached_identity_cwd: snap.identity_cwd.clone(),
             cached_auto_label,
@@ -492,6 +496,12 @@ fn restore_tab(
 
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
+        // A legacy snapshot has no author recorded: treat that as User so a
+        // restored hand-set agent name is protected from tab-rename
+        // inheritance (see `AgentNameAuthor`'s doc comment).
+        let saved_agent_name_author = saved_pane
+            .and_then(|p| p.agent_name_author)
+            .unwrap_or(crate::terminal::AgentNameAuthor::User);
         let saved_managed_agent = saved_pane
             .and_then(|pane| pane.managed_agent_kind.as_deref())
             .and_then(crate::detect::parse_canonical_agent_label);
@@ -645,7 +655,9 @@ fn restore_tab(
                         terminal.restore_managed_agent(agent_name, agent)
                     }
                     (Some(_), Some(_)) => {}
-                    (Some(agent_name), None) if was_imported => terminal.set_agent_name(agent_name),
+                    (Some(agent_name), None) if was_imported => {
+                        terminal.set_agent_name(agent_name, saved_agent_name_author)
+                    }
                     (Some(_), None) => {}
                     (None, _) => {}
                 }
@@ -723,6 +735,11 @@ fn restore_tab(
                 panes,
                 #[cfg(test)]
                 runtimes: HashMap::new(),
+                // Recomputed on the next ~1.5s git-refresh pass; never
+                // persisted.
+                cached_auto_label: None,
+                cached_auto_label_cwd: None,
+                mirrored_name: None,
                 zoomed: snap.zoomed,
                 events: runtime_context.events.clone(),
                 render_notify: runtime_context.render_notify.clone(),
@@ -1190,6 +1207,7 @@ mod tests {
                             cwd,
                             label: Some("reviewer".into()),
                             agent_name: Some("reviewer".into()),
+                            agent_name_author: None,
                             managed_agent_kind: Some("opencode".into()),
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "herdr:opencode".into(),
@@ -1276,6 +1294,7 @@ mod tests {
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
+                                agent_name_author: None,
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
@@ -1287,6 +1306,7 @@ mod tests {
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
+                                agent_name_author: None,
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
@@ -1340,6 +1360,7 @@ mod tests {
                     cwd: cwd.clone(),
                     label: None,
                     agent_name: None,
+                    agent_name_author: None,
                     managed_agent_kind: None,
                     agent_session: None,
                     launch_argv: None,
@@ -1350,6 +1371,7 @@ mod tests {
             cwd: cwd.clone(),
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
+            agent_name_author: None,
             managed_agent_kind: None,
             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                 source: "herdr:codex".into(),
@@ -1441,6 +1463,313 @@ mod tests {
             .all(|detail| detail.pane_id != agent_pane));
     }
 
+    /// A workspace override, a tab override — including the literal digit
+    /// string `"3"`, which must be
+    /// honored as an override rather than silently dropped because it looks
+    /// like an ordinal — a pane label, and public tab ordinals all survive
+    /// a capture-shaped `restore()`, and the restored state passes
+    /// `AppState::assert_invariants_for_test()`.
+    ///
+    /// Also pins a real surprise found while writing this test: a plain
+    /// (unmanaged, non-imported) pane `agent_name` is dropped on a cold
+    /// restore today — see implementation-notes.md.
+    #[tokio::test]
+    async fn char_snapshot_round_trip_preserves_overrides_and_ordinals() {
+        let cwd = std::env::current_dir().unwrap();
+        let tab0_panes = HashMap::from([(
+            0,
+            super::super::snapshot::PaneSnapshot {
+                cwd: cwd.clone(),
+                label: Some("reviewer".into()),
+                agent_name: Some("reviewer".into()),
+                agent_name_author: None,
+                managed_agent_kind: None,
+                agent_session: None,
+                launch_argv: None,
+            },
+        )]);
+        let tab1_panes = HashMap::from([(
+            1,
+            super::super::snapshot::PaneSnapshot {
+                cwd: cwd.clone(),
+                label: None,
+                agent_name: None,
+                agent_name_author: None,
+                managed_agent_kind: None,
+                agent_session: None,
+                launch_argv: None,
+            },
+        )]);
+
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("w1".into()),
+                custom_name: Some("named-workspace".into()),
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::from([(0, 1), (1, 2)]),
+                next_public_pane_number: 3,
+                public_tab_numbers: vec![1, 3],
+                next_public_tab_number: 4,
+                tabs: vec![
+                    TabSnapshot {
+                        custom_name: None,
+                        layout: LayoutSnapshot::Pane(0),
+                        panes: tab0_panes,
+                        zoomed: false,
+                        focused: Some(0),
+                        root_pane: Some(0),
+                    },
+                    TabSnapshot {
+                        // The sub-decision: a persisted numeric override
+                        // must be honored as an override, not treated as
+                        // indistinguishable from an ordinal and dropped.
+                        custom_name: Some("3".to_string()),
+                        layout: LayoutSnapshot::Pane(1),
+                        panes: tab1_panes,
+                        zoomed: false,
+                        focused: Some(1),
+                        root_pane: Some(1),
+                    },
+                ],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+
+        let (events, _event_rx) = mpsc::channel(4);
+        let (workspaces, terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        let mut state = crate::app::state::AppState::test_new();
+        state.workspaces = workspaces;
+        state.terminals = terminals;
+        state.active = Some(0);
+        state.selected = 0;
+        state.assert_invariants_for_test();
+
+        let workspace = &state.workspaces[0];
+        assert_eq!(workspace.custom_name.as_deref(), Some("named-workspace"));
+        assert_eq!(workspace.tabs.len(), 2);
+        assert!(workspace.tabs[0].custom_name.is_none());
+        assert_eq!(
+            workspace.tabs[1].custom_name.as_deref(),
+            Some("3"),
+            "a literal numeric override must be honored as an override, not dropped"
+        );
+        assert_eq!(workspace.tabs[0].number, 1);
+        assert_eq!(workspace.tabs[1].number, 3);
+
+        let root_pane = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.tabs[0].panes[&root_pane]
+            .attached_terminal_id
+            .clone();
+        let terminal = &state.terminals[&terminal_id];
+        assert_eq!(
+            terminal.manual_label.as_deref(),
+            Some("reviewer"),
+            "pane label survives restore"
+        );
+        assert_eq!(
+            terminal.agent_name, None,
+            "surprise (see implementation-notes.md): a plain, unmanaged agent_name is NOT \
+             restored on a cold (non-imported) restore today, even though the snapshot carried one"
+        );
+    }
+
+    /// Opens a real (never-written-to) pty pair and leaks its master side's
+    /// raw fd, for use as an `ImportedHandoffRuntime::master_fd` in a test.
+    /// `from_handoff_fd` takes ownership of the fd it is handed (wraps it
+    /// in an `OwnedFd`), exactly like a real cross-process handoff — so the
+    /// master must outlive this function without `PtyPair`'s own `Drop`
+    /// closing it first. No unsafe code; the leak is bounded to one fd per
+    /// call and the test process exits shortly after.
+    #[cfg(unix)]
+    fn leaked_pty_master_fd() -> std::os::fd::RawFd {
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open a real pty pair for the test");
+        let master_fd = pair
+            .master
+            .as_raw_fd()
+            .expect("a pty master always exposes a raw fd on unix");
+        std::mem::forget(pair.master);
+        master_fd
+    }
+
+    /// `restore_workspace`'s tab loop (:356-374)
+    /// enumerates `snap.tabs` and pairs each index directly against
+    /// `snap.public_tab_numbers.get(idx)` — even for a tab later dropped
+    /// (:690-700, "no panes could be restored for tab, dropping it") —
+    /// because the loop never filters before enumerating. A later sibling
+    /// tab's ordinal must therefore come from its OWN original index, not
+    /// from a position renumbered to account for the drop.
+    ///
+    /// The drop is forced deterministically: the shared `shell_config` for
+    /// this restore is a nonexistent binary, so any FRESH (non-imported)
+    /// pane spawn fails with ENOENT. The two tabs meant to survive are
+    /// instead "imported" with a real pty master fd, bypassing the shell
+    /// entirely — the same handoff path a live process handoff uses — so
+    /// only the middle, genuinely-fresh tab fails to restore.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn char_ordinals_survive_a_restore_that_drops_a_tab() {
+        let cwd = std::env::current_dir().unwrap();
+
+        let pane_snap = || super::super::snapshot::PaneSnapshot {
+            cwd: cwd.clone(),
+            label: None,
+            agent_name: None,
+            agent_name_author: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            launch_argv: None,
+        };
+
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("w1".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::from([(0, 1), (1, 2), (2, 3)]),
+                next_public_pane_number: 4,
+                public_tab_numbers: vec![1, 2, 3],
+                next_public_tab_number: 4,
+                tabs: vec![
+                    TabSnapshot {
+                        // Imported (real pty fd): survives the bad shell.
+                        custom_name: None,
+                        layout: LayoutSnapshot::Pane(0),
+                        panes: HashMap::from([(0, pane_snap())]),
+                        zoomed: false,
+                        focused: Some(0),
+                        root_pane: Some(0),
+                    },
+                    TabSnapshot {
+                        // NOT imported: this tab's only pane must spawn
+                        // fresh through the (deliberately broken) shared
+                        // shell, so it fails and the tab is dropped.
+                        custom_name: None,
+                        layout: LayoutSnapshot::Pane(1),
+                        panes: HashMap::from([(1, pane_snap())]),
+                        zoomed: false,
+                        focused: Some(1),
+                        root_pane: Some(1),
+                    },
+                    TabSnapshot {
+                        // Imported (real pty fd): survives the bad shell.
+                        custom_name: None,
+                        layout: LayoutSnapshot::Pane(2),
+                        panes: HashMap::from([(2, pane_snap())]),
+                        zoomed: false,
+                        focused: Some(2),
+                        root_pane: Some(2),
+                    },
+                ],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+
+        let mut imported_panes = HashMap::from([
+            (
+                0u32,
+                crate::handoff_runtime::ImportedHandoffRuntime {
+                    master_fd: leaked_pty_master_fd(),
+                    state: crate::handoff_runtime::HandoffRuntimeState {
+                        pane_id: 0,
+                        child_pid: 0,
+                        rows: 24,
+                        cols: 80,
+                        cell_width_px: 0,
+                        cell_height_px: 0,
+                        keyboard_protocol_flags: 0,
+                        keyboard_protocol_ansi: None,
+                        input_state: None,
+                        terminal_title: None,
+                        initial_history_ansi: None,
+                    },
+                },
+            ),
+            (
+                2u32,
+                crate::handoff_runtime::ImportedHandoffRuntime {
+                    master_fd: leaked_pty_master_fd(),
+                    state: crate::handoff_runtime::HandoffRuntimeState {
+                        pane_id: 2,
+                        child_pid: 0,
+                        rows: 24,
+                        cols: 80,
+                        cell_width_px: 0,
+                        cell_height_px: 0,
+                        keyboard_protocol_flags: 0,
+                        keyboard_protocol_ansi: None,
+                        input_state: None,
+                        terminal_title: None,
+                        initial_history_ansi: None,
+                    },
+                },
+            ),
+        ]);
+
+        let (events, _event_rx) = mpsc::channel(4);
+        let (workspaces, _terminals, _runtimes) = restore_with_imports(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            crate::pane::PaneShellConfig::new(
+                "/herdr-test-definitely-missing-shell-binary-xyz",
+                crate::config::ShellModeConfig::NonLogin,
+            ),
+            false,
+            &mut imported_panes,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        let workspace = workspaces.first().expect("workspace should restore");
+        assert_eq!(
+            workspace.tabs.len(),
+            2,
+            "the middle tab's fresh spawn fails against the broken shell and is dropped, \
+             leaving the two imported tabs"
+        );
+        // The surviving tabs keep their OWN original ordinals (1 and 3),
+        // never renumbered to [1, 2] to account for the drop.
+        assert_eq!(workspace.tabs[0].number, 1);
+        assert_eq!(workspace.tabs[1].number, 3);
+    }
+
     #[test]
     fn legacy_restore_precomputes_missing_public_pane_numbers() {
         let cwd = std::env::current_dir().unwrap();
@@ -1501,6 +1830,7 @@ mod tests {
                             cwd,
                             label: None,
                             agent_name: None,
+                            agent_name_author: None,
                             managed_agent_kind: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "herdr:codex".into(),
@@ -1667,6 +1997,7 @@ mod tests {
                 cwd: cwd.clone(),
                 label: None,
                 agent_name: None,
+                agent_name_author: None,
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,

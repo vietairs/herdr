@@ -845,14 +845,25 @@ impl App {
         let Some(ws) = self.state.workspaces.get_mut(index) else {
             return workspace_not_found(id, &params.workspace_id);
         };
-        ws.set_custom_name(params.label.clone());
+        // `None` or an empty/whitespace-only string clears the
+        // override instead of setting it, snapping the workspace back to
+        // its live derived name — same empty-clears convention already
+        // used by `handle_pane_rename` (PaneRenameParams).
+        match params.label.map(|label| label.trim().to_string()) {
+            Some(label) if !label.is_empty() => ws.set_custom_name(label),
+            _ => ws.clear_custom_name(),
+        }
         crate::logging::workspace_renamed(&ws.id);
         self.schedule_session_save();
+        // Report the RESOLVED display label (not the raw override), so a
+        // clear reports the name it snapped back to instead of `None`.
+        let resolved_label = self.state.workspaces[index]
+            .display_name_from(&self.state.terminals, &self.terminal_runtimes);
         self.emit_event(EventEnvelope {
             event: EventKind::WorkspaceRenamed,
             data: EventData::WorkspaceRenamed {
                 workspace_id: self.public_workspace_id(index),
-                label: params.label,
+                label: resolved_label,
             },
         });
 
@@ -1351,6 +1362,120 @@ mod tests {
         config::Config,
         workspace::Workspace,
     };
+
+    /// R1: a workspace rename never renames its tabs. Inheritance is
+    /// tab -> pane/agent only.
+    #[test]
+    fn renaming_a_workspace_does_not_rename_its_tabs() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut ws = Workspace::test_new("spaces");
+        ws.tabs[0].custom_name = None;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let workspace_id = app.public_workspace_id(0);
+        let tab_name_before = app.state.workspaces[0].tab_display_name(0);
+
+        let response = app.handle_workspace_rename(
+            "req".into(),
+            crate::api::schema::WorkspaceRenameParams {
+                workspace_id,
+                label: Some("renamed-workspace".to_string()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorkspaceInfo { .. }
+        ));
+
+        let ws = &app.state.workspaces[0];
+        assert_eq!(ws.custom_name.as_deref(), Some("renamed-workspace"));
+        assert_eq!(
+            ws.tabs[0].custom_name, None,
+            "the workspace rename must not touch the tab's own override"
+        );
+        assert_eq!(
+            ws.tab_display_name(0),
+            tab_name_before,
+            "the tab's resolved name is unchanged by a workspace rename"
+        );
+    }
+
+    /// Sending `label: None` (or an empty/whitespace label) on an
+    /// already-overridden workspace clears the override, and the workspace
+    /// snaps back to its live derived name instead of keeping the stale
+    /// override or going nameless.
+    #[test]
+    fn clearing_a_workspace_override_snaps_back_to_the_derived_name() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut ws = Workspace::test_new("spaces");
+        // `Workspace::test_new` models a renamed workspace by default; clear
+        // that so the derived name reflects the live cwd/ordinal ladder
+        // rather than another override.
+        ws.custom_name = None;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let workspace_id = app.public_workspace_id(0);
+
+        let derived_before =
+            app.state.workspaces[0].display_name_from(&app.state.terminals, &app.terminal_runtimes);
+
+        // Set an override.
+        let response = app.handle_workspace_rename(
+            "req1".into(),
+            crate::api::schema::WorkspaceRenameParams {
+                workspace_id: workspace_id.clone(),
+                label: Some("custom-workspace-name".to_string()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorkspaceInfo { .. }
+        ));
+        assert_eq!(
+            app.state.workspaces[0].custom_name.as_deref(),
+            Some("custom-workspace-name")
+        );
+
+        // Clear it.
+        let response = app.handle_workspace_rename(
+            "req2".into(),
+            crate::api::schema::WorkspaceRenameParams {
+                workspace_id,
+                label: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorkspaceInfo { .. }
+        ));
+        assert_eq!(app.state.workspaces[0].custom_name, None);
+        assert_eq!(
+            app.state.workspaces[0].display_name_from(&app.state.terminals, &app.terminal_runtimes),
+            derived_before,
+            "clearing the override must snap the workspace back to its derived name"
+        );
+    }
 
     // `new_cwd = follow` must anchor on the focused pane for every creation
     // surface. Splits and tabs already do; a new workspace must follow the
@@ -2021,6 +2146,7 @@ mod tests {
                 workspace_id: workspace_id.clone(),
                 number: n,
                 label: format!("remote workspace {n}"),
+                name_source: crate::workspace::naming::NameSource::Mirrored,
                 focused: false,
                 pane_count: 1,
                 tab_count: 1,
@@ -2035,6 +2161,7 @@ mod tests {
                 workspace_id: workspace_id.clone(),
                 number: 1,
                 label: format!("remote tab {n}"),
+                name_source: crate::workspace::naming::NameSource::Mirrored,
                 focused: false,
                 pane_count: 1,
                 agent_status: AgentStatus::Idle,
@@ -2048,6 +2175,7 @@ mod tests {
                 cwd: Some("/home/alice/project".to_string()),
                 foreground_cwd: None,
                 label: Some(format!("remote pane {n}")),
+                name_source: crate::workspace::naming::NameSource::default(),
                 agent: None,
                 title: None,
                 terminal_title: None,

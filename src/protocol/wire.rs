@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -1060,6 +1060,31 @@ pub struct ClientShellWorkspace {
     pub new_workspace_cwd: String,
     pub number: usize,
     pub label: String,
+    /// Which rung of the naming ladder produced `label`. Sits alongside the
+    /// old `custom_label: bool` (PROTOCOL_VERSION 23 -> 24, both fields now
+    /// present) — a one-bit override flag could not distinguish a mirrored
+    /// remote label from a derived cwd label from a bare ordinal, and every
+    /// TUI consumer that switched on it (dim styling, the "tab " prefix, the
+    /// single-tab token-visibility test) needed that distinction to render
+    /// correctly. `#[serde(default)]` so a frozen generation-1 JSON endpoint
+    /// payload (`tests/fixtures/endpoint-snapshot-v1.json`, predating this
+    /// field) keeps decoding — the bincode `ClientShell*` wire is the one
+    /// this forces a `PROTOCOL_VERSION` bump on; the JSON endpoint protocol
+    /// has its own, unchanged `ENDPOINT_PROTOCOL_GENERATION`.
+    #[serde(default)]
+    pub name_source: crate::workspace::naming::NameSource,
+    /// Deprecated one-bit override flag, kept (not removed) because a
+    /// generation-1 endpoint client compiled before `name_source` existed
+    /// still requires this field present in the JSON payload it decodes —
+    /// dropping it makes that client's `serde_json::from_str` fail with
+    /// "missing field `custom_label`" and die with an opaque
+    /// `ClientError::Protocol`, since `ENDPOINT_PROTOCOL_GENERATION` did not
+    /// change. Carries the same value it carried before `name_source`
+    /// existed (`true` only for `NameSource::Override`/inherited-override).
+    /// New consumers should read `name_source`, never this. Removal
+    /// condition: once generation-1 endpoint clients are no longer
+    /// supported (`ENDPOINT_PROTOCOL_GENERATION` bumps past 1).
+    #[serde(default)]
     pub custom_label: bool,
     pub branch: Option<String>,
     pub git_ahead_behind: Option<(usize, usize)>,
@@ -1093,6 +1118,11 @@ pub struct ClientShellTab {
     pub workspace_id: String,
     pub number: usize,
     pub label: String,
+    /// See `ClientShellWorkspace::name_source`'s doc.
+    #[serde(default)]
+    pub name_source: crate::workspace::naming::NameSource,
+    /// See `ClientShellWorkspace::custom_label`'s doc.
+    #[serde(default)]
     pub custom_label: bool,
     pub zoomed: bool,
     pub focused: bool,
@@ -1105,7 +1135,19 @@ pub struct ClientShellPane {
     pub pane_id: String,
     pub workspace_id: String,
     pub tab_id: String,
+    /// The resolved naming-ladder label — see
+    /// `crate::api::schema::PaneInfo::label`'s doc. Was previously exactly
+    /// `terminal.manual_label` (rung 1 only, verbatim); consumers that need
+    /// "did the USER set this pane's own label" (the rename overlay's
+    /// prefill/replace-on-type, the context menu's manual-label indicator)
+    /// must check `name_source == NameSource::Override`, never
+    /// `label.is_some()` — every other rung now also populates `label`.
     pub label: Option<String>,
+    /// Which rung of the ladder produced `label`. `#[serde(default)]` for
+    /// the same generation-1 JSON endpoint reason as
+    /// `ClientShellWorkspace::name_source`.
+    #[serde(default)]
+    pub name_source: crate::workspace::naming::NameSource,
     pub cwd: Option<String>,
     pub foreground_cwd: Option<String>,
     pub focused: bool,
@@ -1118,6 +1160,14 @@ pub struct ClientShellAgent {
     pub workspace_id: String,
     pub tab_id: String,
     pub name: Option<String>,
+    /// The resolved naming-ladder display label — see
+    /// `crate::api::schema::AgentInfo::label`'s doc. `#[serde(default)]`
+    /// for the same generation-1 JSON endpoint reason as
+    /// `ClientShellWorkspace::name_source`.
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub name_source: crate::workspace::naming::NameSource,
     pub display_agent: Option<String>,
     pub agent: Option<String>,
     pub title: Option<String>,
@@ -1808,6 +1858,100 @@ mod tests {
         let (decoded, _): (ClientMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    /// `ClientShellWorkspace`/`ClientShellTab` round-trip through bincode,
+    /// positionally encoded. Adding `name_source: NameSource` alongside the
+    /// still-present `custom_label: bool` is a positional-layout change (a
+    /// new field), so `PROTOCOL_VERSION` moved 23 -> 24 with it.
+    #[test]
+    fn client_shell_structs_round_trip_at_protocol_24() {
+        assert_eq!(PROTOCOL_VERSION, 24);
+
+        let workspace = ClientShellWorkspace {
+            workspace_id: "w1".into(),
+            active_tab_id: "w1:t1".into(),
+            new_workspace_cwd: "/tmp".into(),
+            number: 1,
+            label: "renamed".into(),
+            name_source: crate::workspace::naming::NameSource::Override,
+            custom_label: true,
+            branch: None,
+            git_ahead_behind: None,
+            tokens: Vec::new(),
+            worktree: None,
+            focused: true,
+            agent_status: crate::api::schema::AgentStatus::Idle,
+            federation_origin: None,
+        };
+        let encoded =
+            bincode::serde::encode_to_vec(&workspace, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientShellWorkspace, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(workspace, decoded);
+
+        let tab = ClientShellTab {
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            number: 1,
+            label: "renamed-tab".into(),
+            name_source: crate::workspace::naming::NameSource::Override,
+            custom_label: true,
+            zoomed: false,
+            focused: true,
+            agent_status: crate::api::schema::AgentStatus::Idle,
+        };
+        let encoded = bincode::serde::encode_to_vec(&tab, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientShellTab, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(tab, decoded);
+    }
+
+    /// A generation-1 endpoint client's JSON payload carries `custom_label`
+    /// but predates `name_source` entirely — it must still deserialize
+    /// (`ENDPOINT_PROTOCOL_GENERATION` stayed at 1), which is why
+    /// `custom_label` was kept rather than removed (see its doc comment on
+    /// `ClientShellWorkspace`/`ClientShellTab`).
+    #[test]
+    fn generation_one_shaped_payload_without_name_source_still_decodes() {
+        let workspace_json = serde_json::json!({
+            "workspace_id": "w1",
+            "active_tab_id": "w1:t1",
+            "new_workspace_cwd": "/tmp",
+            "number": 1,
+            "label": "renamed",
+            "custom_label": true,
+            "branch": null,
+            "git_ahead_behind": null,
+            "tokens": [],
+            "worktree": null,
+            "focused": true,
+            "agent_status": "idle",
+            "federation_origin": null,
+        });
+        let workspace: ClientShellWorkspace = serde_json::from_value(workspace_json).unwrap();
+        assert!(workspace.custom_label);
+        assert_eq!(
+            workspace.name_source,
+            crate::workspace::naming::NameSource::default()
+        );
+
+        let tab_json = serde_json::json!({
+            "tab_id": "w1:t1",
+            "workspace_id": "w1",
+            "number": 1,
+            "label": "renamed-tab",
+            "custom_label": true,
+            "zoomed": false,
+            "focused": true,
+            "agent_status": "idle",
+        });
+        let tab: ClientShellTab = serde_json::from_value(tab_json).unwrap();
+        assert!(tab.custom_label);
+        assert_eq!(
+            tab.name_source,
+            crate::workspace::naming::NameSource::default()
+        );
     }
 
     #[test]
@@ -2711,6 +2855,7 @@ mod tests {
                 new_workspace_cwd: "/tmp".into(),
                 number: 1,
                 label: "shell".into(),
+                name_source: crate::workspace::naming::NameSource::Cwd,
                 custom_label: false,
                 branch: Some("main".into()),
                 git_ahead_behind: None,
@@ -2725,6 +2870,7 @@ mod tests {
                 workspace_id: "w1".into(),
                 number: 1,
                 label: "main".into(),
+                name_source: crate::workspace::naming::NameSource::Override,
                 custom_label: true,
                 zoomed: false,
                 focused: true,
@@ -2735,6 +2881,7 @@ mod tests {
                 workspace_id: "w1".into(),
                 tab_id: "w1:t1".into(),
                 label: None,
+                name_source: Default::default(),
                 cwd: Some("/repo".into()),
                 foreground_cwd: Some("/repo".into()),
                 focused: true,

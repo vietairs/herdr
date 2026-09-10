@@ -206,7 +206,13 @@ impl ClientShellState {
                 pane_id,
                 workspace_id: pane.workspace_id.clone(),
                 source_pane_id,
-                has_manual_label: pane.label.is_some(),
+                // `pane.label` is the fully resolved ladder text (own
+                // override, inherited tab rename, mirrored remote label,
+                // or agent identity), so only a genuine own
+                // override — `name_source == Override` — means there is
+                // something stored on this pane to clear.
+                has_manual_label: pane.name_source
+                    == crate::workspace::naming::NameSource::Override,
                 right_click_passthrough: pane.right_click_passthrough,
                 auto_resize_splits: snapshot.auto_resize_splits,
             },
@@ -413,7 +419,8 @@ impl ClientShellState {
                         replace_on_type: false,
                         target: ClientRenameTarget::Tab {
                             tab_id,
-                            auto_name: !tab.custom_label,
+                            auto_name: tab.name_source
+                                != crate::workspace::naming::NameSource::Override,
                             original_name: tab.label.clone(),
                         },
                     }));
@@ -446,18 +453,24 @@ impl ClientShellState {
 
         match action {
             ClientContextMenuAction::RenamePane => {
-                let label = self.snapshot.as_deref().and_then(|snapshot| {
+                let found = self.snapshot.as_deref().and_then(|snapshot| {
                     snapshot
                         .panes
                         .iter()
                         .find(|pane| pane.pane_id == pane_id)
-                        .and_then(|pane| pane.label.clone())
+                        .map(|pane| (pane.label.clone(), pane.name_source))
                 });
+                let (label, name_source) = found.unwrap_or((None, Default::default()));
                 self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
                     title: "rename pane",
                     input: label.clone().unwrap_or_default(),
-                    replace_on_type: label.is_none(),
-                    target: ClientRenameTarget::Pane { pane_id },
+                    // See the resolved-ladder note above: replace-on-type
+                    // only when this pane has no own override.
+                    replace_on_type: name_source != crate::workspace::naming::NameSource::Override,
+                    target: ClientRenameTarget::Pane {
+                        pane_id,
+                        original_name: label.unwrap_or_default(),
+                    },
                 }));
             }
             ClientContextMenuAction::ClearPaneName => self.push_endpoint_method(
