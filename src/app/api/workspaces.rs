@@ -500,8 +500,6 @@ impl App {
         // other platforms there are never any pending stages to purge.
         #[cfg(unix)]
         self.purge_pending_remote_clipboard_stages_for_origin(&host_key, connection_epoch);
-        #[cfg(not(unix))]
-        let _ = connection_epoch;
 
         self.state.end_federation_mount(&host_key);
 

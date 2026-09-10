@@ -32,6 +32,11 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
         // sends bytes and reads back a path, it touches no filesystem, so it
         // has nothing to gate on the local platform. Whether a stage request
         // is ever sent is decided by what the *host* also advertised.
+        //
+        // On a non-Unix client the advert is true only by omission: the sole
+        // initiator, `app::remote_clipboard_stage`, is `#[cfg(unix)]`, so no
+        // stage frame can be built at all. Un-gating that module means
+        // un-gating this promise with it.
         Capability::new(Capability::FILE_STAGING),
         // Gates `workspace.close_remote`/`tab.close_remote` forwarding
         // (federation close forwarding for the multi-workspace/tab case).

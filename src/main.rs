@@ -781,7 +781,6 @@ fn main() -> io::Result<()> {
         // the server-daemon-owned mount (local + remote coexist in one TUI)
         // instead of the old federated-alone in-process path. Classic
         // `--remote` (no federation opt-in) is untouched below.
-        #[cfg(unix)]
         {
             let route = remote::decide_launch_route(
                 Some(&remote_launch),

@@ -736,7 +736,6 @@ impl HeadlessServer {
             // A daemon-owned `workspace.mount_remote` dial+mount failed. Without
             // this arm the failure is silent: the sidebar notice alone is easy to
             // miss, so the foreground client also gets a toast.
-            #[cfg(unix)]
             AppEvent::FederationMountFailed { target, reason } => {
                 let (target, reason) = (target.clone(), reason.clone());
                 self.app.handle_internal_event(ev);
