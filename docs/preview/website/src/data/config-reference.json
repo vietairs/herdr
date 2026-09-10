@@ -434,12 +434,6 @@
             "current",
             "path"
           ]
-        },
-        {
-          "key": "terminal.kitty_graphics",
-          "type": "boolean",
-          "default": "true",
-          "description": "Render pane images in Kitty graphics-compatible outer terminals. Set false to disable graphics rendering and the pane graphics API. Restart the server or reattach the client after changing it. In remote sessions, server configuration controls parsing and API availability while local client configuration controls outer-terminal output."
         }
       ]
     },
@@ -581,7 +575,7 @@
           "key": "keys.detach",
           "type": "keybinding",
           "default": "\"prefix+q\"",
-          "description": "Detach the current client from its Herdr server."
+          "description": "Detach from server/client mode, or exit --no-session mode."
         },
         {
           "key": "keys.reload_config",
@@ -1396,17 +1390,6 @@
             "on",
             "off"
           ]
-        },
-        {
-          "key": "ui.sound.agents.muse",
-          "type": "enum",
-          "default": "\"default\"",
-          "description": "Sound override for detected Muse agents.",
-          "values": [
-            "default",
-            "on",
-            "off"
-          ]
         }
       ]
     },
@@ -1477,8 +1460,8 @@
         {
           "key": "experimental.kitty_graphics",
           "type": "boolean",
-          "default": "unset",
-          "description": "Deprecated compatibility key for terminal.kitty_graphics. Existing true and false values remain supported; terminal.kitty_graphics takes precedence when both are set."
+          "default": "false",
+          "description": "Experimental local Kitty graphics rendering for attached clients."
         },
         {
           "key": "experimental.pane_history",
