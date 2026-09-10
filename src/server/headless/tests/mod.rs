@@ -5626,6 +5626,50 @@ fn remote_clipboard_write_is_ignored_when_the_operator_refuses_remote_writes() {
     );
 }
 
+/// An accepted remote clipboard write must carry the host it came from all
+/// the way to the foreground client, which is what lets the client name that
+/// host in its copy feedback rather than showing an unattributed "copied".
+/// The neighbouring tests destructure `ServerMessage::Clipboard { data, .. }`
+/// and so would not notice `origin` being dropped on the way out.
+#[test]
+fn accepted_remote_clipboard_write_forwards_the_host_it_came_from() {
+    let mut server = test_headless_server();
+    let (foreground_tx, foreground_control_rx, _foreground_rx) = test_client_writer();
+    server.clients.insert(
+        1,
+        ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(foreground_tx),
+        ),
+    );
+    server.foreground_client_id = Some(1);
+    server.app.state.accept_remote_clipboard_writes = true;
+
+    server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
+        content: b"test".to_vec(),
+        origin: Some("remote-host".to_string()),
+    });
+
+    match read_server_message(
+        foreground_control_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("an accepted remote clipboard write must reach the operator"),
+    ) {
+        ServerMessage::Clipboard { data, origin } => {
+            assert_eq!(data, "dGVzdA==");
+            assert_eq!(
+                origin.as_deref(),
+                Some("remote-host"),
+                "the client cannot name the host if the server drops the origin"
+            );
+        }
+        other => panic!("expected clipboard message, got {other:?}"),
+    }
+}
+
 /// The refusal must be narrow: only writes with an `origin` (a federated
 /// remote pane) are gated. A local pane's own OSC 52 must still land even
 /// when the operator has turned off *remote* clipboard writes.
