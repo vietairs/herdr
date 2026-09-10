@@ -620,6 +620,9 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
             let response = app.handle_api_request_after_internal_events_drained(Request {
                 id: "federation-create-workspace".to_string(),
                 method: Method::WorkspaceCreate(crate::api::schema::WorkspaceCreateParams {
+                    // A remotely requested workspace has no local source
+                    // workspace to inherit a `follow` cwd policy from.
+                    source_workspace_id: None,
                     // A mounting client's filesystem path is meaningless
                     // here; let this host's own `workspace.create` defaults
                     // pick the root pane's cwd.
@@ -951,7 +954,13 @@ mod tests {
     fn test_app() -> App {
         let config = crate::config::Config::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        crate::app::App::new(&config, true, None, api_rx, crate::api::EventHub::default())
+        crate::app::App::new(
+            &config,
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
     }
 
     /// Drive a connection through admission + mount, returning its `(epoch,
@@ -1333,6 +1342,12 @@ mod tests {
     /// `SplitPane` performs a real split against the live `App` (via the
     /// same `Method::PaneSplit` handler the local TUI/CLI path uses) and
     /// replies with the new pane's raw id + terminal id.
+    // Unix-only: this drives a real local pane spawn, and on Windows the
+    // ConPTY child outlives the dropped `App`, so the pane's `child.wait()`
+    // blocking task never finishes and the test runtime's drop blocks forever.
+    // The serving side these commands arrive on (`server::federation_accept`)
+    // is itself `cfg(unix)`, so nothing this covers can run on Windows anyway.
+    #[cfg(unix)]
     #[tokio::test]
     async fn split_pane_against_a_known_target_pane_creates_a_real_pane_and_replies_ok() {
         let mut app = test_app();
@@ -1378,6 +1393,12 @@ mod tests {
     /// the same `Method::WorkspaceCreate` handler the local TUI/CLI
     /// new-workspace action uses) and replies with the new workspace's raw
     /// workspace/tab/pane/terminal ids.
+    // Unix-only: this drives a real local pane spawn, and on Windows the
+    // ConPTY child outlives the dropped `App`, so the pane's `child.wait()`
+    // blocking task never finishes and the test runtime's drop blocks forever.
+    // The serving side these commands arrive on (`server::federation_accept`)
+    // is itself `cfg(unix)`, so nothing this covers can run on Windows anyway.
+    #[cfg(unix)]
     #[tokio::test]
     async fn create_workspace_creates_a_real_workspace_and_replies_with_its_ids() {
         let mut app = test_app();
@@ -1431,6 +1452,12 @@ mod tests {
     /// production. Before the fix, `Method::PaneSplit`'s handler only
     /// accepted public pane ids and this would reply `pane_not_found` for
     /// every real remote split.
+    // Unix-only: this drives a real local pane spawn, and on Windows the
+    // ConPTY child outlives the dropped `App`, so the pane's `child.wait()`
+    // blocking task never finishes and the test runtime's drop blocks forever.
+    // The serving side these commands arrive on (`server::federation_accept`)
+    // is itself `cfg(unix)`, so nothing this covers can run on Windows anyway.
+    #[cfg(unix)]
     #[tokio::test]
     async fn split_pane_resolves_a_raw_terminal_id_the_same_as_a_public_pane_id() {
         let mut app = test_app();
@@ -2016,6 +2043,10 @@ mod tests {
     /// `Method::TabCreate` handler the local TUI/CLI new-tab action uses) and
     /// replies with the new tab's raw workspace/tab/pane/terminal ids, without
     /// moving the serving user's own focus.
+    // Unix-only for the same reason as the real-pane split/create tests above:
+    // a real tab create spawns a real local pane, and on Windows the ConPTY
+    // child outlives the dropped `App`, hanging the test runtime's drop.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_peers_tab_create_creates_a_tab_in_the_named_workspace_without_stealing_focus() {
         let mut app = test_app();
@@ -2266,6 +2297,7 @@ mod tests {
                 agent_status: AgentStatus::Idle,
                 tokens: Default::default(),
                 worktree: None,
+                federation_origin: None,
             }],
             tabs: vec![TabInfo {
                 tab_id: "w1-tab".to_string(),

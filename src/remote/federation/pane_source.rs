@@ -1,8 +1,9 @@
 //! `RemoteTerminalSource` (P5): the raw-byte-channel counterpart to
 //! `terminal::LocalChild`/`PtyIoActorHandle`. Fed by bytes arriving over the
-//! P1 raw terminal channel (never a local PTY); `write_user_input`/`resize`/
-//! `shutdown` serialize outward as `TerminalChannelMessage::Input`/`Resize`/
-//! `Close`, tagged `{terminal_id, mount_generation}`.
+//! P1 raw terminal channel (never a local PTY); `try_write_user_input`/
+//! `resize`/`shutdown` serialize outward as
+//! `TerminalChannelMessage::Input`/`Resize`/`Close`, tagged
+//! `{terminal_id, mount_generation}`.
 //!
 //! Lifecycle (codex #5, pinned by P2's `TerminalLifecyclePolicy` contract):
 //! this type never spawns/kills a local child (there is no PTY master fd, no
@@ -35,9 +36,9 @@ use crate::terminal::{TerminalLifecyclePolicy, TerminalSource};
 use super::protocol::{ClipboardMessage, FederationMessage, TerminalChannelMessage};
 
 /// Bounded capacity of one remote pane's outbound-input queue. Mirrors the
-/// spirit of `PtyIoActorHandle`'s channel: `write_user_input` waits for
-/// capacity, `try_write_user_input` fails fast — the same backpressure shape
-/// the local path already gives callers.
+/// spirit of `PtyIoActorHandle`'s channel: `try_write_user_input` fails fast
+/// on a full/closed channel — the same backpressure shape the local path
+/// already gives callers.
 const INPUT_CHANNEL_CAPACITY: usize = 256;
 
 /// The `on_read` closure shape: invoked for every byte chunk a remote pane
@@ -176,10 +177,6 @@ impl Drop for RemoteTerminalSourceHandle {
 }
 
 impl TerminalSource for RemoteTerminalSourceHandle {
-    async fn write_user_input(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
-        self.input_tx.send(bytes).await
-    }
-
     fn try_write_user_input(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.input_tx.try_send(bytes)
     }
@@ -324,7 +321,7 @@ mod tests {
         assert_eq!(&*captured.lock().unwrap(), b"hello world");
     }
 
-    // Test 2: write_user_input/resize/shutdown serialize outward as
+    // Test 2: try_write_user_input/resize/shutdown serialize outward as
     // `TerminalChannelMessage` tagged with the raw (map_out-stripped)
     // terminal id and the mount generation this source was constructed
     // with — never a caller's local/namespaced id.
@@ -333,8 +330,7 @@ mod tests {
         let (handle, _output_tx, mut out_rx, _captured) = spawn_capturing("term_9", 7);
 
         handle
-            .write_user_input(Bytes::from_static(b"typed"))
-            .await
+            .try_write_user_input(Bytes::from_static(b"typed"))
             .unwrap();
         let Some(FederationMessage::Terminal(TerminalChannelMessage::Input {
             terminal_id,
@@ -388,8 +384,7 @@ mod tests {
     async fn typing_alone_produces_no_local_echo() {
         let (handle, _output_tx, _out_rx, captured) = spawn_capturing("term_1", 1);
         handle
-            .write_user_input(Bytes::from_static(b"echo me?"))
-            .await
+            .try_write_user_input(Bytes::from_static(b"echo me?"))
             .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(captured.lock().unwrap().is_empty());
@@ -450,7 +445,7 @@ mod tests {
     async fn a_paste_chunk_serializes_as_one_atomic_input_message() {
         let (handle, _output_tx, mut out_rx, _captured) = spawn_capturing("term_1", 1);
         let paste = Bytes::from_static(b"\x1b[200~pasted text\x1b[201~");
-        handle.write_user_input(paste.clone()).await.unwrap();
+        handle.try_write_user_input(paste.clone()).unwrap();
 
         let Some(FederationMessage::Terminal(TerminalChannelMessage::Input { bytes, .. })) =
             out_rx.recv().await

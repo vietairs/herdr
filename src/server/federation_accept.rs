@@ -1927,7 +1927,13 @@ mod tests {
     fn test_app() -> crate::app::App {
         let config = crate::config::Config::default();
         let (_api_tx, api_rx) = mpsc::unbounded_channel();
-        crate::app::App::new(&config, true, None, api_rx, crate::api::EventHub::default())
+        crate::app::App::new(
+            &config,
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
     }
 
     #[test]

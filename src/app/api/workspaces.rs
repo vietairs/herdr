@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
-    WorkspaceMountRemoteParams, WorkspaceMoveBlockParams, WorkspaceMoveParams,
-    WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget,
+    EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCloseParams,
+    WorkspaceCreateParams, WorkspaceMountRemoteParams, WorkspaceMoveBlockParams,
+    WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget,
 };
 use crate::app::App;
 #[cfg(unix)]
@@ -111,6 +111,20 @@ impl App {
         let session_name = crate::session::active_name()
             .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
 
+        // Replace wholesale rather than append: this is what keeps resolved
+        // entries from a prior submission from accumulating, with no expiry
+        // timer to get wrong. Every accepted target gets a `Dialling` entry
+        // here, including one that is about to hit the already-mounted
+        // conflict check below -- that path still resolves its entry
+        // asynchronously via the `FederationMountFailed` event it spawns.
+        self.state.remote_mount_attempts = targets
+            .iter()
+            .map(|target| crate::app::state::RemoteMountAttempt {
+                target: target.clone(),
+                outcome: crate::app::state::RemoteMountOutcome::Dialling,
+            })
+            .collect();
+
         for target in &targets {
             let host_key = crate::remote::federation::id::HostKey::new(target, &session_name);
             if self.state.double_attach_conflict(&host_key) {
@@ -189,13 +203,6 @@ impl App {
 
         if self.state.begin_federation_mount(mirror.clone()).is_err() {
             tracing::warn!(%target, "federation mount ready but this host is already mounted; dropping");
-            if !self.claim_abandoned_remote_mount(&target) {
-                if let Some(remote_mount) = self.state.remote_mount.as_mut() {
-                    if remote_mount.resolve_pending_target(&target) {
-                        remote_mount.error = Some(format!("{target}: already mounted"));
-                    }
-                }
-            }
             return;
         }
         let host_key = mirror.mount().host_key.clone();
@@ -266,13 +273,17 @@ impl App {
             Err(err) => {
                 tracing::warn!(%target, %err, "failed to materialize federation mount");
                 self.state.end_federation_mount(&host_key);
-                if !self.claim_abandoned_remote_mount(&target) {
-                    if let Some(remote_mount) = self.state.remote_mount.as_mut() {
-                        if remote_mount.resolve_pending_target(&target) {
-                            remote_mount.error = Some(format!("{target}: {err}"));
-                        }
-                    }
-                }
+                // The dial itself succeeded, so this is not routed through
+                // `handle_federation_mount_failed` -- but the target's
+                // attempt entry still needs an outcome, or it would stay
+                // `Dialling` forever until the next unrelated submission
+                // wipes it.
+                self.state.resolve_remote_mount_attempt(
+                    &target,
+                    crate::app::state::RemoteMountOutcome::Failed {
+                        reason: err.to_string(),
+                    },
+                );
                 // Mirror the success path's teardown order below (drop
                 // `out_tx` first so the writer task drains and exits,
                 // bounded so a half-open peer can never hang this, then
@@ -288,15 +299,37 @@ impl App {
                 return;
             }
         };
-        let _ = opened;
-
-        // The mount actually materialized — record it as a recent target now,
-        // independent of whether the mount-remote dialog is still open, was
-        // dismissed, or belongs to an earlier abandoned submission (those are
-        // resolved further below via `claim_abandoned_remote_mount` /
-        // `resolve_pending_target`, which also fire on failure paths above
-        // and must never be mistaken for "success").
-        self.record_successful_remote_mount_target(&target);
+        // The first workspace `materialize_federation_mount` opened for this
+        // mount is what the attempt entry reports as "mounted" -- a mount can
+        // materialize more than one remote workspace, but the dialog only
+        // needs one to navigate to. `unwrap_or_default` covers the (unseen in
+        // practice) case where a federation host reports zero materializable
+        // workspaces: an empty id is still a valid `Mounted` outcome rather
+        // than leaving the attempt stuck at `Dialling`.
+        let mounted_workspace_id = opened
+            .first()
+            .map(|&ws_idx| self.public_workspace_id(ws_idx));
+        self.state.resolve_remote_mount_attempt(
+            &target,
+            crate::app::state::RemoteMountOutcome::Mounted {
+                workspace_id: mounted_workspace_id,
+            },
+        );
+        {
+            let mut recents = self.state.recent_remote_mount_targets.clone();
+            crate::app::state::record_recent_remote_mount_target(&mut recents, &target);
+            // Re-mounting the target already at index 0 produces an
+            // identical list; skip the whole read/format/write cycle rather
+            // than rewriting the same bytes on every successful mount.
+            if recents != self.state.recent_remote_mount_targets {
+                self.state.recent_remote_mount_targets = recents.clone();
+                if let Err(err) = crate::config::write_edit(
+                    crate::config::ConfigEdit::RecentRemoteMountTargets(&recents),
+                ) {
+                    tracing::warn!(%err, "failed to persist recent remote mount targets");
+                }
+            }
+        }
 
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
@@ -377,29 +410,6 @@ impl App {
             }
         });
         self.state.mount_drive_tasks.insert(host_key, drive_handle);
-
-        // Correlate this outcome back to the mount dialog, if one is open and
-        // was waiting on this target. A target the user already walked away
-        // from is claimed first, so a dial abandoned by a dismissed dialog can
-        // never resolve — or close — a later submission that happens to use
-        // the same target string. An unknown target beyond that is ignored by
-        // `resolve_pending_target`.
-        //
-        // The two early-return failure branches above (already-mounted
-        // conflict, materialize failure) each resolve `target` and set
-        // `remote_mount.error` themselves before returning, so the dialog
-        // never reads a failed target as a silent success or hangs on
-        // "mounting…" forever.
-        if !self.claim_abandoned_remote_mount(&target) {
-            if let Some(remote_mount) = self.state.remote_mount.as_mut() {
-                if remote_mount.resolve_pending_target(&target)
-                    && remote_mount.pending.is_empty()
-                    && remote_mount.error.is_none()
-                {
-                    self.close_remote_mount_dialog();
-                }
-            }
-        }
     }
 
     /// `AppEvent::FederationMountFailed` handler: surfaces a sidebar notice
@@ -408,6 +418,12 @@ impl App {
     #[cfg(unix)]
     pub(crate) fn handle_federation_mount_failed(&mut self, target: String, reason: String) {
         tracing::warn!(%target, %reason, "federation mount failed");
+        self.state.resolve_remote_mount_attempt(
+            &target,
+            crate::app::state::RemoteMountOutcome::Failed {
+                reason: reason.clone(),
+            },
+        );
         match self.state.toast_config.delivery {
             crate::config::ToastDelivery::Herdr => {
                 self.state.toast = Some(crate::app::state::ToastNotification {
@@ -439,23 +455,6 @@ impl App {
         }
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
-
-        // Correlate this failure back to the mount dialog, if one is open and
-        // was waiting on this target. A target the user already walked away
-        // from is claimed first, so a dial abandoned by a dismissed dialog can
-        // never report its failure against a later submission reusing the same
-        // target string. An unknown target beyond that is ignored by
-        // `resolve_pending_target`. The dialog stays open showing the error
-        // even once every target has resolved (`submitting` alone gates
-        // re-submission) — only the ready path closes it, and only when
-        // nothing failed.
-        if !self.claim_abandoned_remote_mount(&target) {
-            if let Some(remote_mount) = self.state.remote_mount.as_mut() {
-                if remote_mount.resolve_pending_target(&target) {
-                    remote_mount.error = Some(format!("{target}: {reason}"));
-                }
-            }
-        }
     }
 
     /// `AppEvent::FederationMountEnded` handler: the mount's drive task
@@ -623,19 +622,62 @@ impl App {
         // A plain "new workspace" performed while a mounted remote workspace
         // is in focus grows the *mounted host's* workspace set, mirroring how
         // `pane.split` inside a federated workspace splits on the remote
-        // (`dispatch_remote_pane_split`). Only when no `cwd` was requested:
-        // an explicit path is a deliberate local-directory choice, and the
-        // remote host's filesystem is a different namespace entirely. Every
-        // TUI path sends no `cwd` — including the name-prompt dialog, which
-        // asks for a name only and lets this handler derive the path from
-        // `workspace_creation_source` — so only an API/CLI caller that named a
-        // directory itself is treated as having chosen one.
-        if params.cwd.is_none() {
-            if let Some(source_ws_idx) = self.workspace_creation_source() {
-                if let Some(origin) = self.federation_host_key_for_workspace(source_ws_idx) {
+        // (`dispatch_remote_pane_split`). The v0.9.0 client/server split
+        // changed what "plain" means on the wire: both TUI create paths now
+        // echo back what they were already shown instead of sending neither
+        // field. The no-prompt keybind (`src/client/shell/actions.rs`) sends
+        // `source_workspace_id: Some(focused workspace)`, `cwd: None`. The
+        // name-prompt overlay (`src/client/shell/overlay_input.rs`) sends
+        // that same `source_workspace_id` *and* `cwd: Some(...)` — a default
+        // path the server itself told the client this create would use, not
+        // a directory the user typed. So neither field is by itself proof of
+        // a deliberate local choice anymore: only a `source_workspace_id`
+        // naming a workspace OTHER than the one that would be used by
+        // default, or a `cwd` that differs from every one of that
+        // workspace's tabs' resolved default cwds, is a deliberate choice
+        // layered on top of what the client was shown. Everything else is
+        // the client echoing its own defaults back, and must still forward.
+        //
+        // "Every tab", not just the workspace's own active tab: v0.9.0 also
+        // added independent per-client tab views (upstream 6c0bb273), so
+        // `src/server/client_shell.rs` derives the `cwd` it shows each client
+        // from THAT client's own active tab
+        // (`resolved_new_workspace_cwd_from_tab(ws_idx, client_tab_idx)`),
+        // which need not be `Workspace::active_tab_index()`. A client viewing
+        // a non-active tab and hitting "new workspace" would otherwise echo a
+        // cwd this gate cannot recognize as its own default and wrongly fall
+        // through to a local create. The requesting client's tab is
+        // necessarily one of the source workspace's tabs, so accepting a
+        // match against ANY of them closes that hole while a genuinely
+        // foreign path a caller typed still fails every comparison.
+        if let Some(default_source_idx) = self.workspace_creation_source() {
+            let source_is_default_or_absent = match params.source_workspace_id.as_deref() {
+                None => true,
+                Some(workspace_id) => {
+                    self.parse_workspace_id(workspace_id) == Some(default_source_idx)
+                }
+            };
+            let cwd_is_default_or_absent = match params.cwd.as_deref() {
+                None => true,
+                Some(cwd) => {
+                    let cwd = std::path::Path::new(cwd);
+                    let tab_count = self
+                        .state
+                        .workspaces
+                        .get(default_source_idx)
+                        .map(|workspace| workspace.tabs.len())
+                        .unwrap_or(0);
+                    (0..tab_count).any(|tab_idx| {
+                        cwd == self
+                            .resolved_new_workspace_cwd_from_tab(default_source_idx, Some(tab_idx))
+                    })
+                }
+            };
+            if source_is_default_or_absent && cwd_is_default_or_absent {
+                if let Some(origin) = self.federation_host_key_for_workspace(default_source_idx) {
                     return self.dispatch_remote_workspace_create(
                         id,
-                        source_ws_idx,
+                        default_source_idx,
                         origin,
                         params.label,
                         params.focus,
@@ -644,12 +686,25 @@ impl App {
             }
         }
 
+        let source_workspace_index = if params.cwd.is_some() {
+            None
+        } else {
+            match params.source_workspace_id.as_deref() {
+                Some(workspace_id) => match self
+                    .parse_workspace_id(workspace_id)
+                    .filter(|index| self.state.workspaces.get(*index).is_some())
+                {
+                    Some(index) => Some(index),
+                    None => return workspace_not_found(id, workspace_id),
+                },
+                None => self.workspace_creation_source(),
+            }
+        };
         let cwd = params.cwd.map(PathBuf::from).unwrap_or_else(|| {
-            let follow_cwd = self.workspace_creation_source().and_then(|ws_idx| {
-                self.focused_pane_cwd_in_workspace(ws_idx)
-                    .or_else(|| self.seed_cwd_from_workspace(ws_idx))
-            });
-            self.resolve_new_terminal_cwd(follow_cwd)
+            source_workspace_index.map_or_else(
+                || self.resolve_new_terminal_cwd(None),
+                |index| self.resolved_new_workspace_cwd_from(index),
+            )
         });
         let extra_env = match super::env::normalize_launch_env(params.env) {
             Ok(env) => env,
@@ -1001,15 +1056,53 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
-    pub(super) fn handle_workspace_close(&mut self, id: String, target: WorkspaceTarget) -> String {
-        let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
-            return workspace_not_found(id, &target.workspace_id);
+    pub(super) fn handle_workspace_close(
+        &mut self,
+        id: String,
+        params: WorkspaceCloseParams,
+    ) -> String {
+        let Some(index) = self.parse_workspace_id(&params.workspace_id) else {
+            return workspace_not_found(id, &params.workspace_id);
         };
         if self.state.workspaces.get(index).is_none() {
-            return workspace_not_found(id, &target.workspace_id);
+            return workspace_not_found(id, &params.workspace_id);
         }
-        let workspace_id = self.public_workspace_id(index);
-        let workspace = self.workspace_info(index);
+        // Federation shares one `federation:<host_key>` `worktree_space` key
+        // across every mirror workspace a mount materializes (see
+        // `close_single_workspace_at`), so `workspace_close_indices` reports
+        // every sibling mirror as a close group even though closing one
+        // federated workspace has always meant retiring only that one, never
+        // the whole mount. Treat a federated target as its own singleton
+        // group so upstream's group-close guard below, and the
+        // `closed_workspaces` event list, never conflate mount membership
+        // with a worktree-linked close group.
+        let is_federated = self.federation_host_key_for_workspace(index).is_some();
+        let close_indices = if is_federated {
+            vec![index]
+        } else {
+            self.state.workspace_close_indices(index)
+        };
+        if close_indices.len() >= 2 && !params.close_group {
+            return encode_error(
+                id,
+                "workspace_group_close_required",
+                "workspace has linked worktree workspaces; use --group (close_group=true in the API) to close the group",
+            );
+        }
+        let closed_workspaces = close_indices
+            .iter()
+            .map(|index| {
+                (
+                    self.public_workspace_id(*index),
+                    self.workspace_info(*index),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        // pane_ids covers only the directly-targeted workspace: group members
+        // beyond `index` (the non-federated worktree-linked-group case) are
+        // cleaned up by `close_selected_workspace` itself, which removes
+        // plugin pane records for every index in its own close group.
         let pane_ids = self
             .state
             .workspaces
@@ -1080,13 +1173,15 @@ impl App {
         }
         self.state.remove_plugin_pane_records(pane_ids);
         self.shutdown_detached_terminal_runtimes();
-        self.emit_event(EventEnvelope {
-            event: EventKind::WorkspaceClosed,
-            data: EventData::WorkspaceClosed {
-                workspace_id,
-                workspace: Some(workspace),
-            },
-        });
+        for (workspace_id, workspace) in closed_workspaces {
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceClosed,
+                data: EventData::WorkspaceClosed {
+                    workspace_id,
+                    workspace: Some(workspace),
+                },
+            });
+        }
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -1266,7 +1361,11 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{api::schema::SuccessResponse, config::Config, workspace::Workspace};
+    use crate::{
+        api::schema::{ErrorResponse, SuccessResponse},
+        config::Config,
+        workspace::Workspace,
+    };
 
     // `new_cwd = follow` must anchor on the focused pane for every creation
     // surface. Splits and tabs already do; a new workspace must follow the
@@ -1279,7 +1378,7 @@ mod tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             api_rx,
             crate::api::EventHub::default(),
@@ -1325,6 +1424,7 @@ mod tests {
         let response = app.handle_workspace_create(
             "req".into(),
             WorkspaceCreateParams {
+                source_workspace_id: None,
                 cwd: None,
                 focus: false,
                 label: None,
@@ -1350,11 +1450,99 @@ mod tests {
         let _ = std::fs::remove_dir_all(&focused_cwd);
     }
 
+    #[tokio::test]
+    async fn workspace_create_uses_explicit_source_workspace() {
+        use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
+        use crate::config::ShellModeConfig;
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.default_shell = exiting_test_command().into();
+        app.state.shell_mode = ShellModeConfig::NonLogin;
+        app.state.workspaces = vec![Workspace::test_new("first"), Workspace::test_new("source")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        shutdown_test_runtimes(&mut app);
+
+        let source_cwd =
+            std::env::temp_dir().join(format!("herdr-ws-explicit-source-{}", std::process::id()));
+        std::fs::create_dir_all(&source_cwd).unwrap();
+        let pane_id = app.state.workspaces[1].focused_pane_id().unwrap();
+        let terminal_id = app.state.workspaces[1]
+            .terminal_id(pane_id)
+            .cloned()
+            .unwrap();
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = source_cwd.clone();
+        let source_workspace_id = app.public_workspace_id(1);
+
+        let response = app.handle_workspace_create(
+            "req".into(),
+            WorkspaceCreateParams {
+                source_workspace_id: Some(source_workspace_id),
+                cwd: None,
+                focus: false,
+                label: None,
+                env: Default::default(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorkspaceCreated { .. }
+        ));
+        assert_eq!(
+            crate::worktree::canonical_or_original(&app.state.workspaces[2].identity_cwd),
+            crate::worktree::canonical_or_original(&source_cwd)
+        );
+
+        let invalid = app.handle_workspace_create(
+            "invalid".into(),
+            WorkspaceCreateParams {
+                source_workspace_id: Some("w_999".into()),
+                cwd: None,
+                focus: false,
+                label: None,
+                env: Default::default(),
+            },
+        );
+        let error: ErrorResponse = serde_json::from_str(&invalid).unwrap();
+        assert_eq!(error.error.code, "workspace_not_found");
+
+        let captured = app.handle_workspace_create(
+            "captured".into(),
+            WorkspaceCreateParams {
+                source_workspace_id: Some("w_999".into()),
+                cwd: Some(source_cwd.display().to_string()),
+                focus: false,
+                label: None,
+                env: Default::default(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&captured).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorkspaceCreated { .. }
+        ));
+        assert_eq!(
+            crate::worktree::canonical_or_original(&app.state.workspaces[3].identity_cwd),
+            crate::worktree::canonical_or_original(&source_cwd)
+        );
+        shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir_all(&source_cwd);
+    }
+
     fn app_with_linked_worktree() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             api_rx,
             crate::api::EventHub::default(),
@@ -1370,35 +1558,169 @@ mod tests {
         app
     }
 
-    #[test]
-    fn api_workspace_close_closes_linked_worktree_workspace_only() {
+    fn app_with_worktree_group() -> App {
         let mut app = app_with_linked_worktree();
+        let mut parent = Workspace::test_new("parent");
+        parent.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        app.state.workspaces.insert(0, parent);
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.mode = crate::app::Mode::Terminal;
+        app
+    }
+
+    #[test]
+    fn api_workspace_close_parent_group_requires_explicit_group_intent() {
+        for confirm_close in [true, false] {
+            let mut app = app_with_worktree_group();
+            app.state.confirm_close = confirm_close;
+            let parent_id = app.public_workspace_id(0);
+            let workspace_ids = app
+                .state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id.clone())
+                .collect::<Vec<_>>();
+
+            let request: crate::api::schema::Request = serde_json::from_value(serde_json::json!({
+                "id": "req",
+                "method": "workspace.close",
+                "params": { "workspace_id": parent_id }
+            }))
+            .unwrap();
+            let response = app.handle_api_request(request);
+
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["error"]["code"], "workspace_group_close_required");
+            assert!(app.event_hub.events_after(0).is_empty());
+            assert_eq!(app.state.mode, crate::app::Mode::Terminal);
+            assert_eq!(app.state.active, Some(1));
+            assert_eq!(app.state.selected, 1);
+            assert_eq!(
+                app.state
+                    .workspaces
+                    .iter()
+                    .map(|workspace| workspace.id.clone())
+                    .collect::<Vec<_>>(),
+                workspace_ids
+            );
+        }
+    }
+
+    #[test]
+    fn api_workspace_close_noncontiguous_group_preserves_adversarial_identity_state() {
+        let mut app = app_with_worktree_group();
+        let parent = app.state.workspaces.remove(0);
+        let linked = app.state.workspaces.remove(0);
+        app.state = crate::app::state::AppState::test_with_adversarial_identity_state();
+        let survivor_id = app.state.workspaces[0].id.clone();
+        app.state.workspaces.insert(0, parent);
+        app.state.workspaces.push(linked);
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.mode = crate::app::Mode::Terminal;
+        app.state.ensure_test_terminals();
+        let closed_pane_ids = [0, 2].map(|index| app.state.workspaces[index].tabs[0].root_pane);
+        let closed_terminal_ids = [0, 2].map(|index| {
+            app.state
+                .terminal_id_for_pane(index, app.state.workspaces[index].tabs[0].root_pane)
+                .expect("closed workspace pane has a terminal")
+        });
+        for pane_id in closed_pane_ids {
+            app.state.plugin_panes.insert(
+                pane_id,
+                crate::app::state::PluginPaneRecord {
+                    plugin_id: "example.pane".into(),
+                    entrypoint: "board".into(),
+                },
+            );
+        }
+        app.state.assert_invariants_for_test();
+
+        let parent_id = app.public_workspace_id(0);
+        let closed = [0, 2]
+            .into_iter()
+            .map(|index| (app.public_workspace_id(index), app.workspace_info(index)))
+            .collect::<Vec<_>>();
 
         let response = app.handle_workspace_close(
             "req".into(),
-            WorkspaceTarget {
-                workspace_id: app.state.workspaces[0].id.clone(),
+            WorkspaceCloseParams {
+                workspace_id: parent_id,
+                close_group: true,
             },
         );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
-        assert_eq!(app.state.request_remove_linked_worktree, None);
-        assert!(app.state.workspaces.is_empty());
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].id, survivor_id);
+        for terminal_id in closed_terminal_ids {
+            assert!(!app.state.terminals.contains_key(&terminal_id));
+        }
+        for pane_id in closed_pane_ids {
+            assert!(!app.state.plugin_panes.contains_key(&pane_id));
+        }
+        assert!(app.state.terminal_runtime_shutdowns.is_empty());
+        app.state.assert_invariants_for_test();
+        let events = app.event_hub.events_after(0);
+        assert_eq!(events.len(), closed.len());
+        for ((_, event), (workspace_id, workspace)) in events.iter().zip(closed) {
+            assert!(matches!(event.event, EventKind::WorkspaceClosed));
+            assert!(matches!(
+                &event.data,
+                EventData::WorkspaceClosed {
+                    workspace_id: closed_id,
+                    workspace: Some(closed_workspace),
+                } if closed_id == &workspace_id && closed_workspace == &workspace
+            ));
+        }
+    }
+
+    #[test]
+    fn api_workspace_close_closes_linked_worktree_workspace_only() {
+        let mut app = app_with_worktree_group();
+        let linked_id = app.public_workspace_id(1);
+
+        let response = app.handle_workspace_close(
+            "req".into(),
+            WorkspaceCloseParams {
+                workspace_id: linked_id,
+                close_group: true,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].display_name(), "parent");
     }
 
     #[test]
     fn api_workspace_close_event_includes_final_worktree_snapshot() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = app_with_linked_worktree().state.workspaces;
         let workspace_id = app.state.workspaces[0].id.clone();
 
         let response = app.handle_workspace_close(
             "req".into(),
-            WorkspaceTarget {
+            WorkspaceCloseParams {
                 workspace_id: workspace_id.clone(),
+                close_group: false,
             },
         );
 
@@ -1424,7 +1746,13 @@ mod tests {
     fn workspace_metadata_tokens_patch_clear_and_emit_snapshot() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("one")];
         let workspace_id = app.public_workspace_id(0);
 
@@ -1476,7 +1804,13 @@ mod tests {
     fn workspace_token_ttl_expires_through_runtime_and_emits_update() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("one")];
         let workspace_id = app.public_workspace_id(0);
         let response = app.handle_workspace_report_metadata(
@@ -1508,7 +1842,13 @@ mod tests {
     fn api_workspace_move_reorders_workspaces() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![
             Workspace::test_new("one"),
             Workspace::test_new("two"),
@@ -1550,7 +1890,13 @@ mod tests {
     fn api_workspace_move_block_reorders_atomically() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![
             Workspace::test_new("child"),
             Workspace::test_new("normal"),
@@ -1603,7 +1949,13 @@ mod tests {
     fn api_workspace_move_noop_does_not_emit_event() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         let moved_id = app.public_workspace_id(0);
 
@@ -1691,6 +2043,7 @@ mod tests {
                 agent_status: AgentStatus::Idle,
                 tokens: Default::default(),
                 worktree: None,
+                federation_origin: None,
             });
             tabs.push(RemoteTabInfo {
                 tab_id: tab_id.clone(),
@@ -1760,7 +2113,7 @@ mod tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             api_rx,
             crate::api::EventHub::default(),
@@ -1881,8 +2234,9 @@ mod tests {
 
         let response = app.handle_workspace_close(
             "req".into(),
-            WorkspaceTarget {
+            WorkspaceCloseParams {
                 workspace_id: workspace_id.clone(),
+                close_group: false,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -1984,7 +2338,13 @@ mod tests {
     async fn coexistence_local_and_remote_render_together() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -2013,7 +2373,13 @@ mod tests {
     async fn coexistence_mount_failure_keeps_local_session_alive() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -2045,7 +2411,13 @@ mod tests {
     async fn mount_failure_terminal_delivery_calls_local_notify_when_enabled() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -2066,7 +2438,13 @@ mod tests {
     async fn mount_failure_system_delivery_is_noop_when_local_notifications_disabled() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -2080,294 +2458,6 @@ mod tests {
 
         assert_eq!(app.state.workspaces.len(), 1);
         assert!(app.state.toast.is_none());
-    }
-
-    // `RemoteMountState::submitting`/`pending` correlation: the dialog stays
-    // open (not the success-ack-closes-immediately shape) until every
-    // submitted target has resolved via `FederationMountReady`/
-    // `FederationMountFailed`.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn federation_mount_ready_closes_dialog_when_last_pending_target_resolves() {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![Workspace::test_new("local")];
-        app.state.active = Some(0);
-        let mut remote_mount = crate::app::state::RemoteMountState::default();
-        remote_mount.begin_submission(vec!["remote-host".to_string()]);
-        app.state.remote_mount = Some(remote_mount);
-
-        let mirror = test_federation_mirror("remote-host");
-        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
-        app.handle_federation_mount_ready(crate::events::FederationMountReady {
-            target: "remote-host".to_string(),
-            mirror,
-            generation: 1,
-            tunnel_guard: guard,
-            tunnel_reader,
-            tunnel_writer,
-        });
-
-        assert!(
-            app.state.remote_mount.is_none(),
-            "dialog should close once the only pending target succeeds"
-        );
-    }
-
-    // The already-mounted-conflict early return in `handle_federation_mount_ready`
-    // must not leave the dialog reading " mounting…" forever when this is the
-    // only pending target — it must resolve the target and surface a real
-    // error, exactly like the `handle_federation_mount_failed` path does.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn federation_mount_ready_already_mounted_conflict_surfaces_an_error_instead_of_hanging()
-    {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![Workspace::test_new("local")];
-        app.state.active = Some(0);
-        // Pre-mount the same host_key so `begin_federation_mount` inside the
-        // handler rejects this ready event as a duplicate.
-        app.state
-            .begin_federation_mount(test_federation_mirror("remote-host"))
-            .unwrap();
-        let mut remote_mount = crate::app::state::RemoteMountState::default();
-        remote_mount.begin_submission(vec!["remote-host".to_string()]);
-        app.state.remote_mount = Some(remote_mount);
-
-        let mirror = test_federation_mirror("remote-host");
-        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
-        app.handle_federation_mount_ready(crate::events::FederationMountReady {
-            target: "remote-host".to_string(),
-            mirror,
-            generation: 1,
-            tunnel_guard: guard,
-            tunnel_reader,
-            tunnel_writer,
-        });
-
-        let remote_mount = app
-            .state
-            .remote_mount
-            .as_ref()
-            .expect("dialog stays open so the conflict error is visible, not silently hanging");
-        assert!(!remote_mount.submitting);
-        assert!(remote_mount.pending.is_empty());
-        assert!(remote_mount
-            .error
-            .as_ref()
-            .is_some_and(|error| error.contains("remote-host")));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn federation_mount_failed_keeps_dialog_open_with_reason_and_clears_submitting() {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![Workspace::test_new("local")];
-        app.state.active = Some(0);
-        let mut remote_mount = crate::app::state::RemoteMountState::default();
-        remote_mount.begin_submission(vec!["remote-host".to_string()]);
-        app.state.remote_mount = Some(remote_mount);
-
-        app.handle_federation_mount_failed(
-            "remote-host".to_string(),
-            "connection refused".to_string(),
-        );
-
-        let remote_mount = app
-            .state
-            .remote_mount
-            .as_ref()
-            .expect("dialog stays open on failure so the reason is visible");
-        assert!(!remote_mount.submitting);
-        assert!(remote_mount.pending.is_empty());
-        let error = remote_mount.error.as_ref().expect("failure sets an error");
-        assert!(error.contains("remote-host"));
-        assert!(error.contains("connection refused"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn federation_mount_partial_outcome_one_ready_one_failed_stays_open_with_error() {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![Workspace::test_new("local")];
-        app.state.active = Some(0);
-        let mut remote_mount = crate::app::state::RemoteMountState::default();
-        remote_mount.begin_submission(vec!["host-a".to_string(), "host-b".to_string()]);
-        app.state.remote_mount = Some(remote_mount);
-
-        let mirror = test_federation_mirror("host-a");
-        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
-        app.handle_federation_mount_ready(crate::events::FederationMountReady {
-            target: "host-a".to_string(),
-            mirror,
-            generation: 1,
-            tunnel_guard: guard,
-            tunnel_reader,
-            tunnel_writer,
-        });
-        app.handle_federation_mount_failed("host-b".to_string(), "dial timed out".to_string());
-
-        let remote_mount = app
-            .state
-            .remote_mount
-            .as_ref()
-            .expect("dialog stays open while any target failed");
-        assert!(!remote_mount.submitting);
-        assert!(remote_mount.pending.is_empty());
-        assert!(remote_mount
-            .error
-            .as_ref()
-            .is_some_and(|error| error.contains("host-b")));
-    }
-
-    // A stale outcome for a target from a submission the user already
-    // dismissed (Esc) must not resurrect or mutate a *different*, still-open
-    // dialog for a later submission. `federation_mount_ready_after_dialog_dismissed_does_not_resurrect_it`
-    // previously asserted only `remote_mount.is_none()` after `remote_mount`
-    // was already seeded `None`, which stays green even if the entire
-    // correlation block in `handle_federation_mount_ready` is deleted (no
-    // code path creates a dialog from that handler). This scenario instead
-    // exercises what `resolve_pending_target`'s "unknown target is ignored"
-    // return value exists for: dismiss the dialog for target A, reopen it
-    // for a different target B, then let A's stale `FederationMountReady`
-    // arrive — B's dialog must be untouched (still open, still submitting,
-    // no error, `pending` still `[B]`).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn federation_mount_ready_for_a_dismissed_target_does_not_mutate_a_newer_dialog() {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![Workspace::test_new("local")];
-        app.state.active = Some(0);
-        // Dismiss host-a's dialog (Esc), then open a fresh dialog submitting
-        // a different target, host-b, that is still awaiting its outcome.
-        app.state.remote_mount = None;
-        let mut remote_mount = crate::app::state::RemoteMountState::default();
-        remote_mount.begin_submission(vec!["host-b".to_string()]);
-        app.state.remote_mount = Some(remote_mount);
-
-        // host-a's stale dial (spawned before the Esc) now reports ready.
-        let mirror = test_federation_mirror("host-a");
-        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
-        app.handle_federation_mount_ready(crate::events::FederationMountReady {
-            target: "host-a".to_string(),
-            mirror,
-            generation: 1,
-            tunnel_guard: guard,
-            tunnel_reader,
-            tunnel_writer,
-        });
-
-        let remote_mount = app
-            .state
-            .remote_mount
-            .as_ref()
-            .expect("host-a's stale outcome must not touch host-b's dialog");
-        assert!(remote_mount.submitting);
-        assert!(remote_mount.error.is_none());
-        assert_eq!(remote_mount.pending, vec!["host-b".to_string()]);
-    }
-
-    // The same-string case the test above does not cover: dismissing a dialog
-    // does not cancel its dial, so submitting the *same* target again later
-    // leaves two dials outstanding for one string. Correlation is by string
-    // alone, so without tracking what was abandoned the first dial's failure
-    // would land on the second dialog — showing a stale error and clearing
-    // `submitting` while the real dial is still running, after which the real
-    // outcome finds `pending` empty and is dropped entirely.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn stale_failure_for_a_resubmitted_target_does_not_mutate_the_new_dialog() {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![Workspace::test_new("local")];
-        app.state.active = Some(0);
-
-        // Submit host-a, then dismiss the dialog while its dial is in flight.
-        let mut remote_mount = crate::app::state::RemoteMountState::default();
-        remote_mount.begin_submission(vec!["host-a".to_string()]);
-        app.state.remote_mount = Some(remote_mount);
-        app.close_remote_mount_dialog();
-        assert_eq!(
-            app.state.abandoned_remote_mounts,
-            vec!["host-a".to_string()]
-        );
-
-        // Reopen and submit the very same target; a second dial is now live.
-        let mut remote_mount = crate::app::state::RemoteMountState::default();
-        remote_mount.begin_submission(vec!["host-a".to_string()]);
-        app.state.remote_mount = Some(remote_mount);
-
-        // The first, abandoned dial now fails.
-        app.handle_federation_mount_failed("host-a".to_string(), "connection refused".to_string());
-
-        let remote_mount = app
-            .state
-            .remote_mount
-            .as_ref()
-            .expect("the stale failure must not close the new dialog");
-        assert!(
-            remote_mount.submitting,
-            "the second dial is still in flight, so the dialog must stay in its submitting state"
-        );
-        assert!(
-            remote_mount.error.is_none(),
-            "the abandoned dial's failure must not be shown as this submission's error"
-        );
-        assert_eq!(remote_mount.pending, vec!["host-a".to_string()]);
-        assert!(
-            app.state.abandoned_remote_mounts.is_empty(),
-            "the abandoned entry is consumed once, so a later outcome cannot be swallowed too"
-        );
-
-        // The real dial's failure still reaches the dialog afterwards.
-        app.handle_federation_mount_failed("host-a".to_string(), "host key mismatch".to_string());
-        let remote_mount = app.state.remote_mount.as_ref().expect("dialog stays open");
-        assert!(!remote_mount.submitting);
-        assert!(remote_mount.pending.is_empty());
-        assert!(remote_mount
-            .error
-            .as_ref()
-            .is_some_and(|error| error.contains("host key mismatch")));
     }
 
     // Phase-a TDD test 6: a mount task that produced an `Err` (the async
@@ -2392,7 +2482,13 @@ mod tests {
     async fn duplicate_host_key_target_is_isolated_and_named_in_failure_event() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
 
         let session_name = crate::session::active_name()
@@ -2455,7 +2551,13 @@ mod tests {
     async fn mount_remote_rejects_option_like_target_without_spawning_a_dial() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
 
         let response = app.handle_workspace_mount_remote(
@@ -2489,7 +2591,13 @@ mod tests {
     async fn mount_remote_rejects_localhost_target() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
 
         let response = app.handle_workspace_mount_remote(
@@ -2515,7 +2623,13 @@ mod tests {
     async fn mount_remote_rejects_blank_only_targets() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
 
         let response = app.handle_workspace_mount_remote(
@@ -2542,7 +2656,13 @@ mod tests {
     async fn mount_remote_accepts_plain_and_user_at_host_targets() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
 
         let session_name = crate::session::active_name()
@@ -2603,7 +2723,13 @@ mod tests {
     async fn federation_mount_ended_wiring_link_closed_reaches_event_channel() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -2664,7 +2790,13 @@ mod tests {
     async fn federation_mount_ended_removes_workspaces_and_unmounts_registry() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -2720,7 +2852,13 @@ mod tests {
     async fn federation_mount_ended_purges_remote_resync_pane_index_for_its_workspaces() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -2781,7 +2919,13 @@ mod tests {
         // `PendingRemoteSplit::workspace_id`).
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -2903,7 +3047,13 @@ mod tests {
         // which never fires for a locally initiated close).
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -2944,8 +3094,9 @@ mod tests {
 
         let response = app.handle_workspace_close(
             "close-1".to_string(),
-            WorkspaceTarget {
+            WorkspaceCloseParams {
                 workspace_id: remote_workspace_id,
+                close_group: false,
             },
         );
         let decoded: SuccessResponse =
@@ -2981,7 +3132,13 @@ mod tests {
     async fn closing_one_of_several_federated_workspaces_keeps_siblings_and_mount() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -3018,8 +3175,9 @@ mod tests {
 
         let response = app.handle_workspace_close(
             "close-mid".to_string(),
-            WorkspaceTarget {
+            WorkspaceCloseParams {
                 workspace_id: closing_workspace_id,
+                close_group: false,
             },
         );
         let decoded: SuccessResponse =
@@ -3064,7 +3222,13 @@ mod tests {
     async fn closing_the_final_federated_workspace_of_a_mount_ends_it() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -3086,8 +3250,9 @@ mod tests {
         let first = app.public_workspace_id(1);
         let response = app.handle_workspace_close(
             "close-1".to_string(),
-            WorkspaceTarget {
+            WorkspaceCloseParams {
                 workspace_id: first,
+                close_group: false,
             },
         );
         let decoded: SuccessResponse =
@@ -3101,7 +3266,10 @@ mod tests {
         let last = app.public_workspace_id(1);
         let response = app.handle_workspace_close(
             "close-2".to_string(),
-            WorkspaceTarget { workspace_id: last },
+            WorkspaceCloseParams {
+                workspace_id: last,
+                close_group: false,
+            },
         );
         let decoded: SuccessResponse =
             serde_json::from_str(&response).expect("workspace.close must succeed");
@@ -3133,7 +3301,13 @@ mod tests {
     async fn closing_one_federated_workspace_purges_only_its_own_resync_entries() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -3174,8 +3348,9 @@ mod tests {
         let closing_workspace_id = app.public_workspace_id(1);
         let response = app.handle_workspace_close(
             "close-1".to_string(),
-            WorkspaceTarget {
+            WorkspaceCloseParams {
                 workspace_id: closing_workspace_id,
+                close_group: false,
             },
         );
         let decoded: SuccessResponse =
@@ -3216,7 +3391,7 @@ mod tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             api_rx,
             crate::api::EventHub::default(),
@@ -3241,10 +3416,16 @@ mod tests {
         app.state.ensure_test_terminals();
         let unrelated_id = app.state.workspaces[2].id.clone();
 
+        // `close_group` must be set explicitly: closing a member of a
+        // multi-workspace worktree space without it is refused with
+        // `workspace_group_close_required` (covered separately). What this test
+        // guards is that once asked, the whole group still goes — federation's
+        // single-workspace close path must not have narrowed it.
         let response = app.handle_workspace_close(
             "req".into(),
-            WorkspaceTarget {
+            WorkspaceCloseParams {
                 workspace_id: app.state.workspaces[0].id.clone(),
+                close_group: true,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -3264,7 +3445,13 @@ mod tests {
     async fn federation_mount_ended_stale_generation_is_ignored() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -3317,7 +3504,13 @@ mod tests {
     async fn federation_mount_ended_drains_detached_terminal_runtimes() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -3355,7 +3548,13 @@ mod tests {
     async fn federation_mount_ended_preserves_user_focus_on_a_later_unrelated_workspace() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
         app.state.workspaces = vec![Workspace::test_new("local-a")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -3394,7 +3593,10 @@ mod tests {
 
         assert_eq!(app.state.workspaces.len(), 2, "local-a and local-b remain");
         assert_eq!(
-            app.state.workspaces.get(app.state.selected).map(|ws| ws.id.clone()),
+            app.state
+                .workspaces
+                .get(app.state.selected)
+                .map(|ws| ws.id.clone()),
             Some(local_b_id.clone()),
             "selection must still point at local-b, not wherever the federation group's clamp landed"
         );
@@ -3403,5 +3605,259 @@ mod tests {
             Some(app.state.selected),
             "active must track the restored selection"
         );
+    }
+
+    /// A fresh `workspace.mount_remote` submission replaces
+    /// `remote_mount_attempts` wholesale rather than appending -- otherwise a
+    /// resolved entry from an earlier submission would linger forever with
+    /// no expiry timer to clear it. Both targets are pre-mounted so neither
+    /// spawns a real ssh dial (mirrors this file's existing
+    /// already-mounted-conflict tests).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_remote_replaces_attempt_list_wholesale_not_appending() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+
+        let session_name = crate::session::active_name()
+            .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+        for host in ["host-a", "host-b"] {
+            let mirror = crate::remote::federation::reducer::RemoteMirror::new(
+                crate::remote::federation::id::Mount {
+                    host_key: crate::remote::federation::id::HostKey::new(host, &session_name),
+                    server_instance_id: crate::remote::federation::id::ServerInstanceId(
+                        "inst-1".to_string(),
+                    ),
+                    mount_generation: 1,
+                },
+            );
+            app.state.begin_federation_mount(mirror).unwrap();
+        }
+
+        app.handle_workspace_mount_remote(
+            "req-1".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["host-a".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        assert_eq!(
+            app.state.remote_mount_attempts,
+            vec![crate::app::state::RemoteMountAttempt {
+                target: "host-a".to_string(),
+                outcome: crate::app::state::RemoteMountOutcome::Dialling,
+            }]
+        );
+
+        app.handle_workspace_mount_remote(
+            "req-2".into(),
+            WorkspaceMountRemoteParams {
+                targets: vec!["host-b".to_string()],
+                remote_keybindings: false,
+            },
+        );
+        assert_eq!(
+            app.state.remote_mount_attempts,
+            vec![crate::app::state::RemoteMountAttempt {
+                target: "host-b".to_string(),
+                outcome: crate::app::state::RemoteMountOutcome::Dialling,
+            }],
+            "the second submission must replace host-a's entry, not sit alongside it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_failed_toasts_and_resolves_the_dialling_attempt() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.remote_mount_attempts = vec![crate::app::state::RemoteMountAttempt {
+            target: "remote-host".to_string(),
+            outcome: crate::app::state::RemoteMountOutcome::Dialling,
+        }];
+
+        app.handle_federation_mount_failed(
+            "remote-host".to_string(),
+            "connection refused".to_string(),
+        );
+
+        assert!(
+            app.state.toast.is_some(),
+            "the existing sidebar-notice behavior on failure must be unchanged"
+        );
+        assert_eq!(
+            app.state.remote_mount_attempts,
+            vec![crate::app::state::RemoteMountAttempt {
+                target: "remote-host".to_string(),
+                outcome: crate::app::state::RemoteMountOutcome::Failed {
+                    reason: "connection refused".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ready_resolves_attempt_and_persists_recent_target() {
+        // Spawned before the lock so the guard is never held across an
+        // `.await` (clippy's `await_holding_lock`): nothing this test does
+        // after spawning the tunnel is itself async.
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir()
+            .join(format!(
+                "herdr-mount-ready-recents-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.remote_mount_attempts = vec![crate::app::state::RemoteMountAttempt {
+            target: "remote-host".to_string(),
+            outcome: crate::app::state::RemoteMountOutcome::Dialling,
+        }];
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            2,
+            "local plus the materialized workspace"
+        );
+        let materialized_workspace_id = app.state.workspaces[1].id.clone();
+        assert_eq!(
+            app.state.remote_mount_attempts,
+            vec![crate::app::state::RemoteMountAttempt {
+                target: "remote-host".to_string(),
+                outcome: crate::app::state::RemoteMountOutcome::Mounted {
+                    workspace_id: Some(materialized_workspace_id),
+                },
+            }]
+        );
+
+        assert_eq!(
+            app.state.recent_remote_mount_targets,
+            vec!["remote-host".to_string()]
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("recent_remote_mount_targets = [\"remote-host\"]"));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Re-mounting a target already at the front of the recents list
+    /// produces a byte-identical list; the read/format/write cycle must be
+    /// skipped entirely rather than rewriting the same bytes on every
+    /// successful mount. Resets the file to content that lacks the key right
+    /// before the mount, so an incorrect unconditional write is caught by
+    /// the key reappearing (mirrors the deleted client-side
+    /// `record_successful_remote_mount_target_skips_the_write_when_nothing_
+    /// changed` test's technique).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn federation_mount_ready_skips_config_write_when_recent_target_unchanged() {
+        // Spawned before the lock so the guard is never held across an
+        // `.await` (clippy's `await_holding_lock`).
+        let (guard, tunnel_reader, tunnel_writer) = spawn_test_tunnel().await;
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir()
+            .join(format!(
+                "herdr-mount-ready-recents-noop-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        app.state.workspaces = vec![Workspace::test_new("local")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        // The target already sits at the front of recents, so the upcoming
+        // mount is a no-op re-record.
+        app.state.recent_remote_mount_targets = vec!["remote-host".to_string()];
+        app.state.remote_mount_attempts = vec![crate::app::state::RemoteMountAttempt {
+            target: "remote-host".to_string(),
+            outcome: crate::app::state::RemoteMountOutcome::Dialling,
+        }];
+
+        let mirror = test_federation_mirror_with_workspace("remote-host", 1);
+        app.handle_federation_mount_ready(crate::events::FederationMountReady {
+            target: "remote-host".to_string(),
+            mirror,
+            generation: 1,
+            tunnel_guard: guard,
+            tunnel_reader,
+            tunnel_writer,
+        });
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("recent_remote_mount_targets"),
+            "a no-op re-mount must not write to the config file, got:\n{content}"
+        );
+        assert_eq!(
+            app.state.recent_remote_mount_targets,
+            vec!["remote-host".to_string()]
+        );
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
