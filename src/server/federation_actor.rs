@@ -2043,6 +2043,10 @@ mod tests {
     /// `Method::TabCreate` handler the local TUI/CLI new-tab action uses) and
     /// replies with the new tab's raw workspace/tab/pane/terminal ids, without
     /// moving the serving user's own focus.
+    // Unix-only for the same reason as the real-pane split/create tests above:
+    // a real tab create spawns a real local pane, and on Windows the ConPTY
+    // child outlives the dropped `App`, hanging the test runtime's drop.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_peers_tab_create_creates_a_tab_in_the_named_workspace_without_stealing_focus() {
         let mut app = test_app();
