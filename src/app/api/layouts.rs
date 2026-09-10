@@ -369,7 +369,20 @@ impl App {
         let terminal = self.state.terminals.get(terminal_id);
         Some(LayoutPane {
             pane_id: Some(self.public_pane_id(ws_idx, pane_id)?),
-            label: terminal.and_then(|terminal| terminal.manual_label.clone()),
+            // A federation-mounted pane's remote label lives in
+            // `mirrored_label`, never in the `manual_label` override slot,
+            // so an exported layout must fall back to it or a mounted
+            // pane's label silently vanishes from the export. Deliberately
+            // NOT the full naming ladder here (no inherited-tab-override,
+            // no agent-identity fallback) — a layout is a round-trip
+            // template meant to recreate this pane's OWN persisted state,
+            // and baking in a derived/inherited name would corrupt that.
+            label: terminal.and_then(|terminal| {
+                terminal
+                    .manual_label
+                    .clone()
+                    .or_else(|| terminal.mirrored_label.clone())
+            }),
             cwd: tab
                 .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
                 .map(|cwd| cwd.display().to_string()),

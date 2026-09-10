@@ -410,7 +410,7 @@ impl ClientShellState {
             replace_on_type: false,
             target: ClientRenameTarget::Tab {
                 tab_id: tab.tab_id.clone(),
-                auto_name: !tab.custom_label,
+                auto_name: tab.name_source != crate::workspace::naming::NameSource::Override,
                 original_name: tab.label.clone(),
             },
         }));
@@ -429,9 +429,16 @@ impl ClientShellState {
         self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
             title: "rename pane",
             input: pane.label.clone().unwrap_or_default(),
-            replace_on_type: pane.label.is_none(),
+            // `pane.label` is the fully resolved ladder text
+            // (own override, inherited tab rename, mirrored remote label,
+            // or agent identity) — only replace-on-type (first keystroke
+            // clears the prefill) when this pane has no OWN override, so
+            // typing over a resolved-but-not-typed name still starts fresh
+            // the way an empty box used to.
+            replace_on_type: pane.name_source != crate::workspace::naming::NameSource::Override,
             target: ClientRenameTarget::Pane {
                 pane_id: pane.pane_id.clone(),
+                original_name: pane.label.clone().unwrap_or_default(),
             },
         }));
     }
@@ -1010,14 +1017,17 @@ impl ClientShellState {
                     env: Default::default(),
                 },
             )),
-            ClientRenameTarget::Workspace { workspace_id } => (!trimmed.is_empty()).then(|| {
-                crate::api::schema::Method::WorkspaceRename(
+            ClientRenameTarget::Workspace { workspace_id } => {
+                Some(crate::api::schema::Method::WorkspaceRename(
                     crate::api::schema::WorkspaceRenameParams {
                         workspace_id,
-                        label: trimmed.to_owned(),
+                        // An emptied box is a clear request, not a no-op —
+                        // it snaps the workspace back to its derived name
+                        // instead of being silently dropped.
+                        label: (!trimmed.is_empty()).then(|| trimmed.to_owned()),
                     },
-                )
-            }),
+                ))
+            }
             ClientRenameTarget::NewTab {
                 workspace_id,
                 default_name,
@@ -1035,18 +1045,49 @@ impl ClientShellState {
                 tab_id,
                 auto_name,
                 original_name,
-            } => (!(trimmed.is_empty() || auto_name && trimmed == original_name)).then(|| {
-                crate::api::schema::Method::TabRename(crate::api::schema::TabRenameParams {
-                    tab_id,
-                    label: trimmed.to_owned(),
-                })
-            }),
-            ClientRenameTarget::Pane { pane_id } => Some(crate::api::schema::Method::PaneRename(
-                crate::api::schema::PaneRenameParams {
-                    pane_id,
-                    label: Some(trimmed.to_owned()),
-                },
-            )),
+            } => {
+                if auto_name && (trimmed.is_empty() || trimmed == original_name) {
+                    // Already auto-derived and unchanged (or cleared back to
+                    // nothing) — nothing to send, there is no override to clear.
+                    None
+                } else if trimmed == original_name {
+                    // Unchanged override — no-op.
+                    None
+                } else {
+                    // An emptied box on a tab that HAD a user override is a
+                    // clear request — it snaps back to the derived name instead
+                    // of being silently dropped.
+                    Some(crate::api::schema::Method::TabRename(
+                        crate::api::schema::TabRenameParams {
+                            tab_id,
+                            label: (!trimmed.is_empty()).then(|| trimmed.to_owned()),
+                        },
+                    ))
+                }
+            }
+            ClientRenameTarget::Pane {
+                pane_id,
+                original_name,
+            } => {
+                if trimmed == original_name {
+                    // Unchanged prefill — nothing to send. The prefill is
+                    // the pane's fully resolved name, so it is often a name
+                    // that was never typed on this pane (an inherited tab
+                    // rename, a mirrored remote label, its agent identity);
+                    // sending it back would pin that derived string as a
+                    // real override that survives restart and blocks every
+                    // later tab rename from reaching this pane.
+                    None
+                } else {
+                    // An emptied box still sends a clear, as it always has.
+                    Some(crate::api::schema::Method::PaneRename(
+                        crate::api::schema::PaneRenameParams {
+                            pane_id,
+                            label: Some(trimmed.to_owned()),
+                        },
+                    ))
+                }
+            }
         };
         if let Some(method) = method {
             self.push_endpoint_method(method, outcome);

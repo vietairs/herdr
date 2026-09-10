@@ -106,6 +106,33 @@ struct AgentNameOwner {
     session_ref: Option<crate::agent_resume::AgentSessionRef>,
 }
 
+/// Who is responsible for the current `agent_name` value.
+///
+/// `AgentNameOwner` (above) records *which agent identity* owns the name so
+/// `reconcile_agent_name_owner` can clear it when that identity's hook goes
+/// away; it carries no authorship bit. This enum is the authorship bit: it
+/// distinguishes a name the user typed by hand (`User`) from one a launcher
+/// or restore path assigned on the user's behalf (`Managed`) or one that
+/// came purely from screen detection (`Detected`, currently unused by any
+/// writer but reserved so a future detection-assigned name is not
+/// misclassified as `Managed`). A tab rename inherits its label onto a
+/// pane's displayed agent name only when the pane's author is not `User`
+/// (see `src/workspace/naming.rs`), so a hand-set handle is never clobbered.
+///
+/// Persistence: `PaneSnapshot::agent_name_author` is `#[serde(default)]`, so
+/// a legacy snapshot restores `None`. Unknown must mean "protected from
+/// inheritance", not "safe to overwrite" — the wrong default would silently
+/// let a tab rename clobber a pre-upgrade user's hand-set agent name the
+/// first time its tab is renamed after upgrade. Restore therefore treats a
+/// missing value as `User`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentNameAuthor {
+    User,
+    Managed,
+    Detected,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecentAgentProcessExit {
     agent: Agent,
@@ -132,6 +159,13 @@ pub struct TerminalState {
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
     agent_name_owner: Option<AgentNameOwner>,
+    /// Authorship of `agent_name` (R3). `None` only before any writer has
+    /// ever run; every writer sets it alongside `agent_name`.
+    pub agent_name_author: Option<AgentNameAuthor>,
+    /// Remote-resolved label for a federation-mounted pane. Never
+    /// persisted, never treated as a user override; the naming resolver's
+    /// rung 1.5 reads it and stops before rungs 2-4 run against local data.
+    pub mirrored_label: Option<String>,
     managed_agent: Option<ManagedAgent>,
     managed_agent_launch_session: Option<crate::agent_resume::PersistedAgentSession>,
     hook_report_sequences: HashMap<String, u64>,
@@ -167,6 +201,8 @@ impl TerminalState {
             manual_label: None,
             agent_name: None,
             agent_name_owner: None,
+            agent_name_author: None,
+            mirrored_label: None,
             managed_agent: None,
             managed_agent_launch_session: None,
             hook_report_sequences: HashMap::new(),
@@ -1880,9 +1916,10 @@ impl TerminalState {
         self.manual_label = None;
     }
 
-    pub fn set_agent_name(&mut self, name: String) {
+    pub fn set_agent_name(&mut self, name: String, author: AgentNameAuthor) {
         let name = name.trim().to_string();
         self.agent_name = (!name.is_empty()).then_some(name);
+        self.agent_name_author = self.agent_name.as_ref().map(|_| author);
         self.agent_name_owner = self.agent_name.as_ref().and_then(|_| {
             self.hook_authority
                 .as_ref()
@@ -1916,7 +1953,7 @@ impl TerminalState {
         settle_delay: Duration,
         timeout: Duration,
     ) {
-        self.set_agent_name(name);
+        self.set_agent_name(name, AgentNameAuthor::Managed);
         self.agent_name_owner = Some(AgentNameOwner {
             agent_label: crate::detect::agent_label(kind).to_string(),
             session_ref: None,
@@ -2046,7 +2083,7 @@ impl TerminalState {
     }
 
     pub fn restore_managed_agent(&mut self, name: String, kind: Agent) {
-        self.set_agent_name(name);
+        self.set_agent_name(name, AgentNameAuthor::Managed);
         self.agent_name_owner = Some(AgentNameOwner {
             agent_label: crate::detect::agent_label(kind).to_string(),
             session_ref: None,
@@ -2068,6 +2105,7 @@ impl TerminalState {
         }
         self.agent_name = None;
         self.agent_name_owner = None;
+        self.agent_name_author = None;
         self.managed_agent = None;
     }
 
@@ -2121,8 +2159,17 @@ impl TerminalState {
                         .zip(session_ref)
                         .is_some_and(|(current, incoming)| current != incoming) =>
             {
+                // Clearing `agent_name` here must also clear
+                // `agent_name_author` — leaving it `Some(User)` after the
+                // name it protects is gone latches the R3 inheritance gate
+                // shut forever for this pane (a tab rename would never
+                // reach it again), even though there is no longer any
+                // User-set name to protect. Repro this guarded against:
+                // rename an agent, exit it, start a different agent in the
+                // same pane, then rename the tab — the pane must inherit.
                 self.agent_name = None;
                 self.agent_name_owner = None;
+                self.agent_name_author = None;
             }
             Some(owner) if owner.session_ref.is_none() && session_ref.is_some() => {
                 owner.session_ref = session_ref.cloned();
@@ -2137,17 +2184,91 @@ impl TerminalState {
         }
     }
 
-    pub fn border_label(&self, show_agent_labels: bool) -> Option<String> {
+    /// R2/D3: `inherited` is the enclosing tab's own resolved rung-1/1.5
+    /// override (`Workspace::tab_override_for_pane_inheritance`), read at
+    /// resolve time and never written into `TerminalState` (R1's
+    /// tab-does-not-rename-descendants rule is about persisted state, not
+    /// about this read-only, per-call inheritance). R3: a User-authored
+    /// agent name (a hand rename of this specific pane's agent) always
+    /// takes precedence over an inherited tab rename, so inheritance never
+    /// clobbers a name the user set on this pane deliberately.
+    pub fn border_label(&self, show_agent_labels: bool, inherited: Option<&str>) -> Option<String> {
         self.effective_title().or_else(|| {
-            self.manual_label.clone().or_else(|| {
-                show_agent_labels
-                    .then(|| {
-                        self.effective_display_agent()
-                            .or_else(|| self.effective_agent_label().map(str::to_string))
-                    })
-                    .flatten()
-            })
+            self.resolved_pane_label(show_agent_labels, inherited)
+                .map(|resolved| resolved.0)
         })
+    }
+
+    /// The pane-scope naming ladder's full resolved result (text +
+    /// `NameSource`), shared by `border_label` (TUI pane border, which
+    /// still prefers `effective_title` — a presentation-state overlay, a
+    /// separate concept already surfaced on its own via `PaneInfo::title`)
+    /// and `App::pane_info` (JSON API / `PaneInfo::label`, which has no
+    /// `effective_title` short-circuit — it is a distinct field there).
+    /// Same `inherited`/R3 contract as `border_label`'s doc comment.
+    pub fn resolved_pane_label(
+        &self,
+        show_agent_labels: bool,
+        inherited: Option<&str>,
+    ) -> Option<(String, crate::workspace::naming::NameSource)> {
+        self.resolved_pane_label_with(show_agent_labels, inherited, || {
+            self.effective_display_agent()
+        })
+    }
+
+    /// Same ladder as `resolved_pane_label`, for a caller that has already
+    /// built this terminal's `EffectivePresentation` for another field of
+    /// the same response (`App::pane_info`). Building a second one costs a
+    /// title scan, a display-agent scan and a state-label `HashMap`
+    /// allocation, per pane per frame per client — work that belongs
+    /// nowhere on a pane-scaled path.
+    pub fn resolved_pane_label_with_display_agent(
+        &self,
+        show_agent_labels: bool,
+        inherited: Option<&str>,
+        display_agent: Option<&str>,
+    ) -> Option<(String, crate::workspace::naming::NameSource)> {
+        self.resolved_pane_label_with(show_agent_labels, inherited, || {
+            display_agent.map(str::to_string)
+        })
+    }
+
+    /// The pane ladder in two passes so the agent-identity rung stays lazy:
+    /// rungs 1/1.5 first, and `display_agent` is only invoked when none of
+    /// them produced a name. A pane with a manual label, an inherited tab
+    /// override or a mirrored remote label therefore never pays for the
+    /// agent-identity lookup at all.
+    fn resolved_pane_label_with(
+        &self,
+        show_agent_labels: bool,
+        inherited: Option<&str>,
+        display_agent: impl FnOnce() -> Option<String>,
+    ) -> Option<(String, crate::workspace::naming::NameSource)> {
+        let inherited_override = (self.agent_name_author != Some(AgentNameAuthor::User))
+            .then_some(inherited)
+            .flatten();
+        let above_agent_identity = crate::workspace::naming::NameSources {
+            own_override: self.manual_label.as_deref(),
+            inherited_override,
+            mirrored: self.mirrored_label.as_deref(),
+            ..Default::default()
+        };
+        if let Some(resolved) = crate::workspace::naming::resolve_name(
+            crate::workspace::naming::NameScope::Pane,
+            above_agent_identity,
+        ) {
+            return Some((resolved.text.into_owned(), resolved.source));
+        }
+        // Agent identity is the last rung a pane has — rungs 3/4 are not
+        // legal at pane scope, where the caller supplies its own literal
+        // fallback instead — so the owned string this rung produces is
+        // already the answer. Passing it through `resolve_name` only to
+        // borrow it back and copy it out again would allocate a second time
+        // per agent pane per frame per client.
+        show_agent_labels
+            .then(|| display_agent().or_else(|| self.effective_agent_label().map(str::to_string)))
+            .flatten()
+            .map(|text| (text, crate::workspace::naming::NameSource::AgentIdentity))
     }
 
     fn recompute_effective_state(
@@ -3939,24 +4060,279 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Working);
     }
 
+    /// The agent-identity rung must stay lazy: this ladder runs per pane
+    /// per frame per client, and computing the pane's agent identity means
+    /// building a whole presentation snapshot. A pane whose name comes from
+    /// a higher rung must never pay for it.
+    #[test]
+    fn pane_label_skips_the_agent_identity_rung_when_a_higher_rung_wins() {
+        let mut terminal = test_terminal();
+        terminal.manual_label = Some("mine".to_string());
+        let mut computed = false;
+        let resolved = terminal.resolved_pane_label_with(true, None, || {
+            computed = true;
+            Some("claude".to_string())
+        });
+        assert_eq!(resolved.map(|(text, _)| text), Some("mine".to_string()));
+        assert!(!computed, "agent identity must not be computed at all");
+
+        terminal.manual_label = None;
+        terminal.mirrored_label = Some("remote".to_string());
+        let mut computed = false;
+        let resolved = terminal.resolved_pane_label_with(true, None, || {
+            computed = true;
+            Some("claude".to_string())
+        });
+        assert_eq!(resolved.map(|(text, _)| text), Some("remote".to_string()));
+        assert!(!computed);
+
+        terminal.mirrored_label = None;
+        let mut computed = false;
+        let resolved = terminal.resolved_pane_label_with(true, None, || {
+            computed = true;
+            Some("claude".to_string())
+        });
+        assert_eq!(resolved.map(|(text, _)| text), Some("claude".to_string()));
+        assert!(computed, "the ladder reached the agent-identity rung");
+    }
+
     #[test]
     fn border_label_prefers_manual_label_over_agent_label() {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
 
-        assert_eq!(terminal.border_label(false), None);
-        assert_eq!(terminal.border_label(true).as_deref(), Some("claude"));
+        assert_eq!(terminal.border_label(false, None), None);
+        assert_eq!(terminal.border_label(true, None).as_deref(), Some("claude"));
 
         terminal.set_manual_label(" reviewer ".into());
-        assert_eq!(terminal.border_label(false).as_deref(), Some("reviewer"));
-        assert_eq!(terminal.border_label(true).as_deref(), Some("reviewer"));
+        assert_eq!(
+            terminal.border_label(false, None).as_deref(),
+            Some("reviewer")
+        );
+        assert_eq!(
+            terminal.border_label(true, None).as_deref(),
+            Some("reviewer")
+        );
 
         terminal.set_manual_label("   ".into());
-        assert_eq!(terminal.border_label(true).as_deref(), Some("claude"));
+        assert_eq!(terminal.border_label(true, None).as_deref(), Some("claude"));
 
         terminal.set_manual_label("reviewer".into());
         terminal.clear_manual_label();
-        assert_eq!(terminal.border_label(true).as_deref(), Some("claude"));
+        assert_eq!(terminal.border_label(true, None).as_deref(), Some("claude"));
+    }
+
+    /// D3/R2: an inherited tab override is used only when the pane has no
+    /// `manual_label` of its own, and only ranks below `manual_label` /
+    /// `effective_title` — never above them.
+    #[test]
+    fn border_label_uses_inherited_tab_override_when_pane_has_no_manual_label() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.agent_name_author = Some(AgentNameAuthor::Managed);
+
+        assert_eq!(
+            terminal.border_label(true, Some("work")).as_deref(),
+            Some("work"),
+            "an inherited tab override beats the agent identity"
+        );
+
+        terminal.set_manual_label("reviewer".into());
+        assert_eq!(
+            terminal.border_label(true, Some("work")).as_deref(),
+            Some("reviewer"),
+            "the pane's own manual_label still outranks inheritance"
+        );
+    }
+
+    /// R3: a User-authored agent name (a hand rename of this pane's agent)
+    /// must never be clobbered by a tab rename's inheritance.
+    #[test]
+    fn border_label_ignores_inherited_tab_override_for_a_user_authored_agent_name() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.agent_name_author = Some(AgentNameAuthor::User);
+
+        assert_eq!(
+            terminal.border_label(true, Some("work")).as_deref(),
+            Some("claude"),
+            "inheritance is gated off for a User-authored agent name; falls through to \
+             agent identity instead of the inherited tab override"
+        );
+    }
+
+    /// R2 ("no pane rung 3 and no border-precedence reorder"):
+    /// `border_label` (:2140) checks `effective_title()` first, then
+    /// `manual_label`, then (gated on `show_agent_labels`) the agent label
+    /// — in that order, unconditionally. Extends
+    /// `border_label_prefers_manual_label_over_agent_label` (above) with
+    /// the title case it never covered. The `inherited` parameter slots in
+    /// *below* all three rungs asserted here, never above.
+    #[test]
+    fn char_border_label_precedence_title_then_manual_then_agent() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        // Rung 3 (agent), gated on show_agent_labels, is the floor.
+        assert_eq!(terminal.border_label(false, None), None);
+        assert_eq!(terminal.border_label(true, None).as_deref(), Some("claude"));
+
+        // Rung 2 (manual_label) outranks the agent label regardless of the
+        // show_agent_labels gate.
+        terminal.set_manual_label("reviewer".into());
+        assert_eq!(
+            terminal.border_label(false, None).as_deref(),
+            Some("reviewer")
+        );
+        assert_eq!(
+            terminal.border_label(true, None).as_deref(),
+            Some("reviewer")
+        );
+
+        // Rung 1 (effective_title, from agent metadata) outranks both
+        // manual_label and the agent label, and does not need
+        // show_agent_labels at all.
+        terminal.set_agent_metadata(AgentMetadataReport {
+            source: "user:presentation".into(),
+            agent_label: Some("claude".into()),
+            applies_to_source: None,
+            title: Some("Refactor auth".into()),
+            display_agent: None,
+            state_labels: HashMap::new(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_state_labels: false,
+            ttl: None,
+            seq: None,
+        });
+        assert_eq!(terminal.effective_title().as_deref(), Some("Refactor auth"));
+        assert_eq!(
+            terminal.border_label(false, None).as_deref(),
+            Some("Refactor auth")
+        );
+        assert_eq!(
+            terminal.border_label(true, None).as_deref(),
+            Some("Refactor auth")
+        );
+
+        // Clearing manual_label with a title still present keeps the title
+        // on top — the title rung does not fall through to the agent rung
+        // just because the middle rung emptied.
+        terminal.clear_manual_label();
+        assert_eq!(
+            terminal.border_label(true, None).as_deref(),
+            Some("Refactor auth")
+        );
+    }
+
+    /// M1/R3: `AgentNameAuthor { User, Managed, Detected }` distinguishes
+    /// a hand-typed agent rename from a launcher-assigned one, so R3 (a tab
+    /// rename never clobbers a hand-set agent name) has something to gate
+    /// on. `AgentNameOwner` (:103-107) cannot express authorship on its
+    /// own: it records only which agent identity owns the name, never *who*
+    /// set it, so a user rename (`set_agent_name` while a hook authority is
+    /// active) and a managed launch (`begin_managed_agent`) produce
+    /// observationally identical owners. Asserted here through
+    /// `reconcile_agent_name_owner`'s behavior, since the field itself is
+    /// private and unreachable from outside this module; git history
+    /// carries the earlier `_is_indistinguishable_today` form of this test,
+    /// from before the authorship field existed.
+    #[test]
+    fn agent_name_author_distinguishes_user_rename_from_managed_launch() {
+        // User path: a hook authority for "claude" is active, then the user
+        // renames the agent by hand. `set_agent_name` captures the active
+        // hook authority's agent_label as the owner.
+        let mut user_terminal = test_terminal();
+        user_terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+        user_terminal.set_agent_name("reviewer".into(), AgentNameAuthor::User);
+
+        // Managed path: the launcher assigns the same name directly, with
+        // no user action at all.
+        let mut managed_terminal = test_terminal();
+        managed_terminal.begin_managed_agent(
+            "reviewer".into(),
+            Agent::Claude,
+            Instant::now(),
+            Duration::from_secs(0),
+            Duration::from_secs(30),
+        );
+
+        assert_eq!(user_terminal.agent_name.as_deref(), Some("reviewer"));
+        assert_eq!(managed_terminal.agent_name.as_deref(), Some("reviewer"));
+        assert_eq!(user_terminal.agent_name_author, Some(AgentNameAuthor::User));
+        assert_eq!(
+            managed_terminal.agent_name_author,
+            Some(AgentNameAuthor::Managed)
+        );
+
+        // Reconciling against a DIFFERENT agent label clears agent_name
+        // identically for both, because AgentNameOwner records only the
+        // owning agent identity ("claude" in both cases here) — not
+        // whether a person or the launcher set the name.
+        user_terminal.reconcile_agent_name_owner("codex", None);
+        managed_terminal.reconcile_agent_name_owner("codex", None);
+
+        assert_eq!(
+            user_terminal.agent_name, None,
+            "user-set name is cleared on an agent-identity mismatch, same as managed"
+        );
+        assert_eq!(
+            managed_terminal.agent_name, None,
+            "managed name is cleared on an agent-identity mismatch, same as user-set"
+        );
+        // `agent_name_author` must be cleared alongside `agent_name`
+        // — leaving it `Some(User)` with no name left to protect would
+        // permanently latch the R3 inheritance gate shut for this pane.
+        assert_eq!(
+            user_terminal.agent_name_author, None,
+            "agent_name_author must not outlive the agent_name it protects"
+        );
+        assert_eq!(managed_terminal.agent_name_author, None);
+    }
+
+    /// Rename an agent (User authorship), exit that agent,
+    /// start a DIFFERENT agent in the same pane with no name of its own,
+    /// then rename the enclosing tab — the pane must inherit the tab's new
+    /// name. Before the fix, `agent_name_author` stayed latched at
+    /// `Some(User)` after `reconcile_agent_name_owner` cleared `agent_name`
+    /// on the identity mismatch, so `border_label`'s R3 gate
+    /// (`agent_name_author != Some(User)`) permanently excluded this pane
+    /// from tab-rename inheritance even though there was no longer a
+    /// hand-set name to protect.
+    #[test]
+    fn agent_name_author_unlatches_after_the_named_agent_exits_and_a_new_one_starts() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+        terminal.set_agent_name("reviewer".into(), AgentNameAuthor::User);
+        assert_eq!(terminal.agent_name_author, Some(AgentNameAuthor::User));
+
+        // The named agent exits; a different agent starts in the same
+        // pane. Reconciling against the new identity clears the stale name
+        // (existing behavior) and must also clear its author (the fix).
+        terminal.reconcile_agent_name_owner("codex", None);
+        assert_eq!(terminal.agent_name, None);
+        assert_eq!(terminal.agent_name_author, None);
+
+        // A tab rename now reaches this pane: `border_label`'s R3 gate only
+        // suppresses inheritance while `agent_name_author == Some(User)`.
+        let inherited = Some("renamed-tab");
+        assert_eq!(
+            terminal.border_label(true, inherited).as_deref(),
+            Some("renamed-tab"),
+            "the pane must inherit the tab rename once its stale User              authorship is cleared"
+        );
     }
 
     #[test]
@@ -4992,7 +5368,7 @@ mod tests {
                 Some("new".into()),
             )
             .expect("initial session should be accepted");
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), AgentNameAuthor::User);
 
         terminal
             .set_agent_session_ref_for_session_start(
@@ -5493,7 +5869,7 @@ mod tests {
     fn agent_alias_survives_detection_uncertainty_and_reported_release_but_not_replacement() {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), AgentNameAuthor::User);
 
         terminal.set_detected_state(None, AgentState::Unknown);
         assert_eq!(terminal.agent_name.as_deref(), Some("reviewer"));
@@ -5501,7 +5877,7 @@ mod tests {
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
         assert!(terminal.agent_name.is_none());
 
-        terminal.set_agent_name("replacement".into());
+        terminal.set_agent_name("replacement".into(), AgentNameAuthor::User);
         let mutation = terminal
             .release_agent_with_mutation("herdr:codex", "codex", None)
             .expect("detected agent release should be accepted");
@@ -5545,7 +5921,7 @@ mod tests {
             None,
             Some(20),
         );
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), AgentNameAuthor::User);
 
         terminal.set_detected_state(Some(Agent::Grok), AgentState::Idle);
 
@@ -5567,7 +5943,7 @@ mod tests {
                 Instant::now(),
             )
             .expect("initial hook should be accepted");
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), AgentNameAuthor::User);
 
         terminal
             .set_hook_authority_at(
@@ -5607,7 +5983,7 @@ mod tests {
                 Instant::now(),
             )
             .expect("initial hook should be accepted");
-        terminal.set_agent_name("reviewer".into());
+        terminal.set_agent_name("reviewer".into(), AgentNameAuthor::User);
         terminal
             .clear_hook_authority_with_mutation(Some("herdr:pi"), Some(21))
             .expect("hook clear should be accepted");
@@ -5748,7 +6124,7 @@ mod tests {
     fn respawn_cleanup_resets_restored_agent_status() {
         let mut terminal = test_terminal();
         terminal.respawn_shell_on_exit = true;
-        terminal.set_agent_name("codex".into());
+        terminal.set_agent_name("codex".into(), AgentNameAuthor::User);
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
             source: "herdr:codex".into(),
             agent: "codex".into(),

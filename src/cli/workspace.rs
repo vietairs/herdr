@@ -131,13 +131,20 @@ fn workspace_focus(args: &[String]) -> std::io::Result<i32> {
 
 fn workspace_rename(args: &[String]) -> std::io::Result<i32> {
     if args.len() < 2 {
-        eprintln!("usage: herdr workspace rename <workspace_id> <label>");
+        eprintln!("usage: herdr workspace rename <workspace_id> <label>|--clear");
         return Ok(2);
     }
+    // `--clear` snaps the workspace back to its live derived name,
+    // mirroring `herdr agent rename <target> --clear`.
+    let label = if args[1..] == ["--clear".to_string()] {
+        None
+    } else {
+        Some(args[1..].join(" "))
+    };
 
     super::runtime::workspace_rename(WorkspaceRenameParams {
         workspace_id: super::normalize_workspace_id(&args[0]),
-        label: args[1..].join(" "),
+        label,
     })
 }
 
@@ -261,7 +268,7 @@ fn print_workspace_help() {
     eprintln!("  herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]");
     eprintln!("  herdr workspace get <workspace_id>");
     eprintln!("  herdr workspace focus <workspace_id>");
-    eprintln!("  herdr workspace rename <workspace_id> <label>");
+    eprintln!("  herdr workspace rename <workspace_id> <label>|--clear");
     eprintln!("  herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr workspace close <workspace_id> [--group]  close your local mirror only; leaves the host's copy running");
     eprintln!(

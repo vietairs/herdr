@@ -19,14 +19,16 @@ use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, Term
 
 mod aggregate;
 mod git;
+pub(crate) mod naming;
 mod tab;
 
 use self::git::git_status_cache_key_for_space;
 pub(crate) use self::{git::git_status_snapshot_for_cwd_with_demand, tab::MovedPane};
 pub use self::{
     git::{
-        derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_space_metadata,
-        git_status_cache_key, GitSpaceMetadata, GitStatusCacheEntry, GitStatusRefreshDemand,
+        apply_tab_label_distinctness, derive_label_from_cwd, derive_tab_auto_label,
+        fallback_label_from_cwd, git_branch, git_space_metadata, git_status_cache_key,
+        GitSpaceMetadata, GitStatusCacheEntry, GitStatusRefreshDemand,
     },
     tab::{NewPane, Tab},
 };
@@ -50,6 +52,15 @@ pub struct WorkspaceGitStatus {
     pub branch: Option<String>,
     pub ahead_behind: Option<(usize, usize)>,
     pub space: Option<GitSpaceMetadata>,
+    /// D1 — rung-3 derived label per tab (`tab.number`, not index), computed
+    /// on this same ~1.5s pass: `(tab.number, tab_cwd, derived_label)`. The
+    /// cwd rides alongside so `apply_workspace_git_statuses` can stamp
+    /// `Tab::cached_auto_label_cwd` the same way the workspace stamps
+    /// `cached_identity_cwd`, without re-deriving it. Populated by the
+    /// caller after `into_workspace_status` returns, since the derivation
+    /// needs each tab's own resolved cwd, which this snapshot type does not
+    /// carry.
+    pub tab_auto_labels: Vec<(usize, PathBuf, Option<String>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +110,7 @@ impl WorkspaceGitStatusSnapshot {
             branch: self.branch,
             ahead_behind: self.ahead_behind,
             space: self.space,
+            tab_auto_labels: Vec::new(),
         }
     }
 }
@@ -210,6 +222,10 @@ pub struct Workspace {
     pub id: String,
     /// User-provided override. If set, auto-derived identity stops updating.
     pub custom_name: Option<String>,
+    /// Remote-resolved label for a federation-mounted workspace. Never
+    /// persisted, never a user override; the naming resolver's rung 1.5
+    /// reads it and stops before rungs 2-4 run against local data.
+    pub mirrored_name: Option<String>,
     /// Fallback workspace identity source for tests, old snapshots, or missing runtimes.
     pub identity_cwd: PathBuf,
     /// CWD from which the cached automatic label and Git metadata were derived.
@@ -284,6 +300,7 @@ impl Workspace {
         Self {
             id,
             custom_name: label,
+            mirrored_name: None,
             identity_cwd: identity_cwd.clone(),
             cached_identity_cwd: identity_cwd.clone(),
             cached_auto_label,
@@ -436,6 +453,7 @@ impl Workspace {
             Self {
                 id,
                 custom_name: None,
+                mirrored_name: None,
                 identity_cwd: initial_cwd.clone(),
                 cached_identity_cwd: initial_cwd.clone(),
                 cached_auto_label,
@@ -476,11 +494,74 @@ impl Workspace {
     }
 
     pub fn tab_display_name(&self, tab_idx: usize) -> Option<String> {
+        self.resolve_tab_name(tab_idx)
+            .map(|resolved| resolved.text.into_owned())
+    }
+
+    /// A caller that needs both the label and its `NameSource` for the
+    /// same tab (e.g. `App::tab_info`, once per tab per frame per client)
+    /// must call this ONCE instead of `tab_display_name` +
+    /// `tab_name_source` back to back, which ran `resolve_tab_name`'s
+    /// ladder twice. `resolved_display_from` is the workspace-scope twin of
+    /// this method, for the same reason.
+    pub fn resolved_tab_display(
+        &self,
+        tab_idx: usize,
+    ) -> Option<(String, self::naming::NameSource)> {
+        self.resolve_tab_name(tab_idx)
+            .map(|resolved| (resolved.text.into_owned(), resolved.source))
+    }
+
+    fn resolve_tab_name(&self, tab_idx: usize) -> Option<self::naming::ResolvedName<'_>> {
         let tab = self.tabs.get(tab_idx)?;
-        Some(
-            tab.custom_name
-                .clone()
-                .unwrap_or_else(|| (tab_idx + 1).to_string()),
+        let is_remote = self.is_federation_materialized();
+        let sources = self::naming::NameSources {
+            own_override: tab.custom_name.as_deref(),
+            mirrored: if is_remote {
+                tab.mirrored_name.as_deref()
+            } else {
+                None
+            },
+            derived: if is_remote {
+                None
+            } else {
+                tab.cached_auto_label.as_deref()
+            },
+            // Rung 4 is the STABLE public number, never `tab_idx + 1` — a
+            // moved tab's array index shifts while its public number does
+            // not (D2), so an index-derived label drifts after a move.
+            ordinal: self.public_tab_number(tab_idx),
+            ..Default::default()
+        };
+        self::naming::resolve_name(self::naming::NameScope::Tab, sources)
+    }
+
+    /// D3 — the tab's own rung-1 USER override only, for pane inheritance.
+    /// Deliberately NOT the tab's full resolved display name, and
+    /// deliberately NOT the tab's rung-1.5 mirrored remote label either:
+    /// inheriting an auto-derived label, a mirrored remote label, or an
+    /// ordinal down onto every unnamed agent pane would shadow that pane's
+    /// own mirrored label (rung 1.5) and agent identity (rung 2) with the
+    /// TAB's label — exactly the D3 misfire Federation Naming Contract v1
+    /// exists to prevent. Only a genuine user rename at this scope
+    /// is a "renamed scope" in rung 1's sense for inheritance purposes; a
+    /// mirrored tab label is rung 1.5 and stays at the tab, it never
+    /// inherits downward.
+    pub(crate) fn tab_override_for_pane_inheritance(&self, tab_idx: usize) -> Option<&str> {
+        let tab = self.tabs.get(tab_idx)?;
+        tab.custom_name.as_deref()
+    }
+
+    /// Whether this workspace's id classifies as a federation-mounted
+    /// mirror. The same non-spoofable check
+    /// `workspace_info()` already uses for `federation_origin`, keyed off
+    /// this client's own trusted `HostKey`, never off anything the remote
+    /// sends. A remote-classified scope short-circuits the resolver at rung
+    /// 1.5 (`mirrored`) and never runs rungs 2-4 against local data.
+    pub(crate) fn is_federation_materialized(&self) -> bool {
+        matches!(
+            crate::remote::federation::id::classify(&self.id),
+            crate::remote::federation::id::IdClass::Remote(_)
         )
     }
 
@@ -1039,6 +1120,11 @@ impl Workspace {
         self.custom_name = Some(name);
     }
 
+    /// Clears the override — see `Tab::clear_custom_name`'s doc.
+    pub fn clear_custom_name(&mut self) {
+        self.custom_name = None;
+    }
+
     #[cfg(test)]
     pub fn resolved_identity_cwd(&self) -> Option<PathBuf> {
         Some(self.identity_cwd.clone())
@@ -1057,29 +1143,31 @@ impl Workspace {
 
     #[cfg(test)]
     pub fn display_name(&self) -> String {
-        if let Some(name) = &self.custom_name {
-            return name.clone();
-        }
-
-        self.automatic_display_name_for_cwd(&self.identity_cwd)
+        let is_remote = self.is_federation_materialized();
+        let derived = (!is_remote).then(|| self.automatic_display_name_for_cwd(&self.identity_cwd));
+        self.resolve_workspace_name(is_remote, derived.as_deref())
+            .map(|resolved| resolved.text.into_owned())
+            .unwrap_or_else(|| "workspace".into())
     }
 
     pub(crate) fn display_name_from_terminals(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
     ) -> String {
-        if let Some(name) = &self.custom_name {
-            return name.clone();
-        }
-
-        let cwd = self
-            .tabs
-            .first()
-            .and_then(|tab| tab.terminal_id(tab.root_pane))
-            .and_then(|terminal_id| terminals.get(terminal_id))
-            .map(|terminal| &terminal.cwd)
-            .unwrap_or(&self.identity_cwd);
-        self.automatic_display_name_for_cwd(cwd)
+        let is_remote = self.is_federation_materialized();
+        let derived = (!is_remote).then(|| {
+            let cwd = self
+                .tabs
+                .first()
+                .and_then(|tab| tab.terminal_id(tab.root_pane))
+                .and_then(|terminal_id| terminals.get(terminal_id))
+                .map(|terminal| &terminal.cwd)
+                .unwrap_or(&self.identity_cwd);
+            self.automatic_display_name_for_cwd(cwd)
+        });
+        self.resolve_workspace_name(is_remote, derived.as_deref())
+            .map(|resolved| resolved.text.into_owned())
+            .unwrap_or_else(|| "workspace".into())
     }
 
     pub fn display_name_from(
@@ -1087,13 +1175,76 @@ impl Workspace {
         terminals: &HashMap<TerminalId, TerminalState>,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> String {
-        if let Some(name) = &self.custom_name {
-            return name.clone();
-        }
+        self.resolved_display_from(terminals, terminal_runtimes).0
+    }
 
-        self.resolved_identity_cwd_from(terminals, terminal_runtimes)
-            .map(|cwd| self.automatic_display_name_for_cwd(&cwd))
-            .unwrap_or_else(|| "workspace".into())
+    /// Resolves the label AND its `NameSource` in one pass. A
+    /// caller that needs both (e.g. `App::workspace_info`, once per
+    /// workspace per frame per client — a multiplicative render path per
+    /// CLAUDE.md) must call this ONCE. It used to be two separate methods
+    /// (`display_name_from` + a since-removed `workspace_name_source_from`)
+    /// called back to back, which ran the whole derivation chain
+    /// (including `resolved_identity_cwd_from`'s `Pane::cwd()`
+    /// mutex-lock-plus-`platform::process_cwd` fallback) twice per call
+    /// site.
+    pub fn resolved_display_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> (String, self::naming::NameSource) {
+        let (is_remote, derived) = self.workspace_derived_for(terminals, terminal_runtimes);
+        match self.resolve_workspace_name(is_remote, derived.as_deref()) {
+            Some(resolved) => (resolved.text.into_owned(), resolved.source),
+            None => ("workspace".into(), self::naming::NameSource::Ordinal),
+        }
+    }
+
+    /// Rung-3 input for the workspace ladder. Restores the rung-1
+    /// short-circuit: a workspace with a user override
+    /// (`custom_name.is_some()`) never needs a derived cwd label at all —
+    /// `resolve_workspace_name` would discard it anyway (rung 1 always
+    /// wins) — so skip `resolved_identity_cwd_from`'s cwd resolution
+    /// (mutex lock, and on a cache miss `platform::process_cwd`) entirely
+    /// rather than paying that cost only to throw the result away.
+    fn workspace_derived_for(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> (bool, Option<String>) {
+        let is_remote = self.is_federation_materialized();
+        if self.custom_name.is_some() {
+            return (is_remote, None);
+        }
+        let derived = if is_remote {
+            None
+        } else {
+            self.resolved_identity_cwd_from(terminals, terminal_runtimes)
+                .map(|cwd| self.automatic_display_name_for_cwd(&cwd))
+        };
+        (is_remote, derived)
+    }
+
+    /// Shared tail of the `display_name*` family: rung 1 (`custom_name`),
+    /// rung 1.5 (`mirrored_name`, remote scopes only), rung 3
+    /// (the caller-supplied `derived` label, local scopes only). Callers
+    /// fall back to the literal `"workspace"` when this returns `None` —
+    /// no rung 4 here, a workspace has no ordinal.
+    fn resolve_workspace_name<'a>(
+        &'a self,
+        is_remote: bool,
+        derived: Option<&'a str>,
+    ) -> Option<self::naming::ResolvedName<'a>> {
+        let sources = self::naming::NameSources {
+            own_override: self.custom_name.as_deref(),
+            mirrored: if is_remote {
+                self.mirrored_name.as_deref()
+            } else {
+                None
+            },
+            derived,
+            ..Default::default()
+        };
+        self::naming::resolve_name(self::naming::NameScope::Workspace, sources)
     }
 
     fn automatic_display_name_for_cwd(&self, cwd: &std::path::Path) -> String {
@@ -1219,6 +1370,9 @@ impl Workspace {
             layout,
             panes,
             runtimes: HashMap::new(),
+            cached_auto_label: None,
+            cached_auto_label_cwd: None,
+            mirrored_name: None,
             zoomed: false,
             events,
             render_notify,
@@ -1229,6 +1383,7 @@ impl Workspace {
         Self {
             id: generate_workspace_id(),
             custom_name: Some(name.to_string()),
+            mirrored_name: None,
             identity_cwd: identity_cwd.clone(),
             cached_identity_cwd: identity_cwd.clone(),
             cached_auto_label: fallback_label_from_cwd(&identity_cwd),
@@ -1275,6 +1430,9 @@ impl Workspace {
             layout,
             panes,
             runtimes: HashMap::new(),
+            cached_auto_label: None,
+            cached_auto_label_cwd: None,
+            mirrored_name: None,
             zoomed: false,
             events,
             render_notify,
@@ -1295,7 +1453,9 @@ impl Workspace {
         let later_pane = ws.test_split(Direction::Horizontal);
 
         let removed_tab = ws.test_add_tab(Some("removed"));
-        let survivor_tab = ws.test_add_tab(None);
+        // M5: a *surviving* renamed tab, so the fixture does not trivially
+        // pass Policy C by having every surviving tab be unnamed.
+        let survivor_tab = ws.test_add_tab(Some("survivor-renamed"));
         let final_tab = ws.test_add_tab(None);
         let survivor_root = ws.tabs[survivor_tab].root_pane;
         let final_root = ws.tabs[final_tab].root_pane;
@@ -1317,6 +1477,21 @@ impl Workspace {
             "adversarial pane must distinguish raw pane id from public pane number"
         );
         assert_eq!(ws.find_tab_index_for_pane(final_root), Some(1));
+
+        // M5: a mirrored-name tab classified `IdClass::Remote`, so the
+        // shape invariant's not-remote-but-mirrored branch is actually
+        // exercised by adversarial state.
+        let mut mirrored_tab = ws.test_add_tab(None);
+        // `test_add_tab` returns the tabs-vec index at insertion time, which
+        // the moves above may have invalidated as a stable identity — look
+        // it up by root pane instead of trusting the returned index.
+        let mirrored_root = ws.tabs[mirrored_tab].root_pane;
+        mirrored_tab = ws
+            .find_tab_index_for_pane(mirrored_root)
+            .expect("mirrored tab should still exist");
+        ws.tabs[mirrored_tab].mirrored_name = Some("remote-mirrored".to_string());
+        ws.id = format!("r:adversarial-host:{}", ws.id);
+
         ws
     }
 
@@ -1457,6 +1632,43 @@ impl Workspace {
             self.next_public_pane_number,
             max_pane_number
         );
+
+        // Shape invariant: a scope carrying `mirrored_name`
+        // classifies IdClass::Remote; a scope that does not classify Remote
+        // never carries a mirrored_name.
+        let ws_is_remote = self.is_federation_materialized();
+        assert!(
+            ws_is_remote || self.mirrored_name.is_none(),
+            "workspace {} is not federation-materialized but carries a mirrored_name",
+            self.id
+        );
+        for (tab_idx, tab) in self.tabs.iter().enumerate() {
+            assert!(
+                ws_is_remote || tab.mirrored_name.is_none(),
+                "workspace {} tab {} is not federation-materialized but carries a mirrored_name",
+                self.id,
+                tab_idx
+            );
+        }
+
+        // Resolution invariant: no two auto-named tabs (tabs with no
+        // rung-1 override of their own) in one workspace may resolve to the
+        // same displayed string — `apply_tab_label_distinctness` exists
+        // specifically to guarantee this at the cache-write boundary.
+        let mut auto_named_labels = std::collections::HashMap::new();
+        for tab_idx in 0..self.tabs.len() {
+            if !self.tabs[tab_idx].is_auto_named() {
+                continue;
+            }
+            if let Some(label) = self.tab_display_name(tab_idx) {
+                if let Some(previous_idx) = auto_named_labels.insert(label.clone(), tab_idx) {
+                    panic!(
+                        "workspace {} auto-named tabs {} and {} both resolve to {:?}",
+                        self.id, previous_idx, tab_idx, label
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1680,6 +1892,10 @@ mod tests {
         );
     }
 
+    /// R4: labels for auto-named tabs must track the stable public
+    /// `tab.number`, not array position — see
+    /// `tab_display_name_uses_public_tab_number_not_index` below, which
+    /// pins the same rule at the label-resolution level.
     #[test]
     fn moving_tab_keeps_active_identity_and_stable_tab_numbers() {
         let mut ws = Workspace::test_new("test");
@@ -1694,7 +1910,7 @@ mod tests {
         let labels: Vec<_> = (0..ws.tabs.len())
             .map(|tab_idx| ws.tab_display_name(tab_idx).unwrap())
             .collect();
-        assert_eq!(labels, vec!["foo", "2", "3"]);
+        assert_eq!(labels, vec!["foo", "3", "1"]);
         assert_eq!(ws.tabs[0].custom_name.as_deref(), Some("foo"));
         assert!(ws.tabs[1].custom_name.is_none());
         assert!(ws.tabs[2].custom_name.is_none());
@@ -1704,5 +1920,173 @@ mod tests {
         assert_eq!(ws.tabs[2].root_pane, moved_root);
         assert_eq!(ws.tabs[ws.active_tab].root_pane, active_root);
         ws.assert_invariants_for_test();
+    }
+
+    /// Policy C, rung 4: the fallback ordinal comes from
+    /// `public_tab_number(tab_idx)`, the stable public ordinal, never from
+    /// `tab_idx + 1`, the array position. After a move the labels must
+    /// therefore track the *numbers* `["foo", "3", "1"]`, not the
+    /// *positions* `["foo", "2", "3"]`.
+    #[test]
+    fn tab_display_name_uses_public_tab_number_not_index() {
+        let mut ws = Workspace::test_new("test");
+        ws.test_add_tab(Some("foo"));
+        let final_auto_idx = ws.test_add_tab(None);
+        ws.switch_tab(final_auto_idx);
+
+        assert!(ws.move_tab(0, ws.tabs.len()));
+
+        // Numbers are stable identity and diverge from array position:
+        // moving tab 0 to the end leaves the public numbers [2, 3, 1] while
+        // the array positions are [0, 1, 2].
+        assert_eq!(ws.tabs[0].number, 2);
+        assert_eq!(ws.tabs[1].number, 3);
+        assert_eq!(ws.tabs[2].number, 1);
+
+        let labels: Vec<_> = (0..ws.tabs.len())
+            .map(|tab_idx| ws.tab_display_name(tab_idx).unwrap())
+            .collect();
+        // Auto-named tabs at positions 1 and 2 report their stable public
+        // numbers ("3" and "1"), not their 1-based array positions.
+        assert_eq!(labels, vec!["foo", "3", "1"]);
+        assert_eq!(
+            labels[1],
+            ws.public_tab_number(1).unwrap().to_string(),
+            "the label at position 1 must equal its public number"
+        );
+        assert_eq!(
+            labels[2],
+            ws.public_tab_number(2).unwrap().to_string(),
+            "the label at position 2 must equal its public number"
+        );
+    }
+
+    /// The workspace name ladder short-circuits
+    /// on `custom_name` (rung 1) at all three entry points
+    /// (`display_name`/`display_name_from_terminals`/`display_name_from`,
+    /// :1059/:1067/:1085), and only when it is `None` does
+    /// `automatic_display_name_for_cwd` (:1099) consult the cache: the
+    /// admitted `cached_auto_label` when the queried cwd equals
+    /// `cached_identity_cwd`, else `fallback_label_from_cwd` on the raw cwd.
+    #[test]
+    fn char_workspace_name_ladder_override_then_cached_auto_then_fallback() {
+        let mut ws = Workspace::test_new("override-name");
+        let root_pane = ws.tabs[0].root_pane;
+        let terminal_id = ws.tabs[0].terminal_id(root_pane).unwrap().clone();
+        ws.cached_identity_cwd = PathBuf::from("/cached/repo");
+        ws.cached_auto_label = "cached-repo".into();
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+
+        // Rung 1: an override wins over everything below it, regardless of
+        // what the cache or terminal cwd say.
+        let terminals_matching_cache = HashMap::from([(
+            terminal_id.clone(),
+            TerminalState::new(terminal_id.clone(), PathBuf::from("/cached/repo")),
+        )]);
+        assert_eq!(ws.display_name(), "override-name");
+        assert_eq!(
+            ws.display_name_from_terminals(&terminals_matching_cache),
+            "override-name"
+        );
+        assert_eq!(
+            ws.display_name_from(&terminals_matching_cache, &terminal_runtimes),
+            "override-name"
+        );
+
+        // Clear the override: cwd == cached_identity_cwd hits the cached
+        // auto label (no filesystem re-check).
+        ws.custom_name = None;
+        ws.identity_cwd = PathBuf::from("/cached/repo");
+        assert_eq!(ws.display_name(), "cached-repo");
+        assert_eq!(
+            ws.display_name_from_terminals(&terminals_matching_cache),
+            "cached-repo"
+        );
+        assert_eq!(
+            ws.display_name_from(&terminals_matching_cache, &terminal_runtimes),
+            "cached-repo"
+        );
+
+        // A cwd that does NOT match the cached identity cwd falls through
+        // to `fallback_label_from_cwd` — the basename, not the cache.
+        let terminals_diverging = HashMap::from([(
+            terminal_id.clone(),
+            TerminalState::new(terminal_id, PathBuf::from("/elsewhere/other-repo")),
+        )]);
+        assert_eq!(
+            ws.display_name_from_terminals(&terminals_diverging),
+            "other-repo"
+        );
+        assert_eq!(
+            ws.display_name_from(&terminals_diverging, &terminal_runtimes),
+            "other-repo"
+        );
+    }
+
+    /// A mounted workspace whose remote cwd string
+    /// *also* happens to name a real git root on this local machine (the
+    /// `cached_auto_label` / cwd-derivation hazard `identity_cwd` and
+    /// `automatic_display_name_for_cwd` share) must never let that local
+    /// coincidence leak into the resolved name. `is_federation_materialized`
+    /// gates rung 3 off entirely for a Remote-classified scope, so only
+    /// `custom_name` (rung 1) or `mirrored_name` (rung 1.5) can ever win.
+    #[test]
+    fn mounted_workspace_with_a_locally_valid_remote_cwd_resolves_to_the_mirrored_label() {
+        let mut ws = Workspace::test_new("mounted");
+        ws.id = format!("r:mounted-host:{}", ws.id);
+        ws.custom_name = None;
+        ws.mirrored_name = Some("remote workspace".to_string());
+        // The local cache is populated with a real-looking local git root
+        // that happens to share a name with something the remote might
+        // report — simulating the hazard workspace.rs:283-286 describes.
+        ws.cached_identity_cwd = PathBuf::from("/home/alice/project");
+        ws.cached_auto_label = "project".to_string();
+        ws.identity_cwd = PathBuf::from("/home/alice/project");
+
+        assert!(ws.is_federation_materialized());
+        assert_eq!(
+            ws.display_name(),
+            "remote workspace",
+            "a locally-valid cached auto label must never leak into a mounted scope's name"
+        );
+    }
+
+    /// M3: `Workspace::test_new` unconditionally sets
+    /// `custom_name: Some(name)` (:1231), so every test workspace built
+    /// with it is already a *renamed* workspace. R1 (inheritance is
+    /// tab -> pane only, never workspace -> tab) depends on this fact: if
+    /// `test_new` ever stopped setting an override, any test relying on
+    /// R1's guard would pass for the wrong reason.
+    #[test]
+    fn char_test_new_workspace_is_a_renamed_workspace() {
+        let ws = Workspace::test_new("my-workspace");
+        assert_eq!(ws.custom_name.as_deref(), Some("my-workspace"));
+        assert_eq!(
+            ws.identity_cwd,
+            std::env::current_dir().unwrap_or_else(|_| "/".into())
+        );
+    }
+
+    /// `move_tab` reassigns array positions but leaves each tab's public
+    /// `number` untouched, so after a move the two diverge. This is the
+    /// underlying fact that both `tab_display_name` (above) and the
+    /// resolver's rung 4 depend on.
+    #[test]
+    fn char_public_tab_numbers_diverge_from_indexes_after_move() {
+        let mut ws = Workspace::test_new("test");
+        ws.test_add_tab(Some("foo"));
+        ws.test_add_tab(None);
+
+        assert!(ws.move_tab(0, ws.tabs.len()));
+
+        let numbers: Vec<_> = (0..ws.tabs.len())
+            .map(|idx| ws.public_tab_number(idx).unwrap())
+            .collect();
+        let indexes: Vec<_> = (0..ws.tabs.len()).map(|idx| idx + 1).collect();
+        assert_eq!(numbers, vec![2, 3, 1]);
+        assert_ne!(
+            numbers, indexes,
+            "public tab numbers must diverge from 1-based array positions after a move"
+        );
     }
 }

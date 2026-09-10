@@ -17,6 +17,12 @@ use super::{
 pub struct GitStatusRefreshDemand {
     pub branch: bool,
     pub ahead_behind: bool,
+    /// P3 — set whenever any workspace or tab is auto-named, so the ~1.5s
+    /// refresh pass keeps running (and so `Tab::cached_auto_label` keeps
+    /// refreshing) even for a sidebar config with neither `Branch` nor
+    /// `GitStatus` tokens. Never gates a git subprocess call by itself —
+    /// only `is_empty()` reads it, to keep `git_refresh_deadline` alive.
+    pub auto_names: bool,
 }
 
 impl GitStatusRefreshDemand {
@@ -24,10 +30,11 @@ impl GitStatusRefreshDemand {
     pub const ALL: Self = Self {
         branch: true,
         ahead_behind: true,
+        auto_names: true,
     };
 
     pub fn is_empty(self) -> bool {
-        !self.branch && !self.ahead_behind
+        !self.branch && !self.ahead_behind && !self.auto_names
     }
 }
 
@@ -437,6 +444,7 @@ mod tests {
             GitStatusRefreshDemand {
                 branch: true,
                 ahead_behind: false,
+                auto_names: false,
             },
         );
 

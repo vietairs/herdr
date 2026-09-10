@@ -883,6 +883,7 @@ fn copy_mode_survives_mouse_motion_and_parks_across_focus_changes() {
         workspace_id: "ws_1".into(),
         tab_id: "tab_1".into(),
         label: None,
+        name_source: Default::default(),
         cwd: Some("/repo".into()),
         foreground_cwd: Some("/repo".into()),
         focused: true,

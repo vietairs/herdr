@@ -740,6 +740,13 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                 // remount within one session, matching the rest of this
                 // module's fencing scope), so this is safe as-is.
                 let mount = mirror.mount().clone();
+                // Whether this mount's peer states it reports
+                // `PaneInfo::name_source` at all; the pane materialization
+                // below may only narrow a label by that field when it does.
+                // Read before the diff borrows the mirror — the agreed set is
+                // fixed for the life of the connection anyway.
+                let peer_reports_name_source =
+                    mirror.supports(&Capability::new(Capability::PANE_NAME_SOURCE));
                 let diff = mirror.reconcile_by_diff(&snapshot, cursor, hub);
                 // Post-mount pane mirroring fix, part 2
                 // (plans/260722-1327): splice a newly-resynced remote pane
@@ -795,6 +802,7 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                             outbound_clipboard_tx,
                             ctx,
                             pane_info,
+                            peer_reports_name_source,
                         )
                         .await;
                     }
@@ -1387,6 +1395,7 @@ async fn materialize_resync_pane(
     outbound_clipboard_tx: &mpsc::UnboundedSender<ClipboardMessage>,
     ctx: &SplitMaterializationContext,
     pane_info: crate::api::schema::panes::PaneInfo,
+    peer_reports_name_source: bool,
 ) {
     let raw_terminal_id = super::id::strip_mount_namespace(mount, &pane_info.terminal_id);
     let output_rx = router.open_terminal(raw_terminal_id.clone(), generation, out_tx);
@@ -1420,7 +1429,27 @@ async fn materialize_resync_pane(
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|| std::path::PathBuf::from("/")),
             );
-            terminal.manual_label = pane_info.label.clone();
+            // Single-write: the resolver's rung 1.5 reads
+            // `mirrored_label`; `manual_label` stays the pane's own rung-1
+            // override slot, which no remote-resolved string may occupy.
+            // Only a name the remote actually set is mirrored, so the
+            // remote's live agent identity is not frozen at resync time.
+            //
+            // That narrowing is only legible against a peer that reports
+            // which rung produced the label: `PaneInfo::name_source` is
+            // `#[serde(default)]` with an `Ordinal` default, so a peer built
+            // before the field existed sends nothing and reading the result
+            // would treat an absence as a fact that peer never asserted.
+            // Such a peer fills `label` from a pane's own override slot and
+            // from nothing else, so mirror its labels as-is.
+            terminal.mirrored_label = if peer_reports_name_source {
+                crate::workspace::naming::label_worth_mirroring(
+                    pane_info.label.as_deref(),
+                    pane_info.name_source,
+                )
+            } else {
+                pane_info.label.clone()
+            };
             let pane_state = crate::pane::PaneState::new(terminal_id.clone());
             let ready = crate::events::FederationResyncPaneCreated {
                 origin: ctx.origin.clone(),
@@ -2136,6 +2165,7 @@ mod tests {
                 cwd: None,
                 foreground_cwd: None,
                 label: None,
+                name_source: crate::workspace::naming::NameSource::default(),
                 agent: None,
                 title: None,
                 terminal_title: None,
@@ -2311,6 +2341,7 @@ mod tests {
                 cwd: None,
                 foreground_cwd: None,
                 label: None,
+                name_source: crate::workspace::naming::NameSource::default(),
                 agent: None,
                 title: None,
                 terminal_title: None,
@@ -2434,6 +2465,7 @@ mod tests {
                 cwd: None,
                 foreground_cwd: None,
                 label: None,
+                name_source: crate::workspace::naming::NameSource::default(),
                 agent: None,
                 title: None,
                 terminal_title: None,
@@ -2715,6 +2747,7 @@ mod tests {
                 cwd: None,
                 foreground_cwd: None,
                 label: None,
+                name_source: crate::workspace::naming::NameSource::default(),
                 agent: None,
                 title: None,
                 terminal_title: None,
@@ -2883,6 +2916,7 @@ mod tests {
                 cwd: None,
                 foreground_cwd: None,
                 label: None,
+                name_source: crate::workspace::naming::NameSource::default(),
                 agent: None,
                 title: None,
                 terminal_title: None,
@@ -3012,6 +3046,7 @@ mod tests {
                     cwd: None,
                     foreground_cwd: None,
                     label: None,
+                    name_source: crate::workspace::naming::NameSource::default(),
                     agent: None,
                     title: None,
                     terminal_title: None,

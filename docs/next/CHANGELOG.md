@@ -8,6 +8,24 @@
 ### Fixed
 - Closing a pane on Windows now actually stops its child process. The shutdown ladder opened each process without the access right `TerminateProcess` requires, so every terminate silently failed and the child outlived the pane.
 
+### Changed
+- Workspace, tab, and agent names now resolve through one shared precedence chain: a name you
+  typed, then (for a mounted remote scope) a mirrored name from the serving host, then the
+  agent's identity, then the project directory or git root, then the tab number. Auto-named tabs
+  now show the directory they sit in rather than a position, and they report the tab's stable
+  number instead of its current position when no directory resolves — a tab you moved no longer
+  changes its own name. Renaming a tab renames the agents inside it that you have not named
+  yourself; the name you type into `herdr agent send` is unchanged. Renaming a workspace does not
+  rename its tabs.
+- Renaming a workspace or tab that belongs to a mounted remote machine applies on this machine
+  only. It is not sent to the other host, is not saved, and is lost when the mount is re-created.
+- The server/client protocol version moved from 23 to 24, because workspaces and tabs now report
+  where their name came from instead of a plain "renamed" flag. After upgrading, restart the
+  Herdr server (`herdr server stop`, then start Herdr again) so the running server and the
+  installed CLI speak the same protocol; until then CLI commands report a client/server version
+  mismatch. The federation protocol version is unchanged at 7, so mounts to hosts running 0.9.0
+  keep working.
+
 ## [0.9.0] - 2026-09-07
 
 ### Added

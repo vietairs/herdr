@@ -3176,6 +3176,10 @@ command = ["show-ctx"]
         assert_eq!(context.workspace_label.as_deref(), Some("Plugin Work"));
         assert_eq!(context.workspace_cwd.as_deref(), Some("/tmp/issue"));
         assert_eq!(context.tab_id.as_deref(), Some(tab_public.as_str()));
+        // This fixture never runs the git-refresh pass, so the tab has no
+        // `cached_auto_label` and rung 3 does not fire — the resolver falls
+        // through to rung 4's `public_tab_number`, which is "1" for this
+        // workspace's first (and only) tab.
         assert_eq!(context.tab_label.as_deref(), Some("1"));
         assert_eq!(
             context.focused_pane_id.as_deref(),

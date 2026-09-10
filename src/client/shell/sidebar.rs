@@ -607,17 +607,18 @@ pub(in crate::client::shell) fn workspace_rows(
     indented: bool,
     config: &SpacesSidebarConfig,
 ) -> Vec<Vec<crate::ui::ResolvedToken>> {
-    let label = if indented && !workspace.custom_label {
-        workspace
-            .branch
-            .as_deref()
-            .and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
-            .unwrap_or(&workspace.label)
-    } else {
-        &workspace.label
-    };
-    // Badge prefix is applied independent of the `custom_label`/branch
-    // substitution above, so a spoofed custom label can never suppress it.
+    let label =
+        if indented && workspace.name_source != crate::workspace::naming::NameSource::Override {
+            workspace
+                .branch
+                .as_deref()
+                .and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
+                .unwrap_or(&workspace.label)
+        } else {
+            &workspace.label
+        };
+    // Badge prefix is applied independent of the `name_source`/branch
+    // substitution above, so a spoofed name_source can never suppress it.
     let labeled;
     let label = match federation_origin_badge(workspace) {
         Some(badge) => {
@@ -762,6 +763,7 @@ mod federation_badge_tests {
             new_workspace_cwd: "/repo".into(),
             number: 1,
             label: "herdr-checkout".into(),
+            name_source: crate::workspace::naming::NameSource::Ordinal,
             custom_label: false,
             branch: None,
             git_ahead_behind: None,
@@ -810,15 +812,15 @@ mod federation_badge_tests {
 
     /// RT-F8/S11.4 anti-spoof property, ported from the pre-migration
     /// `ui::sidebar` unit test of the same name: `federation_origin` is a
-    /// server-populated runtime fact, and a `custom_label`/spoofed label can
-    /// never suppress the badge because the badge prefix is applied after —
-    /// and independent of — the `custom_label`/branch-substitution label
+    /// server-populated runtime fact, and a spoofed `name_source` can never
+    /// suppress the badge because the badge prefix is applied after — and
+    /// independent of — the `name_source`/branch-substitution label
     /// selection above it.
     #[test]
-    fn spoofed_custom_label_does_not_hide_the_remote_badge() {
+    fn spoofed_name_source_does_not_hide_the_remote_badge() {
         let mut workspace = base_workspace();
         workspace.label = "definitely-local-workspace".to_string();
-        workspace.custom_label = true;
+        workspace.name_source = crate::workspace::naming::NameSource::Override;
         workspace.federation_origin = Some("alice@10.0.0.1".to_string());
         let config = SpacesSidebarConfig::default();
 
@@ -826,18 +828,19 @@ mod federation_badge_tests {
         let label = workspace_token_text(&rows).expect("workspace token must be present");
         assert!(
             label.starts_with('\u{2601}'),
-            "badge must survive a spoofed custom label, got {label:?}"
+            "badge must survive a spoofed name_source, got {label:?}"
         );
         assert!(label.contains("definitely-local-workspace"));
     }
 
     /// Grouped/indented children substitute the label from `branch` when
-    /// `custom_label` is false (see `workspace_rows`) — the badge must still
-    /// prefix the *result* of that substitution, not just a raw label.
+    /// `name_source` is not `Override` (see `workspace_rows`) — the badge
+    /// must still prefix the *result* of that substitution, not just a raw
+    /// label.
     #[test]
     fn indented_grouped_child_badge_survives_branch_label_substitution() {
         let mut workspace = base_workspace();
-        workspace.custom_label = false;
+        workspace.name_source = crate::workspace::naming::NameSource::Ordinal;
         workspace.branch = Some("worktree/feature".to_string());
         workspace.federation_origin = Some("alice@10.0.0.1".to_string());
         let config = SpacesSidebarConfig::default();

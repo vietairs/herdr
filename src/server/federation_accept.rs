@@ -103,6 +103,11 @@ fn federation_capabilities() -> BTreeSet<Capability> {
         // Gates `WorkspaceCloseRequest`/`TabCloseRequest`; see the constant's
         // doc comment for why this needs no protocol-version bump.
         Capability::new(Capability::WORKSPACE_TAB_CLOSE),
+        // States that the `PaneInfo` this host serves reports
+        // `name_source`, so a mounting peer may read that field's absence as
+        // absent rather than as the `Ordinal` its `serde` default would
+        // otherwise manufacture; see the constant's doc comment.
+        Capability::new(Capability::PANE_NAME_SOURCE),
     ]
     .into_iter()
     .collect()

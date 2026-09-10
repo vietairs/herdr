@@ -61,7 +61,16 @@ pub(super) fn snapshot(
                     .to_string(),
                 number: workspace.number,
                 label: workspace.label,
-                custom_label: state.custom_name.is_some(),
+                name_source: workspace.name_source,
+                // Derived from the very rung that produced `label`, so the
+                // deprecated flag keeps carrying exactly what it carried
+                // before `name_source` existed. Reading `custom_name`
+                // directly here would silently report `false` for a
+                // federation-mounted scope, whose remote label now lives in
+                // the mirror slot instead of the override slot — and an
+                // older client that filters on this flag would drop the
+                // mounted label entirely.
+                custom_label: workspace.name_source.is_explicitly_named(),
                 // A federated workspace has no local git repository to
                 // probe: `state.branch()` reads locally-cached git metadata
                 // that nothing populates for a federated workspace's
@@ -105,7 +114,11 @@ pub(super) fn snapshot(
                 workspace_id: tab.workspace_id,
                 number: tab.number,
                 label: tab.label,
-                custom_label: !state.is_auto_named(),
+                name_source: tab.name_source,
+                // Same derivation as the workspace above, and for the same
+                // reason: a mounted tab's label lives in the mirror slot,
+                // so `is_auto_named()` would report it as auto.
+                custom_label: tab.name_source.is_explicitly_named(),
                 zoomed: state.zoomed,
                 agent_status: tab.agent_status,
             }
@@ -131,6 +144,7 @@ pub(super) fn snapshot(
                 workspace_id: pane.workspace_id,
                 tab_id: pane.tab_id,
                 label: pane.label,
+                name_source: pane.name_source,
                 cwd: pane.cwd,
                 foreground_cwd: pane.foreground_cwd,
                 focused,
@@ -153,6 +167,8 @@ pub(super) fn snapshot(
                 workspace_id: agent.workspace_id,
                 tab_id: agent.tab_id,
                 name: agent.name,
+                label: agent.label,
+                name_source: agent.name_source,
                 display_agent: agent.display_agent,
                 agent: agent.agent,
                 title: agent.title,
@@ -464,11 +480,17 @@ fn render_popup_surface(
     let (buffer, cursor) =
         crate::server::render_stream::render_terminal_virtual(runtime, content_area);
     let hyperlinks = runtime.visible_hyperlinks(content_area);
+    // A popup pane belongs to no tab (`PopupPaneState` carries no tab
+    // context), so it degrades to the pane-only ladder: its own override,
+    // then its agent identity, then the literal "popup" — never a tab
+    // inheritance lookup. See `src/workspace/naming.rs`'s module doc.
     let title = app
         .state
         .terminals
         .get(&popup.terminal_id)
-        .and_then(|terminal| terminal.manual_label.clone())
+        .and_then(|terminal| {
+            terminal.border_label(app.state.show_agent_labels_on_pane_borders, None)
+        })
         .unwrap_or_else(|| "popup".to_owned());
     let (pixel_width, pixel_height) = if cell_size.is_known() {
         (
@@ -581,6 +603,7 @@ fn split_hit_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::Workspace;
 
     #[test]
     fn snapshot_projects_cached_release_and_update_facts() {
@@ -676,6 +699,290 @@ mod tests {
         assert_eq!(
             snapshot.recent_remote_mount_targets,
             vec!["host-b".to_string(), "host-a".to_string()]
+        );
+    }
+
+    fn test_app() -> crate::app::App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
+
+    /// Policy C / M2: the tab loop at :90-99 zips `snapshot.tabs`
+    /// (API-shaped) positionally against a fresh `workspace.tabs`
+    /// traversal, unguarded by any id check. Two workspaces x two tabs, one
+    /// tab renamed, asserted pairwise against `AppState` directly
+    /// (workspace_id, label, name_source) — not just a count — so any later
+    /// change that reorders or filters either side trips this test instead
+    /// of silently misattributing a tab's rename to its neighbor.
+    #[test]
+    fn char_client_shell_tabs_pair_with_their_own_workspace_tab() {
+        let mut app = test_app();
+        let mut ws1 = Workspace::test_new("ws1");
+        let ws1_second_tab = ws1.test_add_tab(None);
+        ws1.tabs[ws1_second_tab].set_custom_name("renamed-tab".to_string());
+        let ws1_id = ws1.id.clone();
+
+        let mut ws2 = Workspace::test_new("ws2");
+        ws2.test_add_tab(None);
+        let ws2_id = ws2.id.clone();
+
+        app.state.workspaces = vec![ws1, ws2];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let snap = snapshot(&app, "boot", 1, None, None);
+
+        let expected: Vec<(&str, String, crate::workspace::naming::NameSource, bool)> = app
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|ws| {
+                let ws_id = ws.id.as_str();
+                ws.tabs.iter().enumerate().map(move |(idx, tab)| {
+                    let (label, name_source) = ws.resolved_tab_display(idx).unwrap();
+                    (ws_id, label, name_source, tab.zoomed)
+                })
+            })
+            .collect();
+
+        assert_eq!(snap.tabs.len(), expected.len());
+        assert_eq!(snap.tabs.len(), 4);
+        for (client_tab, (ws_id, label, name_source, zoomed)) in
+            snap.tabs.iter().zip(expected.iter())
+        {
+            assert_eq!(&client_tab.workspace_id, ws_id);
+            assert_eq!(&client_tab.label, label);
+            assert_eq!(client_tab.name_source, *name_source);
+            assert_eq!(client_tab.zoomed, *zoomed);
+        }
+        assert_eq!(snap.tabs[0].workspace_id, ws1_id);
+        assert_eq!(snap.tabs[1].workspace_id, ws1_id);
+        assert_eq!(snap.tabs[2].workspace_id, ws2_id);
+        assert_eq!(snap.tabs[3].workspace_id, ws2_id);
+        assert_ne!(
+            snap.tabs[0].name_source,
+            crate::workspace::naming::NameSource::Override
+        );
+        assert_eq!(
+            snap.tabs[1].name_source,
+            crate::workspace::naming::NameSource::Override
+        );
+        assert_eq!(snap.tabs[1].label, "renamed-tab");
+        assert_ne!(
+            snap.tabs[2].name_source,
+            crate::workspace::naming::NameSource::Override
+        );
+        assert_ne!(
+            snap.tabs[3].name_source,
+            crate::workspace::naming::NameSource::Override
+        );
+    }
+
+    /// `name_source: NameSource` on both wire structs lets a client tell a
+    /// real override apart from every other rung. The `custom_label: bool`
+    /// it supersedes (workspace :64, tab :108) was exactly
+    /// `custom_name.is_some()` / `!is_auto_named()` — a one-bit projection
+    /// of "has an override" that collapsed every other rung into "false".
+    #[test]
+    fn name_source_distinguishes_override_from_every_other_rung() {
+        let mut app = test_app();
+        let ws_named = Workspace::test_new("named-ws");
+        let mut ws_auto = Workspace::test_new("ignored");
+        ws_auto.custom_name = None;
+        let named_tab_idx = ws_auto.test_add_tab(Some("named-tab"));
+        let auto_tab_idx = ws_auto.test_add_tab(None);
+        assert!(named_tab_idx > 0 && auto_tab_idx > named_tab_idx);
+
+        app.state.workspaces = vec![ws_named, ws_auto];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let snap = snapshot(&app, "boot", 1, None, None);
+
+        assert_eq!(
+            snap.workspaces[0].name_source,
+            crate::workspace::naming::NameSource::Override,
+            "named workspace"
+        );
+        assert_ne!(
+            snap.workspaces[1].name_source,
+            crate::workspace::naming::NameSource::Override,
+            "auto workspace"
+        );
+
+        // ws_auto's own three tabs: root tab (auto), "named-tab" (override),
+        // trailing auto tab.
+        let ws_auto_tabs = &snap.tabs[1..4];
+        assert_ne!(
+            ws_auto_tabs[0].name_source,
+            crate::workspace::naming::NameSource::Override,
+            "root tab is auto-named"
+        );
+        assert_eq!(
+            ws_auto_tabs[1].name_source,
+            crate::workspace::naming::NameSource::Override,
+            "explicitly named tab"
+        );
+        assert_ne!(
+            ws_auto_tabs[2].name_source,
+            crate::workspace::naming::NameSource::Override,
+            "trailing auto tab"
+        );
+    }
+
+    /// A mounted scope's wire `name_source` is `Mirrored`, never
+    /// `Override`, even though its label came from the remote and not from
+    /// this user. That follows from the mount path single-writing to
+    /// `mirrored_name` and never `custom_name` (creation.rs:562-563, :744);
+    /// writing the remote's own label into the override slot instead made a
+    /// freshly mounted workspace and tab report `custom_label: true` by
+    /// accident, whether or not the remote user had ever renamed
+    /// anything.
+    #[test]
+    fn mounted_scopes_report_mirrored_not_override() {
+        let mut app = test_app();
+        let mut ws = Workspace::test_new("ignored");
+        // A materialized federation workspace's id always carries the
+        // `r:<host_key>:` namespace prefix (creation.rs:571); classify
+        // confirms this fixture is shaped the same way a real mount is.
+        ws.id = "r:alice@10.0.0.1#s1:w1".to_string();
+        assert!(matches!(
+            crate::remote::federation::id::classify(&ws.id),
+            crate::remote::federation::id::IdClass::Remote(_)
+        ));
+        // Single-write: the mount path sets `mirrored_name`, never
+        // `custom_name`.
+        ws.custom_name = None;
+        ws.mirrored_name = Some("remote workspace".to_string());
+        ws.tabs[0].custom_name = None;
+        ws.tabs[0].mirrored_name = Some("remote tab".to_string());
+
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let snap = snapshot(&app, "boot", 1, None, None);
+
+        assert_eq!(
+            snap.workspaces[0].name_source,
+            crate::workspace::naming::NameSource::Mirrored,
+            "a mounted workspace reports Mirrored, not Override, though nobody \
+             renamed it locally"
+        );
+        assert_eq!(
+            snap.tabs[0].name_source,
+            crate::workspace::naming::NameSource::Mirrored,
+            "a mounted tab reports Mirrored, not Override, though nobody renamed \
+             it locally"
+        );
+    }
+
+    /// The deprecated one-bit override flag must keep reporting `true` for
+    /// a federation-mounted scope. Before the naming ladder existed the
+    /// mount path wrote the remote's label into the override slot, so the
+    /// flag read `true`; the label now lives in the mirror slot instead,
+    /// and a deployed client that filters on this flag would silently drop
+    /// mounted labels if it started reading `false`.
+    #[test]
+    fn mounted_scopes_still_report_the_override_flag() {
+        let mut app = test_app();
+        let mut ws = Workspace::test_new("ignored");
+        ws.id = "r:alice@10.0.0.1#s1:w1".to_string();
+        ws.custom_name = None;
+        ws.mirrored_name = Some("remote workspace".to_string());
+        ws.tabs[0].custom_name = None;
+        ws.tabs[0].mirrored_name = Some("remote tab".to_string());
+
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let snap = snapshot(&app, "boot", 1, None, None);
+
+        assert!(
+            snap.workspaces[0].custom_label,
+            "a mounted workspace carries a name somebody set, on the remote"
+        );
+        assert!(
+            snap.tabs[0].custom_label,
+            "a mounted tab carries a name somebody set, on the remote"
+        );
+    }
+
+    /// The same flag must stay `false` for a scope whose label is derived
+    /// locally, exactly as it was before the ladder existed.
+    #[test]
+    fn derived_scopes_do_not_report_the_override_flag() {
+        let mut app = test_app();
+        let mut ws = Workspace::test_new("ignored");
+        ws.custom_name = None;
+        ws.tabs[0].custom_name = None;
+
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let snap = snapshot(&app, "boot", 1, None, None);
+
+        assert!(!snap.workspaces[0].custom_label);
+        assert!(!snap.tabs[0].custom_label);
+    }
+
+    /// The popup pane title (:471) is the legitimately scope-less resolve
+    /// — a `PopupPaneState` belongs to no tab, so its title is
+    /// `manual_label` or the literal `"popup"`, never an inherited tab
+    /// label. That degrade is deliberate (documented in `naming.rs`, not an
+    /// oversight at the call site).
+    #[tokio::test]
+    async fn char_popup_pane_title_is_manual_label_only() {
+        let mut app = test_app();
+        let pane_id = crate::layout::PaneId::alloc();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let mut terminal = crate::terminal::TerminalState::new(
+            terminal_id.clone(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        terminal.manual_label = Some("popup title".to_string());
+        app.state.terminals.insert(terminal_id.clone(), terminal);
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        app.state.popup_pane = Some(crate::app::state::PopupPaneState {
+            pane_id,
+            terminal_id: terminal_id.clone(),
+            width: None,
+            height: None,
+        });
+
+        let area = Rect::new(0, 0, 80, 24);
+        let cell_size = crate::kitty_graphics::HostCellSize {
+            width_px: 0,
+            height_px: 0,
+        };
+
+        let surface = render_popup_surface(&app, area, false, cell_size)
+            .expect("popup surface must render with a registered runtime and popup state");
+        assert_eq!(surface.title, "popup title");
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .manual_label = None;
+        let surface = render_popup_surface(&app, area, false, cell_size).unwrap();
+        assert_eq!(
+            surface.title, "popup",
+            "no manual_label falls back to the literal \"popup\", never a tab label"
         );
     }
 

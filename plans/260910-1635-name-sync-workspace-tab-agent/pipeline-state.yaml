@@ -1,0 +1,586 @@
+{
+  "version": 2,
+  "task": "auto-sync workspace/tab/agent names with cwd; propagate tab rename to agent name",
+  "created_at": "2026-09-10T06:40:54Z",
+  "updated_at": "2026-09-10T11:31:20Z",
+  "route_revisions": [
+    {
+      "revision": 1,
+      "route": "R5",
+      "reason": "initial",
+      "at": "2026-09-10T06:40:54Z",
+      "stages": [
+        {
+          "skill": "/ak-worktree",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/hvn:blindspot",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/ak-brainstorm --html",
+          "delegated": true,
+          "artifact_gate": true
+        },
+        {
+          "skill": "/ak-predict",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/ak-plan --tdd --parallel",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/ak-plan validate",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/hvn:impl-notes init",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/ak-cook --auto --parallel",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/hvn:impl-notes review",
+          "delegated": false,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/ak-code-review",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/hvn:ship-gate",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/ak-ship",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/ak-review-pr --fix --reply",
+          "delegated": true,
+          "artifact_gate": false
+        },
+        {
+          "skill": "/ak-docs",
+          "delegated": true,
+          "artifact_gate": false
+        }
+      ],
+      "prev_hash": "",
+      "hash": "51ee84e92745b609ad04211cfbefd45bb8f9f2fa6bb8394dd5561d4d18cebc82"
+    }
+  ],
+  "active_revision": 1,
+  "stages": [
+    {
+      "index": 1,
+      "skill": "/ak-worktree",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "done",
+      "dispatch_attempts": 1,
+      "worker_report": "pipeline-progress.md",
+      "worker_report_snapshot": {
+        "sha256": "d51015c9a7d52279330919a395862e141ef9cafef31a458eed837218557a0dff",
+        "size": 2390,
+        "at": "2026-09-10T06:54:12Z"
+      },
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": [
+        {
+          "seq": 1,
+          "at": "2026-09-10T06:54:05Z",
+          "from": "pending",
+          "to": "assigned",
+          "note": "worktree created in main loop"
+        },
+        {
+          "seq": 2,
+          "at": "2026-09-10T06:54:05Z",
+          "from": "assigned",
+          "to": "dispatched",
+          "note": "worktree created in main loop"
+        },
+        {
+          "seq": 3,
+          "at": "2026-09-10T06:54:05Z",
+          "from": "dispatched",
+          "to": "running",
+          "note": "worktree created in main loop"
+        },
+        {
+          "seq": 8,
+          "at": "2026-09-10T06:54:12Z",
+          "from": "running",
+          "to": "verifying"
+        },
+        {
+          "seq": 9,
+          "at": "2026-09-10T06:54:12Z",
+          "from": "verifying",
+          "to": "checkpoint"
+        },
+        {
+          "seq": 10,
+          "at": "2026-09-10T06:54:12Z",
+          "from": "checkpoint",
+          "to": "done"
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "skill": "/hvn:blindspot",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "pending",
+      "dispatch_attempts": 0,
+      "worker_report": null,
+      "worker_report_snapshot": null,
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": []
+    },
+    {
+      "index": 3,
+      "skill": "/ak-brainstorm --html",
+      "delegated": true,
+      "artifact_gate": true,
+      "state": "done",
+      "dispatch_attempts": 2,
+      "worker_report": "reports/design-decision.md",
+      "worker_report_snapshot": {
+        "sha256": "168ea52736a696e1e2f4cf751ed9719a067cdabb6abd3301bd2ef2203cdafc80",
+        "size": 5886,
+        "at": "2026-09-10T08:33:08Z"
+      },
+      "receipt": "reports/design-proposals.md",
+      "receipt_snapshot": {
+        "sha256": "445f207f95c0be3be14a9f30b5d99bbcd77ed090032238e00e87b7902875e0f6",
+        "size": 37033,
+        "at": "2026-09-10T08:33:08Z"
+      },
+      "events": [
+        {
+          "seq": 4,
+          "at": "2026-09-10T06:54:05Z",
+          "from": "pending",
+          "to": "assigned",
+          "note": "workflow wf_fe319825-a2c: 3 proposals done, arbiter interrupted by user pause"
+        },
+        {
+          "seq": 5,
+          "at": "2026-09-10T06:54:05Z",
+          "from": "assigned",
+          "to": "dispatched",
+          "note": "workflow wf_fe319825-a2c: 3 proposals done, arbiter interrupted by user pause"
+        },
+        {
+          "seq": 6,
+          "at": "2026-09-10T06:54:05Z",
+          "from": "dispatched",
+          "to": "running",
+          "note": "workflow wf_fe319825-a2c: 3 proposals done, arbiter interrupted by user pause"
+        },
+        {
+          "seq": 7,
+          "at": "2026-09-10T06:54:05Z",
+          "from": "running",
+          "to": "interrupted",
+          "note": "workflow wf_fe319825-a2c: 3 proposals done, arbiter interrupted by user pause"
+        },
+        {
+          "seq": 11,
+          "at": "2026-09-10T08:33:08Z",
+          "from": "interrupted",
+          "to": "assigned",
+          "note": "Policy C selected by user; arbiter superseded"
+        },
+        {
+          "seq": 12,
+          "at": "2026-09-10T08:33:08Z",
+          "from": "assigned",
+          "to": "dispatched",
+          "note": "Policy C selected by user; arbiter superseded"
+        },
+        {
+          "seq": 13,
+          "at": "2026-09-10T08:33:08Z",
+          "from": "dispatched",
+          "to": "running",
+          "note": "Policy C selected by user; arbiter superseded"
+        },
+        {
+          "seq": 14,
+          "at": "2026-09-10T08:33:08Z",
+          "from": "running",
+          "to": "verifying",
+          "note": "Policy C selected by user; arbiter superseded"
+        },
+        {
+          "seq": 15,
+          "at": "2026-09-10T08:33:08Z",
+          "from": "verifying",
+          "to": "checkpoint",
+          "note": "Policy C selected by user; arbiter superseded"
+        },
+        {
+          "seq": 16,
+          "at": "2026-09-10T08:33:08Z",
+          "from": "checkpoint",
+          "to": "done",
+          "note": "Policy C selected by user; arbiter superseded"
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "skill": "/ak-predict",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "done",
+      "dispatch_attempts": 1,
+      "worker_report": "reports/design-decision.md",
+      "worker_report_snapshot": {
+        "sha256": "168ea52736a696e1e2f4cf751ed9719a067cdabb6abd3301bd2ef2203cdafc80",
+        "size": 5886,
+        "at": "2026-09-10T11:31:19Z"
+      },
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": [
+        {
+          "seq": 17,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "pending",
+          "to": "assigned",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 18,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "assigned",
+          "to": "dispatched",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 19,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "dispatched",
+          "to": "running",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 20,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "running",
+          "to": "verifying",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 21,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "verifying",
+          "to": "checkpoint",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 22,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "checkpoint",
+          "to": "done",
+          "note": "completed in workflow wf_143b113d-783"
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "skill": "/ak-plan --tdd --parallel",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "done",
+      "dispatch_attempts": 1,
+      "worker_report": "reports/design-decision.md",
+      "worker_report_snapshot": {
+        "sha256": "168ea52736a696e1e2f4cf751ed9719a067cdabb6abd3301bd2ef2203cdafc80",
+        "size": 5886,
+        "at": "2026-09-10T11:31:19Z"
+      },
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": [
+        {
+          "seq": 23,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "pending",
+          "to": "assigned",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 24,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "assigned",
+          "to": "dispatched",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 25,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "dispatched",
+          "to": "running",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 26,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "running",
+          "to": "verifying",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 27,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "verifying",
+          "to": "checkpoint",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 28,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "checkpoint",
+          "to": "done",
+          "note": "completed in workflow wf_143b113d-783"
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "skill": "/ak-plan validate",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "pending",
+      "dispatch_attempts": 0,
+      "worker_report": null,
+      "worker_report_snapshot": null,
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": []
+    },
+    {
+      "index": 7,
+      "skill": "/hvn:impl-notes init",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "done",
+      "dispatch_attempts": 1,
+      "worker_report": "reports/design-decision.md",
+      "worker_report_snapshot": {
+        "sha256": "168ea52736a696e1e2f4cf751ed9719a067cdabb6abd3301bd2ef2203cdafc80",
+        "size": 5886,
+        "at": "2026-09-10T11:31:19Z"
+      },
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": [
+        {
+          "seq": 29,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "pending",
+          "to": "assigned",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 30,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "assigned",
+          "to": "dispatched",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 31,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "dispatched",
+          "to": "running",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 32,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "running",
+          "to": "verifying",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 33,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "verifying",
+          "to": "checkpoint",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 34,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "checkpoint",
+          "to": "done",
+          "note": "completed in workflow wf_143b113d-783"
+        }
+      ]
+    },
+    {
+      "index": 8,
+      "skill": "/ak-cook --auto --parallel",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "done",
+      "dispatch_attempts": 1,
+      "worker_report": "reports/design-decision.md",
+      "worker_report_snapshot": {
+        "sha256": "168ea52736a696e1e2f4cf751ed9719a067cdabb6abd3301bd2ef2203cdafc80",
+        "size": 5886,
+        "at": "2026-09-10T11:31:20Z"
+      },
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": [
+        {
+          "seq": 35,
+          "at": "2026-09-10T11:31:19Z",
+          "from": "pending",
+          "to": "assigned",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 36,
+          "at": "2026-09-10T11:31:20Z",
+          "from": "assigned",
+          "to": "dispatched",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 37,
+          "at": "2026-09-10T11:31:20Z",
+          "from": "dispatched",
+          "to": "running",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 38,
+          "at": "2026-09-10T11:31:20Z",
+          "from": "running",
+          "to": "verifying",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 39,
+          "at": "2026-09-10T11:31:20Z",
+          "from": "verifying",
+          "to": "checkpoint",
+          "note": "completed in workflow wf_143b113d-783"
+        },
+        {
+          "seq": 40,
+          "at": "2026-09-10T11:31:20Z",
+          "from": "checkpoint",
+          "to": "done",
+          "note": "completed in workflow wf_143b113d-783"
+        }
+      ]
+    },
+    {
+      "index": 9,
+      "skill": "/hvn:impl-notes review",
+      "delegated": false,
+      "artifact_gate": false,
+      "state": "pending",
+      "dispatch_attempts": 0,
+      "worker_report": null,
+      "worker_report_snapshot": null,
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": []
+    },
+    {
+      "index": 10,
+      "skill": "/ak-code-review",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "pending",
+      "dispatch_attempts": 0,
+      "worker_report": null,
+      "worker_report_snapshot": null,
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": []
+    },
+    {
+      "index": 11,
+      "skill": "/hvn:ship-gate",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "pending",
+      "dispatch_attempts": 0,
+      "worker_report": null,
+      "worker_report_snapshot": null,
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": []
+    },
+    {
+      "index": 12,
+      "skill": "/ak-ship",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "pending",
+      "dispatch_attempts": 0,
+      "worker_report": null,
+      "worker_report_snapshot": null,
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": []
+    },
+    {
+      "index": 13,
+      "skill": "/ak-review-pr --fix --reply",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "pending",
+      "dispatch_attempts": 0,
+      "worker_report": null,
+      "worker_report_snapshot": null,
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": []
+    },
+    {
+      "index": 14,
+      "skill": "/ak-docs",
+      "delegated": true,
+      "artifact_gate": false,
+      "state": "pending",
+      "dispatch_attempts": 0,
+      "worker_report": null,
+      "worker_report_snapshot": null,
+      "receipt": null,
+      "receipt_snapshot": null,
+      "events": []
+    }
+  ],
+  "dispatch_failures": [],
+  "event_seq": 40
+}

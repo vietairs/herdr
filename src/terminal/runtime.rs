@@ -663,6 +663,11 @@ impl TerminalRuntime {
         ))
     }
 
+    /// See `PaneRuntime::test_set_reported_cwd`.
+    pub(crate) fn test_set_reported_cwd(&self, cwd: std::path::PathBuf) {
+        self.0.test_set_reported_cwd(cwd);
+    }
+
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
         self.0.test_process_pty_bytes(bytes);
     }

@@ -27,6 +27,51 @@ pub fn derive_label_from_cwd(cwd: &Path) -> String {
         .unwrap_or_else(|| fallback_label_from_cwd(cwd))
 }
 
+/// D1 — rung-3 derivation for a single tab, computed once on the ~1.5s
+/// workspace git-refresh pass and fed to the naming resolver as a cached
+/// scalar (`Tab::cached_auto_label`). Never called from render, layout, or
+/// PTY-parse paths.
+///
+/// If the tab's own root-pane cwd is a descendant of the workspace's
+/// resolved identity cwd, the label is the path suffix relative to it, so
+/// sibling tabs inside one repo read as their subdirectory rather than all
+/// deriving the same empty suffix. Equal to the workspace cwd -> `None`
+/// (falls through to the tab's stable ordinal). A tab that has `cd`'d into a
+/// different repo entirely derives from its OWN git root rather than
+/// joining the workspace's tree — U1's "join" premise only holds inside one
+/// root.
+pub fn derive_tab_auto_label(workspace_identity_cwd: &Path, tab_cwd: &Path) -> Option<String> {
+    if tab_cwd == workspace_identity_cwd {
+        return None;
+    }
+    match tab_cwd.strip_prefix(workspace_identity_cwd) {
+        Ok(suffix) if !suffix.as_os_str().is_empty() => Some(suffix.display().to_string()),
+        _ => Some(derive_label_from_cwd(tab_cwd)),
+    }
+}
+
+/// U1 — distinctness pass. Sibling tabs in one workspace whose derived
+/// label collides (worst case: every tab at the repo root derives the same
+/// empty suffix) all fall back to `None`, so the resolver's rung 4 ordinal
+/// takes over for them. Ordinals are ugly but injective; two identically
+/// named tabs are strictly worse.
+pub fn apply_tab_label_distinctness(labels: &mut [(usize, PathBuf, Option<String>)]) {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (_, _, label) in labels.iter() {
+        if let Some(label) = label {
+            *counts.entry(label.clone()).or_insert(0) += 1;
+        }
+    }
+    for (_, _, label) in labels.iter_mut() {
+        let collides = label
+            .as_deref()
+            .is_some_and(|text| counts.get(text).copied().unwrap_or(0) > 1);
+        if collides {
+            *label = None;
+        }
+    }
+}
+
 pub fn fallback_label_from_cwd(cwd: &Path) -> String {
     if let Ok(home) = std::env::var("HOME") {
         let home = Path::new(&home);
@@ -371,6 +416,59 @@ mod tests {
 
     use super::*;
     use crate::workspace::git::test_support::run_git;
+
+    #[test]
+    fn tab_auto_label_is_the_suffix_relative_to_the_workspace_root() {
+        let ws = PathBuf::from("/repo");
+        let tab_cwd = PathBuf::from("/repo/src/detect");
+        assert_eq!(
+            derive_tab_auto_label(&ws, &tab_cwd).as_deref(),
+            Some("src/detect")
+        );
+    }
+
+    #[test]
+    fn tab_auto_label_is_none_when_the_tab_cwd_equals_the_workspace_root() {
+        let ws = PathBuf::from("/repo");
+        assert_eq!(derive_tab_auto_label(&ws, &ws), None);
+    }
+
+    #[test]
+    fn tab_in_a_foreign_repo_derives_from_its_own_git_root() {
+        // A tab whose cwd is not a descendant of the workspace's identity
+        // cwd at all (not even a shared prefix) must derive from its own
+        // location rather than producing a bogus relative-suffix string —
+        // `derive_label_from_cwd` falls back to the basename when no git
+        // root is found, which is the behavior under test here (no real
+        // git repo is created, so no subprocess call happens).
+        let ws = PathBuf::from("/repo/one");
+        let tab_cwd = PathBuf::from("/elsewhere/two");
+        assert_eq!(derive_tab_auto_label(&ws, &tab_cwd).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn colliding_sibling_tab_labels_all_fall_back_to_none() {
+        let mut labels = vec![
+            (1, PathBuf::from("/repo"), Some("shared".to_string())),
+            (2, PathBuf::from("/other"), Some("shared".to_string())),
+            (3, PathBuf::from("/repo/unique"), Some("unique".to_string())),
+        ];
+        apply_tab_label_distinctness(&mut labels);
+        assert_eq!(labels[0].2, None);
+        assert_eq!(labels[1].2, None);
+        assert_eq!(labels[2].2.as_deref(), Some("unique"));
+    }
+
+    #[test]
+    fn non_colliding_tab_labels_are_left_alone() {
+        let mut labels = vec![
+            (1, PathBuf::from("/repo/a"), Some("a".to_string())),
+            (2, PathBuf::from("/repo/b"), None),
+        ];
+        apply_tab_label_distinctness(&mut labels);
+        assert_eq!(labels[0].2.as_deref(), Some("a"));
+        assert_eq!(labels[1].2, None);
+    }
 
     fn temp_test_dir(name: &str) -> PathBuf {
         let unique = format!(

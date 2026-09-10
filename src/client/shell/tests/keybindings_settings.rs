@@ -100,6 +100,7 @@ fn tab_bar_renders_endpoint_status_ellipses_and_clamps_to_useful_scroll() {
             workspace_id: "ws_1".into(),
             number,
             label: number.to_string(),
+            name_source: crate::workspace::naming::NameSource::Ordinal,
             custom_label: false,
             zoomed: false,
             focused: false,

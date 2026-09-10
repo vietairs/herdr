@@ -1379,6 +1379,19 @@ impl AppState {
         state.active = Some(0);
         state.selected = 0;
         state.ensure_test_terminals();
+        // M5: a pane whose terminal carries a hand-set `agent_name` with
+        // `AgentNameAuthor::User`, so inheritance-gating tests (R3) have a
+        // real user-authored handle to assert is never clobbered.
+        if let Some(ws) = state.workspaces.first() {
+            if let Some(pane) = ws.tabs.first().and_then(|tab| tab.panes.values().next()) {
+                if let Some(terminal) = state.terminals.get_mut(&pane.attached_terminal_id) {
+                    terminal.set_agent_name(
+                        "adversarial-user-named".to_string(),
+                        crate::terminal::AgentNameAuthor::User,
+                    );
+                }
+            }
+        }
         state
     }
 
@@ -1965,6 +1978,21 @@ mod tests {
         state.workspaces = vec![ws];
 
         assert!(state.pane_exposes_host_cursor(0, pane_id));
+    }
+
+    /// M5: the adversarial identity fixture satisfies both
+    /// `AppState::assert_invariants_for_test` and
+    /// `Workspace::assert_invariants_for_test` on their own, unmutated —
+    /// it did so as the bare baseline too, before it grew a surviving
+    /// renamed tab, a hand-set `AgentNameAuthor::User` agent name, and a
+    /// mirrored-name remote tab.
+    #[test]
+    fn char_adversarial_identity_state_passes_invariants_today() {
+        let state = AppState::test_with_adversarial_identity_state();
+        state.assert_invariants_for_test();
+
+        let ws = crate::workspace::Workspace::test_adversarial_identity_state();
+        ws.assert_invariants_for_test();
     }
 
     #[test]

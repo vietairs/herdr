@@ -3889,6 +3889,17 @@ impl PaneRuntime {
         Self::test_with_scrollback_bytes(cols, rows, 0, bytes)
     }
 
+    /// Test-only seam for `reported_cwd`, which in production is populated
+    /// only via `publish_reported_cwd` inside the async read loop
+    /// (unreachable from `test_with_channel`'s synchronous fixtures).
+    /// Exists to characterize `Tab::cwd_for_pane`'s runtime-over-terminal
+    /// precedence without spawning a real PTY.
+    pub(crate) fn test_set_reported_cwd(&self, cwd: std::path::PathBuf) {
+        if let Ok(mut current) = self.reported_cwd.lock() {
+            *current = Some(cwd);
+        }
+    }
+
     pub(crate) fn test_process_pty_bytes(&self, bytes: &[u8]) {
         let _content_write_guard = match self.content_write_lock.lock() {
             Ok(guard) => guard,

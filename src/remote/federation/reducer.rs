@@ -304,6 +304,7 @@ impl RemoteMirror {
                 cwd: None,
                 foreground_cwd: None,
                 label: None,
+                name_source: crate::workspace::naming::NameSource::default(),
                 agent: None,
                 title: None,
                 terminal_title: None,
@@ -422,6 +423,13 @@ fn namespace_workspace(mount: &Mount, workspace: &WorkspaceInfo) -> WorkspaceInf
     namespaced.workspace_id = map_in(workspace.workspace_id.clone(), mount).to_public_id();
     namespaced.active_tab_id = map_in(workspace.active_tab_id.clone(), mount).to_public_id();
     namespaced.label = sanitize_remote_string(&namespaced.label);
+    // `name_source` never crosses the mount boundary as remote data.
+    // This function only ever processes remote-origin info, so the local
+    // stamp is unconditionally `Mirrored` here — the resolver at the real
+    // local API surface (`Workspace::resolved_display_from`) is the one
+    // place that later re-derives `Override` for a scope the local user has
+    // since renamed.
+    namespaced.name_source = crate::workspace::naming::NameSource::Mirrored;
     if let Some(worktree) = namespaced.worktree.as_mut() {
         worktree.repo_key = sanitize_remote_string(&worktree.repo_key);
         worktree.repo_name = sanitize_remote_string(&worktree.repo_name);
@@ -437,6 +445,9 @@ fn namespace_tab(mount: &Mount, tab: &TabInfo) -> TabInfo {
     namespaced.tab_id = map_in(tab.tab_id.clone(), mount).to_public_id();
     namespaced.workspace_id = map_in(tab.workspace_id.clone(), mount).to_public_id();
     namespaced.label = sanitize_remote_string(&namespaced.label);
+    // See `namespace_workspace`'s comment — never trust the
+    // remote-supplied `name_source`.
+    namespaced.name_source = crate::workspace::naming::NameSource::Mirrored;
     namespaced
 }
 
@@ -462,6 +473,23 @@ fn namespace_pane(mount: &Mount, pane: &PaneInfo) -> PaneInfo {
     namespaced.terminal_title = sanitize_remote_string_opt(namespaced.terminal_title);
     namespaced.terminal_title_stripped =
         sanitize_remote_string_opt(namespaced.terminal_title_stripped);
+    // Pane scope: the remote's own discriminant is never passed
+    // through. It is restated in local terms instead, keeping exactly one
+    // bit of the remote's answer — whether the remote's label was a name
+    // somebody set there, or merely its live agent identity. A name the
+    // remote set is a mirrored name from here (rung 1.5) and may be pinned
+    // locally; anything the remote derived is stamped as the identity rung
+    // it came from, so the materialization path leaves this host's mirror
+    // slot empty and the relayed live identity keeps driving the display.
+    // That single bit is not new trust: before this field existed the mount
+    // path pinned every remote label unconditionally.
+    namespaced.name_source = match namespaced.label {
+        Some(_) if pane.name_source.is_explicitly_named() => {
+            crate::workspace::naming::NameSource::Mirrored
+        }
+        Some(_) => crate::workspace::naming::NameSource::AgentIdentity,
+        None => crate::workspace::naming::NameSource::default(),
+    };
     namespaced.display_agent = sanitize_remote_string_opt(namespaced.display_agent);
     for value in namespaced.state_labels.values_mut() {
         *value = sanitize_remote_string(value);
@@ -668,6 +696,7 @@ mod tests {
             workspace_id: id.to_string(),
             number: 1,
             label: "ws".to_string(),
+            name_source: crate::workspace::naming::NameSource::Override,
             focused: false,
             pane_count: 0,
             tab_count: 0,
@@ -704,6 +733,7 @@ mod tests {
             cwd: None,
             foreground_cwd: None,
             label: None,
+            name_source: crate::workspace::naming::NameSource::default(),
             agent: None,
             title: None,
             terminal_title: None,

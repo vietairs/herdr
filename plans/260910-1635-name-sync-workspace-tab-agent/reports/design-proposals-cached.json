@@ -1,0 +1,194 @@
+[
+  {
+    "policy_name": "Policy B: Project-Anchored Rename Pin",
+    "summary": "A rename stores the name together with the project it was typed in (git checkout key from GitSpaceMetadata, or the cwd when not in a repo). The name holds while the resolved identity cwd stays in that project and is dropped the moment it crosses into a different one, at which point auto-derivation resumes. Tabs gain a cwd-derived auto label to replace the bare ordinal at src/workspace.rs:478-484, and a tab rename overwrites agent names in that tab only where the agent name is still auto-derived. All evaluation runs on the existing 1.5s git-refresh path in server state, never in render.",
+    "rules": [
+      "Rename stores a project anchor. Workspace::custom_name (src/workspace.rs:1038 set_custom_name) and Tab::custom_name (src/workspace/tab.rs:204) each gain a sibling anchor recording the GitSpaceMetadata.checkout_key at rename time (src/workspace/git/discovery.rs:6-13), or the resolved cwd when git_space_metadata returns None.",
+      "Staleness is evaluated only on the existing background refresh. AppState::apply_workspace_git_statuses (src/app/actions.rs:1525-1572) already receives a freshly discovered result.space and result.auto_label from the thread spawned in src/app/git_refresh.rs:65-72. Comparing result.space against the stored anchor there adds zero work to render and no filesystem I/O on any pane-scaled loop.",
+      "Anchor mismatch clears the pin. Replace the freeze at src/app/actions.rs:1555 (changed |= ws.custom_name.is_none()) with: if the incoming project differs from the anchor, drop custom_name and set changed = true; otherwise keep the pin and leave changed as today. The auto label then flows through the untouched Workspace::display_name_from (src/workspace.rs:1085-1097).",
+      "Tabs auto-derive from their own root pane cwd. src/workspace.rs:478-484 tab_display_name returns (tab_idx + 1).to_string() today; it must instead clone a Tab::cached_auto_label filled by the refresh cycle, mirroring Workspace::cached_auto_label (src/workspace.rs:218). tab_display_name stays a pure infallible clone because its callers (src/app/window_title.rs:68, src/app/creation.rs:236, src/app/api/plugins/context.rs:248) sit on presentation paths.",
+      "The ordinal survives as the last-resort fallback. When no cwd resolves for a tab root pane via Tab::cwd_for_pane (src/workspace/tab.rs:532-547), tab_display_name still yields (tab_idx + 1).to_string() so a tab is never blank and existing tests keep a defined answer.",
+      "A tab rename propagates only to derived agent names. TerminalState::agent_name (src/terminal/state.rs:133) is currently indistinguishable between hook-set, session-restored and user-set values because set_agent_name (src/terminal/state.rs:1883-1908) populates agent_name_owner in all three cases. Policy B therefore adds an explicit provenance discriminator and overwrites only the Derived variant, never a hook authority value produced by reconcile_agent_name_owner (src/terminal/state.rs:1919-1926).",
+      "Agent kind labels are never touched. effective_agent_label (src/terminal/state.rs:1812-1823) resolves the agent kind (claude, codex) from hook authority or detection; it stays detection-owned, so the change cannot regress the manifest contract described in CLAUDE.md.",
+      "Everything lands in server state and the JSON API event path. Anchors live on Workspace and Tab, unpin events emit next to EventKind::WorkspaceRenamed (src/app/api/workspaces.rs:865-872) and EventKind::TabRenamed (src/app/api/tabs.rs:334-341) under neutral names such as WorkspaceLabelChanged with a label_source field, so CLI, TUI and federation peers observe one truth. No behavior is added behind the private TUI client socket.",
+      "Remote-mounted workspaces never auto-unpin. src/server/federation_accept.rs:847 already reasons about host set_custom_name versus mounted rows; an unpin driven by a peer pane cwd would rename a workspace under the peer's feet, so the anchor check is skipped for mounted workspaces."
+    ],
+    "files_touched": [
+      {
+        "path": "src/workspace.rs",
+        "change": "Add the anchor field beside custom_name and a Tab-side cached_auto_label peer to cached_auto_label at :218; replace the ordinal fallback in tab_display_name at :478-484 with a cached-label clone; leave display_name_from (:1085-1097) and automatic_display_name_for_cwd (:1099-1105) untouched so the existing live-basename fallback keeps working."
+      },
+      {
+        "path": "src/app/actions.rs",
+        "change": "Replace the permanent freeze at :1555 (changed |= ws.custom_name.is_none()) inside apply_workspace_git_statuses with an anchor comparison against result.space that clears the pin on a project change and marks changed, and apply the same comparison per tab once tab identity results arrive."
+      },
+      {
+        "path": "src/app/git_refresh.rs",
+        "change": "Extend workspace_git_refresh_items (:113-133) to also enumerate per-tab root pane cwds so tabs get an auto label, keeping the results collapsed by deduplicate_git_refresh_items (:206-238) so N tabs in one repo stay one discovery job on the same 1.5s background thread."
+      },
+      {
+        "path": "src/workspace/tab.rs",
+        "change": "Give Tab a cached auto label plus the rename anchor next to custom_name (:38-39), and keep is_auto_named (:201) meaningful by reporting derived-name state rather than only custom_name.is_none()."
+      },
+      {
+        "path": "src/terminal/state.rs",
+        "change": "Add an explicit agent-name provenance discriminator beside agent_name and agent_name_owner (:133-134) so set_agent_name (:1883-1908) records whether a name came from a hook, a restored session, a user rename or tab derivation, and only the derived variant is overwritten by a tab rename."
+      },
+      {
+        "path": "src/app/api/workspaces.rs",
+        "change": "Record the anchor in handle_workspace_rename (:852-880) at the moment set_custom_name runs, and extend the emitted WorkspaceRenamed data plus workspace_info with a neutral label_source so clients can distinguish a pinned name from a derived one."
+      },
+      {
+        "path": "src/app/api/tabs.rs",
+        "change": "Record the anchor in handle_tab_rename (:315-345), fan the rename out to derived agent names in that tab, and extend the TabRenamed event and tab_info with the same label_source field."
+      },
+      {
+        "path": "src/persist/snapshot.rs",
+        "change": "Add optional anchor fields to WorkspaceSnapshot (:49-67) and TabSnapshot (:83-94) with serde default and skip_serializing_if so old files still load and new files stay readable by older binaries; decide whether SNAPSHOT_VERSION (:12) moves from 3 to 4."
+      },
+      {
+        "path": "src/persist/restore.rs",
+        "change": "On restore, when a snapshot carries a custom_name but no anchor, adopt the cached_git_space already computed by discover_workspace_git_identity at :405-412 as the anchor so no existing user name is destroyed on first launch after upgrade."
+      },
+      {
+        "path": "docs/next/CHANGELOG.md",
+        "change": "Record the user-facing naming behavior change, since workspace and tab labels are a visible runtime behavior and unreleased user-facing docs live under docs/next per project CLAUDE.md."
+      }
+    ],
+    "risks": [
+      "Surprise name loss is the headline weakness. A user who names a workspace for a task rather than a project (review, hotfix, demo) loses that name about 1.5s after any cd into another repo, node_modules, a Go module cache or /tmp. There is no undo: set_custom_name (src/workspace.rs:1038) keeps no history and handle_workspace_rename calls schedule_session_save immediately (src/app/api/workspaces.rs:866), so the pin is gone from disk too.",
+      "The definition of a different project is undefined outside git. discover_workspace_git_identity (src/workspace.rs:63-75) falls back to fallback_label_from_cwd with status_cache_key = cwd when there is no repo, so between two non-repo directories every cd looks like a project change and a rename made in ~/scratch dies on cd ~/scratch/sub. The anchor needs an explicit non-git rule (for example, unpin only when the basename changes) or B misfires constantly for shell-only workspaces.",
+      "Linked worktrees force an uncomfortable choice. GitSpaceMetadata carries both key and checkout_key and marks is_linked_worktree (src/workspace/git/discovery.rs:6-13), and the auto label already uses the checkout name (test at src/workspace.rs:1605-1615). Anchoring on repo key means the maintainer worktree flow in CLAUDE.md never unpins; anchoring on checkout_key means moving between sibling worktrees of one repo destroys the name.",
+      "Workspace identity reads only the first tab. resolved_identity_cwd_from (src/workspace.rs:1047-1056) resolves tabs.first() root_pane only, so a workspace whose second tab changed project will not unpin, while a workspace whose first tab is a throwaway cd /tmp shell unpins the whole space. Policy B makes that pre-existing asymmetry user-visible for the first time.",
+      "Tab-to-agent propagation is lossy and one-way. Renaming a tab back does not restore the agent names it overwrote, and the provenance discriminator this needs does not exist today, so an implementation bug clobbers names set by hook authority (src/terminal/state.rs:1919-1926) and regresses the agent detection and hook contract."
+    ],
+    "user_visible_change": "Workspaces and tabs both show the repo or folder name they are actually sitting in, and that name keeps following the cwd even after the user has renamed once. A rename still wins while the user stays in the same project, but the moment the workspace moves to a different project the typed name is dropped and the derived name takes over. Tabs stop reading as bare ordinals (1, 2, 3) and read as project names instead, and renaming a tab renames the auto-named agents inside it."
+  },
+  {
+    "policy_name": "Policy C \u2014 one shared derivation chain with explicit precedence at every layer",
+    "summary": "Replace the three independent naming fields with one server-side resolver plus one override store. `resolve_name(scope, sources) -> {text, source}` applies a single documented ladder \u2014 user override (inheritable down-scope) > agent identity > cwd/git-root > ordinal \u2014 uniformly to workspace, tab and pane/agent. Today the same ladder is hand-written three times with different rungs: `Workspace::display_name`, `display_name_from_terminals` and `display_name_from` (src/workspace.rs:1059, 1067, 1085) each open with an identical `if let Some(name) = &self.custom_name { return name.clone(); }` and then diverge on how they find a cwd; `tab_display_name` (src/workspace.rs:478-484) has only rungs 1 and 4 and skips cwd entirely; and the agent label resolves through a fourth, unrelated chain in `TerminalState::effective_agent_label` (src/terminal/state.rs:1812-1824). Under C, renaming a tab writes one override that descendant panes read at resolve time, so the agent's displayed label follows without any write to `TerminalState::agent_name`. Derivation input stays on the existing ~1.5s git-status pass (src/app/actions.rs:1526-1571), never on the render path. The honest cost is blast radius: ~30 call sites, four struct changes, three API schema changes, and a direct conflict with an existing test that asserts agent name and pane label are independent (src/app/api/agents.rs:699-725).",
+    "rules": [
+      "Precedence ladder, identical at every scope, highest first: (1) user override at this scope, or inherited from the nearest enclosing scope that was renamed; (2) agent identity; (3) cwd / git-root derivation; (4) stable ordinal. Every read of a name goes through the resolver \u2014 `Workspace::custom_name`, `Tab::custom_name` and `TerminalState::manual_label` remain as storage but stop being read directly anywhere, which is exactly what today's three near-duplicate chains at src/workspace.rs:1059/1067/1085 fail to do.",
+      "Only overrides are authoritative state; derived names are never stored as truth and never persisted. Rung 3 reads a cached field refreshed on the existing periodic git pass, matching how Workspace already works (cached_identity_cwd / cached_auto_label, src/workspace.rs:212-218, refreshed at src/app/actions.rs:1550-1552). Tabs gain the same pair, which is the whole of D1 \u2014 they currently have no cwd field at all (src/workspace/tab.rs:38-51), which is why they can only emit an ordinal.",
+      "The resolver is a pure function and derivation input never enters a render or pane-scaled loop. Resolving reads cached scalars only; the expensive half (git_repo_root, and PaneRuntime::cwd falling through to platform::process_cwd at src/pane.rs:3806-3824 when OSC 7 has not reported) runs only in the existing WorkspaceGitStatus pass at src/app/actions.rs:1526-1571, which tabs join rather than duplicate.",
+      "A rename pins a name but never stops derivation underneath it. src/app/actions.rs:1554's `changed |= ws.custom_name.is_none();` gates only the redraw signal \u2014 :1551-1552 already refreshes cached_auto_label unconditionally, so a renamed workspace is sitting on a live derived label nothing reads. C makes that label reachable via the resolver's source field, so clearing an override snaps to the correct current name with zero refresh delay.",
+      "Renaming propagates by shared resolution, never by copying strings between fields. A tab override is read by descendant panes at resolve time; it is never written into TerminalState. Writing it would make one rename irreversibly destroy pane-scope overrides, and any such write reachable from a draw path would violate the pure-render rule.",
+      "The agent's display label and the agent's addressable handle are separated explicitly. The label resolves through the ladder and follows a tab rename; TerminalState::agent_name stays a distinct identifier so `herdr agent send <name>` keeps working and the uniqueness and charset rules survive (valid_agent_name ^[a-z][a-z0-9_-]{0,31}$ at src/app/agents.rs:15-21, agent_name_conflicts at :404-416 \u2014 neither of which tab or workspace names are subject to).",
+      "An inherited tab override does not clobber a hand-set agent name. Inheritance applies only where agent_name_owner indicates the name was auto-assigned or detection-owned (src/terminal/state.rs:134, 1886-1908), never where the user set it via agent.rename. This is a deliberate exception to uniformity and must be documented as such rather than hidden.",
+      "The ordinal rung uses stable identity, not position: tab.number via public_tab_number (src/workspace.rs:1010-1012), not `tab_idx + 1` as tab_display_name does today (:478-484), so a tab's fallback name stops changing when tabs are reordered.",
+      "Resolution stays server-side and ships resolved on the JSON API path, per the runtime/client boundary rule. It lives in a new src/workspace/naming.rs beside aggregate.rs and feeds the sites that already assemble labels (src/app/creation.rs:236 and :411, src/app/api.rs:686 and :984, src/server/notifications.rs:48, src/app/window_title.rs:63-76). TabInfo/WorkspaceInfo/PaneInfo carry a NameSource discriminant so clients style a derived name differently without ever re-deriving it; nothing lands in the TUI client."
+    ],
+    "files_touched": [
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/workspace/naming.rs",
+        "change": "NEW module beside src/workspace/aggregate.rs holding the single resolver. Pure function over &Workspace, &Tab and &HashMap<TerminalId, TerminalState> \u2014 no filesystem, no process inspection, no PTY, so it is safe to call from any of the ~20 existing label call sites without importing I/O into them. Returns {text, source} where source is a NameSource discriminant (Override/AgentIdentity/Cwd/Ordinal)."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/workspace.rs",
+        "change": "tab_display_name (currently :478-484, `tab.custom_name.clone().unwrap_or_else(|| (tab_idx + 1).to_string())`) is deleted and its 8 callers redirected to the resolver. Rung 3 needs the new Tab fields; rung 4 switches to tab.number via public_tab_number (:1010-1012). The three Workspace display_name* variants (:1059, :1067, :1085) collapse into thin wrappers that only supply a cwd source; automatic_display_name_for_cwd (:1099-1105) with its cached-vs-live-basename fallback survives unchanged as the rung-3 implementation."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/workspace/tab.rs",
+        "change": "Tab (:38-51) gains cached_identity_cwd and cached_auto_label, mirroring the pair Workspace already carries (src/workspace.rs:212-218). This is the whole of D1. The cache is what keeps derivation off hot paths \u2014 reading a tab cwd live goes through Tab::cwd_for_pane (:532-547) into PaneRuntime::cwd (src/pane.rs:3806-3824), which falls through to platform::process_cwd(pid)."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/app/actions.rs",
+        "change": "apply_workspace_git_statuses (:1526-1571) extended to carry per-tab auto-labels in the pass that already carries the workspace one, so tabs cost no extra git discovery. The D2 line at :1554 is dropped; :1551-1552 already refreshes cached_auto_label unconditionally, so the gate suppresses only the redraw signal, not the data."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/api/schema/tabs.rs",
+        "change": "TabRenameParams.label (:26-30) becomes Option<String> to give tabs a clear-the-override path, which today exists at no scope; WorkspaceRenameParams (src/api/schema/workspaces.rs:44-48) takes the same change. TabInfo/WorkspaceInfo/PaneInfo gain the NameSource field. API-surface additions, so PROTOCOL_VERSION in src/protocol/wire.rs must be compared against the latest released tag per CLAUDE.md before deciding whether to bump."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/app/creation.rs",
+        "change": "The two places labels enter the JSON API \u2014 TabInfo.label at :236 and WorkspaceInfo.label at :411 \u2014 switch to the resolver. PaneInfo.label at :355 (`terminal.manual_label.clone()`) changes meaning most: it stops being a raw field read and becomes a resolved value that can inherit a tab override, which is the mechanism by which the agent label follows a tab rename."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/persist/restore.rs",
+        "change": "restore_workspace (:405-420) already recomputes cached_auto_label, cached_git_space and cached_git_status_key from snap.identity_cwd via discover_workspace_git_identity rather than trusting persisted derived values; the new Tab cache fields get identical treatment in the same function. Nothing derived is read from the snapshot, which is what makes the upgrade a no-op migration."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/persist/snapshot.rs",
+        "change": "No field added or removed. WorkspaceSnapshot.custom_name (:52-54), TabSnapshot.custom_name (:85-87) and PaneSnapshot.label/agent_name (:99-104) are already #[serde(default)] and already carry exactly the overrides C persists; capture sites :340, :426 and :379-418 keep working as written. The change is documented intent plus tests asserting no derived name is ever written."
+      }
+    ],
+    "risks": [
+      "Blast radius is the largest of the candidates and is refactor-risk by CLAUDE.md's own definition (two-plus core surfaces, persisted state, API IDs, identity projection). tab_display_name has 8 callers (src/app/actions.rs:228, src/app/creation.rs:236, src/app/window_title.rs:68, src/app/api/plugins/context.rs:248/309/335, plus tests); the display_name_from* family has ~10 (src/app/api.rs:686 and :984, src/app/creation.rs:411, src/server/notifications.rs:48, src/server/headless.rs:3387, src/server/headless/notifications.rs:108 and :183, src/app/actions.rs:2118, src/app/window_title.rs:63); manual_label is read at 12+ sites spanning persist, client_shell, plugins and layouts. Characterization tests and AppState::assert_invariants_for_test must land before any code moves.",
+      "It contradicts an invariant the codebase asserts on purpose. src/app/api/agents.rs:699-725 (`agent_rename_does_not_replace_the_pane_label`) exists to keep agent name and pane label independent. C keeps the stores independent but couples their resolution, so that test still passes while its stated intent now reads backwards to anyone who opens it. It needs rewriting with an explicit comment or it becomes an actively misleading signal.",
+      "The 'uniform precedence' claim cannot be fully kept, and pretending otherwise is the main way this policy fails review. Agent identity already has its own two-tier authority chain (hook authority over detected agent, src/terminal/state.rs:1812-1824); the agent handle carries validation and server-wide uniqueness the other scopes lack (src/app/agents.rs:15-21 and :404-416); and the do-not-clobber-a-hand-set-agent-name carve-out is a further conditional keyed on agent_name_owner. The result is one function with several scope-specific branches \u2014 better than three chains, but not the clean thing the name promises.",
+      "Tab-override inheritance must be computed at read time, never written into pane fields, or one rename irreversibly destroys pane-scope overrides. Read-time inheritance is correct but requires both tab and pane context at every call site, and several current sites hold only a TerminalState (src/server/client_shell.rs:469-472, src/app/api/plugins/panes.rs:39) \u2014 those need plumbing or a degraded resolve.",
+      "Cost is paid before value is visible. D1 alone (a tab cwd cache plus rung 3) and D2 alone (a clear path plus an observable derived name) are each independently shippable and deliver most of the user-visible benefit; C bundles them behind a refactor that must land atomically to be coherent, so a mid-way abort leaves the tree worse than either narrow fix would.",
+      "Persisted numeric tab overrides become ambiguous after upgrade. A TabSnapshot.custom_name of \"3\" is indistinguishable from an ordinal a user deliberately typed, so post-upgrade that tab pins \"3\" while its siblings become \"herdr\"/\"docs\". Nothing corrupts and the snapshot carries no evidence to disambiguate. Recommendation is to honor it as the override it is; the alternative \u2014 dropping tab overrides equal to their own ordinal at restore \u2014 deletes user data on a heuristic and should not ship without asking.",
+      "Federation is unquantified in this pass. Fork history records pane and tab identity crossing the federation wire, so a resolved-label-plus-source contract has to be decided for mounted remote panes (does a local tab rename apply to a remote tab's panes, and does the source discriminant survive the wire?). I did not open the federation code, so this is flagged as unsized rather than estimated."
+    ],
+    "user_visible_change": "A workspace the user never renamed keeps following its cwd exactly as today \u2014 that machinery already works (src/app/actions.rs:1550-1552 refreshes the cached label on the ~1.5s git pass; src/workspace.rs:1099-1105 falls back to a live basename on cache miss). A renamed workspace still stays pinned to the chosen name, but for the first time the derived name is observable alongside it and clearing the override snaps straight back to the correct current project with no refresh delay, because the derived label was kept live underneath the whole time. Tabs change most: instead of the bare ordinal from `(tab_idx + 1).to_string()` (src/workspace.rs:478-484), a tab shows the git-root or basename of its root pane's cwd \u2014 and where that cwd is a descendant of the workspace's own, the path suffix relative to it, so a single-repo workspace does not render four tabs all reading \"herdr\". The ordinal survives only when no cwd resolves, and becomes the stable tab.number (src/workspace.rs:1010-1012) rather than a positional index, so a tab's fallback name stops changing when tabs are dragged. Renaming a tab immediately changes the label shown for every agent pane inside it that has no pane-scope name of its own, at the next resolve, with no refresh cycle. What it does not change is the agent's addressable handle: TerminalState::agent_name is untouched, so `herdr agent send reviewer` keeps working and the uniqueness and charset rules at src/app/agents.rs:15-21 and :404-416 still hold. That split \u2014 the label follows the tab, the handle does not \u2014 is the deliberate compromise, and it is the part of the original request C does not deliver in full."
+  },
+  {
+    "policy_name": "Policy A \u2014 Rename Is A Permanent Pin, Everything Else Auto-Derives",
+    "summary": "Policy A makes today's accidental behavior the explicit, uniform contract: any name a user types is a permanent pin that nothing overwrites, and every name the user has NOT typed is re-derived from the owning cwd on the existing periodic refresh path. It closes D1 by giving tabs a cwd/git-root auto-name (reusing derive_label_from_cwd, src/workspace/git/discovery.rs:23-27) instead of the bare ordinal at src/workspace.rs:478-484; it closes D2 not by unfreezing renamed workspaces but by declaring the freeze intentional and making it reachable/reversible; it closes D3 in one direction only \u2014 a tab rename propagates DOWN to TerminalState::agent_name (src/terminal/state.rs:133) for panes whose agent name is itself derived, never onto a user-set one. The structural argument for A is that its central bit already exists end-to-end: ClientShellWorkspace.custom_label and ClientShellTab.custom_label (src/protocol/wire.rs:1063, 1096) are already populated server-side (src/server/client_shell.rs:64, 108) and already drive client styling, so A adds no new concept to the runtime/client protocol. Its two honest costs are that \"rename\" is not currently synonymous with \"user intent\" (worktree and layout flows call set_custom_name too), and that agent_name carries no user-vs-derived provenance at all today.",
+    "rules": [
+      "A workspace with no user pin re-derives its label every git-refresh cycle from tab 1's root-pane cwd; the resolved label already flows through actions.rs:1550-1555 into Workspace::cached_auto_label and out via display_name_from (src/workspace.rs:1086-1093).",
+      "A user rename sets a permanent pin. It is never overwritten by derivation, by a cd, by a git-root change, or by a propagation from any other namespace. Only an explicit clear/reset verb returns that name to auto \u2014 and that verb does not exist today for workspaces or tabs (src/app/api/workspaces.rs:863 only ever calls set_custom_name), so Policy A must add it.",
+      "A pin must be distinguished from a seeded name. set_custom_name is today also called by worktree creation (src/app/api/worktrees.rs:149), workspace-create-with-label (src/app/api/workspaces.rs:717), tab-create-with-label (src/app/api/tabs.rs:164) and layout apply (src/app/api/layouts.rs:144). Under Policy A those seeds are marked seeded, not pinned, and keep auto-syncing; otherwise every worktree space is born permanently frozen.",
+      "A tab with no user pin derives its label from that tab's OWN root-pane cwd via Tab::cwd_for_pane (src/workspace/tab.rs:532-547) plus derive_label_from_cwd; the (tab_idx + 1) ordinal at src/workspace.rs:481-483 survives only as the last-resort fallback when no cwd resolves.",
+      "Derived names are never written into custom_name and never persisted. A session save fires on every rename and dirty mark (src/app/api/tabs.rs:171, src/app/api/panes.rs:1788), so writing a derived label into TabSnapshot.custom_name (src/persist/snapshot.rs:85-87) would silently convert every tab into a permanent pin at the first save \u2014 the single worst failure mode of this policy.",
+      "A tab rename propagates down to TerminalState::agent_name only for panes in that tab whose agent name is Derived (set by detection, hook authority, or a managed launch). A User-sourced agent name is never overwritten, and a pane with no agent is never given one \u2014 agent.rename itself already refuses that at src/app/agents.rs:127-129 with AgentRenameError::NotAgent.",
+      "All derivation runs server-side on the existing periodic git-refresh path (src/app/git_refresh.rs:114-132 collecting, src/app/actions.rs:1526-1573 applying). Nothing derives during compute_view or render: Tab::cwd_for_pane can reach PaneRuntime::cwd, which falls back to platform::process_cwd(pid) (src/pane.rs:3806-3823), a live process probe banned in pane-scaled loops.",
+      "Propagation is one-directional and lossless-by-construction: tab -> agent only. Workspace -> tab, tab -> pane label, and agent -> tab are explicitly out of scope, so no propagation can ever destroy a name the user typed and no undo affordance is required."
+    ],
+    "files_touched": [
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/workspace/tab.rs",
+        "change": "Add cached_auto_label + cached_identity_cwd fields to Tab (currently only custom_name at :39), mirroring Workspace::cached_auto_label/cached_identity_cwd (src/workspace.rs:216-218), plus a pinned-vs-seeded provenance flag beside is_auto_named (:200-202)."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/workspace.rs",
+        "change": "Rewrite tab_display_name (:478-484) to read the tab's cached derived label instead of (tab_idx + 1).to_string(), keeping it a pure allocation-cheap read with zero I/O; extend display_name_from / display_name_from_terminals (:1066-1093) to honor the pinned-vs-seeded distinction rather than custom_name.is_some()."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/app/git_refresh.rs",
+        "change": "Extend workspace_git_refresh_items (:114-132) from one item per workspace to one item per tab, resolving each tab's root-pane cwd off the render thread, and route them through the existing deduplicate_git_refresh_items (:135) so repeated cwds cost one probe."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/app/actions.rs",
+        "change": "Extend apply_workspace_git_statuses (:1526-1573) to apply per-tab derived labels alongside the workspace ones, and change the redraw gate at :1553-1555 (changed |= ws.custom_name.is_none()) to test the new pinned flag rather than custom_name presence."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/terminal/state.rs",
+        "change": "Add an AgentNameSource (Derived | User) field next to agent_name (:133) and agent_name_owner (:134); split set_agent_name (:1883-1908) so the user path (src/app/agents.rs:131) records User while managed/restore paths (:1919, :2049) record Derived, and decide explicitly whether a tab-derived name is exempt from the nulling branch in reconcile_agent_name_owner (:2102-2138)."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/app/api/tabs.rs",
+        "change": "On tab rename (:331-338) mark the tab pinned and fan the new name out to agent_name for that tab's panes whose AgentNameSource is Derived, reusing the already-emitted EventKind::TabRenamed (:335) so the propagation is observable on the JSON event path."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/persist/snapshot.rs",
+        "change": "Add a #[serde(default)] pin-provenance field to WorkspaceSnapshot (:50-54) and TabSnapshot (:83-87), and an agent-name source field to PaneSnapshot beside agent_name (:100-103); keep every addition defaulted so pre-upgrade snapshots deserialize unchanged."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/persist/restore.rs",
+        "change": "Restore the new provenance fields at the workspace (:410-414), tab (:717-721) and agent (:643-650) sites, defaulting absent values to seeded/Derived so old sessions upgrade into auto-sync rather than into a frozen pin."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/client/shell/mobile.rs",
+        "change": "Fix the ordinal assumption at :886-889, where an auto-named tab renders as format!(\"tab {}\", tab.label) and would become \"tab herdr\" once tab.label is a repo name; likewise reconsider the tab-label suppression at :663 that now emits a redundant repo name in agent rows."
+      },
+      {
+        "path": "/Users/hvnguyen/Projects/worktrees/herdr-name-sync/src/client/shell/tabs.rs",
+        "change": "Revisit the dim-vs-bold split at :107-120, which dims every auto-named tab on the assumption that an auto name is a throwaway ordinal; a derived repo name is real information and should not render as low-signal chrome."
+      }
+    ],
+    "risks": [
+      "The pin is a trapdoor with no exit in the current code. handle_workspace_rename (src/app/api/workspaces.rs:863) and the tab rename path only ever call set_custom_name; there is no clear/reset analogous to TerminalState::clear_manual_label (src/terminal/state.rs:1879-1881). Without adding one, a user who renames a space once and later reuses it for a different repo is permanently stuck with a lying label \u2014 strictly worse than the status quo complaint.",
+      "\"Rename\" is not synonymous with user intent today. Worktree creation (src/app/api/worktrees.rs:149-150), workspace create-with-label (src/app/api/workspaces.rs:715-719), tab create-with-label (src/app/api/tabs.rs:153-166) and layout apply (src/app/api/layouts.rs:144) all call set_custom_name. Ship Policy A without separating seeded from pinned and every worktree space and every layout-driven tab is born permanently frozen \u2014 exactly the class of space this work is meant to fix.",
+      "agent_name has no user-vs-derived provenance at all. The user path (src/app/agents.rs:130-132) and the managed/restore paths (src/terminal/state.rs:1919, :2049) share one setter, set_agent_name (:1883). agent_name_owner (:134) records which agent SESSION owns the name, not who typed it. PaneSnapshot (src/persist/snapshot.rs:98-103) has no source field either, so on first upgrade every existing user-set agent name defaults to Derived and becomes overwritable by a later tab rename \u2014 a real one-time regression.",
+      "reconcile_agent_name_owner (src/terminal/state.rs:2102-2138) actively NULLS agent_name when the owning agent label changes. A tab-derived agent name lands squarely in that path: either it is wiped whenever the agent restarts or switches identity (the label visibly flickers back to the detected agent), or it must be exempted, which grows a second lifetime rule inside an already-subtle function that currently has exactly one job.",
+      "Tab auto-names duplicate the workspace name in the single most common case \u2014 one repo, several tabs \u2014 because both derive from cwd via the same helper. The information gain there is near zero while the cost is concrete: a wider tab strip (widths are computed from the label in src/client/shell/tabs.rs), a redundant repo name in agent rows once tab_count > 1 (src/client/shell/agent_sidebar.rs:264, src/client/shell/mobile.rs:663), and \"tab herdr\" on mobile (src/client/shell/mobile.rs:886).",
+      "Tabs are usually a task axis, not a location axis. A tab's splits can sit in different directories, and Policy A names the whole tab after only its root pane via Tab::cwd_for_pane(tab.root_pane, ...) \u2014 a name that is correct for one of N panes. Deriving from the running command or the detected agent would carry more signal for the way tabs are actually used.",
+      "Per-tab refresh multiplies an existing loop by tab cardinality: workspace_git_refresh_items (src/app/git_refresh.rs:114-132) is one item per workspace today, and each cwd resolution can fall through PaneRuntime::cwd to platform::process_cwd(pid) (src/pane.rs:3823) per tab per ~1.5s cycle. It must ride deduplicate_git_refresh_items (:135) and be measured against the 15-pane scaling bar in CLAUDE.md before it ships.",
+      "Federated workspaces need an explicit gate. The server already deliberately withholds branch for a federated workspace because its local identity_cwd is meaningless (src/server/client_shell.rs:70-77), and tab auto-naming would happily derive a label from that same meaningless local path unless gated the same way \u2014 producing a local repo name on a remote tab.",
+      "Policy A is only a partial answer to D3. It propagates tab -> agent and nothing else: a workspace rename still leaves stale derived tab names underneath it, a tab rename never reaches TerminalState::manual_label (src/terminal/state.rs:132), and an agent rename never reaches the tab. Four namespaces remain; Policy A wires exactly one edge."
+    ],
+    "user_visible_change": "A tab that has never been renamed stops showing a bare number and starts showing its own git-root or directory name, refreshed on the same ~1.5s cycle that already updates space names \u2014 so a space with three tabs in three worktrees reads \"herdr / herdr-name-sync / herdr-fed\" instead of \"1 / 2 / 3\". A space with no user-typed name keeps following the cwd exactly as it does today, including after a cd, but only when that cd happens in tab 1's root pane (resolved_identity_cwd_from reads self.tabs.first(), src/workspace.rs:1052-1056) and only to a basename until the next refresh climbs to the git root (automatic_display_name_for_cwd falls back to fallback_label_from_cwd on a cache miss, src/workspace.rs:1099-1105). Anything the user renames by hand stops moving for good and is marked as pinned on the wire the same way it already is (custom_label, src/protocol/wire.rs:1063 and :1096) \u2014 and to undo a pin the user needs a new clear/reset verb that does not exist yet. Renaming a tab also relabels the agents inside it whose names came from detection rather than from the user, so the agent sidebar rows follow the tab; an agent the user named by hand is left alone. Names reaching notifications (src/server/notifications.rs:48), the OS window title (src/app/window_title.rs:63, :68) and plugin context (src/app/api/plugins/context.rs:248) all change with them."
+  }
+]

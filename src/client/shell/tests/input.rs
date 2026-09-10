@@ -146,6 +146,7 @@ fn modal_paste_inserts_clipboard_text_through_overlay_text_path() {
         replace_on_type: true,
         target: ClientRenameTarget::Pane {
             pane_id: "pane_1".into(),
+            original_name: String::new(),
         },
     }));
     let mut outcome = ClientShellInput::default();
@@ -587,6 +588,49 @@ fn help_overlay_uses_live_keymap_and_owns_filter_state() {
     assert!(matches!(state.overlay, Some(ClientShellOverlay::Help(_))));
     assert!(state.handle_input_bytes(b"\x1b").repaint);
     assert!(state.overlay.is_none());
+}
+
+/// The rename-pane box prefills with the pane's fully resolved name, which
+/// is often a name nobody typed on this pane — here, one inherited from a
+/// tab rename. Accepting that prefill unchanged must send nothing: pinning
+/// it as a real pane override would survive restart and stop every later
+/// tab rename from reaching this pane.
+#[test]
+fn rename_pane_accepting_an_inherited_prefill_unchanged_sends_nothing() {
+    let mut snapshot = snapshot();
+    snapshot.panes[0].label = Some("reviewer-tab".into());
+    snapshot.panes[0].name_source = crate::workspace::naming::NameSource::Inherited;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot));
+    let mut open = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::RenamePane),
+        &mut open,
+    );
+    let save = state.handle_input_bytes(b"\r");
+    assert!(
+        save.actions.is_empty(),
+        "an unchanged derived prefill must not be pinned: {:?}",
+        save.actions
+    );
+}
+
+/// The same box on a pane that really does carry its own override is still
+/// a no-op when accepted unchanged.
+#[test]
+fn rename_pane_accepting_an_unchanged_override_sends_nothing() {
+    let mut snapshot = snapshot();
+    snapshot.panes[0].label = Some("build".into());
+    snapshot.panes[0].name_source = crate::workspace::naming::NameSource::Override;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot));
+    let mut open = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::RenamePane),
+        &mut open,
+    );
+    let save = state.handle_input_bytes(b"\r");
+    assert!(save.actions.is_empty());
 }
 
 #[test]

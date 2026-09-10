@@ -144,6 +144,7 @@ fn workspace_focus_success(id: &str, workspace_id: &str) -> Vec<u8> {
                 workspace_id: workspace_id.into(),
                 number: 1,
                 label: workspace_id.into(),
+                name_source: crate::workspace::naming::NameSource::Override,
                 focused: true,
                 pane_count: 1,
                 tab_count: 1,

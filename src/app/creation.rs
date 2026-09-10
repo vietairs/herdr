@@ -229,11 +229,15 @@ impl App {
             })
             .max_by_key(|(state, seen)| tab_attention_priority(*state, *seen))
             .unwrap_or((crate::detect::AgentState::Unknown, true));
+        // Same double-resolve shape as `workspace_info`, handled the same
+        // way — resolve label + name_source ONCE per tab.
+        let (tab_label, tab_name_source) = ws.resolved_tab_display(tab_idx)?;
         Some(crate::api::schema::TabInfo {
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             workspace_id: self.public_workspace_id(ws_idx),
             number: tab.number,
-            label: ws.tab_display_name(tab_idx)?,
+            label: tab_label,
+            name_source: tab_name_source,
             focused: self.state.active == Some(ws_idx) && ws.active_tab == tab_idx,
             pane_count: tab.panes.len(),
             agent_status: pane_agent_status(agg_state, seen),
@@ -340,6 +344,25 @@ impl App {
                 .focused_pane_id()
                 .is_some_and(|focused| focused == pane_id);
         let presentation = terminal.effective_presentation();
+        // Resolve the SAME pane-scope naming ladder the TUI border uses
+        // (own override -> inherited tab override -> mirrored remote
+        // label -> agent identity), not just `manual_label` — otherwise a
+        // mounted pane's mirrored label and a tab-rename's inherited label
+        // never reach the JSON API, the agent sidebar, or the OS window
+        // title, even though the TUI border already shows them.
+        // The agent-identity rung reuses the `EffectivePresentation`
+        // already built above for `title`/`display_agent`: this runs per
+        // pane per frame per client, so a second build here would double
+        // the presentation work on a pane-scaled path.
+        let inherited_tab_override = ws.tab_override_for_pane_inheritance(tab_idx);
+        let (label, name_source) = terminal
+            .resolved_pane_label_with_display_agent(
+                true,
+                inherited_tab_override,
+                presentation.display_agent.as_deref(),
+            )
+            .map(|(text, source)| (Some(text), source))
+            .unwrap_or((None, crate::workspace::naming::NameSource::default()));
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             terminal_id: terminal.id.to_string(),
@@ -352,7 +375,8 @@ impl App {
             foreground_cwd: ws.tabs[tab_idx]
                 .foreground_cwd_for_pane(pane_id, &self.terminal_runtimes)
                 .map(|cwd| cwd.display().to_string()),
-            label: terminal.manual_label.clone(),
+            label,
+            name_source,
             agent: terminal.effective_agent_label().map(str::to_string),
             title: presentation.title,
             terminal_title: terminal.terminal_title.clone(),
@@ -405,10 +429,17 @@ impl App {
     pub(super) fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {
         let ws = &self.state.workspaces[index];
         let (agg_state, seen) = ws.aggregate_state(&self.state.terminals);
+        // Resolve label + name_source ONCE (not via
+        // `display_name_from` + `workspace_name_source_from` separately) —
+        // this runs once per workspace per frame per client, a
+        // multiplicative render path per CLAUDE.md.
+        let (workspace_label, workspace_name_source) =
+            ws.resolved_display_from(&self.state.terminals, &self.terminal_runtimes);
         crate::api::schema::WorkspaceInfo {
             workspace_id: self.public_workspace_id(index),
             number: index + 1,
-            label: ws.display_name_from(&self.state.terminals, &self.terminal_runtimes),
+            label: workspace_label,
+            name_source: workspace_name_source,
             focused: self.state.active == Some(index),
             pane_count: ws.public_pane_numbers.len(),
             tab_count: ws.tabs.len(),
@@ -475,6 +506,14 @@ impl App {
         clipboard_tx: &UnboundedSender<ClipboardMessage>,
     ) -> std::io::Result<Vec<usize>> {
         let mount = mirror.mount().clone();
+        // Whether this mount's peer states it reports `PaneInfo::name_source`
+        // at all; `build_remote_pane` may only narrow a label by that field
+        // when it does. Read once here rather than per pane — the agreed set
+        // is fixed for the life of the connection.
+        let peer_reports_name_source =
+            mirror.supports(&crate::remote::federation::protocol::Capability::new(
+                crate::remote::federation::protocol::Capability::PANE_NAME_SOURCE,
+            ));
         let (rows, cols) = self.state.estimate_pane_size();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
@@ -528,6 +567,7 @@ impl App {
                     router,
                     out_tx,
                     clipboard_tx,
+                    peer_reports_name_source,
                 )?;
                 let terminal_id = terminal.id.clone();
                 self.terminal_runtimes.insert(terminal_id.clone(), runtime);
@@ -550,23 +590,38 @@ impl App {
                 };
 
                 let tab_idx = if let Some(existing_ws_idx) = ws_idx {
-                    self.state.workspaces[existing_ws_idx].create_tab_from_existing_pane(
-                        moved,
-                        Some(tab_info.label.clone()),
-                        self.event_tx.clone(),
-                        self.render_notify.clone(),
-                        self.render_dirty.clone(),
-                    )
+                    // Single-write: the remote's resolved label lands only
+                    // in `mirrored_name`, never in `custom_name`, so
+                    // `NameSource` correctly reports `Mirrored` rather than
+                    // lying `Override`.
+                    let tab_idx = self.state.workspaces[existing_ws_idx]
+                        .create_tab_from_existing_pane(
+                            moved,
+                            None,
+                            self.event_tx.clone(),
+                            self.render_notify.clone(),
+                            self.render_dirty.clone(),
+                        );
+                    if let Some(tab) = self.state.workspaces[existing_ws_idx].tabs.get_mut(tab_idx)
+                    {
+                        tab.mirrored_name = Some(tab_info.label.clone());
+                    }
+                    tab_idx
                 } else {
                     let mut workspace = Workspace::from_existing_pane(
-                        Some(ws_info.label.clone()),
-                        Some(tab_info.label.clone()),
+                        None,
+                        None,
                         PathBuf::from(first_pane.cwd.clone().unwrap_or_else(|| "/".to_string())),
                         moved,
                         self.event_tx.clone(),
                         self.render_notify.clone(),
                         self.render_dirty.clone(),
                     );
+                    // Single-write: see comment above.
+                    workspace.mirrored_name = Some(ws_info.label.clone());
+                    if let Some(tab) = workspace.tabs.get_mut(0) {
+                        tab.mirrored_name = Some(tab_info.label.clone());
+                    }
                     // RT-F8/S11.4: the sidebar badge/grouping
                     // (`ui::sidebar::workspace_federation_origin`) classifies
                     // purely from `Workspace::id`'s `r:<host_key>:` prefix —
@@ -626,6 +681,7 @@ impl App {
                             router,
                             out_tx,
                             clipboard_tx,
+                            peer_reports_name_source,
                         )?;
                     let split_terminal_id = split_terminal.id.clone();
                     self.terminal_runtimes
@@ -703,6 +759,7 @@ impl App {
         router: &mut TerminalChannelRouter,
         out_tx: &UnboundedSender<FederationMessage>,
         clipboard_tx: &UnboundedSender<ClipboardMessage>,
+        peer_reports_name_source: bool,
     ) -> std::io::Result<(PaneId, TerminalState, TerminalRuntime, PaneState)> {
         let raw_terminal_id = strip_mount_namespace(mount, &pane_info.terminal_id);
         let output_rx =
@@ -741,7 +798,29 @@ impl App {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/")),
         );
-        terminal.manual_label = pane_info.label.clone();
+        // Single-write: see the workspace/tab dual-write comment
+        // above `materialize_federation_mount` for the reasoning. Only a
+        // name the remote actually set is mirrored — mirroring its live
+        // agent identity would freeze it here, since the mirror slot
+        // outranks the identity relayed into this pane afterwards.
+        //
+        // That narrowing is only legible against a peer that actually
+        // reports which rung produced the label. `PaneInfo::name_source` is
+        // `#[serde(default)]` and its default is `Ordinal`, so a peer built
+        // before the field existed sends nothing and reading the resulting
+        // value would treat an absence as a fact that peer never asserted —
+        // dropping a name the remote user really typed and showing this
+        // host's own agent identity in its place. Such a peer fills `label`
+        // from a pane's own override slot and from nothing else, so every
+        // label it sends is one somebody set: mirror it as-is.
+        terminal.mirrored_label = if peer_reports_name_source {
+            crate::workspace::naming::label_worth_mirroring(
+                pane_info.label.as_deref(),
+                pane_info.name_source,
+            )
+        } else {
+            pane_info.label.clone()
+        };
         let pane_state = PaneState::new(terminal_id);
         Ok((pane_id, terminal, runtime, pane_state))
     }
@@ -1714,11 +1793,16 @@ impl App {
                 let ws = &mut self.state.workspaces[ws_idx];
                 let tab_idx = ws.create_tab_from_existing_pane(
                     moved,
-                    label,
+                    None,
                     self.event_tx.clone(),
                     self.render_notify.clone(),
                     self.render_dirty.clone(),
                 );
+                // Single-write: see the comment above
+                // `materialize_federation_mount`.
+                if let Some(tab) = ws.tabs.get_mut(tab_idx) {
+                    tab.mirrored_name = label;
+                }
                 (tab_idx, true)
             }
         };
@@ -1823,8 +1907,8 @@ impl App {
             pane_state,
         };
         let mut workspace = Workspace::from_existing_pane(
-            Some(workspace_label),
-            tab_label,
+            None,
+            None,
             terminal.cwd.clone(),
             moved,
             self.event_tx.clone(),
@@ -1836,6 +1920,12 @@ impl App {
         // `r:<host_key>:` prefix, so the mirror's namespaced id must survive
         // verbatim rather than the fresh local id `from_existing_pane` mints.
         workspace.id = workspace_id.clone();
+        // Single-write: see the comment above
+        // `materialize_federation_mount`.
+        workspace.mirrored_name = Some(workspace_label);
+        if let Some(tab) = workspace.tabs.get_mut(0) {
+            tab.mirrored_name = tab_label;
+        }
         workspace.worktree_space = Some(WorktreeSpaceMembership {
             key: format!("federation:{}", origin.as_str()),
             label: origin.as_str().to_string(),
@@ -2978,6 +3068,7 @@ mod federation_materialization_tests {
             workspace_id: "w1".to_string(),
             number: 1,
             label: "remote workspace".to_string(),
+            name_source: crate::workspace::naming::NameSource::Mirrored,
             focused: false,
             pane_count: 2,
             tab_count: 1,
@@ -2995,6 +3086,7 @@ mod federation_materialization_tests {
             workspace_id: "w1".to_string(),
             number: 1,
             label: "remote tab".to_string(),
+            name_source: crate::workspace::naming::NameSource::Mirrored,
             focused: false,
             pane_count: 2,
             agent_status: AgentStatus::Idle,
@@ -3011,6 +3103,9 @@ mod federation_materialization_tests {
             cwd: Some("/home/alice/project".to_string()),
             foreground_cwd: None,
             label: Some("remote pane".to_string()),
+            // A label the remote user actually typed on that pane — the
+            // only kind this host pins into its mirror slot.
+            name_source: crate::workspace::naming::NameSource::Override,
             agent: None,
             title: None,
             terminal_title: None,
@@ -3023,6 +3118,19 @@ mod federation_materialization_tests {
             scroll: None,
             revision: 0,
         }
+    }
+
+    /// The capability set of a peer that reports `PaneInfo::name_source`.
+    /// A `RemoteMirror` starts with nothing negotiated, which is exactly a
+    /// peer built before that field existed, so a test about the reporting
+    /// peer has to say so.
+    fn agreed_with_name_source_reporting(
+    ) -> std::collections::BTreeSet<crate::remote::federation::protocol::Capability> {
+        [crate::remote::federation::protocol::Capability::new(
+            crate::remote::federation::protocol::Capability::PANE_NAME_SOURCE,
+        )]
+        .into_iter()
+        .collect()
     }
 
     /// The single mirrored tab's namespaced (public) id — the exact key
@@ -3043,6 +3151,7 @@ mod federation_materialization_tests {
             workspace_id: "w1".to_string(),
             number,
             label: label.to_string(),
+            name_source: crate::workspace::naming::NameSource::Mirrored,
             focused: false,
             pane_count: 1,
             agent_status: AgentStatus::Idle,
@@ -3227,6 +3336,334 @@ mod federation_materialization_tests {
 
         assert!(created.is_empty());
         assert!(app.state.workspaces.is_empty());
+    }
+
+    /// The mount path single-writes the remote's own resolved
+    /// workspace/tab/pane labels into `mirrored_name`/`mirrored_label`,
+    /// leaving `custom_name`/`manual_label` `None` for a freshly mounted
+    /// scope, so a later local rename — which only ever touches the
+    /// override slot — can never be silently overwritten by the next remote
+    /// snapshot. Writing those labels straight into the user-override slot
+    /// instead, whether or not the remote user ever renamed anything, is
+    /// what this guards against.
+    #[tokio::test]
+    async fn mounted_scope_labels_land_in_the_mirror_slot_not_the_override_slot() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed against a loopback-shaped snapshot");
+        let ws_idx = created[0];
+        let ws = &app.state.workspaces[ws_idx];
+
+        assert_eq!(
+            ws.custom_name, None,
+            "mount-time remote label is not a user override"
+        );
+        assert_eq!(
+            ws.mirrored_name.as_deref(),
+            Some("remote workspace"),
+            "the remote's resolved label lands in the mirror slot, not custom_name"
+        );
+        assert_eq!(ws.tabs[0].custom_name, None);
+        assert_eq!(ws.tabs[0].mirrored_name.as_deref(), Some("remote tab"));
+        assert!(
+            !ws.tabs[0].panes.is_empty(),
+            "fixture must materialize at least one pane"
+        );
+        for pane in ws.tabs[0].panes.values() {
+            let terminal = app
+                .state
+                .terminals
+                .get(&pane.attached_terminal_id)
+                .expect("materialized pane must have a terminal");
+            assert_eq!(terminal.manual_label, None);
+            assert_eq!(terminal.mirrored_label.as_deref(), Some("remote pane"));
+        }
+    }
+
+    /// A mounted pane whose remote label is only the remote's live agent
+    /// identity must NOT have that string pinned into this host's mirror
+    /// slot: the mirror slot outranks agent identity, so pinning it would
+    /// freeze the pane at whatever agent happened to be running at mount
+    /// time. Repro: the remote runs claude, this host mounts it, the remote
+    /// switches to codex, and the relayed status updates this host's
+    /// terminal — the pane must read codex everywhere, not claude.
+    #[tokio::test]
+    async fn a_mounted_pane_follows_the_remote_live_agent_identity_after_it_changes() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.set_agreed_capabilities(agreed_with_name_source_reporting());
+        let mut snapshot = two_pane_snapshot();
+        for pane in &mut snapshot.panes {
+            pane.label = Some("claude".to_string());
+            pane.name_source = crate::workspace::naming::NameSource::AgentIdentity;
+        }
+        mirror.apply_snapshot(&snapshot, EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed against a loopback-shaped snapshot");
+        let ws_idx = created[0];
+
+        let terminal_ids: Vec<_> = app.state.workspaces[ws_idx].tabs[0]
+            .panes
+            .values()
+            .map(|pane| pane.attached_terminal_id.clone())
+            .collect();
+        assert!(!terminal_ids.is_empty());
+        for terminal_id in &terminal_ids {
+            let terminal = app
+                .state
+                .terminals
+                .get(terminal_id)
+                .expect("materialized pane must have a terminal");
+            assert_eq!(
+                terminal.mirrored_label, None,
+                "a name the remote merely derived from its agent identity is not pinned"
+            );
+        }
+
+        // The relayed status now reports a different agent in that pane.
+        for terminal_id in &terminal_ids {
+            let terminal = app
+                .state
+                .terminals
+                .get_mut(terminal_id)
+                .expect("materialized pane must have a terminal");
+            terminal.detected_agent = Some(crate::detect::Agent::Codex);
+        }
+
+        let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        let pane = app
+            .pane_info(ws_idx, pane_id)
+            .expect("materialized pane must produce pane info");
+        assert_eq!(
+            pane.label.as_deref(),
+            Some("codex"),
+            "the live relayed identity keeps driving the label after the mount"
+        );
+        assert_eq!(
+            pane.name_source,
+            crate::workspace::naming::NameSource::AgentIdentity
+        );
+    }
+
+    /// A peer that never agreed to report `PaneInfo::name_source` sends
+    /// `PaneInfo` without that field, and `serde` fills in `Ordinal` — a
+    /// value that peer never asserted. Reading it as one would classify the
+    /// label as locally derived and drop it, so a pane the remote user
+    /// renamed would display this host's own agent identity instead of the
+    /// name they typed. Such a peer only ever fills `label` from a pane's
+    /// own override slot, so its labels must be mirrored unconditionally.
+    #[tokio::test]
+    async fn a_peer_that_does_not_report_name_source_still_mirrors_its_renamed_pane_label() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        // No `set_agreed_capabilities`: nothing negotiated is exactly what a
+        // peer built before the field existed leaves behind.
+        let mut snapshot = two_pane_snapshot();
+        for pane in &mut snapshot.panes {
+            pane.label = Some("deploy box".to_string());
+            // What `#[serde(default)]` manufactures for an absent field.
+            pane.name_source = crate::workspace::naming::NameSource::default();
+        }
+        mirror.apply_snapshot(&snapshot, EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed against a loopback-shaped snapshot");
+        let ws_idx = created[0];
+
+        let terminal_ids: Vec<_> = app.state.workspaces[ws_idx].tabs[0]
+            .panes
+            .values()
+            .map(|pane| pane.attached_terminal_id.clone())
+            .collect();
+        assert!(!terminal_ids.is_empty());
+        for terminal_id in &terminal_ids {
+            let terminal = app
+                .state
+                .terminals
+                .get(terminal_id)
+                .expect("materialized pane must have a terminal");
+            assert_eq!(
+                terminal.mirrored_label.as_deref(),
+                Some("deploy box"),
+                "an absent name_source must not be read as a resolved one"
+            );
+        }
+
+        // Even with an agent detected locally, the remote's name still wins.
+        for terminal_id in &terminal_ids {
+            let terminal = app
+                .state
+                .terminals
+                .get_mut(terminal_id)
+                .expect("materialized pane must have a terminal");
+            terminal.detected_agent = Some(crate::detect::Agent::Codex);
+        }
+        let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        let pane = app
+            .pane_info(ws_idx, pane_id)
+            .expect("materialized pane must produce pane info");
+        assert_eq!(pane.label.as_deref(), Some("deploy box"));
+        assert_eq!(
+            pane.name_source,
+            crate::workspace::naming::NameSource::Mirrored
+        );
+    }
+
+    /// `handle_tab_rename` (api/tabs.rs:315) has no federation branch at
+    /// all, and must not grow one: renaming a mounted tab locally only ever
+    /// updates the local mirror and never queues an outbound federation
+    /// frame. Exercised through the real dispatch entry point
+    /// (`handle_api_request`), not a direct call to the `pub(super)`
+    /// handler, which this module cannot see.
+    #[tokio::test]
+    async fn char_local_rename_of_a_mounted_tab_emits_no_federation_frame() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed against a loopback-shaped snapshot");
+        let ws_idx = created[0];
+
+        // Drain the mount-time Terminal::Open frames so only rename-caused
+        // traffic is observable below.
+        while out_rx.try_recv().is_ok() {}
+
+        let tab_id = app
+            .public_tab_id(ws_idx, 0)
+            .expect("materialized tab must have a public id");
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "1".to_string(),
+            method: crate::api::schema::Method::TabRename(crate::api::schema::TabRenameParams {
+                tab_id: tab_id.clone(),
+                label: Some("local override".to_string()),
+            }),
+        });
+        assert!(
+            response.contains("local override"),
+            "rename must succeed: {response}"
+        );
+        assert_eq!(
+            app.state.workspaces[ws_idx].tabs[0].custom_name.as_deref(),
+            Some("local override"),
+            "the local mirror is updated"
+        );
+
+        out_rx.close();
+        let mut queued = Vec::new();
+        while let Ok(msg) = out_rx.try_recv() {
+            queued.push(msg);
+        }
+        assert!(
+            queued.is_empty(),
+            "a local rename of a mounted tab must never reach the remote host, \
+             but these frames were queued: {queued:?}"
+        );
+    }
+
+    /// `handle_federation_resync_pane_created` (:1594) discovers a remote
+    /// tab that has no local tab yet purely from
+    /// `App::remote_resync_tab_index`'s already-known `label`. That label
+    /// single-writes into `mirrored_name`, exactly as the mount-time path
+    /// does, leaving `custom_name` `None` so a later local rename of that
+    /// tab is never silently clobbered by a subsequent remote snapshot.
+    /// Writing it straight into `custom_name` is the same accident the
+    /// mount-time path once made, on the resync path.
+    #[tokio::test]
+    async fn resync_discovered_tab_label_lands_in_the_mirror_slot() {
+        let mut app = test_app();
+        let mount = mount(1);
+        let mut mirror = RemoteMirror::new(mount.clone());
+        mirror.apply_snapshot(&two_pane_snapshot(), EventCursor(0));
+
+        let mut router = TerminalChannelRouter::new();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let created = app
+            .materialize_federation_mount(&mirror, &mut router, &out_tx, &clipboard_tx)
+            .expect("materialization must succeed against a loopback-shaped snapshot");
+        let ws_idx = created[0];
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+
+        // A resync has already told this mount about a second remote tab's
+        // label before any of its panes have materialized locally — the
+        // exact shape `remote_resync_tab_index` (:1713-1717) is in when a
+        // resync-discovered tab is about to be created.
+        app.remote_resync_tab_index.insert(
+            "w1-tab2".to_string(),
+            RemoteTabRef {
+                workspace_id: workspace_id.clone(),
+                tab_number: None,
+                label: Some("resync tab".to_string()),
+            },
+        );
+
+        let local_pane_id = crate::layout::PaneId::alloc();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        let terminal = crate::terminal::TerminalState::new(
+            terminal_id.clone(),
+            PathBuf::from("/home/alice/project"),
+        );
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let pane_state = crate::pane::PaneState::new(terminal_id.clone());
+
+        app.handle_federation_resync_pane_created(crate::events::FederationResyncPaneCreated {
+            origin: mount.host_key.clone(),
+            workspace_id: workspace_id.clone(),
+            tab_id: "w1-tab2".to_string(),
+            pane_id: "p-resync".to_string(),
+            local_pane_id,
+            terminal_id,
+            terminal,
+            runtime,
+            pane_state,
+        });
+
+        let ws = &app.state.workspaces[ws_idx];
+        assert_eq!(ws.tabs.len(), 2, "the resync-discovered tab was created");
+        let new_tab = ws
+            .tabs
+            .iter()
+            .find(|tab| tab.mirrored_name.as_deref() != Some("remote tab"))
+            .expect("a second, resync-created tab exists beside the mount-time tab");
+        assert_eq!(
+            new_tab.custom_name, None,
+            "resync-known label is not a user override"
+        );
+        assert_eq!(
+            new_tab.mirrored_name.as_deref(),
+            Some("resync tab"),
+            "the resync-known remote label single-writes into mirrored_name"
+        );
     }
 
     /// Regression for the public-pane-numbering bypass: before the fix,
@@ -4561,13 +4998,13 @@ mod federation_materialization_tests {
         assert_eq!(
             ws.tabs
                 .iter()
-                .map(|tab| tab.custom_name.clone())
+                .map(|tab| tab.mirrored_name.clone())
                 .collect::<Vec<_>>(),
             vec![
                 Some("first remote tab".to_string()),
                 Some("second remote tab".to_string())
             ],
-            "each local tab carries its remote counterpart's label"
+            "each local tab carries its remote counterpart's label, in the mirror slot"
         );
 
         for tab_id in &tab_ids {
@@ -4650,9 +5087,9 @@ mod federation_materialization_tests {
         assert_eq!(tab_idx, 2);
         assert_eq!(ws.tabs[tab_idx].panes.len(), 1, "it is not a split");
         assert_eq!(
-            ws.tabs[tab_idx].custom_name.as_deref(),
+            ws.tabs[tab_idx].mirrored_name.as_deref(),
             Some("third remote tab"),
-            "the tab-created event's label must reach the materialized tab"
+            "the tab-created event's label must reach the materialized tab, in the mirror slot"
         );
         assert!(ws.public_pane_number(local_pane_id).is_some());
         assert_eq!(
@@ -4817,9 +5254,9 @@ mod federation_materialization_tests {
         assert_eq!(ws.display_name(), "second remote workspace");
         assert_eq!(ws.tabs.len(), 1);
         assert_eq!(
-            ws.tabs[0].custom_name.as_deref(),
+            ws.tabs[0].mirrored_name.as_deref(),
             Some("w2 root tab"),
-            "the announced tab label reaches the materialized root tab"
+            "the announced tab label reaches the materialized root tab, in the mirror slot"
         );
         assert!(ws.public_pane_number(local_pane_id).is_some());
 

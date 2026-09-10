@@ -260,12 +260,34 @@ pub(super) fn agent_rows(
                 .iter()
                 .filter(|candidate| candidate.workspace_id == agent.workspace_id)
                 .count();
+            // Preserve today's visible behavior deliberately (federation-scope
+            // Q1's default recommendation): a mirrored remote label counts
+            // as "named" for this single-tab row-visibility check, same as
+            // a local override. Changing that is a separate product call.
             let tab_label = tab
-                .filter(|tab| tab_count > 1 || tab.custom_label)
+                .filter(|tab| {
+                    tab_count > 1
+                        || matches!(
+                            tab.name_source,
+                            crate::workspace::naming::NameSource::Override
+                                | crate::workspace::naming::NameSource::Mirrored
+                        )
+                })
                 .map(|tab| tab.label.as_str());
-            let agent_label = agent
-                .display_agent
+            // The `{agent}` token shows the name that was actually given
+            // to this agent's scope — its own pane rename, a rename
+            // inherited from the enclosing tab, or a mirrored remote label
+            // — and only falls back to the agent kind ("claude", "codex")
+            // when nothing was named. The server resolved that ladder
+            // already; the client never re-derives it. This is display
+            // only: `agent.name`, the addressable handle used by
+            // `herdr agent send`, is untouched.
+            let resolved_scope_label = agent
+                .label
                 .as_deref()
+                .filter(|_| agent.name_source.is_explicitly_named());
+            let agent_label = resolved_scope_label
+                .or(agent.display_agent.as_deref())
                 .or(agent.name.as_deref())
                 .or(agent.agent.as_deref())
                 .or(agent.title.as_deref());
