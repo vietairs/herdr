@@ -1342,6 +1342,12 @@ mod tests {
     /// `SplitPane` performs a real split against the live `App` (via the
     /// same `Method::PaneSplit` handler the local TUI/CLI path uses) and
     /// replies with the new pane's raw id + terminal id.
+    // Unix-only: this drives a real local pane spawn, and on Windows the
+    // ConPTY child outlives the dropped `App`, so the pane's `child.wait()`
+    // blocking task never finishes and the test runtime's drop blocks forever.
+    // The serving side these commands arrive on (`server::federation_accept`)
+    // is itself `cfg(unix)`, so nothing this covers can run on Windows anyway.
+    #[cfg(unix)]
     #[tokio::test]
     async fn split_pane_against_a_known_target_pane_creates_a_real_pane_and_replies_ok() {
         let mut app = test_app();
@@ -1387,6 +1393,12 @@ mod tests {
     /// the same `Method::WorkspaceCreate` handler the local TUI/CLI
     /// new-workspace action uses) and replies with the new workspace's raw
     /// workspace/tab/pane/terminal ids.
+    // Unix-only: this drives a real local pane spawn, and on Windows the
+    // ConPTY child outlives the dropped `App`, so the pane's `child.wait()`
+    // blocking task never finishes and the test runtime's drop blocks forever.
+    // The serving side these commands arrive on (`server::federation_accept`)
+    // is itself `cfg(unix)`, so nothing this covers can run on Windows anyway.
+    #[cfg(unix)]
     #[tokio::test]
     async fn create_workspace_creates_a_real_workspace_and_replies_with_its_ids() {
         let mut app = test_app();
@@ -1440,6 +1452,12 @@ mod tests {
     /// production. Before the fix, `Method::PaneSplit`'s handler only
     /// accepted public pane ids and this would reply `pane_not_found` for
     /// every real remote split.
+    // Unix-only: this drives a real local pane spawn, and on Windows the
+    // ConPTY child outlives the dropped `App`, so the pane's `child.wait()`
+    // blocking task never finishes and the test runtime's drop blocks forever.
+    // The serving side these commands arrive on (`server::federation_accept`)
+    // is itself `cfg(unix)`, so nothing this covers can run on Windows anyway.
+    #[cfg(unix)]
     #[tokio::test]
     async fn split_pane_resolves_a_raw_terminal_id_the_same_as_a_public_pane_id() {
         let mut app = test_app();
