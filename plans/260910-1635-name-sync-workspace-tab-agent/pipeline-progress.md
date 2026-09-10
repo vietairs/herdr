@@ -224,3 +224,42 @@ Commits: 8407ba62 (feature), 6ad0715b (plan artifacts). Pre-merge review dispatc
 `wf_fa82ea87-3f4`, scoped to the genuinely new surface — the two conflict resolutions, the semantic
 interaction with the new Windows federation mounting, and whether any earlier fix now rests on a
 stale c2f4166a baseline.
+
+## PIPELINE COMPLETE — PR #26 MERGE-READY (2026-09-11)
+
+Pre-merge review `wf_fa82ea87-3f4` (2 lenses) found ONE real defect, and both lenses found it
+independently: the new `PANE_NAME_SOURCE` constant carried a comment claiming "Federation only
+negotiates capabilities on Unix; matches SCROLLBACK_REPLAY and WORKSPACE_TAB_CLOSE above" plus a
+`not(unix)` dead-code allow — while rebased-in commit 97a03e68 had just DELETED that byte-identical
+justification from those very constants, because the Windows mount work made it untrue. Fixed in
+805c7af1. I had caught this same staleness class in session.rs during conflict resolution and missed
+it here because protocol/mod.rs auto-merged without a conflict.
+
+The workflow reported `CLEAN` with zero findings: my post-processing dropped them because both agents
+returned their JSON as a string. Third occurrence of that script bug this run; the findings were only
+recovered by reading journal.jsonl, exactly as the tool's diagnostics line instructs.
+
+A TEST WAS WRITTEN AND THEN DELETED. Both reviewers noted no test covered the "agreed capability +
+explicitly-named label" path. I added one; it passed; I then mutated the gate to
+`peer_reports_name_source && false` and it PASSED AGAIN. That case is not behaviourally
+distinguishable — both branches return `Some("deploy box")` — so no test of it can fail. Deleted
+rather than banked as coverage. The two existing tests do pin both branches, each on an input where
+they genuinely differ. Logged in implementation-notes.md.
+
+FINAL STATE — commits 8407ba62, 6ad0715b, 805c7af1 on fix/name-sync-workspace-tab-agent:
+  local: fmt clean; unix clippy zero; windows-msvc clippy zero; 3676 tests / 3675 pass; docs 12 pass
+  GitHub: all 7 checks PASS; mergeable=MERGEABLE, CLEAN
+  https://github.com/vietairs/herdr/pull/26
+
+NOT DONE, and deliberately so: no live two-host mount test. The federation paths are covered by unit
+tests plus a capability gate whose two branches were each proven to fail the suite when forced the
+wrong way, but no real mount was exercised. See [[herdr-federation-live-validation-recipe]].
+
+FOUND IN PASSING, NOT THIS BRANCH'S BUG: src/app/api/workspaces.rs:1127-1166, the workspace-close
+path's federated-origin handling, is still entirely `#[cfg(unix)]`. Now that PR #25 lets Windows
+clients mount, a Windows client closing a mounted workspace may take a different path than a Unix
+one. Untested here and out of scope; looks like a real gap in the Windows federation work.
+
+USER-OWNED NEXT STEPS (cortex does not merge): merge #26, then `git pull --ff-only` on the base,
+remove the worktree at /Users/hvnguyen/Projects/worktrees/herdr-name-sync, then `/hvn:plan-gc
+archive`. Never delete the remote branch.
