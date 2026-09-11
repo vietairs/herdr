@@ -237,3 +237,57 @@ fn global_menu_entry_opens_the_mount_remote_overlay() {
         Some(ClientShellOverlay::MountRemote(_))
     ));
 }
+
+// Regression guard for the mount button doing nothing at all: the dialog was
+// rebuilt onto the client-shell endpoint lane, but `workspace.mount_remote`
+// was never added to that lane's advertised method list, so every submit was
+// dropped client-side before a request was ever queued. Binding the fixture
+// to the server's real list (rather than a hand-written one) is the point --
+// a hand-written list would have kept passing through the outage.
+// Mutation-checked: removing "workspace.mount_remote" from
+// `CLIENT_SHELL_METHODS` makes this test fail.
+#[test]
+fn the_real_server_method_list_admits_a_mount_submit() {
+    let mut state = state_with_mount_overlay(vec![]);
+    state.set_endpoint_methods(Some(
+        crate::server::client_commands::supported_client_shell_method_names()
+            .iter()
+            .map(|method| (*method).to_owned())
+            .collect(),
+    ));
+    state.insert_remote_mount_overlay_text("alice@host-b");
+    let mut outcome = ClientShellInput::default();
+
+    state.submit_remote_mount(&mut outcome);
+
+    assert_eq!(
+        mount_remote_params(&outcome.actions).targets,
+        vec!["alice@host-b".to_string()],
+        "a server advertising its real method list must accept a mount submit"
+    );
+}
+
+// A server that does not advertise the method reports it through an endpoint
+// notice, which this modal draws over -- so the rejection also has to land in
+// the dialog's own error line or the button looks inert.
+// Mutation-checked: dropping the `supports_endpoint_method` guard from
+// `submit_remote_mount` makes this test fail (no inline error is set).
+#[test]
+fn an_unsupported_server_rejects_the_submit_inline_instead_of_silently() {
+    let mut state = state_with_mount_overlay(vec![]);
+    state.set_endpoint_methods(Some(vec!["pane.focus".into()]));
+    state.insert_remote_mount_overlay_text("alice@host-b");
+    let mut outcome = ClientShellInput::default();
+
+    state.submit_remote_mount(&mut outcome);
+
+    assert!(outcome.actions.is_empty(), "no request should be sent");
+    let Some(ClientShellOverlay::MountRemote(overlay)) = &state.overlay else {
+        panic!("mount overlay should stay open");
+    };
+    let error = overlay.error.as_deref().expect("inline rejection");
+    assert!(
+        error.contains("does not support"),
+        "rejection should say why, got {error:?}"
+    );
+}

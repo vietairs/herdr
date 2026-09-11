@@ -6,6 +6,14 @@
 - Windows clients can now mount a remote machine's workspaces. `workspace.mount_remote` previously answered `unsupported_platform` on Windows; it now dials and mounts the same way Linux and macOS clients do. Serving a mount from a Windows host is still unsupported. Clipboard file staging remains unavailable when the client is Windows.
 
 ### Fixed
+- The mount button in the "mount remote workspace" dialog works again. The dialog was rebuilt onto
+  the client-shell command lane, but `workspace.mount_remote` was never added to the list of
+  methods that lane accepts, so every submit was dropped before a request was sent and the dialog
+  sat there looking inert. A server that does not offer the method now says so on the dialog
+  itself instead of behind it.
+- "Close on host" (on a remote workspace or tab) and "Balance splits" in the context menu work
+  again. They were dropped before being sent for the same reason as the mount button: the
+  methods they send were missing from the list the client-shell command lane accepts.
 - Closing a pane on Windows now actually stops its child process. The shutdown ladder opened each process without the access right `TerminateProcess` requires, so every terminate silently failed and the child outlived the pane.
 
 ### Changed

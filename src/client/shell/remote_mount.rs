@@ -154,20 +154,32 @@ impl ClientShellState {
                 return;
             }
         };
-        self.push_endpoint_method_with_kind(
-            crate::api::schema::Method::WorkspaceMountRemote(
-                crate::api::schema::WorkspaceMountRemoteParams {
-                    targets,
-                    // No UI exposes this; the pre-merge dialog always sent
-                    // `false` too (its only reader was never wired to a
-                    // control -- see the equivalent note in the deleted
-                    // `src/app/remote_mount.rs`).
-                    remote_keybindings: false,
-                },
-            ),
-            PendingEndpointKind::RemoteMount,
-            outcome,
+        let method = crate::api::schema::Method::WorkspaceMountRemote(
+            crate::api::schema::WorkspaceMountRemoteParams {
+                targets,
+                // No UI exposes this; the pre-merge dialog always sent
+                // `false` too (its only reader was never wired to a
+                // control -- see the equivalent note in the deleted
+                // `src/app/remote_mount.rs`).
+                remote_keybindings: false,
+            },
         );
+        // A server that does not advertise the method would otherwise be
+        // reported only through an endpoint notice, which this modal draws
+        // over -- leaving the dialog looking inert when the button is
+        // pressed. Report it where the user is already looking, the same
+        // place a server-side rejection lands.
+        if !self.supports_endpoint_method(&method) {
+            if let Some(ClientShellOverlay::MountRemote(overlay)) = self.overlay.as_mut() {
+                overlay.error = Some(
+                    "this server does not support mounting remote workspaces; update and restart it"
+                        .to_owned(),
+                );
+            }
+            outcome.repaint = true;
+            return;
+        }
+        self.push_endpoint_method_with_kind(method, PendingEndpointKind::RemoteMount, outcome);
         outcome.repaint = true;
     }
 

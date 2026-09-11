@@ -17,6 +17,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "command.invoke",
     "integration.install",
     "integration.list",
+    "layout.balance",
     "layout.set_split_ratio",
     "pane.close",
     "pane.copy_motion",
@@ -37,13 +38,16 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "release_notes.dismiss",
     "server.reload_config",
     "tab.close",
+    "tab.close_remote",
     "tab.create",
     "tab.focus",
     "tab.move",
     "tab.rename",
     "workspace.close",
+    "workspace.close_remote",
     "workspace.create",
     "workspace.focus",
+    "workspace.mount_remote",
     "workspace.move",
     "workspace.move_block",
     "workspace.rename",
@@ -352,6 +356,12 @@ mod tests {
                 col: 0,
                 content_revision: None,
                 offset_from_bottom: None,
+            },
+        )));
+        assert!(supports_client_shell_method(&Method::WorkspaceMountRemote(
+            crate::api::schema::WorkspaceMountRemoteParams {
+                targets: vec!["user@host".into()],
+                remote_keybindings: false,
             },
         )));
         assert!(!supports_client_shell_method(&Method::Ping(
