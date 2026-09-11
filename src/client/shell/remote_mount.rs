@@ -154,20 +154,32 @@ impl ClientShellState {
                 return;
             }
         };
-        self.push_endpoint_method_with_kind(
-            crate::api::schema::Method::WorkspaceMountRemote(
-                crate::api::schema::WorkspaceMountRemoteParams {
-                    targets,
-                    // No UI exposes this; the pre-merge dialog always sent
-                    // `false` too (its only reader was never wired to a
-                    // control -- see the equivalent note in the deleted
-                    // `src/app/remote_mount.rs`).
-                    remote_keybindings: false,
-                },
-            ),
-            PendingEndpointKind::RemoteMount,
-            outcome,
+        let method = crate::api::schema::Method::WorkspaceMountRemote(
+            crate::api::schema::WorkspaceMountRemoteParams {
+                targets,
+                // No UI exposes this; the pre-merge dialog always sent
+                // `false` too (its only reader was never wired to a
+                // control -- see the equivalent note in the deleted
+                // `src/app/remote_mount.rs`).
+                remote_keybindings: false,
+            },
         );
+        // Every client-side refusal (endpoint offline, method not advertised,
+        // no snapshot yet) reports itself only through an endpoint notice,
+        // and this modal is drawn after the notice -- so it covers the sole
+        // feedback the press produced and the button looks inert. Mirror
+        // whichever refusal happened onto the dialog's own error line, where
+        // a server-side rejection already lands.
+        if !self.push_endpoint_method_with_kind(method, PendingEndpointKind::RemoteMount, outcome) {
+            let reason = self
+                .visible_endpoint_notice
+                .as_ref()
+                .map(|notice| notice.body.clone())
+                .unwrap_or_else(|| "could not send the mount request".to_owned());
+            if let Some(ClientShellOverlay::MountRemote(overlay)) = self.overlay.as_mut() {
+                overlay.error = Some(reason);
+            }
+        }
         outcome.repaint = true;
     }
 
