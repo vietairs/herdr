@@ -358,10 +358,28 @@ mod tests {
                 offset_from_bottom: None,
             },
         )));
+        // The four the client shell sends from the mount dialog and the
+        // context menu. Each was missing from the lane and therefore dead.
         assert!(supports_client_shell_method(&Method::WorkspaceMountRemote(
             crate::api::schema::WorkspaceMountRemoteParams {
                 targets: vec!["user@host".into()],
                 remote_keybindings: false,
+            },
+        )));
+        assert!(supports_client_shell_method(&Method::WorkspaceCloseRemote(
+            crate::api::schema::WorkspaceTarget {
+                workspace_id: "w1".into(),
+            },
+        )));
+        assert!(supports_client_shell_method(&Method::TabCloseRemote(
+            crate::api::schema::TabTarget {
+                tab_id: "w1:t1".into(),
+            },
+        )));
+        assert!(supports_client_shell_method(&Method::LayoutBalance(
+            crate::api::schema::LayoutExportParams {
+                tab_id: None,
+                pane_id: Some("w1:p1".into()),
             },
         )));
         assert!(!supports_client_shell_method(&Method::Ping(

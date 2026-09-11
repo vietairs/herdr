@@ -6,6 +6,18 @@ fn state_with_mount_overlay(recents: Vec<&str>) -> ClientShellState {
     projection.recent_remote_mount_targets = recents.into_iter().map(str::to_owned).collect();
     state.set_snapshot(Box::new(projection));
     state.set_pane_surface(surface());
+    // Seed the server's REAL advertised list rather than leaving it unset. An
+    // unset list makes `supports_endpoint_method` permissive, which is why
+    // every test in this file kept passing while the mount button was dead:
+    // `workspace.mount_remote` was missing from the lane and no fixture here
+    // ever exercised that gate. Binding to the real list makes each submit
+    // test below fail if the method is ever dropped from it again.
+    state.set_endpoint_methods(Some(
+        crate::server::client_commands::supported_client_shell_method_names()
+            .iter()
+            .map(|method| (*method).to_owned())
+            .collect(),
+    ));
     state.open_remote_mount_overlay();
     state
 }
@@ -238,40 +250,11 @@ fn global_menu_entry_opens_the_mount_remote_overlay() {
     ));
 }
 
-// Regression guard for the mount button doing nothing at all: the dialog was
-// rebuilt onto the client-shell endpoint lane, but `workspace.mount_remote`
-// was never added to that lane's advertised method list, so every submit was
-// dropped client-side before a request was ever queued. Binding the fixture
-// to the server's real list (rather than a hand-written one) is the point --
-// a hand-written list would have kept passing through the outage.
-// Mutation-checked: removing "workspace.mount_remote" from
-// `CLIENT_SHELL_METHODS` makes this test fail.
-#[test]
-fn the_real_server_method_list_admits_a_mount_submit() {
-    let mut state = state_with_mount_overlay(vec![]);
-    state.set_endpoint_methods(Some(
-        crate::server::client_commands::supported_client_shell_method_names()
-            .iter()
-            .map(|method| (*method).to_owned())
-            .collect(),
-    ));
-    state.insert_remote_mount_overlay_text("alice@host-b");
-    let mut outcome = ClientShellInput::default();
-
-    state.submit_remote_mount(&mut outcome);
-
-    assert_eq!(
-        mount_remote_params(&outcome.actions).targets,
-        vec!["alice@host-b".to_string()],
-        "a server advertising its real method list must accept a mount submit"
-    );
-}
-
 // A server that does not advertise the method reports it through an endpoint
 // notice, which this modal draws over -- so the rejection also has to land in
 // the dialog's own error line or the button looks inert.
-// Mutation-checked: dropping the `supports_endpoint_method` guard from
-// `submit_remote_mount` makes this test fail (no inline error is set).
+// Mutation-checked: dropping the refusal branch from `submit_remote_mount`
+// makes this test fail (no inline error is set).
 #[test]
 fn an_unsupported_server_rejects_the_submit_inline_instead_of_silently() {
     let mut state = state_with_mount_overlay(vec![]);
@@ -289,5 +272,30 @@ fn an_unsupported_server_rejects_the_submit_inline_instead_of_silently() {
     assert!(
         error.contains("does not support"),
         "rejection should say why, got {error:?}"
+    );
+}
+
+// The same covering applies to the other client-side refusals, so an offline
+// endpoint has to reach the dialog too -- reporting it only as a notice is the
+// same inert button by another route.
+// Mutation-checked: dropping the refusal branch makes this test fail.
+#[test]
+fn an_offline_endpoint_rejects_the_submit_inline_instead_of_silently() {
+    let mut state = state_with_mount_overlay(vec![]);
+    let endpoint_id = state.active_endpoint_id.clone();
+    state.mark_endpoint_disconnected(&endpoint_id);
+    state.insert_remote_mount_overlay_text("alice@host-b");
+    let mut outcome = ClientShellInput::default();
+
+    state.submit_remote_mount(&mut outcome);
+
+    assert!(outcome.actions.is_empty(), "no request should be sent");
+    let Some(ClientShellOverlay::MountRemote(overlay)) = &state.overlay else {
+        panic!("mount overlay should stay open");
+    };
+    let error = overlay.error.as_deref().expect("inline rejection");
+    assert!(
+        error.contains("not ready"),
+        "an offline endpoint should say it is not ready, got {error:?}"
     );
 }

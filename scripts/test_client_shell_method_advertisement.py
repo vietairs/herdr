@@ -8,26 +8,29 @@ an endpoint notice, which a modal dialog draws over.
 
 That is how `workspace.mount_remote` sat broken after the mount dialog was rebuilt onto this
 lane: the Rust-side contract test only checks that advertised methods exist in the schema,
-never the reverse direction. This test closes that direction.
+never the reverse direction. This test closes that direction, and asserts set EQUALITY rather
+than one-way containment so a scanner that silently stops matching fails loudly instead of
+passing vacuously.
 """
 
 import re
 import unittest
 from pathlib import Path
 
+from scripts.test_ui_hot_path_architecture import production_code
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLIENT_ROOT = REPO_ROOT / "src" / "client"
 
+# Advertised methods the client shell does not itself send. Empty today; an entry here needs a
+# reason, because an advertisement nothing sends is usually a leftover.
+EXPECTED_ADVERTISED_BUT_UNSENT: set[str] = set()
 
-def _production_source(path: Path) -> str:
-    """Source with the trailing `#[cfg(test)]` block removed.
 
-    This repository keeps unit tests at the bottom of the file behind `#[cfg(test)]`, so
-    truncating there is enough to drop test-only method references without parsing Rust.
-    """
-    text = path.read_text(encoding="utf-8")
-    marker = text.find("#[cfg(test)]")
-    return text if marker == -1 else text[:marker]
+def _is_test_source(path: Path) -> bool:
+    # Both conventions appear under src/client: a `tests/` directory, and a sibling
+    # `*_tests.rs` pulled in with `#[path = ...]` (e.g. endpoint/activation_tests.rs).
+    return "tests" in path.parts or path.stem.endswith("_tests")
 
 
 def advertised_methods() -> set[str]:
@@ -41,29 +44,31 @@ def variant_to_method_name() -> dict[str, str]:
     return dict(re.findall(r"Method::(\w+)\([^)]*\) => \"([^\"]+)\"", source))
 
 
-def methods_pushed_by_the_client_shell() -> dict[str, Path]:
+def methods_pushed_by_the_client_shell() -> dict[str, str]:
+    """Method name -> the repo-relative file that sends it.
+
+    `production_code` is shared with `test_ui_hot_path_architecture`: it blanks comments,
+    string literals and whole `#[cfg(test)] mod ... { }` bodies wherever they sit. Truncating
+    at the first `#[cfg(test)]` instead would be wrong here -- several client files carry a
+    mid-file `#[cfg(test)] use ...`, and `src/client/mod.rs` hits one on line 41 of 2073.
+    """
     names = variant_to_method_name()
-    found: dict[str, Path] = {}
+    found: dict[str, str] = {}
     for path in sorted(CLIENT_ROOT.rglob("*.rs")):
-        if "tests" in path.parts:
+        if _is_test_source(path):
             continue
-        for variant in re.findall(r"Method::(\w+)", _production_source(path)):
+        code = production_code(path.read_text(encoding="utf-8"))
+        for variant in re.findall(r"Method::(\w+)", code):
             if variant in names:
-                found.setdefault(names[variant], path)
+                found.setdefault(names[variant], path.relative_to(REPO_ROOT).as_posix())
     return found
 
 
 class ClientShellMethodAdvertisement(unittest.TestCase):
-    def test_the_parsers_find_something(self) -> None:
-        # Guards against a rename silently turning this whole test into a no-op.
-        self.assertGreater(len(advertised_methods()), 20)
-        self.assertGreater(len(variant_to_method_name()), 20)
-        self.assertGreater(len(methods_pushed_by_the_client_shell()), 20)
-
     def test_every_method_the_client_shell_sends_is_advertised(self) -> None:
         advertised = advertised_methods()
         unadvertised = {
-            method: path.relative_to(REPO_ROOT).as_posix()
+            method: path
             for method, path in methods_pushed_by_the_client_shell().items()
             if method not in advertised
         }
@@ -73,6 +78,13 @@ class ClientShellMethodAdvertisement(unittest.TestCase):
             "these methods are sent by the client shell but missing from CLIENT_SHELL_METHODS, "
             "so every request carrying one is dropped before it reaches the server",
         )
+
+    def test_the_lane_advertises_nothing_the_client_shell_never_sends(self) -> None:
+        # Doubles as the scanner's canary: if the parsers above silently stop matching, the
+        # sent set shrinks and this fails at once -- which a "found more than N things" sanity
+        # check could never notice.
+        unsent = advertised_methods() - set(methods_pushed_by_the_client_shell())
+        self.assertEqual(unsent, EXPECTED_ADVERTISED_BUT_UNSENT)
 
 
 if __name__ == "__main__":
