@@ -1385,7 +1385,10 @@ manifest_check = false
 
         let config: Config = toml::from_str("[ui]\nrender_interval_ms = 50").unwrap();
         assert_eq!(config.ui.render_interval_ms, 50);
-        assert_eq!(config.ui.render_interval(), std::time::Duration::from_millis(50));
+        assert_eq!(
+            config.ui.render_interval(),
+            std::time::Duration::from_millis(50)
+        );
 
         let clamped: Config = toml::from_str("[ui]\nrender_interval_ms = 0").unwrap();
         assert_eq!(clamped.ui.render_interval_ms, 0);
