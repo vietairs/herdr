@@ -46,11 +46,37 @@ impl App {
     /// Renders the configured outer window title, or `None` when window titles
     /// are disabled or every token resolved empty.
     pub(crate) fn window_title(&self) -> Option<String> {
+        let target = self.state.active.and_then(|workspace_index| {
+            self.state
+                .workspaces
+                .get(workspace_index)
+                .map(|workspace| (workspace_index, workspace.active_tab_index()))
+        });
+        self.window_title_for_target(target)
+    }
+
+    pub(crate) fn window_title_for(
+        &self,
+        workspace_index: usize,
+        tab_index: usize,
+    ) -> Option<String> {
+        self.window_title_for_target(Some((workspace_index, tab_index)))
+    }
+
+    fn window_title_for_target(&self, target: Option<(usize, usize)>) -> Option<String> {
         let (template, hostname) = self.window_title_template.as_ref()?;
-        let workspace = self
-            .state
-            .active
-            .and_then(|ws_idx| self.state.workspaces.get(ws_idx));
+        let workspace =
+            target.and_then(|(workspace_index, _)| self.state.workspaces.get(workspace_index));
+        let tab = target.and_then(|(workspace_index, tab_index)| {
+            self.state
+                .workspaces
+                .get(workspace_index)?
+                .tabs
+                .get(tab_index)
+        });
+        let terminal = tab
+            .and_then(|tab| tab.terminal_id(tab.layout.focused()))
+            .and_then(|terminal_id| self.state.terminals.get(terminal_id));
 
         let mut title = String::new();
         for part in template.parts() {
@@ -65,7 +91,12 @@ impl App {
                     }
                 }
                 WindowTitlePart::Token(WindowTitleToken::Tab) => {
-                    if let Some(name) = workspace.and_then(|ws| ws.active_tab_display_name()) {
+                    if let Some(name) = target.and_then(|(workspace_index, tab_index)| {
+                        self.state
+                            .workspaces
+                            .get(workspace_index)?
+                            .tab_display_name(tab_index)
+                    }) {
                         title.push_str(&name);
                     }
                 }
@@ -75,7 +106,7 @@ impl App {
                     // in the mirror slot, never in the `manual_label`
                     // override slot — still reaches the OS window title
                     // instead of silently vanishing.
-                    if let Some(label) = self.focused_terminal_state().and_then(|terminal| {
+                    if let Some(label) = terminal.and_then(|terminal| {
                         terminal
                             .manual_label
                             .as_deref()
@@ -85,9 +116,8 @@ impl App {
                     }
                 }
                 WindowTitlePart::Token(WindowTitleToken::TerminalTitle) => {
-                    if let Some(terminal_title) = self
-                        .focused_terminal_state()
-                        .and_then(|terminal| terminal.terminal_title_stripped())
+                    if let Some(terminal_title) =
+                        terminal.and_then(|terminal| terminal.terminal_title_stripped())
                     {
                         title.push_str(&terminal_title);
                     }
@@ -96,12 +126,6 @@ impl App {
         }
 
         Some(title)
-    }
-
-    fn focused_terminal_state(&self) -> Option<&crate::terminal::TerminalState> {
-        let workspace = self.state.workspaces.get(self.state.active?)?;
-        let terminal_id = workspace.terminal_id(workspace.focused_pane_id()?)?;
-        self.state.terminals.get(terminal_id)
     }
 }
 

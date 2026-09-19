@@ -102,6 +102,29 @@ fn windows_virtual_terminal_input_mode_sets_only_vti_bit() {
     assert_eq!(windows_virtual_terminal_input_mode(0x03f0), 0x03f0);
 }
 
+#[test]
+fn windows_win32_input_mode_defaults_to_vt_and_honors_probe() {
+    let _guard = env_lock().lock().unwrap();
+    let _removed =
+        EnvVarsRemovedGuard::new(&["HERDR_WINDOWS_INPUT_PROBE", "SSH_CONNECTION", "SSH_TTY"]);
+
+    assert!(!windows_win32_input_mode_enabled());
+    {
+        let _ssh = EnvVarGuard::set("SSH_CONNECTION", "1 2 3 4");
+        assert!(!windows_win32_input_mode_enabled());
+        let _probe = EnvVarGuard::set("HERDR_WINDOWS_INPUT_PROBE", "WiN32");
+        assert!(windows_win32_input_mode_enabled());
+    }
+    {
+        let _ssh = EnvVarGuard::set("SSH_TTY", "terminal");
+        assert!(!windows_win32_input_mode_enabled());
+        let _probe = EnvVarGuard::set("HERDR_WINDOWS_INPUT_PROBE", "vT");
+        assert!(!windows_win32_input_mode_enabled());
+    }
+    let _probe = EnvVarGuard::set("HERDR_WINDOWS_INPUT_PROBE", "win32");
+    assert!(windows_win32_input_mode_enabled());
+}
+
 struct EnvVarsRemovedGuard {
     previous: Vec<(&'static str, Option<OsString>)>,
 }
@@ -252,10 +275,12 @@ fn an_unbridged_empty_paste_is_swallowed_but_the_configured_key_is_forwarded() {
     ));
 }
 
+#[cfg(unix)]
 struct TempImageFile {
     path: std::path::PathBuf,
 }
 
+#[cfg(unix)]
 impl TempImageFile {
     fn new(extension: &str, bytes: &[u8]) -> Self {
         Self::with_name_fragment("test", extension, bytes)
@@ -275,6 +300,7 @@ impl TempImageFile {
     }
 }
 
+#[cfg(unix)]
 impl Drop for TempImageFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -901,12 +927,8 @@ fn terminal_control_scroll_command_maps_to_attach_scroll() {
 
 #[test]
 fn forward_clipboard_uses_local_clipboard_path() {
-    unsafe {
-        std::env::set_var("SSH_CONNECTION", "1 2 3 4");
-    }
+    let _guard = env_lock().lock().unwrap();
+    let _ssh = EnvVarGuard::set("SSH_CONNECTION", "1 2 3 4");
     assert!(forward_clipboard("dGVzdA=="));
     assert!(!forward_clipboard("not base64"));
-    unsafe {
-        std::env::remove_var("SSH_CONNECTION");
-    }
 }

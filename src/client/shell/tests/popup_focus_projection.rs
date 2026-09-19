@@ -37,8 +37,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
 
     state.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
         title: "rename pane",
-        input: String::new(),
-        replace_on_type: false,
+        input: TextEditor::default(),
         target: ClientRenameTarget::Pane {
             pane_id: "pane_1".into(),
             original_name: String::new(),
@@ -50,9 +49,8 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
         ClientWorktreeCreateOverlay {
             source_workspace_id: "ws_1".into(),
             repo_name: "repo".into(),
-            branch: String::new(),
+            branch: TextEditor::default(),
             checkout_path: String::new(),
-            replace_on_type: false,
             error: None,
             creating: true,
         },
@@ -68,7 +66,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
             source_workspace_id: "ws_1".into(),
             entries: Vec::new(),
             selected: 0,
-            query: String::new(),
+            query: TextEditor::default(),
             search_focused: false,
             error: None,
             opening: false,
@@ -81,7 +79,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
     assert!(state.modal_paste_target_active());
 
     state.overlay = Some(ClientShellOverlay::Navigator(ClientNavigatorOverlay {
-        query: String::new(),
+        query: TextEditor::default(),
         search_focused: false,
         selected: None,
         scroll: 0,
@@ -95,7 +93,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
     assert!(state.modal_paste_target_active());
 
     state.overlay = Some(ClientShellOverlay::Help(ClientHelpOverlay {
-        query: String::new(),
+        query: TextEditor::default(),
         search_focused: false,
         scroll: 0,
     }));
@@ -110,6 +108,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
         pane_id: "pane_1".into(),
         content_revision: 0,
         geometry: (80, 24),
+        alternate_screen_active: false,
         cursor: crate::api::schema::PaneTextPoint { row: 0, col: 0 },
         offset_from_bottom: 0,
         max_offset_from_bottom: 0,
@@ -117,7 +116,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
         selection: None,
         search_prompt: Some(ClientCopySearchPrompt {
             direction: crate::api::schema::PaneCopySearchDirection::Forward,
-            query: String::new(),
+            query: TextEditor::default(),
         }),
         search_query: String::new(),
         search_direction: None,
@@ -128,6 +127,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
         search_generation: 0,
         copy_after_search: false,
     });
+    state.mode = ClientShellMode::Copy;
     assert!(state.modal_paste_target_active());
     state.popup_pending = true;
     assert!(!state.modal_paste_target_active());

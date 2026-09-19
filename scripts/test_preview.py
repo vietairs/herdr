@@ -11,21 +11,14 @@ import scripts.preview as preview
 
 
 class PreviewNotesTests(unittest.TestCase):
-    def test_humanize_groups_conventional_subjects(self):
+    def test_notes_contain_only_build_and_comparison_link(self):
         self.assertEqual(
-            preview.humanize_subject("feat(update): add preview channel"),
-            ("Added", "Add preview channel"),
-        )
-        self.assertEqual(
-            preview.humanize_subject("fix: handle preview manifest"),
-            ("Fixed", "Handle preview manifest"),
-        )
-        self.assertEqual(
-            preview.humanize_subject("not conventional"),
-            ("Other", "Not conventional"),
+            preview.build_notes("previous-sha", "current-sha", "2026-09-16-abcdef123456", "herdrdev/herdr"),
+            "Preview build 2026-09-16-abcdef123456\n\n"
+            "[View changes](https://github.com/herdrdev/herdr/compare/previous-sha...current-sha)\n",
         )
 
-    def test_build_manifest_archives_current_assets(self):
+    def test_build_manifest_archives_assets_with_selected_source_generation(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "preview.json"
             notes = "Preview notes\n"
@@ -44,13 +37,14 @@ class PreviewNotesTests(unittest.TestCase):
                     "windows-x86_64": "a" * 64,
                 },
                 retain=30,
+                endpoint_generation=77,
             )
             data = json.loads(content)
             self.assertEqual(data["channel"], "preview")
             self.assertEqual(data["build_id"], "2026-06-02-abcdef123456")
             self.assertEqual(
                 data["endpoint_generation"],
-                preview.read_endpoint_protocol_generation(),
+                77,
             )
             self.assertEqual(
                 data["assets"]["linux-x86_64"]["sha256"],
@@ -68,7 +62,7 @@ class PreviewNotesTests(unittest.TestCase):
             self.assertIn("2026-06-02-abcdef123456", data["builds"])
             self.assertEqual(
                 data["builds"]["2026-06-02-abcdef123456"]["endpoint_generation"],
-                preview.read_endpoint_protocol_generation(),
+                77,
             )
 
     def test_windows_preview_asset_requires_sha256(self):
@@ -121,7 +115,10 @@ class PreviewNotesTests(unittest.TestCase):
 
     def test_preview_range_base_keeps_previous_preview_for_unreleased_work(self):
         def is_ancestor(ancestor: str, descendant: str) -> bool:
-            return (ancestor, descendant) == ("v0.7.0", "new-feature")
+            return (ancestor, descendant) in {
+                ("v0.7.0", "new-feature"),
+                ("previous-preview", "new-feature"),
+            }
 
         with (
             mock.patch.object(preview, "latest_stable_tag", return_value="v0.7.0"),
@@ -135,49 +132,14 @@ class PreviewNotesTests(unittest.TestCase):
                 "previous-preview",
             )
 
-    def test_preview_range_base_falls_back_to_stable_when_previous_is_unresolvable(self):
-        # A rewritten or force-pushed history leaves the manifest naming a
-        # commit this clone no longer has; the range must still be buildable.
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
+    def test_hotfix_preview_uses_stable_base_instead_of_newer_master_preview(self):
+        with (
+            mock.patch.object(preview, "latest_stable_tag", return_value="v0.7.0"),
+            mock.patch.object(preview, "git_is_ancestor", return_value=False),
+        ):
+            self.assertEqual(preview.preview_range_base("newer-master", "hotfix"), "v0.7.0")
 
-            def git(*args: str) -> str:
-                return subprocess.check_output(
-                    ["git", *args],
-                    cwd=repo,
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                ).strip()
-
-            git("init")
-            git("config", "user.email", "test@example.com")
-            git("config", "user.name", "Test User")
-
-            marker = repo / "marker.txt"
-            marker.write_text("release\n", encoding="utf-8")
-            git("add", "marker.txt")
-            git("commit", "-m", "release: v0.7.0")
-            git("tag", "v0.7.0")
-
-            marker.write_text("feature\n", encoding="utf-8")
-            git("commit", "-am", "feat: later work")
-            head = git("rev-parse", "HEAD")
-
-            missing = "44b3adb125524ea9a55739eee3776f922f2115ad"
-            original_cwd = os.getcwd()
-            try:
-                os.chdir(repo)
-                self.assertFalse(preview.git_commit_exists(missing))
-                self.assertEqual(preview.preview_range_base(missing, head), "v0.7.0")
-                # The whole point: the resulting range is usable.
-                self.assertEqual(
-                    preview.commit_subjects("v0.7.0", head),
-                    ["feat: later work"],
-                )
-            finally:
-                os.chdir(original_cwd)
-
-    def test_post_stable_history_selects_release_and_bases_range_on_stable_tag(self):
+    def test_post_stable_history_bases_range_on_stable_tag(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
 
@@ -210,11 +172,11 @@ class PreviewNotesTests(unittest.TestCase):
             original_cwd = os.getcwd()
             try:
                 os.chdir(repo)
-                self.assertEqual(preview.latest_publishable_commit("HEAD"), release)
                 self.assertEqual(
                     preview.preview_range_base(previous_preview, release),
                     "v0.7.0",
                 )
+                self.assertEqual(preview.latest_publishable_commit("HEAD"), release)
             finally:
                 os.chdir(original_cwd)
 
