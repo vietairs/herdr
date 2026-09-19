@@ -17,6 +17,7 @@
   again. They were dropped before being sent for the same reason as the mount button: the
   methods they send were missing from the list the client-shell command lane accepts.
 - Closing a pane on Windows now actually stops its child process. The shutdown ladder opened each process without the access right `TerminateProcess` requires, so every terminate silently failed and the child outlived the pane.
+- A federated mount no longer drops the whole connection when a terminal's scrollback replay is large. The terminal channel's frame cap was too small for a full scrollback with heavy styling, so opening such a pane over federation tore down the entire mount.
 
 ### Changed
 - Workspace, tab, and agent names now resolve through one shared precedence chain: a name you

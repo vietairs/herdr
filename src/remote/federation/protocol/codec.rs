@@ -324,6 +324,55 @@ mod tests {
     }
 
     #[test]
+    fn a_realistic_scrollback_replay_fits_the_terminal_channel_cap() {
+        // Observed on live hosts: `Open`'s scrollback replay is unbounded and
+        // unchunked at the sender, and real panes with heavy styling have
+        // produced wire frames (the `claimed_len` logged by the reader) of
+        // 2.3-2.8 MiB. This targets that observed maximum on the wire, which
+        // exceeded the old 2 MiB `Channel::Terminal` cap and tore down the
+        // whole federation mount.
+        const TARGET_WIRE_FRAME_BYTES: usize = 2_780_438;
+
+        // The codec is serde_json, so a `Vec<u8>` scrollback serialises as a
+        // JSON array of decimal numbers rather than raw bytes; back-solve the
+        // raw byte count that produces the target wire size.
+        let raw_len = {
+            let probe = FederationMessage::Terminal(TerminalChannelMessage::Open {
+                terminal_id: "term_1".to_string(),
+                mount_generation: 3,
+                replay: ScrollbackReplay {
+                    bytes: vec![0x41u8; 1000],
+                },
+            });
+            let probe_frame = encode(&probe).expect("encode should succeed");
+            let inflation_ratio = (probe_frame.len() - FRAME_HEADER_LEN) as f64 / 1000.0;
+            (TARGET_WIRE_FRAME_BYTES as f64 / inflation_ratio) as usize
+        };
+
+        let msg = FederationMessage::Terminal(TerminalChannelMessage::Open {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 3,
+            replay: ScrollbackReplay {
+                bytes: vec![0x41u8; raw_len],
+            },
+        });
+        let frame = encode(&msg).expect("encode should succeed");
+        let wire_frame_bytes = frame.len() - FRAME_HEADER_LEN;
+
+        // Confirm the constructed frame lands close to the real-world
+        // observation before asserting anything about the cap.
+        assert!(
+            wire_frame_bytes.abs_diff(TARGET_WIRE_FRAME_BYTES) < 100_000,
+            "constructed wire frame ({wire_frame_bytes} bytes) drifted too far from the observed maximum ({TARGET_WIRE_FRAME_BYTES} bytes)",
+        );
+
+        let (decoded, _consumed) = decode::<FederationMessage>(&frame, Channel::Terminal.max_len())
+            .expect("a realistic scrollback replay must fit the terminal channel cap");
+
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
     fn decode_rejects_mismatched_federation_protocol_version() {
         let msg = FederationMessage::Event(EventChannelMessage::Reset);
         let mut frame = encode(&msg).expect("encode should succeed");
