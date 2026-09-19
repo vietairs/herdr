@@ -3136,6 +3136,7 @@ mod federation_materialization_tests {
     /// The single mirrored tab's namespaced (public) id — the exact key
     /// `App::remote_resync_tab_index` is keyed on, so a test can address the
     /// already-materialized tab the way a real resync diff would.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn only_tab_id(mirror: &RemoteMirror) -> String {
         mirror
             .tabs()
@@ -3145,6 +3146,7 @@ mod federation_materialization_tests {
             .expect("the test mirror always holds exactly one tab")
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn tab_info_for(tab_id: &str, number: usize, label: &str) -> RemoteTabInfo {
         RemoteTabInfo {
             tab_id: tab_id.to_string(),
@@ -3158,6 +3160,7 @@ mod federation_materialization_tests {
         }
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn pane_info_in_tab(pane_id: &str, terminal_id: &str, tab_id: &str) -> RemotePaneInfo {
         let mut pane = pane_info(pane_id, terminal_id);
         pane.tab_id = tab_id.to_string();
@@ -3166,6 +3169,7 @@ mod federation_materialization_tests {
 
     /// Two remote tabs, one pane each — the shape that regressed into a
     /// single local tab with two splits.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn two_tab_snapshot() -> SessionSnapshot {
         let mut workspace = workspace_info();
         workspace.tab_count = 2;
@@ -4914,6 +4918,7 @@ mod federation_materialization_tests {
     /// fields each caller sets. Same construction the older resync tests
     /// spell out inline; factored out because the multi-tab tests below need
     /// it repeatedly.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn resync_pane_payload() -> (
         crate::layout::PaneId,
         crate::terminal::TerminalId,

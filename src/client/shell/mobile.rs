@@ -367,7 +367,7 @@ pub(super) fn render_mobile_switcher(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
-    selected_workspace_id: Option<&str>,
+    selected_workspace_id: Option<&WorkspaceNavigationTarget>,
     scroll: &mut usize,
     reveal_workspace: &mut bool,
     hits: &mut ShellHitMap,
@@ -457,7 +457,7 @@ pub(super) fn render_mobile_switcher(
                     Some(ClientMobileTarget::Workspace {
                         endpoint_id,
                         workspace_id,
-                    }) if endpoint_id == active_endpoint_id && workspace_id == selected_workspace_id
+                    }) if selected_workspace_id.matches(endpoint_id, workspace_id)
                 ) {
                     if start < *scroll {
                         *scroll = start;
@@ -577,7 +577,7 @@ fn mobile_items(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
-    selected_workspace_id: Option<&str>,
+    selected_workspace_id: Option<&WorkspaceNavigationTarget>,
     content_width: u16,
 ) -> Vec<MobileItem> {
     let palette = &config.palette;
@@ -610,8 +610,11 @@ fn mobile_items(
             });
         }
     }
-    let agents =
-        super::aggregate_navigation::aggregate_agent_rows(endpoints, config.agent_panel_sort);
+    let agents = super::aggregate_navigation::aggregate_agent_rows(
+        endpoints,
+        active_endpoint_id,
+        config.agent_panel_sort,
+    );
     let agent_view_label = snapshot.agent_view_label.as_deref();
     if !agents.is_empty() || agent_view_label.is_some() {
         let title = agent_view_label
@@ -767,10 +770,15 @@ fn mobile_items(
             let Some(workspace) = endpoint.snapshot.workspaces.get(entry.index) else {
                 continue;
             };
-            let selected = endpoint.endpoint_id == active_endpoint_id
-                && selected_workspace_id == Some(workspace.workspace_id.as_str());
+            let selected = selected_workspace_id.is_some_and(|target| {
+                target.matches(endpoint.endpoint_id, &workspace.workspace_id)
+            });
             let background = if selected {
-                palette.surface0
+                if palette.surface0 == ratatui::style::Color::Reset {
+                    palette.active_row_bg
+                } else {
+                    palette.surface0
+                }
             } else if endpoint.endpoint_id == active_endpoint_id && workspace.focused {
                 palette.surface_dim
             } else {
@@ -967,10 +975,7 @@ impl ClientShellState {
                 self.mobile_switcher_scroll = 0;
                 self.reveal_mobile_workspace = false;
                 self.mode = ClientShellMode::Navigate;
-                self.navigate_workspace_id = self
-                    .snapshot
-                    .as_deref()
-                    .and_then(|snapshot| snapshot.focused_workspace_id.clone());
+                self.navigate_workspace_id = self.focused_navigation_target();
                 outcome.repaint = true;
                 return true;
             }
@@ -1012,16 +1017,12 @@ impl ClientShellState {
                 if endpoint_id == self.active_endpoint_id {
                     self.mode = ClientShellMode::Terminal;
                     self.navigate_workspace_id = None;
-                } else if self.endpoint_is_online(&endpoint_id) {
+                    if endpoint_id.is_local() {
+                        self.activate_endpoint(endpoint_id, outcome);
+                    }
+                } else if self.activate_endpoint(endpoint_id, outcome) {
                     self.mode = ClientShellMode::Terminal;
                     self.navigate_workspace_id = None;
-                    outcome.actions.push(ClientShellAction::ActivateEndpoint {
-                        endpoint_id,
-                        target: None,
-                    });
-                } else {
-                    let label = self.endpoint_label(&endpoint_id).to_owned();
-                    self.receive_endpoint_unavailable(format!("{label} is not ready"));
                 }
             }
             Some(ClientMobileTarget::NewWorkspace) => {

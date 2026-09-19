@@ -1056,7 +1056,7 @@ impl App {
         }
     }
 
-    fn emit_focus_api_events(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
+    pub(crate) fn emit_focus_api_events(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
         self.emit_event(crate::api::schema::EventEnvelope {
             event: crate::api::schema::EventKind::WorkspaceFocused,
             data: crate::api::schema::EventData::WorkspaceFocused {
@@ -1271,7 +1271,7 @@ impl App {
                 return self.handle_workspace_mount_remote(request.id, params);
             }
             Method::WorkspaceFocus(target) => {
-                return self.handle_workspace_focus(request.id, target)
+                return self.handle_workspace_focus(request.id, target);
             }
             Method::WorkspaceRename(params) => {
                 return self.handle_workspace_rename(request.id, params);
@@ -1325,7 +1325,7 @@ impl App {
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
             Method::AgentViewSet(params) => return self.handle_agent_view_set(request.id, params),
             Method::AgentViewClear(params) => {
-                return self.handle_agent_view_clear(request.id, params)
+                return self.handle_agent_view_clear(request.id, params);
             }
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentPrompt(_) => {
@@ -1345,7 +1345,7 @@ impl App {
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
             Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
             Method::AgentSendKeys(params) => {
-                return self.handle_agent_send_keys(request.id, params)
+                return self.handle_agent_send_keys(request.id, params);
             }
             Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
@@ -1385,6 +1385,9 @@ impl App {
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
             Method::PaneInputSet(params) => return self.handle_pane_input_set(request.id, params),
+            Method::PaneLinkResolve(params) => {
+                return self.handle_pane_link_resolve(request.id, params);
+            }
             Method::PaneLinkActivate(params) => {
                 return self.handle_pane_link_activate(request.id, params);
             }
@@ -1435,7 +1438,7 @@ impl App {
             }
             Method::PaneSendText(params) => return self.handle_pane_send_text(request.id, params),
             Method::PaneSendInput(params) => {
-                return self.handle_pane_send_input(request.id, params)
+                return self.handle_pane_send_input(request.id, params);
             }
             Method::PaneClose(target) => return self.handle_pane_close(request.id, target),
             Method::PopupClose(_) => {
@@ -2334,7 +2337,13 @@ mod tests {
                 observed_at: std::time::Instant::now(),
             });
 
-            assert!(app.state.terminals[&terminal_id].agent_name.is_none());
+            // The release event is this test's subject; the name outliving the
+            // observation is pinned by
+            // `a_process_exit_observation_alone_does_not_free_the_name`.
+            assert_eq!(
+                app.state.terminals[&terminal_id].agent_name.as_deref(),
+                agent_name
+            );
             assert!(event_hub.events_after(0).iter().any(|(_, event)| matches!(
                 &event.data,
                 crate::api::schema::EventData::PaneAgentDetected {
@@ -2390,7 +2399,9 @@ mod tests {
 
         let terminal = &app.state.terminals[&terminal_id];
         assert_eq!(terminal.state, AgentState::Idle);
-        assert!(terminal.agent_name.is_none());
+        // Releasing the registration does not free the name yet; a wrong
+        // observation must not cost a live agent the handle its owner gave it.
+        assert_eq!(terminal.agent_name.as_deref(), Some("reviewer"));
         assert!(event_hub.events_after(0).iter().any(|(_, event)| matches!(
             event.data,
             crate::api::schema::EventData::PaneAgentDetected { released: true, .. }

@@ -241,96 +241,103 @@ pub(super) fn agent_rows(
 ) -> Vec<AgentRow> {
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
-        .filter_map(|pane_id| {
-            let agent = snapshot
-                .agents
-                .iter()
-                .find(|agent| agent.pane_id == pane_id)?;
-            let workspace = snapshot
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.workspace_id == agent.workspace_id)?;
-            let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == agent.tab_id);
-            let pane = snapshot
-                .panes
-                .iter()
-                .find(|pane| pane.pane_id == agent.pane_id);
-            let tab_count = snapshot
-                .tabs
-                .iter()
-                .filter(|candidate| candidate.workspace_id == agent.workspace_id)
-                .count();
-            // Preserve today's visible behavior deliberately (federation-scope
-            // Q1's default recommendation): a mirrored remote label counts
-            // as "named" for this single-tab row-visibility check, same as
-            // a local override. Changing that is a separate product call.
-            let tab_label = tab
-                .filter(|tab| {
-                    tab_count > 1
-                        || matches!(
-                            tab.name_source,
-                            crate::workspace::naming::NameSource::Override
-                                | crate::workspace::naming::NameSource::Mirrored
-                        )
-                })
-                .map(|tab| tab.label.as_str());
-            // The `{agent}` token shows the name that was actually given
-            // to this agent's scope — its own pane rename, a rename
-            // inherited from the enclosing tab, or a mirrored remote label
-            // — and only falls back to the agent kind ("claude", "codex")
-            // when nothing was named. The server resolved that ladder
-            // already; the client never re-derives it. This is display
-            // only: `agent.name`, the addressable handle used by
-            // `herdr agent send`, is untouched.
-            let resolved_scope_label = agent
-                .label
-                .as_deref()
-                .filter(|_| agent.name_source.is_explicitly_named());
-            let agent_label = resolved_scope_label
-                .or(agent.display_agent.as_deref())
-                .or(agent.name.as_deref())
-                .or(agent.agent.as_deref())
-                .or(agent.title.as_deref());
-            let labels = agent
-                .state_labels
-                .iter()
-                .cloned()
-                .collect::<HashMap<_, _>>();
-            let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
-            let state_text = labels
-                .get(status_text(agent.agent_status))
-                .map(String::as_str)
-                .unwrap_or_else(|| sidebar_status_text(agent.agent_status));
-            let canonical_agent = agent
-                .agent
-                .as_deref()
-                .and_then(crate::detect::parse_agent_label);
-            let rows = crate::ui::sidebar_agent_rows(
-                &config.agents,
-                crate::ui::AgentTokenContext {
-                    machine,
-                    workspace: &workspace.label,
-                    tab: tab_label,
-                    pane: agent
-                        .title
-                        .as_deref()
-                        .or_else(|| pane.and_then(|pane| pane.label.as_deref())),
-                    agent_label,
-                    terminal_title: agent.terminal_title.as_deref(),
-                    terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
-                    canonical_agent,
-                    tokens: &tokens,
-                },
-                state_text,
-            );
-            Some(AgentRow {
-                pane_id: agent.pane_id.clone(),
-                status: agent.agent_status,
-                focused: agent.focused,
-                rows,
-            })
-        })
+        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
         .collect()
+}
+
+pub(super) fn agent_row(
+    snapshot: &ClientShellSnapshot,
+    pane_id: &str,
+    config: &ClientShellConfig,
+    machine: Option<&str>,
+) -> Option<AgentRow> {
+    let agent = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.pane_id == pane_id)?;
+    let workspace = snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == agent.workspace_id)?;
+    let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == agent.tab_id);
+    let pane = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == agent.pane_id);
+    let tab_count = snapshot
+        .tabs
+        .iter()
+        .filter(|candidate| candidate.workspace_id == agent.workspace_id)
+        .count();
+    // Preserve today's visible behavior deliberately (federation-scope
+    // Q1's default recommendation): a mirrored remote label counts
+    // as "named" for this single-tab row-visibility check, same as
+    // a local override. Changing that is a separate product call.
+    let tab_label = tab
+        .filter(|tab| {
+            tab_count > 1
+                || matches!(
+                    tab.name_source,
+                    crate::workspace::naming::NameSource::Override
+                        | crate::workspace::naming::NameSource::Mirrored
+                )
+        })
+        .map(|tab| tab.label.as_str());
+    // The `{agent}` token shows the name that was actually given
+    // to this agent's scope — its own pane rename, a rename
+    // inherited from the enclosing tab, or a mirrored remote label
+    // — and only falls back to the agent kind ("claude", "codex")
+    // when nothing was named. The server resolved that ladder
+    // already; the client never re-derives it. This is display
+    // only: `agent.name`, the addressable handle used by
+    // `herdr agent send`, is untouched.
+    let resolved_scope_label = agent
+        .label
+        .as_deref()
+        .filter(|_| agent.name_source.is_explicitly_named());
+    let agent_label = resolved_scope_label
+        .or(agent.display_agent.as_deref())
+        .or(agent.name.as_deref())
+        .or(agent.agent.as_deref())
+        .or(agent.title.as_deref());
+    let labels = agent
+        .state_labels
+        .iter()
+        .cloned()
+        .collect::<HashMap<_, _>>();
+    let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
+    let state_text = labels
+        .get(status_text(agent.agent_status))
+        .map(String::as_str)
+        .unwrap_or_else(|| sidebar_status_text(agent.agent_status));
+    let canonical_agent = agent
+        .agent
+        .as_deref()
+        .and_then(crate::detect::parse_agent_label);
+    let rows = crate::ui::sidebar_agent_rows(
+        &config.agents,
+        crate::ui::AgentTokenContext {
+            machine,
+            workspace: &workspace.label,
+            tab: tab_label,
+            pane: agent
+                .title
+                .as_deref()
+                .or_else(|| pane.and_then(|pane| pane.label.as_deref())),
+            agent_label,
+            terminal_title: agent.terminal_title.as_deref(),
+            terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
+            canonical_agent,
+            tokens: &tokens,
+        },
+        state_text,
+    );
+    Some(AgentRow {
+        pane_id: agent.pane_id.clone(),
+        status: agent.agent_status,
+        focused: agent.focused,
+        rows,
+    })
 }
 
 pub(super) fn render_agent_row(
@@ -354,16 +361,8 @@ pub(super) fn render_agent_row(
             .fg(palette.subtext0)
             .add_modifier(Modifier::BOLD)
     };
-    let status_style = Style::default()
-        .fg(status_color(row.status, palette))
-        .add_modifier(if row.focused {
-            Modifier::empty()
-        } else {
-            Modifier::DIM
-        });
-    let secondary = Style::default()
-        .fg(palette.overlay0)
-        .add_modifier(Modifier::DIM);
+    let status_style = Style::default().fg(status_color(row.status, palette));
+    let secondary = Style::default().fg(palette.overlay0);
     let icon = (
         status_icon(row.status, config.status_indicators),
         Style::default().fg(status_color(row.status, palette)),

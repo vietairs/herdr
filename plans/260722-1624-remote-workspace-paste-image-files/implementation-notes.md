@@ -614,3 +614,48 @@ What: `begin_remote_clipboard_stage_with_timings` takes the slow-toast delay and
 Why: the previous timer tests injected their events by hand, so deleting either `tokio::spawn` left both green — a remote that never answers would have leaked pending entries until the in-flight cap refused every further paste. `tokio::time::advance` was unavailable because tokio's `test-util` feature is not enabled and Cargo.toml is out of scope.
 Evidence: mutation — deleting either spawn fails `a_stage_schedules_the_waits_that_announce_it_and_then_reap_it` ("no wait told the user…" / "no wait reaped…").
 Reversibility: inline the wrapper's two arguments back into the body.
+
+### v0.9.1 merge: docs/preview pinned set leaked outside conflict markers (third recurrence)
+What: Restored `docs/preview/**` to HEAD (15 modified + 3 added files) and reverted `docs/versions/manifest.json` `current` from upstream's `0.9.0` back to the fork's `0.8.2`.
+Why: `docs-preview.mjs check` requires the snapshot to byte-match the commit pinned in `distribution/preview.json` (`ba940075bf34`); the merge took upstream's snapshot while the fork kept its pin. `docs-versions.mjs check` separately requires `manifest.current` to equal `website/latest.json`, which is fork release-CI output frozen at 0.8.2 — the fork has never cut a stable 0.9.0, so claiming `current: 0.9.0` would make `/docs/` advertise a release its own update manifest does not serve.
+Evidence: both checks failed before, both pass after ("validated preview documentation snapshot ba940075bf34…", "validated 22 documentation versions"); federation docs still present (`grep -c "Federated workspaces"` = 2).
+Reversibility: trivial — `docs/preview` is a restore from HEAD; the manifest change is one field. The new `docs/versions/0.9.0/` tree and its `versions[]` entry were KEPT, so `/docs/0.9.0/` still publishes.
+
+### v0.9.1 merge: test-only compile breaks invisible to `cargo build`
+What: Fixed 13 compile errors in `#[cfg(test)]` code across `src/client/shell/tests/{agents_worktrees_notifications,chrome_context,keybindings_settings,graphics,text_editing}.rs`, `src/client/shell_runtime.rs`, `src/pane/terminal{,/migration_tests,/windows_recent_fallback}.rs`, `src/terminal/state.rs`, `src/app/api/agents.rs` — upstream test bodies constructing fork-extended types (`label`/`name_source`, `original_name`, `federated`, `deferred_local_activation`, `set_agent_name`'s `AgentNameAuthor`, `resize`'s `is_remote_backed`, `label: Option<String>`).
+Why: `cargo build` compiles only the binary, so a green build says nothing about test targets; these were lost silently at conflict resolution with no marker and no warning.
+Evidence: `cargo nextest run` failed to compile with 13 errors after a green `cargo build`; every fix follows an existing fork call-site convention rather than a guess (e.g. `overlay_input.rs:972-975`'s "an emptied box is a clear request" comment fixes the `Option<String>` rename assertions).
+Reversibility: fully — all changes are test-side only, no production behavior touched.
+
+### v0.9.1 merge: one of those breaks was Windows-only
+What: `src/pane/terminal/windows_recent_fallback.rs:405` also called the 4-arg `resize`; fixed to pass `is_remote_backed: false`.
+Why: the file is `#[cfg(windows)]`, so it never compiles on this mac and the local nextest run could not have caught it. Fork CI now runs the FULL Windows suite, so it would have failed there.
+Evidence: found by grepping every `resize(` call site after the mac-visible errors were fixed, not by the compiler.
+Reversibility: fully — test-side only.
+
+### v0.9.1 merge: two upstream tests encoded upstream's naming semantics, not the fork's
+What: Adjusted `muted_agent_sidebar_rows_do_not_stack_terminal_faint` to set `name_source = Override` alongside `custom_label = true`, and narrowed `all_naming_targets_preserve_submission_and_empty_semantics`'s empty-submit exemption from upstream's fields {1,3} to the fork's {3,4}.
+Why: both tests are new in v0.9.1 (absent from fork HEAD) and assert upstream's naming model. The fork's agent sidebar gates a tab label on `name_source`, not the legacy `custom_label` flag (`agent_sidebar.rs:276`). On empty submit the fork's `overlay_input::rename_method` differs per target: workspace rename ALWAYS sends a clear (`label: None`); a tab that is still `auto_name` sends nothing; a pane whose prefill is unchanged sends nothing.
+Evidence: made each change only after reading the production branch that decides it, then confirmed by test — both now PASS. Field-by-field failures (`naming target 3`, then `naming target 4`) drove the exemption set empirically rather than by assumption.
+Reversibility: fully — test-side only, and each exemption carries a comment naming the production code that justifies it.
+
+### v0.9.1 merge: integration-test baseline held
+What: Five integration failures (`api_ping`, `live_handoff`, `multi_client` x2, `client_mode`) attributed to the known mac-environment baseline, not the merge.
+Why: memory `herdr-six-integration-tests-fail-locally` records these exact six failing on an UNMODIFIED origin/master on this machine; the same commits pass on Linux VM appn-ltu-vm-100 and in GitHub CI.
+Evidence: all five observed names are members of that recorded set; the sixth is flaky and passed this run.
+Reversibility: n/a — no change made. Still worth re-confirming on the Linux VM before the PR.
+
+## 260919-2215 — v0.9.1 merge imported upstream release state
+What: reverted distribution/latest.json, docs/versions/manifest.json and the whole
+docs/versions/0.9.0/ tree to origin/master state inside the v0.9.1 merge branch.
+Why: the merge pulled upstream's *published release artifacts* into a fork whose own
+release state is 0.8.2, leaving distribution/latest.json=0.9.0 against website/latest.json
+=0.8.2 and manifest.current=0.8.2, and a manifest entry for tag v0.9.0 that does not exist
+on the fork remote. Upstream's 0.9.0 docs tree also contains none of the fork's federation
+docs, so adopting it as current would delete them from the site.
+Evidence: fork CI runs 35442090113 (Distribution contract) and 35442090124 (Website) both
+failed on exactly these two facts; origin/master is coherent at 0.8.2 and passes. After the
+revert all four validators pass locally: scripts/docs/versions.mjs check, scripts/docs/
+preview.mjs check, website/scripts/docs-versions.mjs check, website/scripts/docs-preview.mjs check.
+Reversibility: trivial — the upstream state is one `git checkout v0.9.1 -- <paths>` away,
+and the fork's own release CI seeds docs/versions from its tag at release time anyway.
