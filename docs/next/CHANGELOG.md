@@ -18,6 +18,11 @@
   methods they send were missing from the list the client-shell command lane accepts.
 - Closing a pane on Windows now actually stops its child process. The shutdown ladder opened each process without the access right `TerminateProcess` requires, so every terminate silently failed and the child outlived the pane.
 - A federated mount no longer drops the whole connection when a terminal's scrollback replay is large. The terminal channel's frame cap was too small for a full scrollback with heavy styling, so opening such a pane over federation tore down the entire mount.
+- The client no longer stays stuck on a frozen display after an endpoint drops. When the endpoint
+  the display was following disconnected with no switch in flight, the client froze presentation
+  and had no way back out: the only path that unfroze it needed a switch that was already under
+  way. The display now recovers when that endpoint reconnects, and a backstop recovers the cases
+  where nothing reconnects because no connection ever failed.
 
 ### Changed
 - Workspace, tab, and agent names now resolve through one shared precedence chain: a name you

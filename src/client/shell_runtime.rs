@@ -732,3 +732,128 @@ pub(super) fn finish_client_shell_input(
     }
     Ok(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use endpoint::{ClientEndpointId, EndpointRegistry, EndpointSupervisors};
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    struct Transport(Arc<AtomicUsize>);
+
+    impl endpoint::EndpointTransport for Transport {
+        fn send(&mut self, _: &ClientMessage) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn disconnect(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn state() -> ClientState {
+        ClientState {
+            blit_encoder: render_ansi::BlitEncoder::new(),
+            mouse_capture_active: false,
+            endpoint_mouse_capture_requested: false,
+            endpoint_sgr_pixels_requested: false,
+            host_theme_updates: Vec::new(),
+            direct_mouse_capture_preference: false,
+            shell_mouse_capture_preference: false,
+            direct_keyboard_protocol: Default::default(),
+            pane_keyboard_report_all: false,
+            keyboard_report_all_active: false,
+            reported_size: (100, 30),
+            reported_cell_size: (0, 0),
+            sound_config: Default::default(),
+            kitty_graphics_enabled: false,
+            pixel_geometry_enabled: false,
+            pixel_geometry_exact: false,
+            #[cfg(unix)]
+            direct_graphics_response: Default::default(),
+            #[cfg(unix)]
+            retired_direct_graphics: None,
+            #[cfg(unix)]
+            pending_surface_graphics: HashMap::new(),
+            attach_escape: None,
+            #[cfg(unix)]
+            mouse_scroll_lines: 3,
+            remote_image_paste_key: None,
+            redraw_on_focus_gained: false,
+            repaint_pending: false,
+            presentation_frozen: false,
+            draw_host_cursor: false,
+            detached_process_children: Vec::new(),
+            shell: Some(shell::ClientShellState::new(
+                shell::ClientShellConfig::from_config(&crate::config::Config::default()),
+            )),
+        }
+    }
+
+    fn empty_frame() -> FrameData {
+        FrameData {
+            cells: Vec::new(),
+            width: 0,
+            height: 0,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        }
+    }
+
+    /// Regression coverage for S4 in the freeze investigation
+    /// (`plans/reports/root-cause-260919-1105-herdr-client-freeze.md`): a disconnect of the
+    /// currently-active endpoint with no activation in flight freezes presentation via
+    /// `present_handoff_unavailable`, and `pending_activation` stays `None` throughout — this is
+    /// the load-bearing precondition that makes `endpoint::ACTIVATION_TIMEOUT` unreachable, since
+    /// that check is itself gated on a live activation. Before the reconnect/watchdog recovery in
+    /// `mod.rs`, nothing ever calls `unfreeze_presentation` again, so a frame composed after the
+    /// endpoint reconnects — exactly what `EndpointSupervisorEvent::Connected` does in the main
+    /// loop — can never reach the terminal.
+    #[test]
+    fn a_disconnected_active_endpoint_freezes_presentation_with_no_pending_activation() {
+        let now = Instant::now();
+        let mut state = state();
+        let mut endpoints = EndpointRegistry::new(
+            Transport(Arc::new(AtomicUsize::new(0))),
+            1,
+            Default::default(),
+        );
+        endpoints.unfreeze_input();
+        let mut endpoint_commands = endpoint_commands::EndpointCommands::default();
+        let mut supervisors = EndpointSupervisors::new(&[], now);
+        let mut pending_activation: Option<endpoint::PendingEndpointActivation> = None;
+
+        assert!(!state.presentation_frozen, "baseline must start unfrozen");
+
+        let was_active = handle_endpoint_disconnect(
+            &mut state,
+            &mut endpoints,
+            &mut endpoint_commands,
+            &mut supervisors,
+            &mut pending_activation,
+            &ClientEndpointId::Local,
+            1,
+            now,
+            "connection lost; reconnecting",
+        );
+
+        assert!(was_active, "Local was the active endpoint");
+        assert!(
+            state.presentation_frozen,
+            "the active endpoint's own disconnect must freeze presentation"
+        );
+        assert!(
+            pending_activation.is_none(),
+            "S4 has no activation to clear — this is what makes the freeze absorbing"
+        );
+
+        let frame = empty_frame();
+        state.present_frame(frame.clone());
+        assert!(
+            !state.blit_encoder.is_current(&frame),
+            "a frame must not commit while presentation stays frozen with no exit"
+        );
+    }
+}
