@@ -777,7 +777,16 @@ impl Channel {
             Channel::Handshake => 64 * 1024,
             Channel::Mount => 8 * 1024 * 1024,
             Channel::Event => 256 * 1024,
-            Channel::Terminal => 2 * 1024 * 1024,
+            // A single `Open` frame carries the whole ANSI scrollback replay
+            // for one terminal (`AppFederationHost::scrollback_replay`),
+            // unbounded and unchunked at the sender. Real panes with a full
+            // scrollback and heavy styling have been observed producing
+            // frames of 2.2-2.7 MiB against the old 2 MiB cap, tearing down
+            // the whole mount on every occurrence. Matches `Channel::Mount`'s
+            // cap for headroom well above the observed maximum. Note this is
+            // headroom, not a bound: the sender still has no cap of its own,
+            // so a large enough scrollback can outgrow this too.
+            Channel::Terminal => 8 * 1024 * 1024,
             Channel::AgentStatus => 64 * 1024,
             Channel::Clipboard => 16 * 1024 * 1024,
             Channel::Control => 4 * 1024,

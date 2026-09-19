@@ -136,6 +136,69 @@ use crate::protocol::{self, ClientMessage, FrameData, ServerMessage, MAX_GRAPHIC
 use crate::protocol::{AttachScrollDirection, AttachScrollSource, NotifyKind};
 use crate::server::socket_paths::client_socket_path;
 
+// `presentation_frozen` has exactly one production unfreeze, inside
+// `complete_endpoint_activation`, and that path only runs for a live `pending_activation`.
+// `handle_endpoint_disconnect` and `rollback_endpoint_activation` can freeze presentation with
+// `pending_activation` already `None` (a disconnect of the active endpoint with nothing in
+// flight, or a rollback that lands on `Unavailable`), which leaves no automatic exit at all.
+// `reconnect_recovery_event` re-arms activation once the disconnected endpoint comes back;
+// `freeze_watchdog_event` backstops the cases a reconnect can never observe (the freeze happened
+// without any transport failure). `PRESENTATION_FREEZE_WATCHDOG_BOUND` sits at 3x
+// `endpoint::ACTIVATION_TIMEOUT` so it can never race a live, merely slow activation.
+//
+// Both functions own the full decision AND the shape of the event they schedule, deliberately:
+// an earlier version of this fix split the condition from the `ClientLoopEvent` it authorized,
+// and a mutation to the call site's own argument expression (comparing the wrong endpoint id, or
+// dropping a gate) passed every existing test because the tests only exercised the extracted
+// condition in isolation, never the real comparison the call site performed. Keeping the decision
+// and the event construction in one function called with the call site's raw, untransformed
+// values (registry/state fields directly, not pre-computed booleans) means a wiring mistake at
+// the call site is a mistake inside the tested function, not beside it.
+const PRESENTATION_FREEZE_WATCHDOG_BOUND: Duration = Duration::from_secs(15);
+
+/// The recovery event to schedule when `reconnected_id` reconnects, if presentation is frozen
+/// with no activation in flight for exactly that endpoint. Gated on the reconnected endpoint
+/// being the one presentation is frozen on, so a healthy reconnect elsewhere is left untouched,
+/// and on no activation already being in flight, so this can never interrupt one. `force: true`
+/// is required: `begin_endpoint_activation`'s `already_active` short-circuit would otherwise
+/// no-op, since a disconnect never flips the registry's `surface_active` bit for the endpoint
+/// that owned presentation.
+fn reconnect_recovery_event(
+    presentation_frozen: bool,
+    pending_activation: Option<&endpoint::PendingEndpointActivation>,
+    active_id: &endpoint::ClientEndpointId,
+    reconnected_id: &endpoint::ClientEndpointId,
+) -> Option<ClientLoopEvent> {
+    (presentation_frozen && pending_activation.is_none() && active_id == reconnected_id).then(
+        || ClientLoopEvent::ActivateEndpoint {
+            endpoint_id: reconnected_id.clone(),
+            target: None,
+            force: true,
+        },
+    )
+}
+
+/// The recovery event the freeze-with-no-pending-activation backstop should schedule for the
+/// active endpoint, if any. `endpoint::ACTIVATION_TIMEOUT` cannot reach this state because it is
+/// itself gated on `pending_activation` being `Some`; this is the only automatic exit for a
+/// freeze that never had one. `stalled_for` is measured against the last re-arm attempt for this
+/// stall, so a repeated failure is retried no more often than once per bound instead of spinning.
+fn freeze_watchdog_event(
+    presentation_frozen: bool,
+    pending_activation: Option<&endpoint::PendingEndpointActivation>,
+    active_id: &endpoint::ClientEndpointId,
+    stalled_for: Duration,
+) -> Option<ClientLoopEvent> {
+    (presentation_frozen
+        && pending_activation.is_none()
+        && stalled_for >= PRESENTATION_FREEZE_WATCHDOG_BOUND)
+        .then(|| ClientLoopEvent::ActivateEndpoint {
+            endpoint_id: active_id.clone(),
+            target: None,
+            force: true,
+        })
+}
+
 fn run_client_with_mode(
     attach_request: Option<(String, bool)>,
     attach_escape: Option<AttachEscapeState>,
@@ -296,12 +359,20 @@ fn run_client_with_mode(
         .map_err(io::Error::other)?;
 
     let should_quit = Arc::new(AtomicBool::new(false));
+    // Termination wake: the ctrlc handler runs on a separate signal thread outside
+    // the tokio runtime, so it cannot send into the loop's channels. A `Notify` can
+    // be signaled from any thread, and its `notified()` future is polled as an arm of
+    // the loop's `select!` — so Ctrl-C un-parks the loop even when it is sleeping on
+    // a far/stale timer deadline (the macOS ANR condition).
+    let quit_notify = Arc::new(tokio::sync::Notify::new());
 
     // ctrlc's "termination" feature also catches SIGTERM/SIGHUP so direct
     // termination signals still run the quit path and TerminalGuard::Drop.
     let quit_flag = should_quit.clone();
+    let quit_notify_handler = quit_notify.clone();
     if let Err(err) = ctrlc::set_handler(move || {
         quit_flag.store(true, Ordering::Release);
+        quit_notify_handler.notify_one();
     }) {
         warn!(%err, "failed to install termination handler; terminal restore relies on TerminalGuard::Drop and the panic hook");
     }
@@ -316,6 +387,7 @@ fn run_client_with_mode(
             cell_height_px,
             exact_cell_size,
             should_quit,
+            quit_notify,
             loop_config,
             attach_escape,
         )
@@ -366,6 +438,7 @@ async fn run_client_loop(
     initial_cell_height_px: u32,
     initial_pixel_geometry_exact: bool,
     should_quit: Arc<AtomicBool>,
+    quit_notify: Arc<tokio::sync::Notify>,
     config: ClientLoopConfig,
     attach_escape: Option<AttachEscapeState>,
 ) -> Result<(), ClientError> {
@@ -569,6 +642,10 @@ async fn run_client_loop(
 
     // Main event loop.
     let mut client_timer = timer::ClientLoopTimer::new();
+    // Set the first time a loop iteration observes `presentation_frozen` with no
+    // `pending_activation`; cleared as soon as either condition stops holding. Backs the
+    // `freeze_watchdog_event` bound below.
+    let mut presentation_frozen_since: Option<std::time::Instant> = None;
     #[cfg(windows)]
     let mut stdin_open = true;
     while !should_quit.load(Ordering::Acquire) {
@@ -690,6 +767,7 @@ async fn run_client_loop(
             event
         } else {
             tokio::select! {
+                _ = quit_notify.notified() => ClientLoopEvent::Quit,
                 _ = tokio::time::sleep_until(timer_deadline.into()) => ClientLoopEvent::Timer,
                 ev = stdin_rx.recv(), if stdin_open => match ev {
                     Some(event) => event,
@@ -708,6 +786,7 @@ async fn run_client_loop(
         } else {
             tokio::select! {
                 biased;
+                _ = quit_notify.notified() => ClientLoopEvent::Quit,
                 _ = tokio::time::sleep_until(timer_deadline.into()) => ClientLoopEvent::Timer,
                 ev = supervisor_rx.recv() => ev.map(ClientLoopEvent::EndpointSupervisor).unwrap_or(ClientLoopEvent::Timer),
                 ev = event_rx.recv() => ev.unwrap_or(ClientLoopEvent::Timer),
@@ -1178,6 +1257,21 @@ async fn run_client_loop(
                     );
                     if let Some(frame) = frame {
                         state.present_frame(frame);
+                    }
+                    // `present_frame` above is a no-op while frozen, and nothing else re-arms
+                    // activation for a reconnected endpoint: the only production unfreeze lives
+                    // inside `complete_endpoint_activation`, which needs a live
+                    // `pending_activation`. Without this, a disconnect that froze presentation
+                    // with no activation in flight (the active endpoint's own transport failing,
+                    // or the disconnect of an endpoint an activation depended on) stays frozen
+                    // forever even after the endpoint comes back.
+                    if let Some(event) = reconnect_recovery_event(
+                        state.presentation_frozen,
+                        pending_activation.as_ref(),
+                        write_stream.active_id(),
+                        &endpoint_id,
+                    ) {
+                        scheduled_activation = Some(event);
                     }
                     let reader_tx = event_tx.clone();
                     std::thread::spawn(move || {
@@ -1944,6 +2038,14 @@ async fn run_client_loop(
                     io::Error::new(io::ErrorKind::UnexpectedEof, "connection was lost"),
                 );
             }
+            ClientLoopEvent::Quit => {
+                // The termination wake fired while we were parked on the timer.
+                // Set the shared flag and let the loop exit through the normal
+                // `while !should_quit` head check so the existing shutdown path
+                // (Detach + terminal restore) still runs.
+                should_quit.store(true, Ordering::Release);
+                continue;
+            }
             ClientLoopEvent::Timer => {
                 client_timer.fired();
                 #[cfg(unix)]
@@ -2059,6 +2161,33 @@ async fn run_client_loop(
                 }
             }
         }
+        // Backstop for a `presentation_frozen` state with no `pending_activation`: a reconnect
+        // recovers most cases (see `EndpointSupervisorEvent::Connected` above), but a freeze that
+        // never involved a transport failure — an activation that rolled back straight to
+        // `Unavailable` — has no reconnect to wait for either. Track how long the no-exit freeze
+        // has been observed and re-arm the active endpoint once it has run well past a normal
+        // activation.
+        if state.presentation_frozen && pending_activation.is_none() {
+            let since = *presentation_frozen_since.get_or_insert(now);
+            if let Some(event) = freeze_watchdog_event(
+                state.presentation_frozen,
+                pending_activation.as_ref(),
+                write_stream.active_id(),
+                now.duration_since(since),
+            ) {
+                presentation_frozen_since = Some(now);
+                // Never displace an activation this iteration already scheduled. `immediate_event`
+                // above consumes the slot at the top of the loop, so a write here lands after
+                // every other arm that can fill it, and an unguarded assignment would silently
+                // replace a user-initiated endpoint switch with a re-arm of the current one.
+                // Deferring costs at most one more watchdog bound, and the switch itself unfreezes.
+                if scheduled_activation.is_none() {
+                    scheduled_activation = Some(event);
+                }
+            }
+        } else {
+            presentation_frozen_since = None;
+        }
     }
 
     // Clean exit (Ctrl+C). Send Detach before closing.
@@ -2071,3 +2200,221 @@ async fn run_client_loop(
 
 #[cfg(test)]
 mod tests;
+
+// Regression coverage for the `presentation_frozen`-with-no-`pending_activation` absorbing state:
+// `handle_endpoint_disconnect` and `rollback_endpoint_activation` (`shell_runtime.rs`) can freeze
+// presentation with `pending_activation` already `None`, and the sole production unfreeze, inside
+// `complete_endpoint_activation`, only runs for a live activation. Named `presentation_freeze_recovery`
+// (not `tests`) to avoid colliding with the `src/client/tests/` module declared above.
+//
+// Every test below calls `reconnect_recovery_event`/`freeze_watchdog_event` with the exact same
+// raw values the two call sites pass — a live registry's `active_id()`, a real
+// `PendingEndpointActivation` (or `None`), and a `ClientEndpointId` — and asserts on the returned
+// `ClientLoopEvent` itself (endpoint id, target, and `force`), not on a pre-digested boolean. A
+// wiring mistake at either call site (comparing the wrong endpoint, dropping the frozen gate, or
+// flipping `force`) is a mistake inside these functions, so it cannot pass unnoticed the way a
+// mistake beside a tested-in-isolation predicate could.
+#[cfg(test)]
+mod presentation_freeze_recovery {
+    use super::*;
+
+    struct NoopTransport;
+
+    impl endpoint::EndpointTransport for NoopTransport {
+        fn send(&mut self, _: &ClientMessage) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn disconnect(&mut self) {}
+    }
+
+    fn ssh_endpoint_id() -> endpoint::ClientEndpointId {
+        endpoint::ClientEndpointId::Ssh(
+            endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        )
+    }
+
+    fn negotiation_with_surface_interest() -> endpoint::EndpointNegotiation {
+        endpoint::EndpointNegotiation::new(
+            vec!["client_shell.surface.set".into()],
+            vec![
+                crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into(),
+                crate::protocol::endpoint::PRESENTATION_EFFECTS_FENCE_CAPABILITY.into(),
+            ],
+        )
+    }
+
+    fn minimal_snapshot(boot_id: &str, revision: u64) -> crate::protocol::ClientShellSnapshot {
+        crate::protocol::ClientShellSnapshot {
+            boot_id: boot_id.into(),
+            revision,
+            config_diagnostic: None,
+            product_announcement: None,
+            update_available: None,
+            update_install_command: String::new(),
+            server_keybindings_toml: None,
+            latest_release_notes_available: false,
+            integration_updates_available: false,
+            worktree_directory: String::new(),
+            auto_resize_splits: false,
+            release_notes: None,
+            focused_workspace_id: None,
+            focused_tab_id: None,
+            focused_pane_id: None,
+            tab_bar_right: Vec::new(),
+            tab_bar_right_separator: String::new(),
+            agent_view_label: None,
+            agent_order: Vec::new(),
+            workspaces: Vec::new(),
+            tabs: Vec::new(),
+            panes: Vec::new(),
+            agents: Vec::new(),
+            commands: Vec::new(),
+            remote_mount_attempts: Vec::new(),
+            recent_remote_mount_targets: Vec::new(),
+        }
+    }
+
+    /// A real, live `PendingEndpointActivation` (Local activating an Ssh target), built through
+    /// the production `PendingEndpointActivation::begin` constructor exactly as
+    /// `begin_endpoint_activation` (`shell_runtime.rs`) calls it — not a hand-built struct
+    /// literal, so this fixture cannot drift from what a genuine in-flight activation looks like.
+    fn a_live_pending_activation(now: std::time::Instant) -> endpoint::PendingEndpointActivation {
+        let mut shell = shell::ClientShellState::new(shell::ClientShellConfig::from_config(
+            &crate::config::Config::default(),
+        ));
+        let profile = endpoint::SavedSshEndpoint {
+            id: endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            label: "Remote".into(),
+            target: "dev@example.com".into(),
+            session: "main".into(),
+            enabled: true,
+        };
+        let target = endpoint::ClientEndpointId::Ssh(profile.id.clone());
+        shell.set_endpoint_catalog(&[profile]);
+        shell.set_snapshot(Box::new(minimal_snapshot("local-boot", 1)));
+        shell.set_endpoint_status(&target, endpoint::ClientEndpointStatus::Online);
+        shell.set_endpoint_snapshot(&target, Box::new(minimal_snapshot("remote-boot", 1)));
+
+        let mut endpoints =
+            endpoint::EndpointRegistry::new(NoopTransport, 1, negotiation_with_surface_interest());
+        endpoints.insert(
+            target.clone(),
+            NoopTransport,
+            7,
+            negotiation_with_surface_interest(),
+            false,
+        );
+
+        endpoint::PendingEndpointActivation::begin(
+            &shell,
+            &mut endpoints,
+            target,
+            None,
+            ClientMessage::ClientShellResize {
+                cell_width_px: 8,
+                cell_height_px: 16,
+                surface_size: crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 },
+                pixel_mouse: false,
+            },
+            1,
+            now,
+        )
+        .expect("a coherent source/target pair begins an activation")
+    }
+
+    #[test]
+    fn reconnect_recovery_event_matches_the_frozen_endpoint() {
+        let id = endpoint::ClientEndpointId::Local;
+        match reconnect_recovery_event(true, None, &id, &id) {
+            Some(ClientLoopEvent::ActivateEndpoint {
+                endpoint_id,
+                target,
+                force,
+            }) => {
+                assert_eq!(endpoint_id, id);
+                assert_eq!(target, None);
+                assert!(
+                    force,
+                    "must force past begin_endpoint_activation's already-active short-circuit"
+                );
+            }
+            _ => panic!("expected a forced ActivateEndpoint for the reconnected endpoint"),
+        }
+    }
+
+    #[test]
+    fn reconnect_recovery_event_is_none_when_not_frozen() {
+        let id = endpoint::ClientEndpointId::Local;
+        assert!(reconnect_recovery_event(false, None, &id, &id).is_none());
+    }
+
+    #[test]
+    fn reconnect_recovery_event_is_none_for_a_different_endpoint() {
+        let active = endpoint::ClientEndpointId::Local;
+        let reconnected = ssh_endpoint_id();
+        assert!(reconnect_recovery_event(true, None, &active, &reconnected).is_none());
+    }
+
+    #[test]
+    fn reconnect_recovery_event_is_none_during_a_live_activation() {
+        let now = std::time::Instant::now();
+        let activation = a_live_pending_activation(now);
+        let id = endpoint::ClientEndpointId::Local;
+        assert!(reconnect_recovery_event(true, Some(&activation), &id, &id).is_none());
+    }
+
+    #[test]
+    fn freeze_watchdog_event_matches_the_active_endpoint_once_stalled() {
+        let id = endpoint::ClientEndpointId::Local;
+        match freeze_watchdog_event(true, None, &id, PRESENTATION_FREEZE_WATCHDOG_BOUND) {
+            Some(ClientLoopEvent::ActivateEndpoint {
+                endpoint_id,
+                target,
+                force,
+            }) => {
+                assert_eq!(endpoint_id, id);
+                assert_eq!(target, None);
+                assert!(force);
+            }
+            _ => panic!("expected the watchdog to re-arm the active endpoint"),
+        }
+    }
+
+    #[test]
+    fn freeze_watchdog_event_is_none_when_not_frozen() {
+        let id = endpoint::ClientEndpointId::Local;
+        assert!(
+            freeze_watchdog_event(false, None, &id, PRESENTATION_FREEZE_WATCHDOG_BOUND * 10)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn freeze_watchdog_event_leaves_a_short_stall_alone() {
+        let id = endpoint::ClientEndpointId::Local;
+        assert!(freeze_watchdog_event(true, None, &id, Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn freeze_watchdog_event_never_fires_while_an_activation_is_live() {
+        // Even a stall far past the bound must not race a genuinely slow (but live) activation.
+        let now = std::time::Instant::now();
+        let activation = a_live_pending_activation(now);
+        let id = endpoint::ClientEndpointId::Local;
+        assert!(freeze_watchdog_event(
+            true,
+            Some(&activation),
+            &id,
+            PRESENTATION_FREEZE_WATCHDOG_BOUND * 10
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn the_watchdog_bound_sits_comfortably_above_the_activation_timeout() {
+        // A live activation can never legitimately outlast `endpoint::ACTIVATION_TIMEOUT`, so the
+        // watchdog bound must clear it with real margin.
+        assert!(PRESENTATION_FREEZE_WATCHDOG_BOUND >= endpoint::ACTIVATION_TIMEOUT * 2);
+    }
+}

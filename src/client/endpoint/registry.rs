@@ -152,6 +152,14 @@ impl EndpointRegistry {
         negotiation: EndpointNegotiation,
         surface_active: bool,
     ) {
+        // The Local endpoint is deliberately not probed. A heartbeat cannot observe a
+        // wedged local server: the pong is written by the per-client reader thread
+        // (`server::client_transport`), which never enters the App loop, so a fully
+        // stuck App loop still answers every ping on time. Probing Local would add no
+        // detection while giving the client a new way to evict itself — a Local
+        // expiry surfaces as `ConnectionLost` and exits, so any delayed pong (a large
+        // workspace restore, transport backpressure) would drop the user out of the
+        // TUI. Local failures are detected by transport error instead.
         let health = (!endpoint_id.is_local() && negotiation.supports_health_check())
             .then(|| EndpointHealth::new(Instant::now()));
         if let Some(mut previous) = self.connections.insert(
@@ -474,6 +482,11 @@ mod tests {
 
     #[test]
     fn recovered_local_uses_transport_failure_not_remote_health_probes() {
+        // The Local endpoint is never probed, even when the negotiation advertises the
+        // health capability. A heartbeat cannot observe a wedged local server (the pong
+        // is answered off the App loop), so probing would buy no detection while giving
+        // a slow-but-healthy local server a way to evict the client. Local liveness is
+        // reported by transport failure instead.
         let mut registry = EndpointRegistry::empty();
         let sent = Arc::new(Mutex::new(Vec::new()));
         registry.insert(

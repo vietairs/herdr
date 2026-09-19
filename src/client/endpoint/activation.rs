@@ -11,7 +11,9 @@ pub(crate) use model::{
 use model::{ActivationEvidence, ActivationPhase, EndpointLease};
 use protocol::*;
 
-const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
+// `pub(crate)` so the freeze-watchdog bound in `client::mod` can be checked against the real
+// value instead of a hand-mirrored copy that could silently drift from it.
+pub(crate) const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl PendingEndpointActivation {
     #[allow(clippy::too_many_arguments)]

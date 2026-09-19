@@ -1095,6 +1095,12 @@
           "type": "list of strings",
           "default": "[]",
           "description": "Most-recent-first remote-mount targets shown in the mount remote workspace dialog. Written automatically after a successful mount and capped at 5; edit or clear it by hand to change what the dialog offers."
+        },
+        {
+          "key": "ui.render_interval_ms",
+          "type": "integer",
+          "default": "16",
+          "description": "Minimum interval in milliseconds between server render/presentation attempts. Bounds the cadence of the headless render loop; larger values cut host CPU at the cost of a less responsive display. Clamped to the range 1-1000. Reloadable live via the [ui] section."
         }
       ]
     },

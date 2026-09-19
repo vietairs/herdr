@@ -3,9 +3,11 @@
 ## Unreleased
 
 ### Added
+- New `ui.render_interval_ms` setting controls the minimum interval between server render and presentation attempts, replacing a hard-coded 16 ms. Raising it cuts host CPU at the cost of a less responsive display. The value is clamped to the range 1-1000 and is reloadable live from the `[ui]` section.
 - Windows clients can now mount a remote machine's workspaces. `workspace.mount_remote` previously answered `unsupported_platform` on Windows; it now dials and mounts the same way Linux and macOS clients do. Serving a mount from a Windows host is still unsupported. Clipboard file staging remains unavailable when the client is Windows.
 
 ### Fixed
+- A termination signal now exits the client even while its event loop is waiting on a timer. `SIGINT`, `SIGTERM`, and `SIGHUP` wake the loop directly instead of being noticed only on its next pass, so `kill` and a terminal hangup shut the client down promptly and still run the normal detach and terminal-restore path.
 - The mount button in the "mount remote workspace" dialog works again. The dialog was rebuilt onto
   the client-shell command lane, but `workspace.mount_remote` was never added to the list of
   methods that lane accepts, so every submit was dropped before a request was sent and the dialog
@@ -15,6 +17,12 @@
   again. They were dropped before being sent for the same reason as the mount button: the
   methods they send were missing from the list the client-shell command lane accepts.
 - Closing a pane on Windows now actually stops its child process. The shutdown ladder opened each process without the access right `TerminateProcess` requires, so every terminate silently failed and the child outlived the pane.
+- A federated mount no longer drops the whole connection when a terminal's scrollback replay is large. The terminal channel's frame cap was too small for a full scrollback with heavy styling, so opening such a pane over federation tore down the entire mount.
+- The client no longer stays stuck on a frozen display after an endpoint drops. When the endpoint
+  the display was following disconnected with no switch in flight, the client froze presentation
+  and had no way back out: the only path that unfroze it needed a switch that was already under
+  way. The display now recovers when that endpoint reconnects, and a backstop recovers the cases
+  where nothing reconnects because no connection ever failed.
 
 ### Changed
 - Workspace, tab, and agent names now resolve through one shared precedence chain: a name you
