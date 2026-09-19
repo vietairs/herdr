@@ -536,6 +536,7 @@ impl ChildGuard {
     /// module even at `pub(crate)` visibility, so cross-module app-level
     /// tests (e.g. `app::api::workspaces`'s federation-mount tests) need
     /// this seam to build a real guard around a real spawned child.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn for_test(child: tokio::process::Child) -> Self {
         Self(child)
     }
