@@ -1100,7 +1100,7 @@
           "key": "ui.render_interval_ms",
           "type": "integer",
           "default": "16",
-          "description": "Minimum interval in milliseconds between server render/presentation attempts. Bounds the cadence of the headless render loop; larger values cut host CPU. Values below 1 are clamped to 1. Reloadable live via the [ui] section."
+          "description": "Minimum interval in milliseconds between server render/presentation attempts. Bounds the cadence of the headless render loop; larger values cut host CPU at the cost of a less responsive display. Clamped to the range 1-1000. Reloadable live via the [ui] section."
         }
       ]
     },

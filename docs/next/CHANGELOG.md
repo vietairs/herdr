@@ -3,9 +3,11 @@
 ## Unreleased
 
 ### Added
+- New `ui.render_interval_ms` setting controls the minimum interval between server render and presentation attempts, replacing a hard-coded 16 ms. Raising it cuts host CPU at the cost of a less responsive display. The value is clamped to the range 1-1000 and is reloadable live from the `[ui]` section.
 - Windows clients can now mount a remote machine's workspaces. `workspace.mount_remote` previously answered `unsupported_platform` on Windows; it now dials and mounts the same way Linux and macOS clients do. Serving a mount from a Windows host is still unsupported. Clipboard file staging remains unavailable when the client is Windows.
 
 ### Fixed
+- A termination signal now exits the client even while its event loop is waiting on a timer. `SIGINT`, `SIGTERM`, and `SIGHUP` wake the loop directly instead of being noticed only on its next pass, so `kill` and a terminal hangup shut the client down promptly and still run the normal detach and terminal-restore path.
 - The mount button in the "mount remote workspace" dialog works again. The dialog was rebuilt onto
   the client-shell command lane, but `workspace.mount_remote` was never added to the list of
   methods that lane accepts, so every submit was dropped before a request was sent and the dialog
