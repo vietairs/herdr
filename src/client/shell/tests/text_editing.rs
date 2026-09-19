@@ -328,7 +328,7 @@ fn all_naming_targets_preserve_submission_and_empty_semantics() {
             // override to clear, so nothing is sent. A workspace (field 1)
             // has no such guard: an empty submission is a clear request and
             // still sends a rename carrying `label: None`, snapping the name
-            // back to its derived value. See `overlay_input::rename_method`.
+            // back to its derived value. See `overlay_input::save_rename_overlay`.
             // The pane (field 4) is unnamed in this fixture, so its rename box
             // is prefilled with "" and emptying it leaves the prefill
             // unchanged — also a no-op, for a different reason: sending it
