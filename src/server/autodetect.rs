@@ -307,7 +307,19 @@ pub fn auto_detect_launch(saved_federation: bool) -> io::Result<()> {
 /// caller already has saved remote machines to fall back on, a local startup
 /// failure is logged and swallowed instead of aborting, so the session still
 /// starts with whatever remotes are reachable.
+///
+/// Both callers attach as a thin client afterwards, so the terminal-geometry
+/// check lives here: it runs before socket lookup creates directories or
+/// starts a daemon, for the plain and the `--remote` mount launch alike.
 fn ensure_server_running(saved_federation: bool) -> io::Result<()> {
+    // The client requires terminal geometry before it can attach. Reject an
+    // unusable terminal before socket lookup creates directories or starts a daemon.
+    crate::platform::terminal_grid_size().map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("cannot attach without a usable terminal: {err}; run inside a terminal"),
+        )
+    })?;
     let socket_path = client_socket_path();
     info!(path = %socket_path.display(), "auto-detect launch starting");
 

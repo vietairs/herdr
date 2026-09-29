@@ -2289,6 +2289,7 @@ mod tests {
                 agent_status: AgentStatus::Idle,
             }],
             panes: vec![PaneInfo {
+                restore_error: None,
                 pane_id: "p1".to_string(),
                 terminal_id: "t1".to_string(),
                 workspace_id: "w1".to_string(),

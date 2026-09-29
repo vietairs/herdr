@@ -2167,6 +2167,7 @@ mod tests {
                 agent_status: AgentStatus::Idle,
             });
             panes.push(RemotePaneInfo {
+                restore_error: None,
                 pane_id: format!("w{n}-p1"),
                 terminal_id: format!("t{n}"),
                 workspace_id,

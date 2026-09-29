@@ -375,6 +375,7 @@ impl App {
             foreground_cwd: ws.tabs[tab_idx]
                 .foreground_cwd_for_pane(pane_id, &self.terminal_runtimes)
                 .map(|cwd| cwd.display().to_string()),
+            restore_error: terminal.restore_error.clone(),
             label,
             name_source,
             agent: terminal.effective_agent_label().map(str::to_string),
@@ -3095,6 +3096,7 @@ mod federation_materialization_tests {
 
     fn pane_info(pane_id: &str, terminal_id: &str) -> RemotePaneInfo {
         RemotePaneInfo {
+            restore_error: None,
             pane_id: pane_id.to_string(),
             terminal_id: terminal_id.to_string(),
             workspace_id: "w1".to_string(),

@@ -1343,6 +1343,7 @@ mod tests {
             ],
             panes: vec![
                 RemotePaneInfo {
+                    restore_error: None,
                     pane_id: "p1".to_string(),
                     terminal_id: "t1".to_string(),
                     workspace_id: "w1".to_string(),
@@ -1365,6 +1366,7 @@ mod tests {
                     revision: 0,
                 },
                 RemotePaneInfo {
+                    restore_error: None,
                     pane_id: "p2".to_string(),
                     terminal_id: "t2".to_string(),
                     workspace_id: "w1".to_string(),

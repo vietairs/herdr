@@ -889,8 +889,7 @@ pub struct AppState {
     /// None means unsupported or not yet reported, which preserves active-pane suppression.
     pub outer_terminal_focus: Option<bool>,
     // Config
-    pub prefix_code: KeyCode,
-    pub prefix_mods: KeyModifiers,
+    pub prefix_keys: Vec<(KeyCode, KeyModifiers)>,
     /// Parsed `keys.remote_image_paste`. `None` when the user cleared the
     /// binding or wrote something unparseable, in which case the remote
     /// image-paste intercept never claims a key. It lives beside the prefix
@@ -1284,8 +1283,7 @@ impl AppState {
             toast: None,
             pending_agent_notifications: std::collections::HashMap::new(),
             outer_terminal_focus: None,
-            prefix_code: KeyCode::Char('b'),
-            prefix_mods: KeyModifiers::CONTROL,
+            prefix_keys: vec![(KeyCode::Char('b'), KeyModifiers::CONTROL)],
             remote_image_paste_key: Some((KeyCode::Char('v'), KeyModifiers::CONTROL)),
             headless_size: (
                 crate::config::DEFAULT_HEADLESS_COLS,

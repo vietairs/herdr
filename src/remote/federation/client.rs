@@ -2157,6 +2157,7 @@ mod tests {
 
             let mut snapshot = crate::remote::federation::serve::empty_snapshot();
             snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+                restore_error: None,
                 pane_id: "pane_new".to_string(),
                 terminal_id: "term_new".to_string(),
                 workspace_id: "w1".to_string(),
@@ -2333,6 +2334,7 @@ mod tests {
 
             let mut snapshot = crate::remote::federation::serve::empty_snapshot();
             snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+                restore_error: None,
                 pane_id: "pane_new".to_string(),
                 terminal_id: "term_new".to_string(),
                 workspace_id: "w_new".to_string(),
@@ -2457,6 +2459,7 @@ mod tests {
 
             let mut snapshot = crate::remote::federation::serve::empty_snapshot();
             snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+                restore_error: None,
                 pane_id: "pane_1".to_string(),
                 terminal_id: "term_1".to_string(),
                 workspace_id: "w1".to_string(),
@@ -2739,6 +2742,7 @@ mod tests {
             // materialized.
             let mut snapshot = crate::remote::federation::serve::empty_snapshot();
             snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+                restore_error: None,
                 pane_id: "pane_2".to_string(),
                 terminal_id: "term_2".to_string(),
                 workspace_id: "w1".to_string(),
@@ -2908,6 +2912,7 @@ mod tests {
 
             let mut snapshot = crate::remote::federation::serve::empty_snapshot();
             snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+                restore_error: None,
                 pane_id: "w1:p2".to_string(),
                 terminal_id: "term_new".to_string(),
                 workspace_id: "w1".to_string(),
@@ -3038,6 +3043,7 @@ mod tests {
             mount_snapshot
                 .panes
                 .push(crate::api::schema::panes::PaneInfo {
+                    restore_error: None,
                     pane_id: "w1:p2".to_string(),
                     terminal_id: "term_old".to_string(),
                     workspace_id: "w1".to_string(),

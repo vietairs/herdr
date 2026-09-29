@@ -424,7 +424,7 @@ impl ClientShellState {
                 }
             }
             ClientContextMenuAction::Close => {
-                self.push_endpoint_method(Method::TabClose(TabTarget { tab_id }), outcome);
+                self.request_tab_close(tab_id, outcome);
             }
             ClientContextMenuAction::CloseOnHost => {
                 self.push_endpoint_method(Method::TabCloseRemote(TabTarget { tab_id }), outcome);
