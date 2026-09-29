@@ -568,6 +568,10 @@ pub(super) enum ClientContextMenuAction {
     /// Ask the SERVING host to close its own workspace/tab, rather than just
     /// unmounting the local mirror of it. Only offered on a federated target.
     CloseOnHost,
+    /// Unmount this federated workspace from the local session only. The
+    /// serving host is never asked to close anything. Only offered on a
+    /// federated workspace target.
+    Detach,
 }
 
 #[derive(Debug)]
