@@ -2479,6 +2479,14 @@ mod tests {
                 },
             ),
         };
+        let workspace_detach = crate::api::schema::Request {
+            id: "req_13".into(),
+            method: crate::api::schema::Method::WorkspaceDetach(
+                crate::api::schema::WorkspaceTarget {
+                    workspace_id: "w1".into(),
+                },
+            ),
+        };
 
         assert!(!crate::api::request_changes_ui(&read_only));
         assert!(!crate::api::request_changes_ui(&worktree_list));
@@ -2492,6 +2500,7 @@ mod tests {
         assert!(crate::api::request_changes_ui(&command_invoke));
         assert!(crate::api::request_changes_ui(&announcement_dismiss));
         assert!(crate::api::request_changes_ui(&release_notes_dismiss));
+        assert!(crate::api::request_changes_ui(&workspace_detach));
     }
 
     #[test]

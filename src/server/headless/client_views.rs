@@ -235,6 +235,7 @@ impl HeadlessServer {
                 | Method::TabClose(_)
                 | Method::TabCreate(_)
                 | Method::WorkspaceClose(_)
+                | Method::WorkspaceDetach(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorktreeCreate(_)
                 | Method::WorktreeOpen(_)
@@ -272,6 +273,7 @@ impl HeadlessServer {
                 | Method::TabMove(_)
                 | Method::TabRename(_)
                 | Method::WorkspaceClose(_)
+                | Method::WorkspaceDetach(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorkspaceFocus(_)
                 | Method::WorkspaceMove(_)
@@ -303,6 +305,7 @@ impl HeadlessServer {
                 | Method::TabCreate(_)
                 | Method::TabFocus(_)
                 | Method::WorkspaceClose(_)
+                | Method::WorkspaceDetach(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorkspaceFocus(_)
                 | Method::WorktreeCreate(_)
@@ -957,5 +960,59 @@ impl HeadlessServer {
                     || self.resize_shell_tab_if_controller(client_id, false)
             };
         changed | navigation_changed | geometry_changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both `WorkspaceClose` and `WorkspaceDetach` must be classified identically
+    /// across all three geometry-change classifiers, so the sidebar reconciliation
+    /// handles them the same way.
+    #[test]
+    fn workspace_detach_is_classified_like_workspace_close() {
+        let close =
+            crate::api::schema::Method::WorkspaceClose(crate::api::schema::WorkspaceCloseParams {
+                workspace_id: "w1".into(),
+                close_group: false,
+            });
+        let detach =
+            crate::api::schema::Method::WorkspaceDetach(crate::api::schema::WorkspaceTarget {
+                workspace_id: "w1".into(),
+            });
+
+        // Both must be classified the same by all three checkers
+        assert_eq!(
+            HeadlessServer::shell_locations_may_need_reconcile(&close),
+            HeadlessServer::shell_locations_may_need_reconcile(&detach),
+            "workspace.close and workspace.detach must have the same shell_locations_may_need_reconcile classification"
+        );
+
+        assert_eq!(
+            HeadlessServer::shell_endpoint_claims_geometry(&close),
+            HeadlessServer::shell_endpoint_claims_geometry(&detach),
+            "workspace.close and workspace.detach must have the same shell_endpoint_claims_geometry classification"
+        );
+
+        assert_eq!(
+            HeadlessServer::public_request_may_change_geometry(&close),
+            HeadlessServer::public_request_may_change_geometry(&detach),
+            "workspace.close and workspace.detach must have the same public_request_may_change_geometry classification"
+        );
+
+        // All three must return true
+        assert!(
+            HeadlessServer::shell_locations_may_need_reconcile(&close),
+            "workspace.close must claim shell_locations_may_need_reconcile"
+        );
+        assert!(
+            HeadlessServer::shell_endpoint_claims_geometry(&close),
+            "workspace.close must claim shell_endpoint_claims_geometry"
+        );
+        assert!(
+            HeadlessServer::public_request_may_change_geometry(&close),
+            "workspace.close must claim public_request_may_change_geometry"
+        );
     }
 }

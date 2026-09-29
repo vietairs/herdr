@@ -48,6 +48,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "workspace.close",
     "workspace.close_remote",
     "workspace.create",
+    "workspace.detach",
     "workspace.focus",
     "workspace.mount_remote",
     "workspace.move",
@@ -301,6 +302,10 @@ mod tests {
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
         );
+        assert_eq!(
+            actual.remove("workspace.detach").as_deref(),
+            Some("2897a2284fe28e3211c7efeb90e9ef17aba82efbb167023bb12c19ff60977715")
+        );
 
         assert_eq!(
             actual, expected,
@@ -399,6 +404,11 @@ mod tests {
                 col: 0,
                 content_revision: None,
                 offset_from_bottom: None,
+            },
+        )));
+        assert!(supports_client_shell_method(&Method::WorkspaceDetach(
+            crate::api::schema::WorkspaceTarget {
+                workspace_id: "w1".into(),
             },
         )));
         assert!(!supports_client_shell_method(&Method::Ping(

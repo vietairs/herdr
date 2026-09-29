@@ -101,6 +101,11 @@ pub enum Method {
     /// dispatch_remote_workspace_close`.
     #[serde(rename = "workspace.close_remote")]
     WorkspaceCloseRemote(WorkspaceTarget),
+    /// Unmounts one federated workspace from this session without asking the
+    /// serving host to close anything; its panes and agents keep running there.
+    /// Ends the mount when this was its last mirrored workspace.
+    #[serde(rename = "workspace.detach")]
+    WorkspaceDetach(WorkspaceTarget),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]

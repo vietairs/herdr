@@ -590,6 +590,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::WorkspaceReportMetadata(_) => "workspace.report_metadata",
         Method::WorkspaceClose(_) => "workspace.close",
         Method::WorkspaceCloseRemote(_) => "workspace.close_remote",
+        Method::WorkspaceDetach(_) => "workspace.detach",
         Method::WorktreeList(_) => "worktree.list",
         Method::WorktreeCreate(_) => "worktree.create",
         Method::WorktreeOpen(_) => "worktree.open",

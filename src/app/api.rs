@@ -1311,6 +1311,9 @@ impl App {
             Method::WorkspaceCloseRemote(target) => {
                 return self.handle_workspace_close_remote(request.id, target)
             }
+            Method::WorkspaceDetach(target) => {
+                return self.handle_workspace_detach(request.id, target)
+            }
             Method::WorktreeList(_) | Method::WorktreeOpen(_) => {
                 return responses::encode_error(
                     request.id,

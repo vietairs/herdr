@@ -5182,6 +5182,23 @@
           "type": "object"
         },
         {
+          "description": "Unmounts one federated workspace from this session without asking the\nserving host to close anything; its panes and agents keep running there.\nEnds the mount when this was its last mirrored workspace.",
+          "properties": {
+            "method": {
+              "const": "workspace.detach",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "method": {
               "const": "worktree.list",
