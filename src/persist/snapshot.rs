@@ -1209,6 +1209,39 @@ mod tests {
         assert_eq!(snapshot.workspaces[0].custom_name.as_deref(), Some("local"));
     }
 
+    /// Restore matches history to workspaces by position, so a mounted
+    /// workspace between two local ones must not take a history slot.
+    #[test]
+    fn capture_history_skips_federation_materialized_workspaces() {
+        let mut state = state_with_workspaces(&["local-a", "mounted", "local-b"]);
+        state.workspaces[1].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "federation:alice@10.0.0.1#s1".into(),
+            label: "alice@10.0.0.1".into(),
+            repo_root: PathBuf::new(),
+            checkout_path: PathBuf::new(),
+            is_linked_worktree: false,
+        });
+        state.workspaces[2].test_add_tab(Some("local-b-extra"));
+        state.ensure_test_terminals();
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+
+        let snapshot = capture_from_state_with_runtimes(&state, &terminal_runtimes);
+        let history = capture_history_from_state_with_runtimes(&state, &terminal_runtimes);
+
+        assert_eq!(snapshot.workspaces.len(), 2);
+        assert_eq!(
+            history.workspaces.len(),
+            snapshot.workspaces.len(),
+            "history must have one entry per captured workspace"
+        );
+        assert_eq!(
+            history.workspaces[1].tabs.len(),
+            snapshot.workspaces[1].tabs.len(),
+            "the second history entry must belong to local-b, not the mounted workspace"
+        );
+        assert_eq!(history.workspaces[1].tabs.len(), 2);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn capture_prefers_live_shell_cwd_and_keeps_it_after_exit() {
