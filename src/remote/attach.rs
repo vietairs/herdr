@@ -356,7 +356,7 @@ fn apply_managed_ssh_options_tokio(
             .arg("-o")
             .arg("ControlMaster=auto")
             .arg("-o")
-            .arg("ControlPersist=yes");
+            .arg("ControlPersist=600");
     }
 }
 
@@ -563,11 +563,11 @@ pub(crate) async fn dial_federation(
     ssh_options: Option<&ManagedSshOptions>,
 ) -> Result<LiveTunnel, FederationMountFailure> {
     let mut command = tokio::process::Command::new("ssh");
-    // The tunnel must NOT join the herdr-managed control master: when
-    // provisioning ends, `RemoteSsh`'s Drop runs `ssh -O exit`, which tears
-    // down every session multiplexed through that master — including a live
-    // tunnel. Reuse the managed config for its keepalive settings, but force
-    // a direct, mux-independent connection.
+    // The tunnel must NOT join the herdr-managed control master: that master
+    // belongs to provisioning and expires on its own schedule, so a tunnel
+    // multiplexed through it would share its lifetime. Reuse the managed
+    // config for its keepalive settings, but force a direct, mux-independent
+    // connection.
     if let Some(options) = ssh_options {
         command
             .arg("-F")
