@@ -69,6 +69,8 @@ When a connection is lost, the last workspace and agent state remains visible bu
 
 Renaming a mounted remote workspace or tab is local-only: it changes what you see, but it is never sent to the serving host, is not saved, and is lost the next time that workspace or tab is remounted. It also does not affect the name the workspace or tab owner sees on the serving host itself.
 
+To stop showing a mounted remote workspace without closing anything on the host, right-click it in the left sidebar and choose **Detach**. It disappears from your sidebar at once, with no confirmation, and the host's workspace, panes, and agents keep running. If other workspaces from that machine are still mounted they keep streaming; the connection ends when you detach the last one. Mount the machine again to get the workspace back. **Close on host** is the option that closes it on the host.
+
 ## Rename, disable, or remove
 
 Read profile IDs from the list rather than deriving them from labels or hostnames:
