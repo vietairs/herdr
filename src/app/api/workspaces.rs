@@ -1158,9 +1158,8 @@ impl App {
 
     /// Purges every per-workspace federation record for the mirror at `index`
     /// and ends its mount when no other mirror of the same live host remains.
-    /// Does not remove the workspace itself. Cross-platform: the clipboard
-    /// staging and image paste state it also clears is Unix-only, so those two
-    /// purges are compile-gated inside.
+    /// Does not remove the workspace itself. Cross-platform: the umbrella purge
+    /// compile-gates the Unix-only clipboard staging and image paste cleanup.
     fn release_federated_mirror(&mut self, index: usize) {
         let closing_ids: std::collections::HashSet<String> = self
             .state
@@ -1168,17 +1167,7 @@ impl App {
             .get(index)
             .map(|ws| std::iter::once(ws.id.clone()).collect())
             .unwrap_or_default();
-        self.purge_pending_remote_splits_for_workspaces(&closing_ids);
-        self.purge_pending_remote_closes_for_workspaces(&closing_ids);
-        // Clipboard staging and image paste are Unix-only, so there is no
-        // per-workspace state of theirs to purge on other platforms.
-        #[cfg(unix)]
-        self.purge_pending_remote_clipboard_stages_for_workspaces(&closing_ids);
-        #[cfg(unix)]
-        self.purge_remote_image_paste_pane_state_for_workspaces(&closing_ids);
-        self.purge_remote_resync_pane_index_for_workspaces(&closing_ids);
-        self.purge_remote_resync_tab_index_for_workspaces(&closing_ids);
-        self.purge_remote_resync_workspace_index_for_workspaces(&closing_ids);
+        self.purge_federation_state_for_workspaces(&closing_ids);
 
         if let Some(host_key) = self.federation_host_key_for_workspace(index) {
             let siblings_remain = (0..self.state.workspaces.len()).any(|other| {
@@ -4234,6 +4223,32 @@ mod tests {
             .iter()
             .all(|ws| ws.worktree_space().is_none()));
         app.state.assert_invariants_for_test();
+    }
+
+    /// Detaching a mirror drops the focus claims only that mount could redeem,
+    /// the same as every other path that retires a mirrored workspace.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detaching_a_federated_workspace_drops_its_pending_focus_claims() {
+        let (mut app, _out_rx, ws_idx) = app_with_federation_mounted_workspace(true);
+        let workspace_id = app.state.workspaces[ws_idx].id.clone();
+        let host_key = app
+            .federation_host_key_for_workspace(ws_idx)
+            .expect("the mounted workspace belongs to a live mount");
+        app.pending_remote_workspace_focus
+            .insert(workspace_id.clone());
+        app.pending_remote_tab_focus
+            .insert(format!("r:{}:w1-tab3", host_key.as_str()));
+        app.pending_remote_tab_create_focus
+            .insert((host_key.clone(), 1));
+
+        let response = app.handle_workspace_detach("req".into(), WorkspaceTarget { workspace_id });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::Ok {}));
+        assert!(app.pending_remote_workspace_focus.is_empty());
+        assert!(app.pending_remote_tab_focus.is_empty());
+        assert!(app.pending_remote_tab_create_focus.is_empty());
     }
 
     /// `workspace.detach` on a local (non-federated) workspace returns `not_federated`.
