@@ -6,12 +6,21 @@ impl ClientContextMenuOverlay {
 
         let item = |label, action| ClientContextMenuItem { label, action };
 
-        // "Close on host" is only reachable on a federated target, and always
-        // sits last so that adding it never shifts the index of an item above
-        // it -- menu rows are activated by index.
+        // Federated-only rows are appended after every unconditional row, so
+        // adding one never shifts the index of an item above it -- menu rows
+        // are activated by index.
         let with_close_on_host = |mut items: Vec<ClientContextMenuItem>, federated: bool| {
             if federated {
                 items.push(item("Close on host", Action::CloseOnHost));
+            }
+            items
+        };
+        // Workspace menus additionally offer "Detach" after "Close on host".
+        // Tab and pane menus have no detach row.
+        let with_federated_workspace_rows = |items: Vec<ClientContextMenuItem>, federated: bool| {
+            let mut items = with_close_on_host(items, federated);
+            if federated {
+                items.push(item("Detach", Action::Detach));
             }
             items
         };
@@ -21,7 +30,7 @@ impl ClientContextMenuOverlay {
                 is_git: false,
                 federated,
                 ..
-            } => with_close_on_host(
+            } => with_federated_workspace_rows(
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)],
                 *federated,
             ),
@@ -30,7 +39,7 @@ impl ClientContextMenuOverlay {
                 has_worktree_children: false,
                 federated,
                 ..
-            } => with_close_on_host(
+            } => with_federated_workspace_rows(
                 vec![
                     item("Rename", Action::Rename),
                     item("Close", Action::Close),
@@ -43,7 +52,7 @@ impl ClientContextMenuOverlay {
                 is_linked_worktree: true,
                 federated,
                 ..
-            } => with_close_on_host(
+            } => with_federated_workspace_rows(
                 vec![
                     item("Rename", Action::Rename),
                     item("Close", Action::Close),
@@ -56,7 +65,7 @@ impl ClientContextMenuOverlay {
                 collapsed,
                 federated,
                 ..
-            } => with_close_on_host(
+            } => with_federated_workspace_rows(
                 vec![
                     item("Rename", Action::Rename),
                     item("Close group", Action::Close),
@@ -349,6 +358,14 @@ impl ClientShellState {
                 ),
                 outcome,
             ),
+            // Disconnect only, so there is no confirmation overlay: nothing on
+            // the serving host is destroyed and a remount restores the view.
+            ClientContextMenuAction::Detach => self.push_endpoint_method(
+                crate::api::schema::Method::WorkspaceDetach(crate::api::schema::WorkspaceTarget {
+                    workspace_id,
+                }),
+                outcome,
+            ),
             _ => {}
         }
     }
@@ -424,7 +441,7 @@ impl ClientShellState {
                 }
             }
             ClientContextMenuAction::Close => {
-                self.push_endpoint_method(Method::TabClose(TabTarget { tab_id }), outcome);
+                self.request_tab_close(tab_id, outcome);
             }
             ClientContextMenuAction::CloseOnHost => {
                 self.push_endpoint_method(Method::TabCloseRemote(TabTarget { tab_id }), outcome);

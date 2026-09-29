@@ -235,6 +235,7 @@ impl HeadlessServer {
                 | Method::TabClose(_)
                 | Method::TabCreate(_)
                 | Method::WorkspaceClose(_)
+                | Method::WorkspaceDetach(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorktreeCreate(_)
                 | Method::WorktreeOpen(_)
@@ -262,6 +263,7 @@ impl HeadlessServer {
                 | Method::PaneRename(_)
                 | Method::PaneResize(_)
                 | Method::PaneScroll(_)
+                | Method::PaneClear(_)
                 | Method::PaneSplit(_)
                 | Method::PaneSwap(_)
                 | Method::PaneZoom(_)
@@ -271,6 +273,7 @@ impl HeadlessServer {
                 | Method::TabMove(_)
                 | Method::TabRename(_)
                 | Method::WorkspaceClose(_)
+                | Method::WorkspaceDetach(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorkspaceFocus(_)
                 | Method::WorkspaceMove(_)
@@ -302,6 +305,7 @@ impl HeadlessServer {
                 | Method::TabCreate(_)
                 | Method::TabFocus(_)
                 | Method::WorkspaceClose(_)
+                | Method::WorkspaceDetach(_)
                 | Method::WorkspaceCreate(_)
                 | Method::WorkspaceFocus(_)
                 | Method::WorktreeCreate(_)
@@ -312,7 +316,10 @@ impl HeadlessServer {
 
     pub(super) fn deferred_endpoint_navigation_tab_id(response: &[u8]) -> Option<String> {
         let response = serde_json::from_slice::<serde_json::Value>(response).ok()?;
-        if response.pointer("/result/type")?.as_str()? != "worktree_created" {
+        if !matches!(
+            response.pointer("/result/type")?.as_str()?,
+            "worktree_created" | "worktree_opened"
+        ) {
             return None;
         }
         response
@@ -526,7 +533,7 @@ impl HeadlessServer {
         self.app.sync_pending_agent_resume_deadline(now);
         if self
             .app
-            .start_pending_agent_resumes(self.app.pending_agent_resume_due(now))
+            .start_pending_agent_resumes(now, self.app.pending_agent_resume_due(now))
         {
             for client in self.clients.values_mut() {
                 client.request_recompute();
@@ -850,24 +857,17 @@ impl HeadlessServer {
             api::schema::Method::TabCreate(params) => params.focus,
             _ => false,
         };
-        let inspect_worktree_open = matches!(
-            &msg.request.method,
-            api::schema::Method::WorktreeOpen(params) if params.focus
-        );
         let inspect_pane_move = matches!(
             &msg.request.method,
             api::schema::Method::PaneMove(params) if params.focus
         );
-        let response_proxy = (agent_focus_target.is_some()
-            || inspect_worktree_open
-            || inspect_pane_move)
-            .then(|| {
-                let (proxy_tx, proxy_rx) = std::sync::mpsc::channel();
-                let original = std::mem::replace(&mut msg.respond_to, proxy_tx);
-                (original, proxy_rx)
-            });
+        let response_proxy = (agent_focus_target.is_some() || inspect_pane_move).then(|| {
+            let (proxy_tx, proxy_rx) = std::sync::mpsc::channel();
+            let original = std::mem::replace(&mut msg.respond_to, proxy_tx);
+            (original, proxy_rx)
+        });
         let reconcile = Self::shell_locations_may_need_reconcile(&msg.request.method);
-        let changed = self.handle_api_request_with_shutdown_check_inner(msg, false);
+        let changed = self.handle_api_request_with_shutdown_check_inner(msg, false, false);
         let proxied_result = forward_proxied_api_response(response_proxy);
         let proxied_request_succeeded = proxied_result.is_some();
         // Same-tab and zoomed moves succeed without moving or requesting focus.
@@ -894,7 +894,6 @@ impl HeadlessServer {
             .is_some_and(|target| self.default_shell_target() == Some(target));
         let public_focus_succeeded = explicit_focus_succeeded
             || (create_focus_requested && target_changed)
-            || (inspect_worktree_open && proxied_request_succeeded)
             || pane_move_focus_succeeded;
         if public_focus_succeeded {
             self.focus_all_shell_clients_on_default_target();
@@ -926,7 +925,7 @@ impl HeadlessServer {
         self.set_default_shell_target_from_client(client_id);
         let popup_before = self.app.state.popup_pane.is_some();
         let popup_owner = self.shell_tab_id_for_client(client_id);
-        let changed = self.handle_api_request_with_shutdown_check_inner(msg, false);
+        let changed = self.handle_api_request_with_shutdown_check_inner(msg, false, true);
         self.focus_shell_client_on_default_target(client_id);
         if !popup_before && self.app.state.popup_pane.is_some() {
             self.popup_owner_tab_id = popup_owner;
@@ -961,5 +960,59 @@ impl HeadlessServer {
                     || self.resize_shell_tab_if_controller(client_id, false)
             };
         changed | navigation_changed | geometry_changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both `WorkspaceClose` and `WorkspaceDetach` must be classified identically
+    /// across all three geometry-change classifiers, so the sidebar reconciliation
+    /// handles them the same way.
+    #[test]
+    fn workspace_detach_is_classified_like_workspace_close() {
+        let close =
+            crate::api::schema::Method::WorkspaceClose(crate::api::schema::WorkspaceCloseParams {
+                workspace_id: "w1".into(),
+                close_group: false,
+            });
+        let detach =
+            crate::api::schema::Method::WorkspaceDetach(crate::api::schema::WorkspaceTarget {
+                workspace_id: "w1".into(),
+            });
+
+        // Both must be classified the same by all three checkers
+        assert_eq!(
+            HeadlessServer::shell_locations_may_need_reconcile(&close),
+            HeadlessServer::shell_locations_may_need_reconcile(&detach),
+            "workspace.close and workspace.detach must have the same shell_locations_may_need_reconcile classification"
+        );
+
+        assert_eq!(
+            HeadlessServer::shell_endpoint_claims_geometry(&close),
+            HeadlessServer::shell_endpoint_claims_geometry(&detach),
+            "workspace.close and workspace.detach must have the same shell_endpoint_claims_geometry classification"
+        );
+
+        assert_eq!(
+            HeadlessServer::public_request_may_change_geometry(&close),
+            HeadlessServer::public_request_may_change_geometry(&detach),
+            "workspace.close and workspace.detach must have the same public_request_may_change_geometry classification"
+        );
+
+        // All three must return true
+        assert!(
+            HeadlessServer::shell_locations_may_need_reconcile(&close),
+            "workspace.close must claim shell_locations_may_need_reconcile"
+        );
+        assert!(
+            HeadlessServer::shell_endpoint_claims_geometry(&close),
+            "workspace.close must claim shell_endpoint_claims_geometry"
+        );
+        assert!(
+            HeadlessServer::public_request_may_change_geometry(&close),
+            "workspace.close must claim public_request_may_change_geometry"
+        );
     }
 }

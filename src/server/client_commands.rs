@@ -19,6 +19,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "integration.list",
     "layout.balance",
     "layout.set_split_ratio",
+    "pane.clear",
     "pane.close",
     "pane.copy_motion",
     "pane.copy_search",
@@ -47,6 +48,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "workspace.close",
     "workspace.close_remote",
     "workspace.create",
+    "workspace.detach",
     "workspace.focus",
     "workspace.mount_remote",
     "workspace.move",
@@ -291,10 +293,18 @@ mod tests {
         )))
         .expect("endpoint method shape fixture");
         let mut actual = endpoint_method_shape_digests();
-        // Freeze the additive method separately without rewriting the published fixture.
+        // Freeze additive methods separately without rewriting the published fixture.
+        assert_eq!(
+            actual.remove("pane.clear").as_deref(),
+            Some("0301d288ba198ddaa427dd7421c71911cccaf4ea03544531efa8b67ca21b08f6")
+        );
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
+        );
+        assert_eq!(
+            actual.remove("workspace.detach").as_deref(),
+            Some("2897a2284fe28e3211c7efeb90e9ef17aba82efbb167023bb12c19ff60977715")
         );
 
         assert_eq!(
@@ -394,6 +404,11 @@ mod tests {
                 col: 0,
                 content_revision: None,
                 offset_from_bottom: None,
+            },
+        )));
+        assert!(supports_client_shell_method(&Method::WorkspaceDetach(
+            crate::api::schema::WorkspaceTarget {
+                workspace_id: "w1".into(),
             },
         )));
         assert!(!supports_client_shell_method(&Method::Ping(

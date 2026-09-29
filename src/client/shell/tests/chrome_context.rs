@@ -581,11 +581,11 @@ fn close_on_host_follows_the_server_origin_field_not_the_workspace_id_shape() {
     assert!(!open(snapshot()).contains(&"Close on host"));
 }
 
-/// Menu rows are activated by index, so a conditional item must never displace
-/// an unconditional one. Close-on-host is appended last for exactly that
-/// reason.
+/// Menu rows are activated by index, so conditional items must never displace
+/// an unconditional one. Close-on-host and detach are appended last for exactly
+/// that reason.
 #[test]
-fn close_on_host_appends_last_and_never_shifts_the_items_above_it() {
+fn federated_rows_append_last_and_never_shift_the_items_above_them() {
     let labels_for = |origin: Option<&str>| {
         let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
         let snapshot = federated_snapshot(origin, true);
@@ -599,15 +599,19 @@ fn close_on_host_appends_last_and_never_shifts_the_items_above_it() {
     let federated = labels_for(Some("dev@10.0.0.5"));
     assert_eq!(
         federated.len(),
-        local.len() + 1,
-        "close-on-host should add exactly one row"
+        local.len() + 2,
+        "close-on-host and detach should add exactly two rows"
     );
     assert_eq!(
         &federated[..local.len()],
         &local[..],
-        "close-on-host must not reorder the rows above it"
+        "federated rows must not reorder the rows above them"
     );
-    assert_eq!(federated.last().copied(), Some("Close on host"));
+    assert_eq!(
+        &federated[local.len()..],
+        ["Close on host", "Detach"],
+        "federated workspace menus must end with close-on-host and detach"
+    );
 }
 
 #[test]
@@ -885,7 +889,7 @@ fn pane_menu_rows_are_pinned_for_every_label_combination() {
 }
 
 /// Same contract for the non-pane menu shapes, including the federated
-/// variants that append close-on-host.
+/// variants that append close-on-host and detach.
 #[test]
 fn workspace_and_tab_menu_rows_are_pinned_for_every_shape() {
     let workspace = |mutate: &dyn Fn(&mut ClientShellWorkspace)| {
@@ -904,7 +908,7 @@ fn workspace_and_tab_menu_rows_are_pinned_for_every_shape() {
             ws.branch = None;
             ws.federation_origin = Some("dev@10.0.0.5".into());
         }),
-        ["Rename", "Close", "Close on host"]
+        ["Rename", "Close", "Close on host", "Detach"]
     );
     // Git workspace with no linked worktrees.
     assert_eq!(
@@ -921,11 +925,175 @@ fn workspace_and_tab_menu_rows_are_pinned_for_every_shape() {
         ["Rename", "Close", "Delete worktree checkout..."]
     );
 
+    // Federated git-group workspace: non-linked worktree shared by multiple workspaces.
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut snapshot_group = snapshot();
+    let shared_worktree = ClientShellWorktree {
+        key: "repo".into(),
+        label: "repo".into(),
+        is_linked_worktree: false,
+    };
+    snapshot_group.workspaces[0].worktree = Some(shared_worktree.clone());
+    snapshot_group.workspaces[0].federation_origin = Some("dev@10.0.0.5".into());
+    let mut ws2 = snapshot_group.workspaces[0].clone();
+    ws2.workspace_id = "ws_2".into();
+    ws2.active_tab_id = "tab_2".into();
+    ws2.number = 2;
+    ws2.focused = false;
+    ws2.worktree = Some(shared_worktree);
+    snapshot_group.workspaces.push(ws2);
+    state.set_snapshot(Box::new(snapshot_group));
+    state.open_workspace_context_menu("ws_1".into(), 0, 0);
+    assert_eq!(
+        workspace_menu_labels(&state),
+        [
+            "Rename",
+            "Close group",
+            "New worktree",
+            "Open worktree...",
+            "Collapse",
+            "Close on host",
+            "Detach"
+        ]
+    );
+
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
     state.open_tab_context_menu("tab_1".into(), 0, 0);
     assert_eq!(
         workspace_menu_labels(&state),
         ["New tab", "Rename", "Close"]
+    );
+}
+
+/// The detach-target gate reads the server-populated `federation_origin`,
+/// never the shape of `workspace_id`. A remote-looking id with no origin must
+/// not surface the action, and a local-looking id the server marked federated
+/// must.
+#[test]
+fn detach_follows_the_server_origin_field_not_the_workspace_id_shape() {
+    let open = |snapshot: ClientShellSnapshot| {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let workspace_id = snapshot.workspaces[0].workspace_id.clone();
+        state.set_snapshot(Box::new(snapshot));
+        state.open_workspace_context_menu(workspace_id, 0, 0);
+        workspace_menu_labels(&state)
+    };
+
+    // Remote-shaped id, but the server did not mark it federated.
+    assert!(
+        !open(federated_snapshot(None, true)).contains(&"Detach"),
+        "a remote-shaped workspace_id must not by itself unlock detach"
+    );
+    // Local-shaped id the server did mark federated.
+    assert!(
+        open(federated_snapshot(Some("dev@10.0.0.5"), false)).contains(&"Detach"),
+        "the server's federation_origin must unlock detach"
+    );
+    assert!(!open(snapshot()).contains(&"Detach"));
+}
+
+/// Activating detach sends exactly one endpoint request carrying WorkspaceDetach,
+/// never WorkspaceClose variants, and does not open the confirm overlay.
+#[test]
+fn detach_unmounts_the_menu_target_without_closing_on_host() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let snapshot = federated_snapshot(Some("dev@10.0.0.5"), true);
+    let workspace_id = snapshot.workspaces[0].workspace_id.clone();
+    state.set_snapshot(Box::new(snapshot));
+    state.open_workspace_context_menu(workspace_id.clone(), 0, 0);
+    let index = workspace_menu_labels(&state)
+        .iter()
+        .position(|label| *label == "Detach")
+        .expect("detach item");
+
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut outcome);
+
+    let detach_actions: Vec<_> = outcome
+        .actions
+        .iter()
+        .filter(|action| {
+            matches!(
+                action,
+                ClientShellAction::Endpoint { request, .. }
+                    if matches!(request.method, crate::api::schema::Method::WorkspaceDetach(ref target)
+                        if target.workspace_id == workspace_id)
+            )
+        })
+        .collect();
+    assert_eq!(
+        detach_actions.len(),
+        1,
+        "expected exactly one detach action"
+    );
+
+    let has_close_variant = outcome.actions.iter().any(|action| {
+        matches!(
+            action,
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(
+                    request.method,
+                    crate::api::schema::Method::WorkspaceClose(_)
+                        | crate::api::schema::Method::WorkspaceCloseRemote(_)
+                        | crate::api::schema::Method::TabCloseRemote(_)
+                )
+        )
+    });
+    assert!(!has_close_variant, "detach must not send any close variant");
+    assert!(
+        state.overlay.is_none(),
+        "detach must not open a confirm overlay"
+    );
+}
+
+/// Detach is gated by the advertised method list, so it must not be silently
+/// dropped at the endpoint lane when the server supports it.
+#[test]
+fn detach_is_sent_through_the_real_advertised_method_list() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let snapshot = federated_snapshot(Some("dev@10.0.0.5"), true);
+    let workspace_id = snapshot.workspaces[0].workspace_id.clone();
+    state.set_snapshot(Box::new(snapshot));
+    // Seed the real advertised list so detach is not silently dropped.
+    state.set_endpoint_methods(Some(
+        crate::server::client_commands::supported_client_shell_method_names()
+            .iter()
+            .map(|m| (*m).to_owned())
+            .collect(),
+    ));
+    state.open_workspace_context_menu(workspace_id.clone(), 0, 0);
+    let index = workspace_menu_labels(&state)
+        .iter()
+        .position(|label| *label == "Detach")
+        .expect("detach item");
+
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(index, &mut outcome);
+
+    let has_detach = outcome.actions.iter().any(|action| {
+        matches!(
+            action,
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(request.method, crate::api::schema::Method::WorkspaceDetach(ref target)
+                    if target.workspace_id == workspace_id)
+        )
+    });
+    assert!(
+        has_detach,
+        "detach must be emitted when the method is advertised"
+    );
+}
+
+/// Tab menus must never offer detach, even on federated workspaces.
+#[test]
+fn tab_menu_never_offers_detach() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let snapshot = federated_snapshot(Some("dev@10.0.0.5"), true);
+    state.set_snapshot(Box::new(snapshot));
+    state.open_tab_context_menu("tab_1".into(), 0, 0);
+    assert!(
+        !workspace_menu_labels(&state).contains(&"Detach"),
+        "tab menus must never contain detach"
     );
 }

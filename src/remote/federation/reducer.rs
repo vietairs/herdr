@@ -296,6 +296,7 @@ impl RemoteMirror {
         self.panes
             .entry(pane_id.clone())
             .or_insert_with(|| PaneInfo {
+                restore_error: None,
                 pane_id: pane_id.clone(),
                 terminal_id,
                 workspace_id: String::new(),
@@ -725,6 +726,7 @@ mod tests {
 
     fn pane(id: &str, terminal_id: &str, agent_status: AgentStatus) -> PaneInfo {
         PaneInfo {
+            restore_error: None,
             pane_id: id.to_string(),
             terminal_id: terminal_id.to_string(),
             workspace_id: "w1".to_string(),

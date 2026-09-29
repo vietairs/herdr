@@ -10,7 +10,7 @@
 //! - We avoid duplicating parsing logic in the client
 //! - Host terminal control replies can be buffered or discarded before they leak
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 #[cfg(unix)]
@@ -39,21 +39,25 @@ pub fn stdin_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
+    host_theme_query_pending: Arc<AtomicU32>,
     host_cell_size_query_sent: bool,
     host_mouse_capture_active: Arc<AtomicBool>,
     host_sgr_pixels_active: Arc<AtomicBool>,
+    host_escape_disambiguation_active: bool,
+    initial_host_input: Vec<u8>,
     #[cfg(unix)] direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
     #[cfg(unix)] direct_response_active: Arc<AtomicBool>,
 ) {
     #[cfg(windows)]
     {
         let _ = (
-            host_color_query_sent,
+            host_theme_query_pending,
             host_cell_size_query_sent,
             host_mouse_capture_active,
             host_sgr_pixels_active,
         );
-        windows_stdin_reader_loop(event_tx, should_quit);
+        let _ = (host_escape_disambiguation_active, initial_host_input);
+        windows_stdin_reader_loop(event_tx, should_quit, host_color_query_sent);
     }
 
     #[cfg(unix)]
@@ -61,9 +65,12 @@ pub fn stdin_reader_loop(
         event_tx,
         should_quit,
         host_color_query_sent,
+        host_theme_query_pending,
         host_cell_size_query_sent,
         host_mouse_capture_active,
         host_sgr_pixels_active,
+        host_escape_disambiguation_active,
+        initial_host_input,
         direct_response,
         direct_response_active,
     );
@@ -74,9 +81,12 @@ fn unix_stdin_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
+    host_theme_query_pending: Arc<AtomicU32>,
     host_cell_size_query_sent: bool,
     host_mouse_capture_active: Arc<AtomicBool>,
     host_sgr_pixels_active: Arc<AtomicBool>,
+    host_escape_disambiguation_active: bool,
+    initial_host_input: Vec<u8>,
     direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
     direct_response_active: Arc<AtomicBool>,
 ) {
@@ -84,6 +94,7 @@ fn unix_stdin_reader_loop(
     let mut reader = stdin.lock();
     let mut scratch = [0u8; 4096];
     let mut framer = crate::raw_input::RawInputByteFramer::for_host_input();
+    framer.set_host_escape_disambiguation_active(host_escape_disambiguation_active);
     if host_color_query_sent {
         framer.host_color_query_sent();
         framer.enable_host_color_scheme_change_tracking();
@@ -96,6 +107,57 @@ fn unix_stdin_reader_loop(
     let mut pending_mode = None;
     let mut last_geometry = None;
     let mut direct_filter = super::direct_graphics::InputFilter::default();
+
+    if !initial_host_input.is_empty() {
+        let sgr_pixels = host_sgr_pixels_active.load(Ordering::Acquire);
+        if sgr_pixels {
+            last_geometry = crate::input::mouse::HostGeometry::current();
+        }
+        let chunks = framer.push(&initial_host_input);
+        if !send_unix_input_chunks(
+            chunks,
+            &event_tx,
+            &mut pending_palette,
+            sgr_pixels,
+            last_geometry,
+        ) {
+            return;
+        }
+        if (framer.has_pending_input() || !pending_palette.is_empty())
+            && stdin_read_ready(
+                &reader,
+                idle_flush_timeout_ms(&framer, host_mouse_capture_active.load(Ordering::Acquire)),
+            ) == Some(false)
+        {
+            let had_pending = framer.has_pending_input();
+            let chunks = framer.flush_timeout();
+            let held_escape = had_pending && chunks.is_empty();
+            if !send_unix_input_chunks(
+                chunks,
+                &event_tx,
+                &mut pending_palette,
+                sgr_pixels,
+                last_geometry,
+            ) || !flush_unix_palette_input(&event_tx, &mut pending_palette)
+            {
+                return;
+            }
+            if held_escape
+                && stdin_read_ready(&reader, crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS)
+                    == Some(false)
+                && !send_unix_input_chunks(
+                    framer.flush_timeout(),
+                    &event_tx,
+                    &mut pending_palette,
+                    sgr_pixels,
+                    last_geometry,
+                )
+            {
+                return;
+            }
+        }
+        pending_mode = framer.has_pending_input().then_some(sgr_pixels);
+    }
 
     while !should_quit.load(Ordering::Acquire) {
         if direct_filter.has_pending()
@@ -119,6 +181,11 @@ fn unix_stdin_reader_loop(
         match reader.read(&mut scratch) {
             Ok(0) => break,
             Ok(n) => {
+                // A redraw can issue queries while this thread is blocked in read().
+                // Arm the split-reply guard before framing the returned bytes.
+                for _ in 0..host_theme_query_pending.swap(0, Ordering::AcqRel) {
+                    framer.host_color_query_sent();
+                }
                 let sgr_pixels = *pending_mode
                     .get_or_insert_with(|| host_sgr_pixels_active.load(Ordering::Acquire));
                 if sgr_pixels {
@@ -312,8 +379,12 @@ fn idle_flush_timeout_ms(
     framer: &crate::raw_input::RawInputByteFramer,
     host_mouse_capture_active: bool,
 ) -> i32 {
+    // A mouse report split after ESC[ is still ambiguous with legacy Alt+[.
+    // Give it the mouse-active grace period without changing timeout decoding.
     if host_mouse_capture_active
-        && (framer.has_pending_lone_escape() || framer.has_pending_incomplete_mouse_sequence())
+        && (framer.has_pending_lone_escape()
+            || framer.has_pending_csi_introducer()
+            || framer.has_pending_incomplete_mouse_sequence())
     {
         crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS
     } else {
@@ -325,15 +396,26 @@ fn idle_flush_timeout_ms(
 fn windows_stdin_reader_loop(
     event_tx: mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
+    host_color_query_sent: bool,
 ) {
     if !super::windows_vti_input_backend_enabled() {
+        windows_vti::trace_input_transport("reader=crossterm");
         windows_crossterm_reader_loop(event_tx, should_quit);
     } else {
         match windows_vti::console_input_handle() {
-            Ok(handle) if windows_vti::virtual_terminal_input_enabled(handle) => {
-                windows_vti::raw_console_reader_loop(handle, event_tx, should_quit);
+            Ok(handle) => {
+                windows_vti::trace_input_transport("reader=windows-console");
+                windows_vti::raw_console_reader_loop(
+                    handle,
+                    event_tx,
+                    should_quit,
+                    host_color_query_sent,
+                );
             }
-            _ => windows_crossterm_reader_loop(event_tx, should_quit),
+            _ => {
+                windows_vti::trace_input_transport("reader=crossterm-fallback");
+                windows_crossterm_reader_loop(event_tx, should_quit);
+            }
         }
     }
 }
@@ -573,8 +655,20 @@ fn windows_client_input_event_from_raw(
         crate::raw_input::RawInputEvent::OuterFocusLost => {
             Some(crate::protocol::ClientInputEvent::FocusLost)
         }
-        crate::raw_input::RawInputEvent::HostDefaultColor { .. }
-        | crate::raw_input::RawInputEvent::HostPaletteColors { .. }
+        crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
+            Some(crate::protocol::ClientInputEvent::HostDefaultColor {
+                kind: match kind {
+                    crate::terminal_theme::DefaultColorKind::Foreground => {
+                        crate::protocol::ClientHostDefaultColorKind::Foreground
+                    }
+                    crate::terminal_theme::DefaultColorKind::Background => {
+                        crate::protocol::ClientHostDefaultColorKind::Background
+                    }
+                },
+                color: color.into(),
+            })
+        }
+        crate::raw_input::RawInputEvent::HostPaletteColors { .. }
         | crate::raw_input::RawInputEvent::HostColorSchemeChanged(_)
         | crate::raw_input::RawInputEvent::HostCellSizeReport { .. }
         | crate::raw_input::RawInputEvent::Unsupported => None,
@@ -588,31 +682,7 @@ fn stdin_read_ready<R: AsRawFd>(reader: &R, timeout_ms: i32) -> Option<bool> {
 
 #[cfg(unix)]
 fn poll_read_ready(fd: i32, timeout_ms: i32) -> Option<bool> {
-    #[repr(C)]
-    struct PollFd {
-        fd: i32,
-        events: i16,
-        revents: i16,
-    }
-
-    unsafe extern "C" {
-        fn poll(fds: *mut PollFd, nfds: usize, timeout: i32) -> i32;
-    }
-
-    const POLLIN: i16 = 0x0001;
-
-    let mut pfd = PollFd {
-        fd,
-        events: POLLIN,
-        revents: 0,
-    };
-
-    let result = unsafe { poll(&mut pfd as *mut PollFd, 1, timeout_ms) };
-    if result < 0 {
-        None
-    } else {
-        Some(result > 0)
-    }
+    crate::platform::poll_fd_readable(fd, timeout_ms).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -730,9 +800,51 @@ mod tests {
     }
 
     #[test]
+    fn captured_mouse_report_split_after_csi_survives_idle_gap() {
+        let mut framer = crate::raw_input::RawInputByteFramer::for_host_input();
+        framer.enable_host_appearance_query_on_focus();
+        assert_eq!(framer.push(b"\x1b[I"), vec![b"\x1b[I".to_vec()]);
+        assert!(framer.push(b"\x1b[").is_empty());
+
+        // #4630 input.bin offsets 10465/10467: ESC[ and its continuation
+        // arrived 32.937 ms apart. Apply the Unix reader's two idle waits
+        // without sleeping, using its production timeout selector.
+        let gap = std::time::Duration::from_micros(32_937);
+        let first_wait =
+            std::time::Duration::from_millis(idle_flush_timeout_ms(&framer, true) as u64);
+        let mut chunks = Vec::new();
+        if gap >= first_wait {
+            chunks.extend(framer.flush_timeout());
+            if chunks.is_empty()
+                && gap
+                    >= first_wait
+                        + std::time::Duration::from_millis(
+                            crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS as u64,
+                        )
+            {
+                chunks.extend(framer.flush_timeout());
+            }
+        }
+        chunks.extend(framer.push(b"<35;64;37M\x1b[<35;65;36M\x1b[<35;64;36M"));
+        assert_eq!(
+            chunks,
+            vec![
+                b"\x1b[<35;64;37M".to_vec(),
+                b"\x1b[<35;65;36M".to_vec(),
+                b"\x1b[<35;64;36M".to_vec(),
+            ],
+            "captured mouse reports must remain whole, not become key fragments"
+        );
+        assert!(!framer.has_pending_input());
+        assert_eq!(framer.push(b"x"), vec![b"x".to_vec()]);
+    }
+
+    #[test]
     fn mouse_active_escape_sequences_get_longer_reassembly_window() {
         let mut escape = crate::raw_input::RawInputByteFramer::default();
         assert!(escape.push(b"\x1b").is_empty());
+        let mut csi = crate::raw_input::RawInputByteFramer::default();
+        assert!(csi.push(b"\x1b[").is_empty());
         let mut sgr_mouse = crate::raw_input::RawInputByteFramer::default();
         assert!(sgr_mouse.push(b"\x1b[<3").is_empty());
         let mut default_mouse = crate::raw_input::RawInputByteFramer::default();
@@ -740,13 +852,13 @@ mod tests {
         let mut unrelated = crate::raw_input::RawInputByteFramer::default();
         assert!(unrelated.push(b"\x1b[49:33;2:").is_empty());
 
-        for framer in [&escape, &sgr_mouse, &default_mouse, &unrelated] {
+        for framer in [&escape, &csi, &sgr_mouse, &default_mouse, &unrelated] {
             assert_eq!(
                 idle_flush_timeout_ms(framer, false),
                 crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS
             );
         }
-        for framer in [&escape, &sgr_mouse, &default_mouse] {
+        for framer in [&escape, &csi, &sgr_mouse, &default_mouse] {
             assert_eq!(
                 idle_flush_timeout_ms(framer, true),
                 crate::raw_input::MOUSE_ACTIVE_ESCAPE_SEQUENCE_FLUSH_TIMEOUT_MS

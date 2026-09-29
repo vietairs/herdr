@@ -385,14 +385,6 @@ pub(super) fn complete_endpoint_activation(
         completion,
         endpoint::ActivationCompletion::AwaitingPresentationSync { .. }
     ) {
-        #[cfg(unix)]
-        if let endpoint::ActivationCompletion::AwaitingPresentationSync { previous, endpoint } =
-            &completion
-        {
-            if previous != endpoint {
-                state.retire_endpoint_graphics(previous);
-            }
-        }
         // The coherent target frame can replace the frozen source now, but the registry keeps
         // pane input disabled until a second projection epoch has replayed host modes/effects.
         state.unfreeze_presentation();
@@ -511,7 +503,7 @@ pub(super) fn handle_endpoint_disconnect(
 ) -> bool {
     supervisors.disconnected(endpoint_id, generation, now);
     #[cfg(unix)]
-    state.retire_endpoint_graphics(endpoint_id);
+    state.retire_endpoint_graphics(endpoint_id, generation);
     if pending_activation
         .as_ref()
         .is_some_and(|pending| pending.involves_endpoint(endpoint_id))
@@ -572,7 +564,7 @@ pub(super) fn handle_endpoint_attention(
         now,
     );
     #[cfg(unix)]
-    state.retire_endpoint_graphics(endpoint_id);
+    state.retire_endpoint_graphics(endpoint_id, generation);
     if pending_activation
         .as_ref()
         .is_some_and(|pending| pending.involves_endpoint(endpoint_id))
@@ -597,6 +589,7 @@ pub(super) fn handle_endpoint_attention(
             shell.cancel_endpoint_request(&request_id);
         }
         shell.set_endpoint_status(endpoint_id, endpoint::ClientEndpointStatus::Attention);
+        shell.set_machine_diagnostic(endpoint_id, message.clone());
         endpoint_was_active.then(|| format!("{}: {message}", shell.endpoint_label(endpoint_id)))
     });
     if let Some(message) = unavailable {
@@ -680,7 +673,7 @@ pub(super) fn install_client_shell_snapshot(
 pub(super) fn finish_client_shell_input(
     state: &mut ClientState,
     outcome: shell::ClientShellInput,
-    frame: Option<FrameData>,
+    frame: Option<super::frame_output::ComposedFrame>,
     endpoints: &mut endpoint::EndpointRegistry,
     pending_activation: &mut Option<endpoint::PendingEndpointActivation>,
     endpoint_commands: &mut endpoint_commands::EndpointCommands,
@@ -758,6 +751,10 @@ pub(super) fn finish_client_shell_input(
                 }
                 continue;
             }
+            if endpoints.active_surface_available() {
+                write_to_server(endpoints, &request).map_err(ClientError::ConnectionLost)?;
+            }
+            continue;
         }
         // Host focus belongs to a pending target even when the source has gone offline or has
         // already had its surface revoked. Route it before the ordinary source-online gate.
@@ -802,6 +799,7 @@ pub(super) fn finish_client_shell_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::FrameData;
     use endpoint::{ClientEndpointId, EndpointRegistry, EndpointSupervisors};
     use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
@@ -819,43 +817,7 @@ mod tests {
     }
 
     fn state() -> ClientState {
-        ClientState {
-            blit_encoder: render_ansi::BlitEncoder::new(),
-            deferred_local_activation: None,
-            mouse_capture_active: false,
-            endpoint_mouse_capture_requested: false,
-            endpoint_sgr_pixels_requested: false,
-            host_theme_updates: Vec::new(),
-            direct_mouse_capture_preference: false,
-            shell_mouse_capture_preference: false,
-            direct_keyboard_protocol: Default::default(),
-            pane_keyboard_report_all: false,
-            keyboard_report_all_active: false,
-            reported_size: (100, 30),
-            reported_cell_size: (0, 0),
-            sound_config: Default::default(),
-            kitty_graphics_enabled: false,
-            pixel_geometry_enabled: false,
-            pixel_geometry_exact: false,
-            #[cfg(unix)]
-            direct_graphics_response: Default::default(),
-            #[cfg(unix)]
-            retired_direct_graphics: None,
-            #[cfg(unix)]
-            pending_surface_graphics: HashMap::new(),
-            attach_escape: None,
-            #[cfg(unix)]
-            mouse_scroll_lines: 3,
-            remote_image_paste_key: None,
-            redraw_on_focus_gained: false,
-            repaint_pending: false,
-            presentation_frozen: false,
-            draw_host_cursor: false,
-            detached_process_children: Vec::new(),
-            shell: Some(shell::ClientShellState::new(
-                shell::ClientShellConfig::from_config(&crate::config::Config::default()),
-            )),
-        }
+        ClientState::test_new()
     }
 
     fn empty_frame() -> FrameData {
@@ -921,6 +883,107 @@ mod tests {
         assert!(
             !state.blit_encoder.is_current(&frame),
             "a frame must not commit while presentation stays frozen with no exit"
+        );
+    }
+
+    #[test]
+    fn host_color_reaches_server_before_first_snapshot() {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<ClientMessage>>>);
+
+        impl endpoint::EndpointTransport for Capture {
+            fn send(&mut self, message: &ClientMessage) -> std::io::Result<()> {
+                self.0.lock().unwrap().push(message.clone());
+                Ok(())
+            }
+        }
+
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut endpoints = endpoint::EndpointRegistry::new(
+            Capture(sent.clone()),
+            1,
+            endpoint::EndpointNegotiation::new(Vec::new(), Vec::new()),
+        );
+        let mut state = ClientState::test_new();
+        assert!(!state
+            .shell
+            .as_ref()
+            .unwrap()
+            .endpoint_is_online(&endpoint::ClientEndpointId::Local));
+        let outcome = state.shell.as_mut().unwrap().handle_raw_events(vec![
+            crate::raw_input::RawInputEvent::HostDefaultColor {
+                kind: crate::terminal_theme::DefaultColorKind::Background,
+                color: crate::terminal_theme::RgbColor {
+                    r: 0x11,
+                    g: 0x22,
+                    b: 0x33,
+                },
+            },
+        ]);
+        let mut pending_activation = None;
+        let mut endpoint_commands = endpoint_commands::EndpointCommands::default();
+        let mut prefix_input_source = crate::platform::RealPrefixInputSource::default();
+        let mut scheduled_activation = None;
+        finish_client_shell_input(
+            &mut state,
+            outcome,
+            None,
+            &mut endpoints,
+            &mut pending_activation,
+            &mut endpoint_commands,
+            &mut prefix_input_source,
+            &mut scheduled_activation,
+        )
+        .unwrap();
+
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec![ClientMessage::ClientShellHostTheme {
+                update: crate::protocol::ClientHostThemeUpdate::DefaultColor {
+                    kind: crate::protocol::ClientHostDefaultColorKind::Background,
+                    color: crate::protocol::ClientHostColor {
+                        r: 0x11,
+                        g: 0x22,
+                        b: 0x33,
+                    },
+                },
+            }]
+        );
+
+        let local = endpoint::ClientEndpointId::Local;
+        assert!(endpoints.set_surface_active(&local, false));
+        let outcome = state.shell.as_mut().unwrap().handle_raw_events(vec![
+            crate::raw_input::RawInputEvent::HostDefaultColor {
+                kind: crate::terminal_theme::DefaultColorKind::Foreground,
+                color: crate::terminal_theme::RgbColor { r: 4, g: 5, b: 6 },
+            },
+        ]);
+        finish_client_shell_input(
+            &mut state,
+            outcome,
+            None,
+            &mut endpoints,
+            &mut pending_activation,
+            &mut endpoint_commands,
+            &mut prefix_input_source,
+            &mut scheduled_activation,
+        )
+        .unwrap();
+        assert_eq!(sent.lock().unwrap().len(), 1);
+
+        assert!(endpoints.set_surface_active(&local, true));
+        state.replay_host_theme(&mut endpoints, &local);
+        let messages = sent.lock().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1], messages[0]);
+        assert_eq!(
+            messages[2],
+            ClientMessage::ClientShellHostTheme {
+                update: crate::protocol::ClientHostThemeUpdate::DefaultColor {
+                    kind: crate::protocol::ClientHostDefaultColorKind::Foreground,
+                    color: crate::protocol::ClientHostColor { r: 4, g: 5, b: 6 },
+                },
+            }
         );
     }
 }

@@ -176,7 +176,9 @@ manual testing, reset `C:\work\repo` back to a clean checkout before finishing.
 
 Agent detection changes should use the manifest hot-reload loop. Can drives the real agent UI into the target state, then you read the pane with `herdr agent read <pane> --source detection --format text` and inspect matching with `herdr agent explain <pane> --json`. Update the bundled manifest in `src/detect/manifests/<agent>.toml`, copy that manifest to the local override path at `~/.config/herdr/agent-detection/<agent>.toml`, then run `herdr server reload-agent-manifests`. Can verifies the live pane state, and once the rule is correct, remove the local override so the committed bundled manifest remains the source of truth.
 
-Do not add large agent-specific full-screen fixture suites for routine manifest tuning. Keep Rust tests focused on manifest parsing, rule semantics, skip-state semantics, source precedence, cache reload behavior, and update flow. Use live pane reads for agent-specific screen evidence.
+Unit-test Herdr's detection engine, not individual CLI agents' screen or title conventions. Use synthetic manifests and minimal input strings to test parsing, regions, matching, AND/OR/NOT gates, rule priority, skip-state semantics, source precedence, cache reload behavior, and update flow. Keep bundled-manifest schema validation, process identification, and integration hook/protocol tests. Do not add tests that classify captured or invented CLI screens against bundled agent rules, or freeze an agent's specific detection rule IDs and priorities.
+
+Validate agent-specific detection behavior with live smoke tests through the manifest hot-reload loop above. Exercise the changed state and nearby transitions (idle, working, blocked, and background work where supported), including relevant optional OSC settings. Record the CLI version, observed signals, and outcomes. Passing engine tests proves the rules execute as written; it does not prove compatibility with the current CLI.
 
 ## Vendored libghostty-vt
 
