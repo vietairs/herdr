@@ -29,9 +29,8 @@ concurrency:
 
 jobs:
   build:
-    # Self-hosted runner: never run code from pull requests opened by outside forks.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64]
+    # Same-repo runs use the self-hosted runner; PRs from outside forks fall back to GitHub-hosted (same check name).
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout
