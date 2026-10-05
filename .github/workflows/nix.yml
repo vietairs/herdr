@@ -40,7 +40,9 @@ concurrency:
 jobs:
   flake-check:
     name: flake check
-    runs-on: ubuntu-latest
+    # Self-hosted runner: never run code from pull requests opened by outside forks.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -56,6 +58,4 @@ jobs:
             always-allow-substitutes = true
 
       - name: Run Nix flake check
-        run: |
-          nix flake check --print-build-logs
-          nix flake check --all-systems --no-build --print-build-logs
+        run: bash scripts/ci/flake-check.sh

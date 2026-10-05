@@ -1,0 +1,49 @@
+{
+  "repo": "vietairs/herdr",
+  "legs": [
+    {
+      "check": "conventional-commits",
+      "os": "linux",
+      "script": "scripts/ci/conventional-commits.sh",
+      "image": "python:3.12-bookworm",
+      "setup": "git config --global --add safe.directory '*'"
+    },
+    {
+      "check": "check (ubuntu-latest)",
+      "os": "linux",
+      "script": "scripts/ci/check.sh",
+      "image": "rust:1-bookworm",
+      "setup": "bash scripts/ci/local-linux-toolchain.sh",
+      "env": { "NEXTEST_FILTER": "all()" }
+    },
+    {
+      "check": "check (macos-latest)",
+      "os": "macos",
+      "script": "scripts/ci/check.sh",
+      "env": { "NEXTEST_FILTER": "not binary(live_handoff)" }
+    },
+    { "check": "check (windows-latest)", "os": "windows", "script": "scripts/ci/check.sh" },
+    { "check": "Windows ConPTY package", "os": "windows", "script": "scripts/ci/windows-conpty-package.sh" },
+    {
+      "check": "validate",
+      "os": "linux",
+      "script": "scripts/ci/validate.sh",
+      "image": "node:22-bookworm",
+      "setup": "git config --global --add safe.directory '*' && npm install -g bun@1.3.14"
+    },
+    {
+      "check": "flake check",
+      "os": "linux",
+      "script": "scripts/ci/flake-check.sh",
+      "image": "nixos/nix:latest",
+      "setup": "git config --global --add safe.directory '*' && mkdir -p /etc/nix && printf 'experimental-features = nix-command flakes\\nalways-allow-substitutes = true\\nsandbox = false\\n' >> /etc/nix/nix.conf"
+    },
+    {
+      "check": "build",
+      "os": "linux",
+      "script": "scripts/ci/build.sh",
+      "image": "node:22-bookworm",
+      "setup": "git config --global --add safe.directory '*' && npm install -g bun@1.3.14"
+    }
+  ]
+}
