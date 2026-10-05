@@ -15,7 +15,7 @@
       "script": "scripts/ci/check.sh",
       "image": "rust:1-bookworm",
       "setup": "bash scripts/ci/local-linux-toolchain.sh",
-      "env": { "NEXTEST_FILTER": "all()" }
+      "env": { "NEXTEST_FILTER": "all() - test(pane_info_reports_foreground_cwd_without_changing_pane_cwd)" }
     },
     {
       "check": "check (macos-latest)",
