@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Generic local CI runner (zero dependencies, Node >= 18, ESM). Copy verbatim to scripts/local-ci.mjs.
-// Runs the legs in scripts/ci/legs.json against a fresh clone of HEAD (linux legs in an Apple
-// `container`, macos legs natively, windows legs never) and can post per-leg GitHub commit statuses.
+// Runs the legs in scripts/ci/legs.json against a fresh clone of HEAD (linux legs in Docker on a
+// native x86_64 host over ssh, or an Apple `container` with LOCAL_CI_LINUX_HOST=local; macos legs
+// natively; windows legs never) and can post per-leg GitHub commit statuses.
 // Invariants: the user's working tree is never executed; zero legs run => never green;
 // --post only ever vouches for a pushed, clean, drift-free HEAD.
 
@@ -101,6 +102,26 @@ export function findDrift(manifest, root) {
 const shq = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`);
 const innerScript = (leg) => `${leg.setup ? `${leg.setup}; ` : ""}bash ${leg.script}`;
 
+// Linux legs run on this ssh host's Docker unless LOCAL_CI_LINUX_HOST says otherwise ("local" = Apple container).
+export const DEFAULT_LINUX_HOST = "appn-ltu-vm-100";
+const SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"];
+
+// Remote Docker: the HEAD clone (with .git) is streamed as a tar over ssh into a throwaway container, so nothing
+// is left on the host. The host is native x86_64: `arch` (an Apple-container Rosetta workaround) is ignored here.
+// The remote shell's trap removes the container if the ssh session dies mid-run.
+export function buildRemoteCommand(leg, { clone, host, name, cpus = "8", memory = "16G" }) {
+  const env = Object.entries(leg.env || {}).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+  const inner = `mkdir -p /work && tar --no-same-owner -xf - -C /work && cd /work && ${innerScript(leg)}`;
+  const docker = ["docker", "run", "--rm", "-i", "--name", name, "--cpus", String(cpus), "--memory", String(memory),
+    "-e", "CI=true", ...env, leg.image, "bash", "-euo", "pipefail", "-c", inner];
+  const cleanup = ["docker", "rm", "-f", name].map(shq).join(" ") + " >/dev/null 2>&1";
+  const remote = `trap ${shq(cleanup)} EXIT HUP INT TERM; ${docker.map(shq).join(" ")}`;
+  return {
+    cmd: "bash",
+    args: ["-o", "pipefail", "-c", `tar -C ${shq(clone)} -cf - . | ssh ${SSH_OPTS.join(" ")} ${shq(host)} ${shq(remote)}`],
+  };
+}
+
 export function buildContainerCommand(leg, { clone, cpus = "4", memory = "8G" }) {
   const env = Object.entries(leg.env || {}).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
   return {
@@ -114,7 +135,8 @@ export function buildContainerCommand(leg, { clone, cpus = "4", memory = "8G" })
 const slugify = (s) => s.replace(/[^\w.-]+/g, "_");
 
 // One item per selected leg: action "run" (cmd/args/cwd/env/logFile) or "skip" (reason). Windows never runs.
-export function buildPlan(manifest, { clone, logDir, opts = {}, env = process.env, platform = process.platform }) {
+export function buildPlan(manifest, { clone, logDir, opts = {}, env = process.env, platform = process.platform, pid = process.pid }) {
+  const host = env.LOCAL_CI_LINUX_HOST || DEFAULT_LINUX_HOST;
   const sel = manifest.legs.filter((l) =>
     (!opts.legs || !opts.legs.length || opts.legs.some((s) => l.check === s || l.check.includes(s))) &&
     (!opts.os || l.os === opts.os));
@@ -126,8 +148,13 @@ export function buildPlan(manifest, { clone, logDir, opts = {}, env = process.en
       return { ...base, action: "run", cwd: clone, env: { ...env, CI: "true", ...(leg.env || {}) },
         cmd: "bash", args: leg.setup ? ["-euo", "pipefail", "-c", innerScript(leg)] : [leg.script] };
     }
-    const { cmd, args } = buildContainerCommand(leg, { clone, cpus: env.LOCAL_CI_CPUS || "4", memory: env.LOCAL_CI_MEMORY || "8G" });
-    return { ...base, action: "run", cwd: clone, env, cmd, args };
+    if (host === "local") {
+      const { cmd, args } = buildContainerCommand(leg, { clone, cpus: env.LOCAL_CI_CPUS || "4", memory: env.LOCAL_CI_MEMORY || "8G" });
+      return { ...base, action: "run", backend: "local", cwd: clone, env, cmd, args };
+    }
+    const { cmd, args } = buildRemoteCommand(leg, { clone, host, name: `local-ci-${slugify(leg.check)}-${pid}`,
+      cpus: env.LOCAL_CI_CPUS || "8", memory: env.LOCAL_CI_MEMORY || "16G" });
+    return { ...base, action: "run", backend: host, cwd: clone, env, cmd, args };
   });
 }
 
@@ -158,14 +185,21 @@ const postStatus = (exec, repo, sha, check, state, description) =>
 // ---------- run ----------
 // post = {repo, sha} to publish statuses. Skipped legs are never posted.
 export function executePlan(plan, { exec, post = null, now = Date.now, log = console.log }) {
-  let containerReady = null;
+  const ready = new Map(); // backend -> reachable, probed once per run
+  const probe = (backend) => backend === "local"
+    ? exec("container", ["system", "status"]).status === 0
+    : exec("ssh", [...SSH_OPTS, backend, "docker version --format {{.Server.Version}}"]).status === 0;
   return plan.map((item) => {
     const r = { check: item.check, os: item.os, status: "SKIP", seconds: 0, reason: item.reason, logFile: item.logFile };
     if (item.action === "skip") return r;
-    if (item.cmd === "container" && containerReady === null) containerReady = exec("container", ["system", "status"]).status === 0;
-    if (item.cmd === "container" && !containerReady) {
-      log(`  ${item.check}: apple container is not running — fix: container system start`);
-      return { ...r, status: "FAIL", reason: "container system not running" }; // infra failure: no verdict, nothing posted
+    if (item.backend) {
+      if (!ready.has(item.backend)) ready.set(item.backend, probe(item.backend));
+      if (!ready.get(item.backend)) { // infra failure: no verdict, nothing posted
+        const local = item.backend === "local";
+        log(local ? `  ${item.check}: apple container is not running — fix: container system start`
+          : `  ${item.check}: cannot reach Docker on ${item.backend} over ssh — fix: ssh access, or LOCAL_CI_LINUX_HOST=local`);
+        return { ...r, status: "FAIL", reason: local ? "container system not running" : `docker on ${item.backend} unreachable` };
+      }
     }
     if (post) postStatus(exec, post.repo, post.sha, item.check, "pending", `local-ci ${item.os} running`);
     log(`>>> ${item.check}`);
