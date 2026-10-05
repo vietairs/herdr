@@ -64,6 +64,8 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
+          # The self-hosted tool cache keeps the first 22.x it downloads; keep tracking the latest 22.x.
+          check-latest: true
 
       - name: Install Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2

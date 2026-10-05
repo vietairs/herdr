@@ -32,7 +32,7 @@ case "$os" in
     ;;
   windows)
     just check
-    ps="$(command -v pwsh || command -v powershell)"
+    ps="$(command -v pwsh)"
     exe="$PWD/target/debug/herdr.exe"
     command -v cygpath >/dev/null && exe="$(cygpath -w "$exe")"
     "$ps" -NoProfile -ExecutionPolicy Bypass -File scripts/windows_smoke_conpty_path.ps1 \

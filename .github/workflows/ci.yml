@@ -64,7 +64,8 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     # Matrix values (and so check names) stay as-is; each maps to a self-hosted label set.
     runs-on: ${{ fromJSON('{"ubuntu-latest":["self-hosted","Linux","X64"],"macos-latest":["self-hosted","macOS","ARM64"],"windows-latest":["self-hosted","Windows","X64"]}')[matrix.os] }}
-    timeout-minutes: 15
+    # The self-hosted Linux runner builds amd64 under emulation; hosted runners finished well inside 15m.
+    timeout-minutes: 60
     steps:
       # The macOS runner is the maintainer's own Mac: keep every HOME-relative write
       # (rustup, cargo, bun, git config) inside this job's temp dir.
@@ -78,6 +79,21 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+
+      # The hosted Windows image ships Python and Node; the self-hosted Windows VM has neither.
+      # `just check` -> `just test` runs python unittest (tomllib needs 3.11+) and bun tests that spawn node.
+      - name: Install Python
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Node
+        if: runner.os == 'Windows'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          check-latest: true
 
       - name: Install Rust
         if: matrix.kind == 'unix'
@@ -211,6 +227,13 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+
+      # The hosted Windows image ships Python; the self-hosted Windows VM does not.
+      # package_windows_conpty.ps1 and windows_install_conpty_package_test.ps1 call `python`.
+      - name: Install Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1

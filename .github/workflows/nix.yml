@@ -40,9 +40,10 @@ concurrency:
 jobs:
   flake-check:
     name: flake check
-    # Self-hosted runner: never run code from pull requests opened by outside forks.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64]
+    # Stays GitHub-hosted: the amd64 container VM behind the self-hosted Linux runner rejects Nix's
+    # seccomp filter and has no systemd for install-nix-action. Move it to [self-hosted, Linux, X64]
+    # only after a green run there with `filter-syscalls = false` and `sandbox = false` in extra_nix_config.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout

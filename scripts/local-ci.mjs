@@ -12,8 +12,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const OSES = ["linux", "macos", "windows"];
-const LEG_KEYS = ["check", "os", "script", "image", "setup", "env"];
-const MANIFEST_PATH = "scripts/ci/legs.json";
+const LEG_KEYS = ["check", "os", "script", "image", "arch", "setup", "env"];
+const ARCHES = ["amd64", "arm64"];
+// First existing path wins; .github/ci/ serves repos that forbid a root scripts/ dir.
+const MANIFEST_PATHS = ["scripts/ci/legs.json", ".github/ci/legs.json"];
 
 export class UsageError extends Error {}
 
@@ -61,6 +63,9 @@ export function validate(manifest, root) {
       errs.push(`${at}: "script" must be a repo-relative path without spaces or ".."`);
     } else if (!fs.existsSync(path.join(root, leg.script))) errs.push(`${at}: script file missing: ${leg.script}`);
     if (leg.os === "linux" && (typeof leg.image !== "string" || !leg.image)) errs.push(`${at}: linux leg needs "image"`);
+    if (leg.arch !== undefined && !(leg.os === "linux" && ARCHES.includes(leg.arch))) {
+      errs.push(`${at}: "arch" is linux-only, one of ${ARCHES.join("|")}`);
+    }
     if (leg.setup !== undefined && typeof leg.setup !== "string") errs.push(`${at}: "setup" must be a string`);
     if (leg.env !== undefined) {
       const ok = leg.env && typeof leg.env === "object" && !Array.isArray(leg.env) &&
@@ -72,13 +77,14 @@ export function validate(manifest, root) {
 }
 
 export function loadManifest(root) {
-  const file = path.join(root, MANIFEST_PATH);
-  if (!fs.existsSync(file)) throw new UsageError(`${MANIFEST_PATH} not found in ${root}`);
+  const rel = MANIFEST_PATHS.find((p) => fs.existsSync(path.join(root, p)));
+  if (!rel) throw new UsageError(`${MANIFEST_PATHS.join(" or ")} not found in ${root}`);
+  const file = path.join(root, rel);
   let manifest;
   try { manifest = JSON.parse(fs.readFileSync(file, "utf8")); }
-  catch (e) { throw new UsageError(`${MANIFEST_PATH} is not valid JSON: ${e.message}`); }
+  catch (e) { throw new UsageError(`${rel} is not valid JSON: ${e.message}`); }
   const errs = validate(manifest, root);
-  if (errs.length) throw new UsageError(`${MANIFEST_PATH} invalid:\n  - ${errs.join("\n  - ")}`);
+  if (errs.length) throw new UsageError(`${rel} invalid:\n  - ${errs.join("\n  - ")}`);
   return manifest;
 }
 
@@ -99,7 +105,7 @@ export function buildContainerCommand(leg, { clone, cpus = "4", memory = "8G" })
   const env = Object.entries(leg.env || {}).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
   return {
     cmd: "container",
-    args: ["run", "--rm", "--arch", "amd64", "--cpus", String(cpus), "--memory", String(memory),
+    args: ["run", "--rm", "--arch", leg.arch || "amd64", "--cpus", String(cpus), "--memory", String(memory),
       "-v", `${clone}:/work`, "-w", "/work", "-e", "CI=true", ...env,
       leg.image, "bash", "-euo", "pipefail", "-c", innerScript(leg)],
   };
