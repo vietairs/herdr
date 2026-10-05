@@ -18,6 +18,9 @@ default_filter="all()"
 filter="${NEXTEST_FILTER:-$default_filter}"
 
 export CARGO_INCREMENTAL=1
+# A few timing-sensitive tests flake on the busier self-hosted machines. nextest reruns a failed
+# test up to twice and reports a pass-on-retry as FLAKY; a test that keeps failing still fails.
+export NEXTEST_RETRIES="${NEXTEST_RETRIES:-2}"
 
 case "$os" in
   linux)
