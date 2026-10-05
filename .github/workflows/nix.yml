@@ -40,6 +40,9 @@ concurrency:
 jobs:
   flake-check:
     name: flake check
+    # Stays GitHub-hosted: the amd64 container VM behind the self-hosted Linux runner rejects Nix's
+    # seccomp filter and has no systemd for install-nix-action. Move it to [self-hosted, Linux, X64]
+    # only after a green run there with `filter-syscalls = false` and `sandbox = false` in extra_nix_config.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -56,6 +59,4 @@ jobs:
             always-allow-substitutes = true
 
       - name: Run Nix flake check
-        run: |
-          nix flake check --print-build-logs
-          nix flake check --all-systems --no-build --print-build-logs
+        run: bash scripts/ci/flake-check.sh
