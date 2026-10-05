@@ -216,21 +216,14 @@ jobs:
 
   windows-conpty-package:
     name: Windows ConPTY package
-    # Same-repo runs use the self-hosted runner; PRs from outside forks fall back to GitHub-hosted (same check name).
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'windows-2022' || fromJSON('["self-hosted","Windows","X64"]') }}
+    # Always GitHub-hosted: the test rewrites the real HKCU PATH, which the shared self-hosted Windows VM cannot isolate.
+    runs-on: windows-2022
     timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-
-      # The hosted Windows image ships Python; the self-hosted Windows VM does not.
-      # package_windows_conpty.ps1 and windows_install_conpty_package_test.ps1 call `python`.
-      - name: Install Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: '3.12'
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1

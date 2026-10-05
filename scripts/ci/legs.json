@@ -11,6 +11,7 @@
     {
       "check": "check (ubuntu-latest)",
       "os": "linux",
+      "arch": "arm64",
       "script": "scripts/ci/check.sh",
       "image": "rust:1-bookworm",
       "setup": "bash scripts/ci/local-linux-toolchain.sh",
