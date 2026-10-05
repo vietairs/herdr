@@ -61,8 +61,10 @@ jobs:
           - os: windows-latest
             kind: windows
     # Same-repo runs use the self-hosted runner; PRs from outside forks fall back to GitHub-hosted (same check name); matrix values and check names stay as-is.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && matrix.os || fromJSON('{"ubuntu-latest":["self-hosted","Linux","X64"],"macos-latest":["self-hosted","macOS","ARM64"],"windows-latest":["self-hosted","Windows","X64"]}')[matrix.os] }}
-    # The self-hosted Linux runner builds amd64 under emulation; hosted runners finished well inside 15m.
+    # Windows stays GitHub-hosted: on the self-hosted Windows VM, Zig's TLS client fails to fetch the
+    # vendored libghostty-vt dependencies (TlsInitializationFailed) although Windows' own TLS reaches them.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && matrix.os || fromJSON('{"ubuntu-latest":["self-hosted","Linux","X64"],"macos-latest":["self-hosted","macOS","ARM64"],"windows-latest":"windows-latest"}')[matrix.os] }}
+    # Raised from the hosted 15m to absorb a cold self-hosted build cache.
     timeout-minutes: 60
     steps:
       # The macOS runner is the maintainer's own Mac: keep every HOME-relative write
