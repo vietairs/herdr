@@ -21,8 +21,9 @@ impl ClientShellState {
             && (self.sidebar_hover_reveal || self.mode == ClientShellMode::Navigate)
     }
 
-    /// True when an open overlay or popup hides the drawer. Menus are exempt: they open from
-    /// the drawer's own rows and launcher, so the drawer stays drawn beneath them.
+    /// True when an open overlay or popup hides the drawer. Menus are exempt so a drawer that
+    /// was already showing stays drawn beneath a menu opened from its rows or launcher; a menu
+    /// never arms a new reveal (see `update_sidebar_auto_reveal`).
     fn sidebar_drawer_blocked(&self) -> bool {
         self.popup_terminal_id.is_some() || (self.overlay.is_some() && !self.sidebar_menu_open())
     }
@@ -83,8 +84,9 @@ impl ClientShellState {
 
     /// Opens the drawer when the pointer moves onto the trigger columns and closes it once the
     /// pointer leaves the drawer. A drag never closes it, and neither does any event while a
-    /// sidebar gesture or a menu opened from the drawer is in flight. Only repaints: hover
-    /// never changes the docked layout, so it never resizes the panes.
+    /// sidebar gesture or a menu opened from the drawer is in flight. No overlay may arm a new
+    /// reveal, so a pane or tab menu near the left edge never opens the drawer beneath it.
+    /// Only repaints: hover never changes the docked layout, so it never resizes the panes.
     pub(super) fn update_sidebar_auto_reveal(
         &mut self,
         mouse: crossterm::event::MouseEvent,
@@ -114,10 +116,20 @@ impl ClientShellState {
                 outcome.repaint = true;
             }
         } else if mouse.kind == MouseEventKind::Moved
+            && self.overlay.is_none()
             && mouse.column < self.sidebar_reveal_trigger_width()
         {
             self.sidebar_hover_reveal = true;
             outcome.repaint = true;
+        }
+    }
+
+    /// A click outside the drawer that closes a menu opened from it closes the drawer too,
+    /// as moving the pointer away would.
+    pub(super) fn close_sidebar_drawer_after_menu_click(&mut self, column: u16) {
+        let overlay = self.hits.sidebar_overlay;
+        if !overlay.is_empty() && column >= overlay.right() {
+            self.sidebar_hover_reveal = false;
         }
     }
 

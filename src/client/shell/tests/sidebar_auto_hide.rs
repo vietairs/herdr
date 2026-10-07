@@ -351,6 +351,69 @@ fn auto_hide_drawer_stays_under_a_workspace_menu_opened_from_it() {
 }
 
 #[test]
+fn auto_hide_pane_menu_opened_with_the_drawer_hidden_never_reveals_it() {
+    let mut state = auto_hide_state();
+    state.compose(106, 30).expect("docked frame");
+    state.open_pane_context_menu("pane_1".into(), 2, 5);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::ContextMenu(_))
+    ));
+
+    for column in [0, 1] {
+        state.handle_raw_events(vec![moved(column, 6)]);
+        assert!(!state.sidebar_hover_reveal);
+    }
+    state.compose(106, 30).expect("menu frame");
+    assert!(state.hits.sidebar_overlay.is_empty());
+}
+
+#[test]
+fn auto_hide_click_outside_the_drawer_closes_its_menu_and_the_drawer() {
+    let mut state = auto_hide_state();
+    reveal_drawer(&mut state);
+    let workspace = state.hits.workspaces[0].rect;
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Right),
+        workspace.x + 2,
+        workspace.y,
+    )]);
+    state.compose(106, 30).expect("menu frame");
+
+    let outcome = state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        100,
+        28,
+    )]);
+    assert!(state.overlay.is_none());
+    assert!(!state.sidebar_hover_reveal);
+    assert!(outcome.repaint);
+    assert!(!outcome.resize);
+}
+
+#[test]
+fn auto_hide_click_inside_the_drawer_closes_its_menu_and_keeps_the_drawer() {
+    let mut state = auto_hide_state();
+    reveal_drawer(&mut state);
+    let workspace = state.hits.workspaces[0].rect;
+    let drawer = state.hits.sidebar_overlay;
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Right),
+        workspace.x + 2,
+        workspace.y,
+    )]);
+    state.compose(106, 30).expect("menu frame");
+
+    state.handle_raw_events(vec![mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        drawer.x,
+        20,
+    )]);
+    assert!(state.overlay.is_none());
+    assert!(state.sidebar_hover_reveal);
+}
+
+#[test]
 fn auto_hide_global_menu_opens_beside_the_drawer_launcher() {
     let mut state = auto_hide_state();
     reveal_drawer(&mut state);

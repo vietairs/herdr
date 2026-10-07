@@ -1387,6 +1387,7 @@ impl ClientShellState {
                         self.activate_global_menu_item(index, outcome);
                     } else {
                         self.overlay = None;
+                        self.close_sidebar_drawer_after_menu_click(mouse.column);
                         outcome.repaint = true;
                     }
                 }
@@ -1415,6 +1416,7 @@ impl ClientShellState {
                         self.activate_context_menu_item(index, outcome);
                     } else {
                         self.overlay = None;
+                        self.close_sidebar_drawer_after_menu_click(mouse.column);
                         outcome.repaint = true;
                     }
                 }
