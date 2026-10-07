@@ -227,6 +227,10 @@ pub enum Method {
     PaneReportAgentSession(PaneReportAgentSessionParams),
     #[serde(rename = "pane.report_metadata")]
     PaneReportMetadata(PaneReportMetadataParams),
+    #[serde(rename = "pane.report_prompt_cache")]
+    PaneReportPromptCache(PaneReportPromptCacheParams),
+    #[serde(rename = "pane.report_context_usage")]
+    PaneReportContextUsage(PaneReportContextUsageParams),
     #[serde(rename = "pane.clear_agent_authority")]
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams),
     #[serde(rename = "pane.release_agent")]

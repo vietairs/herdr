@@ -650,6 +650,8 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneReportAgent(_) => "pane.report_agent",
         Method::PaneReportAgentSession(_) => "pane.report_agent_session",
         Method::PaneReportMetadata(_) => "pane.report_metadata",
+        Method::PaneReportPromptCache(_) => "pane.report_prompt_cache",
+        Method::PaneReportContextUsage(_) => "pane.report_context_usage",
         Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
         Method::PaneReleaseAgent(_) => "pane.release_agent",
         Method::PaneClose(_) => "pane.close",
@@ -1225,6 +1227,8 @@ mod tests {
             tokens: HashMap::new(),
             agent_session: None,
             scroll: None,
+            prompt_cache: None,
+            context_usage: None,
             revision: 0,
         }
     }

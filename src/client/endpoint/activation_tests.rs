@@ -70,6 +70,7 @@ fn test_snapshot(boot_id: &str, revision: u64) -> crate::protocol::ClientShellSn
         commands: Vec::new(),
         remote_mount_attempts: Vec::new(),
         recent_remote_mount_targets: Vec::new(),
+        server_now_ms: 0,
     }
 }
 
@@ -441,6 +442,7 @@ fn activation_requires_an_exact_snapshot_surface_revision_pair() {
         commands: Vec::new(),
         remote_mount_attempts: Vec::new(),
         recent_remote_mount_targets: Vec::new(),
+        server_now_ms: 0,
     };
     assert_eq!(
         activation.receive_snapshot(&target, 7, &snapshot),

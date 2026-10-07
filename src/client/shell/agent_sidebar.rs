@@ -56,6 +56,7 @@ pub(super) fn render_agent_panel(
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
+    now_unix_ms: u64,
 ) {
     if !render_agent_panel_header(
         buffer,
@@ -67,7 +68,7 @@ pub(super) fn render_agent_panel(
         return;
     }
 
-    let rows = agent_rows(snapshot, config, None);
+    let rows = agent_rows(snapshot, config, None, now_unix_ms);
     render_agent_list(
         buffer,
         area,
@@ -238,10 +239,11 @@ pub(super) fn agent_rows(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     machine: Option<&str>,
+    now_unix_ms: u64,
 ) -> Vec<AgentRow> {
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
-        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
+        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine, now_unix_ms))
         .collect()
 }
 
@@ -250,6 +252,7 @@ pub(super) fn agent_row(
     pane_id: &str,
     config: &ClientShellConfig,
     machine: Option<&str>,
+    now_unix_ms: u64,
 ) -> Option<AgentRow> {
     let agent = snapshot
         .agents
@@ -314,6 +317,19 @@ pub(super) fn agent_row(
         .agent
         .as_deref()
         .and_then(crate::detect::parse_agent_label);
+    let prompt_cache = agent.prompt_cache.map(|cache| {
+        crate::prompt_cache::prompt_cache_countdown(
+            cache.last_request_at_ms,
+            cache.ttl_secs,
+            now_unix_ms,
+        )
+    });
+    let context_usage = agent
+        .context_usage
+        .map(|usage| crate::context_usage::ContextReading {
+            used_tokens: usage.used_tokens,
+            window_tokens: usage.window_tokens,
+        });
     let rows = crate::ui::sidebar_agent_rows(
         &config.agents,
         crate::ui::AgentTokenContext {
@@ -329,6 +345,8 @@ pub(super) fn agent_row(
             terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
             canonical_agent,
             tokens: &tokens,
+            prompt_cache,
+            context_usage,
         },
         state_text,
     );

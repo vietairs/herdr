@@ -18,6 +18,15 @@ pub(in crate::client::shell) fn render_sidebar_background(
     area: Rect,
     palette: &Palette,
 ) {
+    // Reset whole cells, not just the style: the auto-hide drawer draws over the tab bar, and
+    // `set_style` alone would keep the tab bar's glyphs in every cell the sidebar leaves empty.
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.reset();
+            }
+        }
+    }
     buffer.set_style(area, Style::default().bg(palette.sidebar_bg));
     let separator_x = area.right().saturating_sub(1);
     for y in area.y..area.bottom() {
@@ -248,6 +257,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
     pub(super) workspace_drop_indicator_row: Option<u16>,
+    pub(super) prompt_cache_now_ms: u64,
 }
 
 pub(super) fn render_shell(
@@ -264,6 +274,19 @@ pub(super) fn render_shell(
             layout.mobile_header,
             snapshot,
             config,
+            &mut hits,
+        );
+    }
+    // The tab bar draws first: the auto-hide drawer's sidebar rect overlaps it.
+    if layout.tab_bar.height > 0 {
+        render_tab_bar(
+            buffer,
+            layout.tab_bar,
+            snapshot,
+            config,
+            state.tab_scroll,
+            state.reveal_focused_tab,
+            state.tab_drag_insert_index,
             &mut hits,
         );
     }
@@ -309,16 +332,14 @@ pub(super) fn render_shell(
             );
         }
     }
-    if layout.tab_bar.height > 0 {
-        render_tab_bar(
-            buffer,
-            layout.tab_bar,
-            snapshot,
-            config,
-            state.tab_scroll,
-            state.reveal_focused_tab,
-            state.tab_drag_insert_index,
-            &mut hits,
+    if state.sidebar_collapsed && layout.mobile_header.is_empty() {
+        // Collapsed chrome draws no launcher, so a global menu opened from the keyboard is
+        // anchored at the bottom-left corner. Zero width keeps the anchor itself unclickable.
+        hits.global_launcher = Rect::new(
+            layout.sidebar.x,
+            layout.sidebar.bottom().saturating_sub(1),
+            0,
+            u16::from(layout.sidebar.height > 0),
         );
     }
     if !config.mouse_capture {

@@ -633,6 +633,8 @@ fn pane_command() -> Command {
         .subcommand(report_agent_session_command())
         .subcommand(release_agent_command())
         .subcommand(report_metadata_command())
+        .subcommand(report_prompt_cache_command())
+        .subcommand(report_context_usage_command())
 }
 
 fn report_agent_command() -> Command {
@@ -696,6 +698,27 @@ fn report_metadata_command() -> Command {
         .arg(repeatable_option("clear-token", "NAME"))
         .arg(option("seq", "N"))
         .arg(option("ttl-ms", "N"))
+}
+
+fn report_prompt_cache_command() -> Command {
+    Command::new("report-prompt-cache")
+        .about("Report when the agent last used its prompt cache")
+        .arg(required("pane_id", "PANE_ID"))
+        .arg(option("source", "ID").required(true))
+        .arg(option("last-request-at", "MS|now"))
+        .arg(option("ttl", "SECS"))
+        .arg(flag("clear"))
+}
+
+fn report_context_usage_command() -> Command {
+    Command::new("report-context-usage")
+        .about("Report how much of its context window the agent uses")
+        .arg(required("pane_id", "PANE_ID"))
+        .arg(option("source", "ID").required(true))
+        .arg(option("used", "TOKENS"))
+        .arg(option("window", "TOKENS"))
+        .arg(option("observed-at", "MS|now"))
+        .arg(flag("clear"))
 }
 
 fn terminal_command() -> Command {

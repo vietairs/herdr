@@ -575,6 +575,12 @@ impl HeadlessServer {
                     self.server_config_diagnostic_without_keybindings.clone()
                 };
                 candidate.revision = client.shell_projection_revision;
+                // The send-time clock is not a change: compare with the stamp
+                // last sent and stamp afresh only when the snapshot goes out.
+                candidate.server_now_ms = client
+                    .shell_snapshot
+                    .as_ref()
+                    .map_or(0, |sent| sent.server_now_ms);
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_completions.as_ref() != Some(&completions)
                     || client.shell_agent_view != agent_view
@@ -582,6 +588,7 @@ impl HeadlessServer {
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
                     candidate.revision = client.shell_projection_revision;
+                    candidate.server_now_ms = crate::prompt_cache::unix_now_ms();
                     completions.revision = candidate.revision;
                     let completion_framed =
                         match crate::protocol::endpoint::agent_completions_message(&completions)

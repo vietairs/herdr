@@ -213,6 +213,7 @@ pub(super) fn render_collapsed(
         state.active_endpoint_id,
         config,
         hits,
+        state.prompt_cache_now_ms,
     );
     hits.sidebar_toggle = if area.is_empty() || workspace_area.width == 0 {
         Rect::default()
@@ -562,6 +563,7 @@ pub(super) fn render_expanded(
         config,
         state.agent_scroll,
         hits,
+        state.prompt_cache_now_ms,
     );
     hits.sidebar_toggle = Rect::new(
         area.right().saturating_sub(2),

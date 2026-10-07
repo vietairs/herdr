@@ -72,11 +72,17 @@ impl ClientShellState {
         match crate::config::load_live_config() {
             Ok(loaded) => {
                 let agent_panel_sort = self.config.agent_panel_sort;
+                let sidebar_auto_hide = self.config.sidebar_auto_hide;
                 let diagnostics = self.config.apply_live_config(
                     &loaded.config,
                     &loaded.diagnostics,
                     &loaded.invalid_sections,
                 );
+                if self.config.sidebar_auto_hide != sidebar_auto_hide {
+                    // The session pin belongs to the auto-hide setting it was made under.
+                    self.sidebar_auto_hide_pinned = false;
+                    self.sidebar_hover_reveal = false;
+                }
                 if let Some(appearance) = self.host_appearance {
                     self.config.palette = crate::app::client_palette_for_appearance(
                         &self.config.theme_runtime,
@@ -118,6 +124,7 @@ impl ClientShellConfig {
             sidebar_max_width: config.ui.sidebar_max_width,
             sidebar_start_collapsed: config.ui.sidebar_start_collapsed,
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
+            sidebar_auto_hide: config.ui.sidebar_auto_hide,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             tab_bar_position: config.ui.tab_bar_position,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
@@ -320,6 +327,7 @@ impl ClientShellConfig {
                 self.sidebar_min_width = ui.sidebar_min_width;
                 self.sidebar_max_width = ui.sidebar_max_width;
                 self.sidebar_collapsed_mode = ui.sidebar_collapsed_mode;
+                self.sidebar_auto_hide = ui.sidebar_auto_hide;
                 self.mobile_width_threshold = ui.mobile_width_threshold;
                 self.tab_bar_position = ui.tab_bar_position;
                 self.hide_tab_bar_when_single_tab = ui.hide_tab_bar_when_single_tab;
@@ -422,10 +430,11 @@ impl ClientShellConfig {
     }
 
     pub(crate) fn initial_surface_size(&self, cols: u16, rows: u16) -> ClientSurfaceSize {
-        let sidebar_collapsed = self
-            .preferences
-            .sidebar_collapsed
-            .unwrap_or(self.sidebar_start_collapsed);
+        let sidebar_collapsed = self.sidebar_auto_hide
+            || self
+                .preferences
+                .sidebar_collapsed
+                .unwrap_or(self.sidebar_start_collapsed);
         let (min_width, max_width) =
             crate::config::validated_sidebar_bounds(self.sidebar_min_width, self.sidebar_max_width)
                 .unwrap_or((18, 36));

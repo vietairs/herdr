@@ -1363,6 +1363,8 @@ mod tests {
                     tokens: Default::default(),
                     agent_session: None,
                     scroll: None,
+                    prompt_cache: None,
+                    context_usage: None,
                     revision: 0,
                 },
                 RemotePaneInfo {
@@ -1386,6 +1388,8 @@ mod tests {
                     tokens: Default::default(),
                     agent_session: None,
                     scroll: None,
+                    prompt_cache: None,
+                    context_usage: None,
                     revision: 0,
                 },
             ],

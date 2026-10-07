@@ -37,7 +37,7 @@ use crate::api::schema::common::AgentStatus;
 use crate::api::EventHub;
 use crate::pane::RelayedAgentStatus;
 
-use super::id::{HostKey, Mount, ServerInstanceId};
+use super::id::{fence, FenceResult, HostKey, Mount, ServerInstanceId};
 use super::protocol::{
     Capability, ClipboardMessage, ClipboardStageRequest, FaultReason, FederationMessage, Handshake,
     HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, TabCloseRequest,
@@ -545,6 +545,10 @@ pub(crate) struct TerminalChannelRouter {
     /// extra namespace mapping is needed to route it back to the pane that
     /// `build_remote_pane` registered it for.
     agent_status_senders: HashMap<String, mpsc::Sender<RelayedAgentStatus>>,
+    /// The local terminal mirroring each raw serving-host `terminal_id`, so
+    /// `PaneUsage` facts reach that terminal wherever its pane now lives (a
+    /// mirror pane can be moved out of its mounted workspace).
+    local_terminal_ids: HashMap<String, crate::terminal::TerminalId>,
 }
 
 impl TerminalChannelRouter {
@@ -562,6 +566,24 @@ impl TerminalChannelRouter {
         sender: mpsc::Sender<RelayedAgentStatus>,
     ) {
         self.agent_status_senders.insert(terminal_id, sender);
+    }
+
+    /// Records the local terminal that mirrors raw `terminal_id`.
+    pub(crate) fn register_local_terminal(
+        &mut self,
+        terminal_id: String,
+        local_terminal_id: crate::terminal::TerminalId,
+    ) {
+        self.local_terminal_ids
+            .insert(terminal_id, local_terminal_id);
+    }
+
+    /// The local terminal mirroring raw `terminal_id`, if one was registered.
+    pub(crate) fn local_terminal_id(
+        &self,
+        terminal_id: &str,
+    ) -> Option<&crate::terminal::TerminalId> {
+        self.local_terminal_ids.get(terminal_id)
     }
 
     /// Routes one inbound `AgentStatus` (+ identity) value to the registered
@@ -601,6 +623,7 @@ impl TerminalChannelRouter {
     pub(crate) fn forget(&mut self, terminal_id: &str) {
         self.output_senders.remove(terminal_id);
         self.agent_status_senders.remove(terminal_id);
+        self.local_terminal_ids.remove(terminal_id);
     }
 
     /// Routes one inbound `Terminal` message to the registered pane, if
@@ -691,6 +714,16 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
     // instead of clearing the flag on a snapshot that predates the change.
     let mut resync_in_flight = false;
     let mut resync_dirty = false;
+    // How far the serving host's clock runs ahead of ours, from the `PaneUsage`
+    // frames seen so far; facts seeded from a resync snapshot reuse it. A frame
+    // stamped at poll time can wait behind terminal output in the host's
+    // outbound queue, which only lowers a sample; the estimate absorbs that
+    // and still follows a clock step on either host.
+    let mut host_clock = crate::prompt_cache::ClockOffsetEstimate::default();
+    // Each mapped terminal's facts on the host's own clock. The host resends a
+    // fact only when it changes, so facts already moved with an offset the
+    // estimate has since left are sent again from here.
+    let mut host_usage_facts: HashMap<String, HostUsageFacts> = HashMap::new();
     loop {
         let Some(msg) = read_frame(reader).await? else {
             return Ok(DriveOutcome::LinkClosed);
@@ -794,6 +827,12 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                             .await;
                     }
                     for pane_info in diff.created_panes {
+                        remember_host_usage_facts(
+                            &mut host_usage_facts,
+                            super::id::strip_mount_namespace(&mount, &pane_info.terminal_id),
+                            &pane_info.prompt_cache,
+                            &pane_info.context_usage,
+                        );
                         materialize_resync_pane(
                             &mount,
                             generation,
@@ -803,6 +842,7 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                             ctx,
                             pane_info,
                             peer_reports_name_source,
+                            host_clock.offset_ms(),
                         )
                         .await;
                     }
@@ -879,6 +919,63 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                         agent: status_msg.agent.clone(),
                     },
                 );
+            }
+            // Fenced exactly like `AgentStatus` above: the drive task's own
+            // generation against the mirror's mount. The wire
+            // `mount_generation` is a constant on every serving host, so it
+            // cannot tell a superseded drive task from the live one.
+            FederationMessage::PaneUsage(mut usage) => {
+                if let FenceResult::RejectStale { .. } = fence(mirror.mount(), generation) {
+                    continue;
+                }
+                let previous_offset_ms = host_clock.offset_ms();
+                if usage.host_now_ms != 0 {
+                    host_clock.observe(
+                        crate::prompt_cache::remote_clock_offset_ms(
+                            usage.host_now_ms,
+                            crate::prompt_cache::unix_now_ms(),
+                        ),
+                        usage.host_now_ms,
+                    );
+                }
+                let Some(ctx) = split_materialization else {
+                    continue;
+                };
+                // Keyed by this mount's own terminal mapping, not by which
+                // workspace the pane sits in. A terminal not built yet is
+                // seeded from the snapshot that reveals it instead.
+                let Some(local_terminal_id) = router.local_terminal_id(&usage.terminal_id) else {
+                    continue;
+                };
+                remember_host_usage_facts(
+                    &mut host_usage_facts,
+                    usage.terminal_id.clone(),
+                    &usage.prompt_cache,
+                    &usage.context_usage,
+                );
+                move_usage_facts_to_local_clock(
+                    &mut usage.prompt_cache,
+                    &mut usage.context_usage,
+                    host_clock.offset_ms(),
+                );
+                let _ = ctx
+                    .events
+                    .send(crate::events::AppEvent::FederationPaneUsage {
+                        terminal_id: local_terminal_id.clone(),
+                        prompt_cache: usage.prompt_cache,
+                        context_usage: usage.context_usage,
+                    })
+                    .await;
+                if host_clock.moved_from(previous_offset_ms) {
+                    resend_host_usage_facts(
+                        ctx,
+                        router,
+                        &mut host_usage_facts,
+                        host_clock.offset_ms(),
+                        &usage.terminal_id,
+                    )
+                    .await;
+                }
             }
             // Handshake/HandshakeResponse/MountSnapshot are already
             // consumed during `connect_and_mount`.
@@ -1189,6 +1286,10 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                                 router
                                     .register_agent_status_sender(new_terminal_id.clone(), sender);
                             }
+                            router.register_local_terminal(
+                                new_terminal_id.clone(),
+                                terminal_id.clone(),
+                            );
                             // C1 fix (plans/260722-1327 review): register this
                             // split-created pane in the mirror BEFORE it can
                             // ever be seen again through a resync snapshot,
@@ -1377,6 +1478,86 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
     }
 }
 
+/// The two usage facts a serving host reports for one terminal.
+type HostUsageFacts = (
+    Option<crate::api::schema::PromptCacheInfo>,
+    Option<crate::api::schema::ContextUsageInfo>,
+);
+
+/// Records `terminal_id`'s latest facts as the host stated them; a terminal with
+/// none left is forgotten.
+fn remember_host_usage_facts(
+    facts: &mut HashMap<String, HostUsageFacts>,
+    terminal_id: String,
+    prompt_cache: &Option<crate::api::schema::PromptCacheInfo>,
+    context_usage: &Option<crate::api::schema::ContextUsageInfo>,
+) {
+    if prompt_cache.is_none() && context_usage.is_none() {
+        facts.remove(&terminal_id);
+    } else {
+        facts.insert(terminal_id, (prompt_cache.clone(), context_usage.clone()));
+    }
+}
+
+/// Sends every remembered terminal's facts again, moved with the current
+/// `host_clock_offset_ms`, except `sent_terminal_id`, whose frame was just sent
+/// with it. Terminals this mount no longer maps are forgotten.
+async fn resend_host_usage_facts(
+    ctx: &SplitMaterializationContext,
+    router: &TerminalChannelRouter,
+    facts: &mut HashMap<String, HostUsageFacts>,
+    host_clock_offset_ms: i64,
+    sent_terminal_id: &str,
+) {
+    facts.retain(|terminal_id, _| router.local_terminal_id(terminal_id).is_some());
+    for (terminal_id, (prompt_cache, context_usage)) in facts.iter() {
+        if terminal_id == sent_terminal_id {
+            continue;
+        }
+        let Some(local_terminal_id) = router.local_terminal_id(terminal_id) else {
+            continue;
+        };
+        let mut prompt_cache = prompt_cache.clone();
+        let mut context_usage = context_usage.clone();
+        move_usage_facts_to_local_clock(
+            &mut prompt_cache,
+            &mut context_usage,
+            host_clock_offset_ms,
+        );
+        let _ = ctx
+            .events
+            .send(crate::events::AppEvent::FederationPaneUsage {
+                terminal_id: local_terminal_id.clone(),
+                prompt_cache,
+                context_usage,
+            })
+            .await;
+    }
+}
+
+/// Moves a serving host's usage timestamps onto this server's clock, given how
+/// far the host's clock runs ahead (`host_clock_offset_ms`, negative when it
+/// runs behind), so a mounted pane's countdown reads against this host's clock
+/// like a local pane's does.
+fn move_usage_facts_to_local_clock(
+    prompt_cache: &mut Option<crate::api::schema::PromptCacheInfo>,
+    context_usage: &mut Option<crate::api::schema::ContextUsageInfo>,
+    host_clock_offset_ms: i64,
+) {
+    if let Some(cache) = prompt_cache {
+        cache.last_request_at_ms = crate::prompt_cache::remote_to_local_clock_ms(
+            cache.last_request_at_ms,
+            host_clock_offset_ms,
+        );
+    }
+    if let Some(usage) = context_usage {
+        usage.observed_at_ms = crate::prompt_cache::remote_to_local_clock_ms(
+            usage.observed_at_ms,
+            host_clock_offset_ms,
+        );
+    }
+}
+
 /// Builds one resync-revealed remote pane's real local `TerminalRuntime`
 /// (mirrors the `SplitPaneResponse::Created` arm above and `App::
 /// build_remote_pane`'s mount-time counterpart) and hands it back to `App`
@@ -1396,6 +1577,7 @@ async fn materialize_resync_pane(
     ctx: &SplitMaterializationContext,
     pane_info: crate::api::schema::panes::PaneInfo,
     peer_reports_name_source: bool,
+    host_clock_offset_ms: i64,
 ) {
     let raw_terminal_id = super::id::strip_mount_namespace(mount, &pane_info.terminal_id);
     let output_rx = router.open_terminal(raw_terminal_id.clone(), generation, out_tx);
@@ -1419,8 +1601,9 @@ async fn materialize_resync_pane(
     ) {
         Ok(runtime) => {
             if let Some(sender) = runtime.relayed_agent_status_sender() {
-                router.register_agent_status_sender(raw_terminal_id, sender);
+                router.register_agent_status_sender(raw_terminal_id.clone(), sender);
             }
+            router.register_local_terminal(raw_terminal_id, terminal_id.clone());
             let mut terminal = crate::terminal::TerminalState::new(
                 terminal_id.clone(),
                 pane_info
@@ -1450,6 +1633,18 @@ async fn materialize_resync_pane(
             } else {
                 pane_info.label.clone()
             };
+            // The snapshot carries the facts the serving host held when it
+            // built it; a `PaneUsage` frame sent before this pane existed had
+            // nowhere to land, and the host only resends on change.
+            let mut prompt_cache = pane_info.prompt_cache.clone();
+            let mut context_usage = pane_info.context_usage.clone();
+            move_usage_facts_to_local_clock(
+                &mut prompt_cache,
+                &mut context_usage,
+                host_clock_offset_ms,
+            );
+            terminal.prompt_cache = prompt_cache;
+            terminal.context_usage = context_usage;
             let pane_state = crate::pane::PaneState::new(terminal_id.clone());
             let ready = crate::events::FederationResyncPaneCreated {
                 origin: ctx.origin.clone(),
@@ -2177,6 +2372,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
             write_frame(
@@ -2354,6 +2551,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
             write_frame(
@@ -2479,6 +2678,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
             write_frame(
@@ -2762,6 +2963,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
             write_frame(
@@ -2932,6 +3135,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
             write_frame(
@@ -3063,6 +3268,8 @@ mod tests {
                     tokens: Default::default(),
                     agent_session: None,
                     scroll: None,
+                    prompt_cache: None,
+                    context_usage: None,
                     revision: 0,
                 });
             write_frame(
@@ -3598,6 +3805,27 @@ mod tests {
     async fn drive_mount_script(
         frames: Vec<FederationMessage>,
     ) -> (Vec<crate::events::AppEvent>, Vec<FederationMessage>) {
+        drive_mount_script_at_generation_offset(frames, 0).await
+    }
+
+    /// `drive_mount_script_with_router` with an empty router.
+    async fn drive_mount_script_at_generation_offset(
+        frames: Vec<FederationMessage>,
+        generation_offset: u64,
+    ) -> (Vec<crate::events::AppEvent>, Vec<FederationMessage>) {
+        drive_mount_script_with_router(frames, generation_offset, TerminalChannelRouter::new())
+            .await
+    }
+
+    /// `drive_mount_script`, but the drive task runs with a generation
+    /// `generation_offset` ahead of the mirror's own mount generation — the
+    /// shape of a drive task that outlived the mount it was started for —
+    /// and routes through `router`, which may already map terminals.
+    async fn drive_mount_script_with_router(
+        frames: Vec<FederationMessage>,
+        generation_offset: u64,
+        mut router: TerminalChannelRouter,
+    ) -> (Vec<crate::events::AppEvent>, Vec<FederationMessage>) {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
         let (client_reader, client_writer) = tokio::io::split(client_side);
         let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
@@ -3642,14 +3870,13 @@ mod tests {
             .connect_and_mount(client_reader, client_writer)
             .await
             .expect("the loopback mount succeeds");
-        let generation = mounted.mirror.mount().mount_generation;
+        let generation = mounted.mirror.mount().mount_generation + generation_offset;
         let MountedConnection {
             mut mirror,
             mut reader,
             ..
         } = mounted;
 
-        let mut router = TerminalChannelRouter::new();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
         let (clipboard_tx, _clipboard_rx) =
             mpsc::channel::<ClipboardMessage>(CLIPBOARD_CHANNEL_CAPACITY);
@@ -3692,6 +3919,338 @@ mod tests {
             outbound.push(msg);
         }
         (events, outbound)
+    }
+
+    fn pane_usage_frame(terminal_id: &str, host_now_ms: u64) -> FederationMessage {
+        FederationMessage::PaneUsage(crate::remote::federation::protocol::PaneUsageMessage {
+            terminal_id: terminal_id.to_string(),
+            // The wire field is a constant on every serving host; the drive
+            // task's own generation is the fence, so a value no mount ever
+            // holds must not matter.
+            mount_generation: 99,
+            prompt_cache: Some(crate::api::schema::PromptCacheInfo {
+                source: "herdr:claude".to_string(),
+                last_request_at_ms: 1_700_000_000_000,
+                ttl_secs: 300,
+            }),
+            context_usage: Some(crate::api::schema::ContextUsageInfo {
+                source: "herdr:claude".to_string(),
+                used_tokens: 42_000,
+                window_tokens: Some(200_000),
+                observed_at_ms: 1_700_000_000_500,
+            }),
+            host_now_ms,
+        })
+    }
+
+    type UsageEvent = (
+        crate::terminal::TerminalId,
+        Option<crate::api::schema::PromptCacheInfo>,
+        Option<crate::api::schema::ContextUsageInfo>,
+    );
+
+    fn usage_events(events: Vec<crate::events::AppEvent>) -> Vec<UsageEvent> {
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                crate::events::AppEvent::FederationPaneUsage {
+                    terminal_id,
+                    prompt_cache,
+                    context_usage,
+                } => Some((terminal_id, prompt_cache, context_usage)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A router that maps the serving host's `term_1` to `local`.
+    fn router_mapping_term_1(local: &crate::terminal::TerminalId) -> TerminalChannelRouter {
+        let mut router = TerminalChannelRouter::new();
+        router.register_local_terminal("term_1".to_string(), local.clone());
+        router
+    }
+
+    #[tokio::test]
+    async fn pane_usage_frame_reaches_the_mapped_local_terminal_and_stale_generation_is_dropped() {
+        let local = crate::terminal::TerminalId::alloc();
+        let (events, _outbound) = drive_mount_script_with_router(
+            vec![pane_usage_frame("term_1", 0)],
+            0,
+            router_mapping_term_1(&local),
+        )
+        .await;
+        let usage = usage_events(events);
+        assert_eq!(usage.len(), 1, "one frame yields one usage event");
+        let (terminal_id, prompt_cache, context_usage) = &usage[0];
+        assert_eq!(terminal_id, &local, "the mount's own local mirror terminal");
+        assert_eq!(
+            prompt_cache.as_ref().map(|fact| fact.last_request_at_ms),
+            Some(1_700_000_000_000),
+            "a frame without a host clock is taken as-is"
+        );
+        assert_eq!(
+            context_usage.as_ref().map(|fact| fact.used_tokens),
+            Some(42_000)
+        );
+
+        let (unmapped, _outbound) = drive_mount_script(vec![pane_usage_frame("term_1", 0)]).await;
+        assert!(
+            usage_events(unmapped).is_empty(),
+            "a terminal this mount never built has nowhere to land"
+        );
+
+        let (stale_events, _outbound) = drive_mount_script_with_router(
+            vec![pane_usage_frame("term_1", 0)],
+            1,
+            router_mapping_term_1(&local),
+        )
+        .await;
+        assert!(
+            usage_events(stale_events).is_empty(),
+            "a drive task whose generation the mirror no longer holds forwards nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn pane_usage_timestamps_move_onto_the_mounting_server_clock() {
+        let local = crate::terminal::TerminalId::alloc();
+        // The serving host's clock runs three minutes behind this one.
+        let skew_ms = 180_000;
+        let host_now_ms = crate::prompt_cache::unix_now_ms() - skew_ms;
+        let (events, _outbound) = drive_mount_script_with_router(
+            vec![pane_usage_frame("term_1", host_now_ms)],
+            0,
+            router_mapping_term_1(&local),
+        )
+        .await;
+
+        let usage = usage_events(events);
+        assert_eq!(usage.len(), 1);
+        let (_, prompt_cache, context_usage) = &usage[0];
+        let shifted = |at: u64, host_at: u64| {
+            // Delivery latency only ever adds to the measured skew.
+            (host_at + skew_ms..host_at + skew_ms + 5_000).contains(&at)
+        };
+        let last_request_at_ms = prompt_cache.as_ref().unwrap().last_request_at_ms;
+        assert!(
+            shifted(last_request_at_ms, 1_700_000_000_000),
+            "{last_request_at_ms}"
+        );
+        let observed_at_ms = context_usage.as_ref().unwrap().observed_at_ms;
+        assert!(
+            shifted(observed_at_ms, 1_700_000_000_500),
+            "{observed_at_ms}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frame_queued_behind_terminal_output_does_not_shift_usage_timestamps() {
+        let local = crate::terminal::TerminalId::alloc();
+        let now_ms = crate::prompt_cache::unix_now_ms();
+        // In sync, then a frame that sat five seconds in the host's queue.
+        let (events, _outbound) = drive_mount_script_with_router(
+            vec![
+                pane_usage_frame("term_1", now_ms),
+                pane_usage_frame("term_1", now_ms - 5_000),
+            ],
+            0,
+            router_mapping_term_1(&local),
+        )
+        .await;
+
+        let usage = usage_events(events);
+        assert_eq!(usage.len(), 2);
+        for (_, prompt_cache, context_usage) in &usage {
+            assert_eq!(
+                prompt_cache.as_ref().map(|fact| fact.last_request_at_ms),
+                Some(1_700_000_000_000)
+            );
+            assert_eq!(
+                context_usage.as_ref().map(|fact| fact.observed_at_ms),
+                Some(1_700_000_000_500)
+            );
+        }
+    }
+
+    /// A router that maps the serving host's `term_1` and `term_2`.
+    fn router_mapping_two_terminals(
+        first: &crate::terminal::TerminalId,
+        second: &crate::terminal::TerminalId,
+    ) -> TerminalChannelRouter {
+        let mut router = router_mapping_term_1(first);
+        router.register_local_terminal("term_2".to_string(), second.clone());
+        router
+    }
+
+    /// The last `last_request_at_ms` each local terminal was sent.
+    fn last_request_at_by_terminal(
+        usage: &[UsageEvent],
+    ) -> HashMap<crate::terminal::TerminalId, u64> {
+        usage
+            .iter()
+            .filter_map(|(terminal_id, prompt_cache, _)| {
+                Some((
+                    terminal_id.clone(),
+                    prompt_cache.as_ref()?.last_request_at_ms,
+                ))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn one_late_poll_does_not_lower_the_offset_for_panes_already_sent() {
+        let (first, second, third) = (
+            crate::terminal::TerminalId::alloc(),
+            crate::terminal::TerminalId::alloc(),
+            crate::terminal::TerminalId::alloc(),
+        );
+        let mut router = router_mapping_two_terminals(&first, &second);
+        router.register_local_terminal("term_3".to_string(), third.clone());
+        let now_ms = crate::prompt_cache::unix_now_ms();
+        // The host runs ten minutes fast. One of its polls changed two terminals and
+        // then sat ten minutes in the queue, so both frames carry that poll's stamp.
+        let late_poll_ms = now_ms;
+        let (events, _outbound) = drive_mount_script_with_router(
+            vec![
+                pane_usage_frame("term_1", now_ms + 600_000),
+                pane_usage_frame("term_2", late_poll_ms),
+                pane_usage_frame("term_3", late_poll_ms),
+            ],
+            0,
+            router,
+        )
+        .await;
+
+        let usage = usage_events(events);
+        let first_facts: Vec<u64> = usage
+            .iter()
+            .filter(|(terminal_id, _, _)| terminal_id == &first)
+            .filter_map(|(_, prompt_cache, _)| prompt_cache.as_ref())
+            .map(|fact| fact.last_request_at_ms)
+            .collect();
+        assert!(
+            first_facts
+                .iter()
+                .all(|&at| at <= 1_700_000_000_000 - 599_000),
+            "the pane sent before the late poll keeps the host's offset: {first_facts:?}"
+        );
+        let last = last_request_at_by_terminal(&usage);
+        for terminal_id in [&second, &third] {
+            assert!(
+                last.get(terminal_id)
+                    .is_some_and(|&at| at <= 1_700_000_000_000 - 599_000),
+                "the late poll's frames are moved with the estimate: {last:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_late_first_frame_does_not_leave_its_skew_on_the_pane() {
+        let (first, second) = (
+            crate::terminal::TerminalId::alloc(),
+            crate::terminal::TerminalId::alloc(),
+        );
+        let now_ms = crate::prompt_cache::unix_now_ms();
+        // The clocks agree; the link's first frame sat five seconds in the queue.
+        let (events, _outbound) = drive_mount_script_with_router(
+            vec![
+                pane_usage_frame("term_1", now_ms - 5_000),
+                pane_usage_frame("term_2", now_ms),
+            ],
+            0,
+            router_mapping_two_terminals(&first, &second),
+        )
+        .await;
+
+        let last = last_request_at_by_terminal(&usage_events(events));
+        assert_eq!(last.get(&first), Some(&1_700_000_000_000));
+        assert_eq!(last.get(&second), Some(&1_700_000_000_000));
+    }
+
+    #[tokio::test]
+    async fn resync_revealed_pane_starts_with_its_snapshot_facts_on_this_clock() {
+        // The serving host's clock runs three minutes behind this one.
+        let skew_ms = 180_000;
+        let host_now_ms = crate::prompt_cache::unix_now_ms() - skew_ms;
+        let mut snapshot = crate::remote::federation::serve::empty_snapshot();
+        snapshot.panes.push(crate::api::schema::panes::PaneInfo {
+            restore_error: None,
+            pane_id: "w1:p2".to_string(),
+            terminal_id: "term_new".to_string(),
+            workspace_id: "w1".to_string(),
+            tab_id: "w1-tab".to_string(),
+            focused: false,
+            cwd: None,
+            foreground_cwd: None,
+            label: None,
+            name_source: crate::workspace::naming::NameSource::default(),
+            agent: None,
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            display_agent: None,
+            agent_status: AgentStatus::Idle,
+            state_labels: Default::default(),
+            tokens: Default::default(),
+            agent_session: None,
+            scroll: None,
+            prompt_cache: Some(crate::api::schema::PromptCacheInfo {
+                source: "herdr:claude".to_string(),
+                last_request_at_ms: 1_700_000_000_000,
+                ttl_secs: 300,
+            }),
+            context_usage: None,
+            revision: 0,
+        });
+        let (events, _outbound) = drive_mount_script(vec![
+            // Arrives before the pane exists: nowhere to land, and the host
+            // will not resend an unchanged fact.
+            pane_usage_frame("term_new", host_now_ms),
+            FederationMessage::Event(
+                crate::remote::federation::protocol::EventChannelMessage::Frame(
+                    crate::remote::federation::protocol::EventFrame {
+                        source_seq: 1,
+                        kind: crate::api::schema::events::EventKind::PaneCreated,
+                    },
+                ),
+            ),
+            FederationMessage::SnapshotResponse(MountSnapshot {
+                server_instance_id: ServerInstanceId("fake-server".to_string()),
+                snapshot,
+                cursor: crate::remote::federation::protocol::EventCursor(1),
+            }),
+            // Once the pane exists, its frames reach it.
+            pane_usage_frame("term_new", host_now_ms),
+        ])
+        .await;
+
+        let mut created = None;
+        let mut usage_terminals = Vec::new();
+        for event in events {
+            match event {
+                crate::events::AppEvent::FederationPaneUsage { terminal_id, .. } => {
+                    assert!(created.is_some(), "an unmapped terminal's frame is dropped");
+                    usage_terminals.push(terminal_id);
+                }
+                crate::events::AppEvent::FederationResyncPaneCreated(ready) => {
+                    created = Some(ready);
+                }
+                _ => {}
+            }
+        }
+        let ready = created.expect("the resync reveals the pane");
+        assert_eq!(usage_terminals, vec![ready.terminal_id.clone()]);
+        let last_request_at_ms = ready
+            .terminal
+            .prompt_cache
+            .as_ref()
+            .expect("seeded from the snapshot")
+            .last_request_at_ms;
+        assert!(
+            (1_700_000_000_000 + skew_ms..1_700_000_000_000 + skew_ms + 5_000)
+                .contains(&last_request_at_ms),
+            "{last_request_at_ms}"
+        );
     }
 
     fn tab_created(request_id: u64) -> FederationMessage {

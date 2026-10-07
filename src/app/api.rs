@@ -2,11 +2,13 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+mod context_usage;
 mod env;
 mod integrations;
 mod layouts;
 mod panes;
 pub(crate) mod plugins;
+mod prompt_cache;
 pub(super) mod responses;
 mod session;
 mod tabs;
@@ -235,6 +237,16 @@ impl App {
 
         if let AppEvent::FederationResyncPaneRemoved { origin, pane_id } = ev {
             self.handle_federation_resync_pane_removed(origin, pane_id);
+            return Vec::new();
+        }
+
+        if let AppEvent::FederationPaneUsage {
+            terminal_id,
+            prompt_cache,
+            context_usage,
+        } = ev
+        {
+            self.handle_federation_pane_usage(&terminal_id, prompt_cache, context_usage);
             return Vec::new();
         }
 
@@ -1430,6 +1442,12 @@ impl App {
             }
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);
+            }
+            Method::PaneReportPromptCache(params) => {
+                return self.handle_pane_report_prompt_cache(request.id, params);
+            }
+            Method::PaneReportContextUsage(params) => {
+                return self.handle_pane_report_context_usage(request.id, params);
             }
             Method::PaneClearAgentAuthority(params) => {
                 return self.handle_pane_clear_agent_authority(request.id, params);

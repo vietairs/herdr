@@ -140,7 +140,7 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
         }
         crate::api::schema::IntegrationTarget::Copilot => {
             let installed = install_copilot()?;
-            vec![
+            let mut messages = vec![
                 format!(
                     "installed copilot integration hook to {}",
                     installed.hook_path.display()
@@ -149,7 +149,9 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                     "ensured copilot settings at {}",
                     installed.settings_path.display()
                 ),
-            ]
+            ];
+            messages.extend(installed.warnings);
+            messages
         }
         crate::api::schema::IntegrationTarget::Devin => {
             let installed = install_devin()?;
@@ -267,13 +269,15 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
         }
         crate::api::schema::IntegrationTarget::Cursor => {
             let installed = install_cursor()?;
-            vec![
+            let mut messages = vec![
                 format!(
                     "installed cursor integration hook to {}",
                     installed.hook_path.display()
                 ),
                 format!("updated cursor hooks at {}", installed.hooks_path.display()),
-            ]
+            ];
+            messages.extend(installed.warnings);
+            messages
         }
         crate::api::schema::IntegrationTarget::Mastracode => {
             let installed = install_mastracode()?;
@@ -290,7 +294,7 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
         }
         crate::api::schema::IntegrationTarget::AntigravityCli => {
             let installed = install_antigravity_cli()?;
-            vec![
+            let mut messages = vec![
                 format!(
                     "installed antigravity-cli integration hook to {}",
                     installed.hook_path.display()
@@ -299,7 +303,9 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                     "ensured antigravity-cli hooks at {}",
                     installed.hooks_path.display()
                 ),
-            ]
+            ];
+            messages.extend(installed.warnings);
+            messages
         }
         crate::api::schema::IntegrationTarget::Grok => {
             let installed = install_grok()?;
@@ -438,6 +444,7 @@ pub(crate) fn uninstall_target(
                     result.settings_path.display()
                 ));
             }
+            messages.extend(result.warnings);
             messages
         }
         crate::api::schema::IntegrationTarget::Devin => {
@@ -684,6 +691,7 @@ pub(crate) fn uninstall_target(
                     result.hooks_path.display()
                 ));
             }
+            messages.extend(result.warnings);
             messages
         }
         crate::api::schema::IntegrationTarget::Mastracode => {
@@ -738,6 +746,7 @@ pub(crate) fn uninstall_target(
                     result.hooks_path.display()
                 ));
             }
+            messages.extend(result.warnings);
             messages
         }
         crate::api::schema::IntegrationTarget::Grok => {

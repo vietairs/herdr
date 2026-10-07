@@ -148,6 +148,8 @@ Notes:
 - Federated workspaces are labeled by remote host and never run local git shellouts, so a remote workspace cannot masquerade as a trusted local one.
 - **Platforms:** Linux, macOS, and Windows can all mount. Serving a mount — being the machine on the other end — is Linux and macOS only. On Windows the mount has not yet been verified against a live host, and OpenSSH there has no connection multiplexing, so every SSH connection authenticates separately and key or agent authentication is effectively required. Clipboard file staging is unavailable when the mounting client is Windows.
 
+Prompt-cache countdowns and context-window use reported on the serving host appear on the mounted panes too. Both ends must be upgraded together, because this release moves the federation protocol to version 8; a peer on another federation protocol version cannot mount.
+
 ### Mount a remote workspace from inside a running session
 
 You do not need to relaunch Herdr to add a remote workspace. From a running local Herdr, open the

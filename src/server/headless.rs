@@ -2035,13 +2035,14 @@ impl HeadlessServer {
                 } else {
                     self.server_config_diagnostic_without_keybindings.as_deref()
                 };
-                let (seed_snapshot, completion_projection) = client_shell_snapshot(
+                let (mut seed_snapshot, completion_projection) = client_shell_snapshot(
                     &self.app,
                     &self.client_shell_boot_id,
                     connection.shell_projection_revision,
                     config_diagnostic,
                     None,
                 );
+                seed_snapshot.server_now_ms = crate::prompt_cache::unix_now_ms();
                 let location =
                     crate::server::clients::ClientShellLocation::from_snapshot(&seed_snapshot);
                 let agent_view = self.app.state.agent_view_override.clone();

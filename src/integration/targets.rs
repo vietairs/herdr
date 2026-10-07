@@ -2,10 +2,19 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(not(windows))]
+use jsonc_parser::cst::{CstInputValue, CstObject, CstObjectProp, CstRootNode, CstStringLit};
+#[cfg(not(windows))]
+use jsonc_parser::ParseOptions;
 use serde_json::{json, Map, Value};
 
 use super::claude_settings::{
     install as install_claude_settings, uninstall as uninstall_claude_settings,
+};
+#[cfg(not(windows))]
+use super::claude_settings::{
+    install_statusline as install_claude_statusline,
+    uninstall_statusline as uninstall_claude_statusline,
 };
 use super::command::hook_command;
 #[cfg(windows)]
@@ -19,7 +28,11 @@ use super::config_edit::{
     remove_direct_hook_commands, remove_flat_command_hook, remove_hermes_plugin_enabled,
     remove_hook_commands, remove_kimi_config_block, remove_simple_command_hook,
 };
+#[cfg(not(windows))]
+use super::config_file::check_config_target;
 use super::config_file::{check_config_targets, write_config};
+#[cfg(not(windows))]
+use super::env::antigravity_cli_settings_dir;
 use super::env::{
     antigravity_cli_dir, claude_dir, codex_dir, copilot_dir, cursor_dir, devin_dir, droid_dir,
     grok_dir, hermes_dir, hermes_plugin_dir, kilo_dir, kimi_dir, letta_dir, mastracode_dir,
@@ -31,6 +44,16 @@ use super::file_ops::{
 use super::opencode_config::{
     add_cli_plugin, add_tui_plugin, remove_cli_plugin, remove_tui_plugin,
     validate_tui_plugin_config,
+};
+#[cfg(not(windows))]
+use super::statusline_tap::{
+    install_statusline_tap, uninstall_statusline_tap, STATUSLINE_TAP_FILE_NAME,
+};
+#[cfg(not(windows))]
+use super::statusline_wrapper::{
+    install_statusline_wrapper, lost_wrapper_warning, remove_files_unless_named,
+    remove_statusline_wrapper_files, restore_statusline_wrapper, unwrapped_statusline_warning,
+    WrapperRestore, STATUSLINE_WRAPPER_FILE_NAME,
 };
 use super::types::{
     AntigravityCliInstallPaths, AntigravityCliUninstallResult, ClaudeInstallPaths,
@@ -62,6 +85,11 @@ use super::{
     OPENCODE_TUI_PLUGIN_SPEC, PI_EXTENSION_ASSET, PI_EXTENSION_INSTALL_NAME, QODERCLI_HOOK_ASSET,
     QODERCLI_HOOK_EVENTS, QODERCLI_HOOK_INSTALL_NAME, QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS,
     QWEN_HOOK_ASSET, QWEN_HOOK_EVENTS, QWEN_HOOK_INSTALL_NAME,
+};
+#[cfg(not(windows))]
+use super::{
+    ANTIGRAVITY_CLI_STATUSLINE_TAP_ASSET, CLAUDE_STATUSLINE_TAP_ASSET,
+    COPILOT_STATUSLINE_TAP_ASSET, CURSOR_STATUSLINE_TAP_ASSET, INSTALL_WARNING_PREFIX,
 };
 
 fn ensure_extension_dir(dir: &Path, agent: &str) -> io::Result<()> {
@@ -138,6 +166,16 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     fs::write(&hook_path, CLAUDE_HOOK_ASSET)?;
     make_executable(&hook_path)?;
 
+    // The statusline tap is its own file: the shared hook file is rewritten or
+    // deleted by builds that do not know the tap.
+    #[cfg(not(windows))]
+    let tap_path = hooks_dir.join(STATUSLINE_TAP_FILE_NAME);
+    #[cfg(not(windows))]
+    {
+        fs::write(&tap_path, CLAUDE_STATUSLINE_TAP_ASSET)?;
+        make_executable(&tap_path)?;
+    }
+
     let settings_path = dir.join("settings.json");
     let existing_settings = if settings_path.is_file() {
         fs::read_to_string(&settings_path)?
@@ -145,6 +183,8 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         "{}".to_string()
     };
     let updated_settings = install_claude_settings(&existing_settings, &settings_path, &hook_path)?;
+    #[cfg(not(windows))]
+    let updated_settings = install_claude_statusline(&updated_settings, &settings_path, &tap_path)?;
     remove_legacy_bash_hook_file(&hook_path)?;
 
     if updated_settings != existing_settings {
@@ -196,6 +236,14 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         hooks,
         "SessionStart",
         hook_command(&hook_path, Some("session")),
+        10,
+        None,
+    )?;
+    remove_hook_commands(hooks, "Stop", &hook_path, Some("usage"))?;
+    ensure_command_hook(
+        hooks,
+        "Stop",
+        hook_command(&hook_path, Some("usage")),
         10,
         None,
     )?;
@@ -273,6 +321,15 @@ pub(crate) fn install_copilot() -> io::Result<CopilotInstallPaths> {
     fs::write(&hook_path, COPILOT_HOOK_ASSET)?;
     make_executable(&hook_path)?;
 
+    // The statusline tap is its own file: the shared hook file is rewritten or
+    // deleted by builds that do not know the tap.
+    #[cfg(not(windows))]
+    {
+        let tap_path = hooks_dir.join(STATUSLINE_TAP_FILE_NAME);
+        fs::write(&tap_path, COPILOT_STATUSLINE_TAP_ASSET)?;
+        make_executable(&tap_path)?;
+    }
+
     let settings_path = dir.join("settings.json");
     let mut settings = if settings_path.is_file() {
         serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?).map_err(|err| {
@@ -303,11 +360,77 @@ pub(crate) fn install_copilot() -> io::Result<CopilotInstallPaths> {
     }
     remove_legacy_bash_hook_file(&hook_path)?;
 
+    #[cfg(not(windows))]
+    let warnings = wrap_copilot_statusline(&mut settings, &dir, &hooks_dir);
+    #[cfg(windows)]
+    let warnings = Vec::new();
+
     write_config(&settings_path, serde_json::to_string_pretty(&settings)?)?;
 
     Ok(CopilotInstallPaths {
         hook_path,
         settings_path,
+        warnings,
+    })
+}
+
+/// Settings key of Copilot CLI's statusline object in `settings.json`.
+#[cfg(not(windows))]
+const COPILOT_STATUSLINE_KEY: &str = "statusLine";
+
+/// The `statusLine.command` string slot when `statusLine` is exactly a
+/// `{"type": "command", "command": <string>}` object; `None` for any other
+/// shape, including no statusline at all (a statusline is never created).
+#[cfg(not(windows))]
+fn copilot_statusline_command_slot(settings: &mut Value) -> Option<&mut Value> {
+    let statusline = settings.get_mut(COPILOT_STATUSLINE_KEY)?.as_object_mut()?;
+    if statusline.get("type").and_then(Value::as_str) != Some("command") {
+        return None;
+    }
+    let command = statusline.get_mut("command")?;
+    command.is_string().then_some(command)
+}
+
+/// Replaces an EXISTING Copilot `statusLine.command` with the wrapper path.
+/// Other statusline keys are untouched and none is ever created. Best effort:
+/// a failure leaves the statusline as it was and returns a warning.
+#[cfg(not(windows))]
+fn wrap_copilot_statusline(settings: &mut Value, dir: &Path, hooks_dir: &Path) -> Vec<String> {
+    let Some(slot) = copilot_statusline_command_slot(settings) else {
+        return Vec::new();
+    };
+    let current = slot.as_str().unwrap_or_default().to_string();
+    match install_statusline_wrapper("copilot", &current, hooks_dir, dir) {
+        Ok(Some(wrapper_command)) => {
+            *slot = Value::String(wrapper_command);
+            Vec::new()
+        }
+        Ok(None) => Vec::new(),
+        Err(err) => vec![unwrapped_statusline_warning("copilot", &err)],
+    }
+}
+
+/// Puts the user's own command back when `statusLine.command` is a herdr
+/// wrapper; returns whether the settings changed and any warning. A wrapper
+/// whose file and backup are both gone is left in place with a warning; the
+/// original is never guessed.
+#[cfg(not(windows))]
+fn restore_copilot_statusline(
+    settings: &mut Value,
+    dir: &Path,
+    settings_path: &Path,
+) -> io::Result<(bool, Vec<String>)> {
+    let Some(slot) = copilot_statusline_command_slot(settings) else {
+        return Ok((false, Vec::new()));
+    };
+    let current = slot.as_str().unwrap_or_default().to_string();
+    Ok(match restore_statusline_wrapper(&current, dir)? {
+        WrapperRestore::NotWrapped => (false, Vec::new()),
+        WrapperRestore::Restored(original) => {
+            *slot = Value::String(original);
+            (true, Vec::new())
+        }
+        WrapperRestore::Lost => (false, vec![lost_wrapper_warning(settings_path, &current)]),
     })
 }
 
@@ -580,8 +703,14 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
 
     if settings_path.is_file() {
         let existing_settings = fs::read_to_string(&settings_path)?;
+        #[cfg(not(windows))]
+        let restored_settings = uninstall_claude_statusline(&existing_settings, &settings_path)?;
+        #[cfg(not(windows))]
+        let restored_settings = restored_settings.as_str();
+        #[cfg(windows)]
+        let restored_settings = existing_settings.as_str();
         let new_settings =
-            uninstall_claude_settings(&existing_settings, &settings_path, &hook_path)?;
+            uninstall_claude_settings(restored_settings, &settings_path, &hook_path)?;
         updated_settings = new_settings != existing_settings;
         if updated_settings {
             write_config(&settings_path, new_settings)?;
@@ -590,6 +719,9 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
 
     let removed_hook_file =
         remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    // Removed only after the settings no longer point at it.
+    #[cfg(not(windows))]
+    remove_file_if_exists(&dir.join("hooks").join(STATUSLINE_TAP_FILE_NAME))?;
 
     Ok(ClaudeUninstallResult {
         hook_path,
@@ -629,6 +761,7 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
             updated_hooks |=
                 remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
             updated_hooks |= remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
+            updated_hooks |= remove_hook_commands(hooks, "Stop", &hook_path, Some("usage"))?;
         }
 
         if updated_hooks {
@@ -682,7 +815,7 @@ pub(crate) fn uninstall_copilot() -> io::Result<CopilotUninstallResult> {
     let settings_path = copilot_dir.join("settings.json");
     let mut updated_settings = false;
 
-    if settings_path.is_file() {
+    let warnings = if settings_path.is_file() {
         let mut settings = serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?)
             .map_err(|err| {
                 io::Error::other(format!(
@@ -705,11 +838,36 @@ pub(crate) fn uninstall_copilot() -> io::Result<CopilotUninstallResult> {
             }
         }
 
+        // The settings are restored first so they never point at a removed wrapper.
+        #[cfg(not(windows))]
+        let warnings = {
+            let (restored, warnings) =
+                restore_copilot_statusline(&mut settings, &copilot_dir, &settings_path)?;
+            updated_settings |= restored;
+            warnings
+        };
+        #[cfg(windows)]
+        let warnings = Vec::new();
+
         if updated_settings {
             write_config(&settings_path, serde_json::to_string_pretty(&settings)?)?;
         }
-    }
+        warnings
+    } else {
+        Vec::new()
+    };
 
+    // A statusline herdr could not restore may still name the wrapper.
+    #[cfg(not(windows))]
+    let warnings = {
+        let mut warnings = warnings;
+        warnings.extend(remove_statusline_wrapper_files(
+            &copilot_dir.join("hooks"),
+            &copilot_dir,
+            &settings_path,
+        )?);
+        warnings
+    };
     let removed_hook_file =
         remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
 
@@ -718,6 +876,7 @@ pub(crate) fn uninstall_copilot() -> io::Result<CopilotUninstallResult> {
         settings_path,
         removed_hook_file,
         updated_settings,
+        warnings,
     })
 }
 
@@ -1255,6 +1414,11 @@ pub(crate) fn install_cursor() -> io::Result<CursorInstallPaths> {
     fs::write(&hook_path, CURSOR_HOOK_ASSET)?;
     make_executable(&hook_path)?;
 
+    #[cfg(not(windows))]
+    let warnings = install_cursor_statusline_tap(&dir)?;
+    #[cfg(windows)]
+    let warnings = Vec::new();
+
     let hooks_path = dir.join("hooks.json");
     let mut hooks_file = if hooks_path.is_file() {
         serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?).map_err(|err| {
@@ -1295,7 +1459,175 @@ pub(crate) fn install_cursor() -> io::Result<CursorInstallPaths> {
     Ok(CursorInstallPaths {
         hook_path,
         hooks_path,
+        warnings,
     })
+}
+
+/// Cursor CLI's own config file; it holds the `statusLine` object.
+#[cfg(not(windows))]
+const CURSOR_CLI_CONFIG_FILE: &str = "cli-config.json";
+/// Key of Cursor CLI's statusline object in `cli-config.json`.
+#[cfg(not(windows))]
+const CURSOR_STATUSLINE_KEY: &str = "statusLine";
+
+/// Writes the statusline tap and, when `cli-config.json` already holds a
+/// `statusLine` command, points that command at the herdr wrapper. A missing
+/// config file is not an error and nothing is created. Wrapping is best
+/// effort: a config that cannot be read, parsed or written leaves the
+/// statusline as it was and returns a warning, and the hooks still install.
+#[cfg(not(windows))]
+fn install_cursor_statusline_tap(dir: &Path) -> io::Result<Vec<String>> {
+    let tap_path = dir.join(STATUSLINE_TAP_FILE_NAME);
+    fs::write(&tap_path, CURSOR_STATUSLINE_TAP_ASSET)?;
+    make_executable(&tap_path)?;
+
+    Ok(match wrap_cursor_statusline(dir) {
+        Ok(()) => Vec::new(),
+        Err(err) => vec![unwrapped_statusline_warning("cursor", &err)],
+    })
+}
+
+#[cfg(not(windows))]
+fn wrap_cursor_statusline(dir: &Path) -> io::Result<()> {
+    let config_path = dir.join(CURSOR_CLI_CONFIG_FILE);
+    if !config_path.is_file() {
+        return Ok(());
+    }
+    check_config_target(&config_path)?;
+    let existing = fs::read_to_string(&config_path)?;
+    let updated = edit_cursor_statusline_command(&existing, &config_path, |current| {
+        install_statusline_wrapper("cursor", current, dir, dir)
+    })?;
+    if updated != existing {
+        write_config(&config_path, updated)?;
+    }
+    Ok(())
+}
+
+/// Puts the user's own command back when `statusLine.command` is a herdr
+/// wrapper. A wrapper whose file and backup are both gone is left in place
+/// with a warning; the original is never guessed. Only a herdr wrapper that is
+/// found and cannot be restored is an error, so a config herdr never wrapped
+/// never blocks the uninstall.
+#[cfg(not(windows))]
+fn restore_cursor_statusline(dir: &Path) -> io::Result<Vec<String>> {
+    let config_path = dir.join(CURSOR_CLI_CONFIG_FILE);
+    if !config_path.is_file() {
+        return Ok(Vec::new());
+    }
+    // An unreadable config cannot be shown to hold a herdr wrapper, so it
+    // must not block removing the hooks.
+    let existing = match fs::read_to_string(&config_path) {
+        Ok(existing) => existing,
+        Err(err) => return Ok(vec![left_unreadable_warning(&config_path, &err)]),
+    };
+    let mut lost = None;
+    let restored = edit_cursor_statusline_command(&existing, &config_path, |current| {
+        Ok(match restore_statusline_wrapper(current, dir)? {
+            WrapperRestore::NotWrapped => None,
+            WrapperRestore::Restored(original) => Some(original),
+            WrapperRestore::Lost => {
+                lost = Some(lost_wrapper_warning(&config_path, current));
+                None
+            }
+        })
+    });
+    let restored = match restored {
+        Ok(restored) => restored,
+        Err(err) if !existing.contains(STATUSLINE_WRAPPER_FILE_NAME) => {
+            return Ok(vec![format!(
+                "{INSTALL_WARNING_PREFIX} left {} as it was: {err}",
+                config_path.display()
+            )]);
+        }
+        Err(err) => return Err(err),
+    };
+    if restored != existing {
+        write_config(&config_path, restored)?;
+    }
+    Ok(lost.into_iter().collect())
+}
+
+#[cfg(not(windows))]
+fn left_unreadable_warning(path: &Path, err: &io::Error) -> String {
+    format!(
+        "{INSTALL_WARNING_PREFIX} could not read {} to restore its statusline, left it as it was: {err}",
+        path.display()
+    )
+}
+
+/// Edits only `statusLine.command` through the JSONC CST, so comments, key
+/// order and formatting survive. `decide` maps the current command to its
+/// replacement (`None` keeps it). A statusline that is not exactly
+/// `{"type": "command", "command": <string>}`, or is absent, is left alone:
+/// a statusline is never created.
+#[cfg(not(windows))]
+fn edit_cursor_statusline_command(
+    content: &str,
+    config_path: &Path,
+    decide: impl FnOnce(&str) -> io::Result<Option<String>>,
+) -> io::Result<String> {
+    let parse = |text: &str| {
+        CstRootNode::parse(text, &ParseOptions::default()).map_err(|err| {
+            io::Error::other(format!("failed to parse {}: {err}", config_path.display()))
+        })
+    };
+    let root = parse(content)?;
+    let Some((literal, current)) = cursor_statusline_command(&root) else {
+        return Ok(content.to_string());
+    };
+    let Some(replacement) = decide(&current)? else {
+        return Ok(content.to_string());
+    };
+    if replacement == current {
+        return Ok(content.to_string());
+    }
+    literal.replace_with(CstInputValue::String(replacement.clone()));
+    let updated = root.to_string();
+
+    let written = cursor_statusline_command(&parse(&updated)?).map(|(_, command)| command);
+    if written.as_deref() != Some(replacement.as_str()) {
+        return Err(io::Error::other(format!(
+            "failed to safely update {CURSOR_STATUSLINE_KEY}.command in {}",
+            config_path.display()
+        )));
+    }
+    Ok(updated)
+}
+
+/// The command string literal and its decoded value when `statusLine` is
+/// exactly one `{"type": "command", "command": <string>}` object.
+#[cfg(not(windows))]
+fn cursor_statusline_command(root: &CstRootNode) -> Option<(CstStringLit, String)> {
+    let statusline =
+        single_cst_property(&root.value()?.as_object()?, CURSOR_STATUSLINE_KEY)?.object_value()?;
+    let kind = single_cst_property(&statusline, "type")?
+        .value()?
+        .as_string_lit()?
+        .decoded_value()
+        .ok()?;
+    if kind != "command" {
+        return None;
+    }
+    let literal = single_cst_property(&statusline, "command")?
+        .value()?
+        .as_string_lit()?;
+    let command = literal.decoded_value().ok()?;
+    Some((literal, command))
+}
+
+/// The property named `name`, unless it is missing or duplicated (a
+/// duplicated key is ambiguous, so it is left alone).
+#[cfg(not(windows))]
+fn single_cst_property(object: &CstObject, name: &str) -> Option<CstObjectProp> {
+    let mut matching = object.properties().into_iter().filter(|property| {
+        property
+            .name()
+            .and_then(|property_name| property_name.decoded_value().ok())
+            .is_some_and(|property_name| property_name == name)
+    });
+    let property = matching.next()?;
+    matching.next().is_none().then_some(property)
 }
 
 pub(crate) fn uninstall_qodercli() -> io::Result<QodercliUninstallResult> {
@@ -1433,6 +1765,14 @@ pub(crate) fn uninstall_cursor() -> io::Result<CursorUninstallResult> {
     let hooks_path = cursor_home.join("hooks.json");
     let mut updated_hooks = false;
 
+    // The config is restored first so it never points at a removed wrapper,
+    // and a wrapper that cannot be restored stops the uninstall before
+    // anything is removed.
+    #[cfg(not(windows))]
+    let warnings = restore_cursor_statusline(&cursor_home)?;
+    #[cfg(windows)]
+    let warnings = Vec::new();
+
     if hooks_path.is_file() {
         let mut hooks_file = serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?)
             .map_err(|err| {
@@ -1462,6 +1802,17 @@ pub(crate) fn uninstall_cursor() -> io::Result<CursorUninstallResult> {
         }
     }
 
+    // A config herdr could not read or restore may still name the wrapper.
+    #[cfg(not(windows))]
+    let warnings = {
+        let mut warnings = warnings;
+        warnings.extend(remove_statusline_wrapper_files(
+            &cursor_home,
+            &cursor_home,
+            &cursor_home.join(CURSOR_CLI_CONFIG_FILE),
+        )?);
+        warnings
+    };
     let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(CursorUninstallResult {
@@ -1469,6 +1820,7 @@ pub(crate) fn uninstall_cursor() -> io::Result<CursorUninstallResult> {
         hooks_path,
         removed_hook_file,
         updated_hooks,
+        warnings,
     })
 }
 
@@ -1597,6 +1949,25 @@ pub(crate) fn install_antigravity_cli() -> io::Result<AntigravityCliInstallPaths
     fs::write(&hook_path, ANTIGRAVITY_CLI_HOOK_ASSET)?;
     make_executable(&hook_path)?;
 
+    // The statusline tap is its own file: the shared hook file is rewritten or
+    // deleted by builds that do not know the tap.
+    #[cfg(not(windows))]
+    {
+        let tap_path = hooks_dir.join(STATUSLINE_TAP_FILE_NAME);
+        fs::write(&tap_path, ANTIGRAVITY_CLI_STATUSLINE_TAP_ASSET)?;
+        make_executable(&tap_path)?;
+    }
+    // Wrapping is best effort: a statusline settings file that cannot be read,
+    // parsed or written is left as it was, and the hooks still install.
+    #[cfg(not(windows))]
+    let warnings = match wrap_antigravity_cli_statusline(&hooks_dir.join(STATUSLINE_TAP_FILE_NAME))
+    {
+        Ok(()) => Vec::new(),
+        Err(err) => vec![unwrapped_statusline_warning("antigravity-cli", &err)],
+    };
+    #[cfg(windows)]
+    let warnings = Vec::new();
+
     let hooks_path = dir.join("hooks.json");
     let mut hooks_file = if hooks_path.is_file() {
         serde_json::from_str::<Value>(&fs::read_to_string(&hooks_path)?).map_err(|err| {
@@ -1625,7 +1996,67 @@ pub(crate) fn install_antigravity_cli() -> io::Result<AntigravityCliInstallPaths
     Ok(AntigravityCliInstallPaths {
         hook_path,
         hooks_path,
+        warnings,
     })
+}
+
+/// Settings key of Antigravity CLI's statusline object in `settings.json`.
+#[cfg(not(windows))]
+const ANTIGRAVITY_CLI_STATUSLINE_KEY: &str = "statusLine";
+
+/// Wraps an existing Antigravity `statusLine.command` with the herdr tap. A
+/// missing settings file or directory is not an error and nothing is created:
+/// a statusline command would replace Antigravity's built-in status bar.
+#[cfg(not(windows))]
+fn wrap_antigravity_cli_statusline(tap_path: &Path) -> io::Result<()> {
+    let settings_dir = antigravity_cli_settings_dir()?;
+    check_config_targets(&settings_dir, &["settings.json"])?;
+    let settings_path = settings_dir.join("settings.json");
+    if !settings_path.is_file() {
+        return Ok(());
+    }
+    let existing = fs::read_to_string(&settings_path)?;
+    let updated = install_statusline_tap(
+        &existing,
+        &settings_path,
+        ANTIGRAVITY_CLI_STATUSLINE_KEY,
+        tap_path,
+    )?;
+    if updated != existing {
+        write_config(&settings_path, updated)?;
+    }
+    Ok(())
+}
+
+/// Restores the user's own Antigravity `statusLine.command` when it is wrapped
+/// by a herdr tap; any other content is left as it is. Only a herdr tap that
+/// is found and cannot be restored is an error, so a settings file herdr never
+/// wrapped never blocks the uninstall.
+#[cfg(not(windows))]
+fn restore_antigravity_cli_statusline() -> io::Result<Vec<String>> {
+    let settings_path = antigravity_cli_settings_dir()?.join("settings.json");
+    if !settings_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let existing = match fs::read_to_string(&settings_path) {
+        Ok(existing) => existing,
+        Err(err) => return Ok(vec![left_unreadable_warning(&settings_path, &err)]),
+    };
+    let restored =
+        match uninstall_statusline_tap(&existing, &settings_path, ANTIGRAVITY_CLI_STATUSLINE_KEY) {
+            Ok(restored) => restored,
+            Err(err) if !existing.contains(STATUSLINE_TAP_FILE_NAME) => {
+                return Ok(vec![format!(
+                    "{INSTALL_WARNING_PREFIX} left {} as it was: {err}",
+                    settings_path.display()
+                )]);
+            }
+            Err(err) => return Err(err),
+        };
+    if restored != existing {
+        write_config(&settings_path, restored)?;
+    }
+    Ok(Vec::new())
 }
 
 pub(crate) fn antigravity_cli_hook_command(hook_path: &Path, action: &str) -> String {
@@ -1684,12 +2115,27 @@ pub(crate) fn uninstall_antigravity_cli() -> io::Result<AntigravityCliUninstallR
     }
 
     let removed_hook_file = remove_file_if_exists(&hook_path)?;
+    // The settings are restored first so they never point at a removed tap,
+    // and settings herdr could not read or restore may still name it.
+    #[cfg(not(windows))]
+    let warnings = {
+        let mut warnings = restore_antigravity_cli_statusline()?;
+        warnings.extend(remove_files_unless_named(
+            &antigravity_cli_settings_dir()?.join("settings.json"),
+            STATUSLINE_TAP_FILE_NAME,
+            &[dir.join("hooks").join(STATUSLINE_TAP_FILE_NAME)],
+        )?);
+        warnings
+    };
+    #[cfg(windows)]
+    let warnings = Vec::new();
 
     Ok(AntigravityCliUninstallResult {
         hook_path,
         hooks_path,
         removed_hook_file,
         updated_hooks,
+        warnings,
     })
 }
 

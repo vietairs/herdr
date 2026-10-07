@@ -81,6 +81,11 @@ use super::id::ServerInstanceId;
 /// `FederationMessage` variants a v6 peer cannot decode, not additive
 /// fields.
 ///
+/// Bumped 7 -> 8 with `PaneUsage`: the serving host forwards each terminal's
+/// prompt-cache and context-usage facts so mounted panes show them. A new
+/// top-level variant a v7 peer cannot decode, same category as the earlier
+/// bumps; no `Capability`, for the reason below.
+///
 /// No `Capability` accompanies this bump, deliberately. Capabilities gate
 /// variants added *within* an already-negotiated version, where an older
 /// peer on the same version would fail to decode the frame (the rule written
@@ -90,7 +95,7 @@ use super::id::ServerInstanceId;
 /// mismatch — so any peer this mount reached is on v7 and is guaranteed to
 /// decode these two variants. A capability here would be a permanently-true
 /// check plus a dead not-agreed branch.
-pub const FEDERATION_PROTOCOL_VERSION: u32 = 7;
+pub const FEDERATION_PROTOCOL_VERSION: u32 = 8;
 
 /// An optional feature two federation peers may support. Modeled as an
 /// opaque name rather than a closed enum so an older peer can simply not
@@ -380,6 +385,28 @@ pub struct AgentStatusMessage {
     /// (recorded before this field existed) decodable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+}
+
+/// Per-terminal usage facts from the serving host: the full current value of
+/// both, sent whenever either changes. Rides the agent-status channel. A
+/// `None` fact means the serving host no longer holds it, so the receiver
+/// clears its copy. Timestamps are the serving host's own wall clock;
+/// `host_now_ms` lets the receiver move them onto its own clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneUsageMessage {
+    /// Raw (un-namespaced) serving-host terminal id.
+    pub terminal_id: String,
+    /// Carried for symmetry with `AgentStatusMessage`; the receiver fences on
+    /// its own drive generation, never on this field.
+    pub mount_generation: u64,
+    #[serde(default)]
+    pub prompt_cache: Option<crate::api::schema::PromptCacheInfo>,
+    #[serde(default)]
+    pub context_usage: Option<crate::api::schema::ContextUsageInfo>,
+    /// The serving host's wall clock (unix epoch ms) when it built this frame.
+    /// 0 when absent: the receiver then assumes both clocks agree.
+    #[serde(default)]
+    pub host_now_ms: u64,
 }
 
 /// Clipboard-channel message. `origin_tag` identifies which side produced
@@ -852,6 +879,7 @@ pub enum FederationMessage {
     SnapshotResponse(MountSnapshot),
     ClipboardStageRequest(ClipboardStageRequest),
     ClipboardStageResponse(ClipboardStageResponse),
+    PaneUsage(PaneUsageMessage),
 }
 
 impl FederationMessage {
@@ -881,6 +909,8 @@ impl FederationMessage {
             Self::ClipboardStageRequest(_) | Self::ClipboardStageResponse(_) => {
                 Channel::FileStaging
             }
+            // Accompanies the agent statuses it is polled with.
+            Self::PaneUsage(_) => Channel::AgentStatus,
         }
     }
 }
@@ -1097,16 +1127,55 @@ mod tests {
     }
 
     // The version is pinned so a bump is always a deliberate, reviewed act.
-    // v6 shipped (tag `v0.8.2-hvn.3`), so it can no longer absorb new
-    // top-level variants in place; `TabCreateRequest`/`TabCreateResponse`
-    // therefore forced 6 -> 7 (see the doc comment on
-    // `FEDERATION_PROTOCOL_VERSION`). An accidental bump here would silently
-    // desync this worktree's protocol version from what deployed peers
-    // expect, and `codec::decode` rejects a mismatch before touching the
-    // payload, so every mount on the old version simply stops working.
+    // v7 shipped (tag `v0.9.2-hvn.1`), so it can no longer absorb new
+    // top-level variants in place; `PaneUsage` therefore forced 7 -> 8 (see
+    // the doc comment on `FEDERATION_PROTOCOL_VERSION`). An accidental bump
+    // here would silently desync this worktree's protocol version from what
+    // deployed peers expect, and `codec::decode` rejects a mismatch before
+    // touching the payload, so every mount on the old version simply stops
+    // working.
     #[test]
-    fn federation_protocol_version_is_pinned_at_the_tab_create_bump() {
-        assert_eq!(FEDERATION_PROTOCOL_VERSION, 7);
+    fn federation_protocol_version_is_pinned_at_the_pane_usage_bump() {
+        assert_eq!(FEDERATION_PROTOCOL_VERSION, 8);
+    }
+
+    // Both per-terminal usage facts ride the agent-status channel, so they
+    // share its cap and ordering with the status frames they accompany. A
+    // frame always carries the full current value of both facts, so `None`
+    // is a meaningful "cleared" value and must survive the round trip.
+    #[test]
+    fn pane_usage_round_trips_on_the_agent_status_channel() {
+        let with_facts = FederationMessage::PaneUsage(PaneUsageMessage {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 1,
+            prompt_cache: Some(crate::api::schema::PromptCacheInfo {
+                source: "herdr:claude".to_string(),
+                last_request_at_ms: 1_700_000_000_000,
+                ttl_secs: 300,
+            }),
+            context_usage: Some(crate::api::schema::ContextUsageInfo {
+                source: "herdr:claude".to_string(),
+                used_tokens: 42_000,
+                window_tokens: Some(200_000),
+                observed_at_ms: 1_700_000_000_500,
+            }),
+            host_now_ms: 1_700_000_001_000,
+        });
+        let cleared = FederationMessage::PaneUsage(PaneUsageMessage {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 1,
+            prompt_cache: None,
+            context_usage: None,
+            host_now_ms: 1_700_000_001_000,
+        });
+        for msg in [with_facts, cleared] {
+            assert_eq!(msg.channel(), Channel::AgentStatus);
+            let encoded = codec::encode(&msg).expect("encode must succeed");
+            let (decoded, _consumed) =
+                codec::decode::<FederationMessage>(&encoded, Channel::AgentStatus.max_len())
+                    .expect("decode must succeed");
+            assert_eq!(decoded, msg);
+        }
     }
 
     #[test]

@@ -6,6 +6,10 @@
 - New `ui.render_interval_ms` setting controls the minimum interval between server render and presentation attempts, replacing a hard-coded 16 ms. Raising it cuts host CPU at the cost of a less responsive display. The value is clamped to the range 1-1000 and is reloadable live from the `[ui]` section.
 - Windows clients can now mount a remote machine's workspaces. `workspace.mount_remote` previously answered `unsupported_platform` on Windows; it now dials and mounts the same way Linux and macOS clients do. Serving a mount from a Windows host is still unsupported. Clipboard file staging remains unavailable when the client is Windows.
 - Remote workspaces can now be detached. Right-click a mounted remote workspace in the sidebar and choose **Detach** (after **Close on host**), or call the new `workspace.detach` method, to unmount it locally without closing it on the serving host: its panes and agents keep running there, and mounting the machine again restores it. The connection ends only when the last workspace from that machine is detached.
+- The sidebar can hide itself. Turn on `ui.sidebar_auto_hide` (or **Settings → Sidebar**) and the sidebar stays collapsed while you work, opens over the panes when the pointer reaches the left edge or in navigate mode, and hides again when you move away. `toggle_sidebar` docks it open. New `keys.grow_sidebar` and `keys.shrink_sidebar` actions (unbound by default) change the sidebar width from the keyboard.
+- Agent rows can show a prompt-cache countdown. The new `prompt_cache` sidebar token, now in the default agent layout, shows how long the agent's prompt cache stays warm (for example `5m 4:12`) and turns to `cold` when it expires. Integrations report it with `herdr pane report-prompt-cache` or the `pane.report_prompt_cache` API method.
+- Agent rows can show context-window use. The new `context` sidebar token, on its own row in the default agent layout, shows tokens used against the agent's exact context window (for example `ctx 84k/200k 42%`), coloured as the context fills; with no known window it shows only the tokens. Integrations report it with `herdr pane report-context-usage` or the `pane.report_context_usage` API method. Mounted remote panes show both the countdown and context use.
+- Integrations report the new facts: Claude Code v11 (prompt-cache and context hooks; on macOS and Linux it also wraps your existing statusline, keeping its output unchanged, to read the exact window; without a statusline, and on Windows, it reports tokens only), Codex v9, Qwen Code v2, Pi v10, OMP v11, OpenCode v14, Kilo Code CLI v5, Hermes Agent v6 (tokens only), Antigravity CLI v4, GitHub Copilot CLI v4 and Cursor Agent CLI v2 (these three on macOS and Linux, when you have a custom statusline; Copilot and Cursor are unverified until tested against a live session). Grok CLI does not report usage yet (known gap). Run `herdr integration install <agent>` to update. Clients and servers must be upgraded together: the client protocol moved to version 25. Both ends of a federation mount must be upgraded together: the federation protocol moved to version 8.
 
 ### Fixed
 - A termination signal now exits the client even while its event loop is waiting on a timer. `SIGINT`, `SIGTERM`, and `SIGHUP` wake the loop directly instead of being noticed only on its next pass, so `kill` and a terminal hangup shut the client down promptly and still run the normal detach and terminal-restore path.
@@ -42,6 +46,14 @@
   installed CLI speak the same protocol; until then CLI commands report a client/server version
   mismatch. The federation protocol version is unchanged at 7, so mounts to hosts running 0.9.0
   keep working.
+
+## [0.9.3] - 2026-09-29
+
+This is a hotfix release for v0.9.2. See the v0.9.2 notes for the full feature release: https://github.com/herdrdev/herdr/releases/tag/v0.9.2
+
+### Fixed
+- Terminal shortcuts that send Escape followed by a key work again in panes. On macOS, Option+Left/Right and Option+Backspace from Ghostty's defaults or iTerm2's Natural Text Editing preset move and delete by word again, instead of typing `b` and `f` or deleting one character. Escape-based Shift+Enter bindings insert a newline in Claude Code instead of submitting. Clicking a pane still doesn't send a stray Escape. (#4751)
+- Alt+[ followed quickly by another key no longer merges into a different key. (#4751)
 
 ## [0.9.2] - 2026-09-29
 

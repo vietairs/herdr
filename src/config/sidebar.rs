@@ -115,6 +115,8 @@ pub enum AgentSidebarToken {
     Agent,
     TerminalTitle,
     TerminalTitleStripped,
+    PromptCache,
+    Context,
     Custom(String),
     Styled {
         token: Box<AgentSidebarToken>,
@@ -199,8 +201,13 @@ impl RawSidebarToken {
                 if token.rules.len() > 16 {
                     return Err("sidebar tokens may contain at most 16 rules".into());
                 }
+                // `prompt_cache` and `context` resolve to numbers whose text is
+                // written only where they are drawn, so no value exists to match.
                 if !token.rules.is_empty()
-                    && matches!(token.token.as_str(), "state_icon" | "git_status")
+                    && matches!(
+                        token.token.as_str(),
+                        "state_icon" | "git_status" | "prompt_cache" | "context"
+                    )
                 {
                     return Err("sidebar rules require a text-valued token".into());
                 }
@@ -279,6 +286,8 @@ fn agent_token_name(token: &AgentSidebarToken) -> String {
         AgentSidebarToken::Agent => "agent".into(),
         AgentSidebarToken::TerminalTitle => "terminal_title".into(),
         AgentSidebarToken::TerminalTitleStripped => "terminal_title_stripped".into(),
+        AgentSidebarToken::PromptCache => "prompt_cache".into(),
+        AgentSidebarToken::Context => "context".into(),
         AgentSidebarToken::Custom(name) => format!("${name}"),
         AgentSidebarToken::Styled { token, .. } => agent_token_name(token),
     }
@@ -338,6 +347,8 @@ impl<'de> Deserialize<'de> for AgentSidebarToken {
                 ("agent", Self::Agent),
                 ("terminal_title", Self::TerminalTitle),
                 ("terminal_title_stripped", Self::TerminalTitleStripped),
+                ("prompt_cache", Self::PromptCache),
+                ("context", Self::Context),
             ],
         )
         .map_err(serde::de::Error::custom)?;
@@ -435,6 +446,15 @@ impl AgentsSidebarConfig {
             .and_then(|agent| self.rows_by_agent.get(crate::detect::agent_label(agent)))
             .unwrap_or(&self.rows)
     }
+
+    /// True when the default rows or any per-agent override show the prompt-cache countdown.
+    pub(crate) fn uses_prompt_cache_token(&self) -> bool {
+        std::iter::once(&self.rows)
+            .chain(self.rows_by_agent.values())
+            .flatten()
+            .flatten()
+            .any(|token| matches!(token.parts().0, AgentSidebarToken::PromptCache))
+    }
 }
 
 impl Default for AgentsSidebarConfig {
@@ -447,7 +467,8 @@ impl Default for AgentsSidebarConfig {
                     AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
-                vec![AgentSidebarToken::Agent],
+                vec![AgentSidebarToken::Agent, AgentSidebarToken::PromptCache],
+                vec![AgentSidebarToken::Context],
             ],
             rows_by_agent: BTreeMap::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
@@ -498,7 +519,8 @@ mod tests {
                     AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
-                vec![AgentSidebarToken::Agent],
+                vec![AgentSidebarToken::Agent, AgentSidebarToken::PromptCache],
+                vec![AgentSidebarToken::Context],
             ]
         );
         assert!(config.agents.rows_by_agent.is_empty());
@@ -511,6 +533,53 @@ mod tests {
             ]
         );
         assert_eq!(config.spaces.row_gap, 0);
+    }
+
+    #[test]
+    fn prompt_cache_token_parses_and_serializes() {
+        let config =
+            toml::from_str::<AgentsSidebarConfig>("rows = [[\"agent\", \"prompt_cache\"]]")
+                .unwrap();
+        assert_eq!(config.rows[0][1], AgentSidebarToken::PromptCache);
+        assert!(toml::to_string(&config).unwrap().contains("prompt_cache"));
+    }
+
+    #[test]
+    fn context_token_parses_and_serializes() {
+        let config =
+            toml::from_str::<AgentsSidebarConfig>("rows = [[\"agent\", \"context\"]]").unwrap();
+        assert_eq!(config.rows[0][1], AgentSidebarToken::Context);
+        assert!(toml::to_string(&config).unwrap().contains("context"));
+    }
+
+    #[test]
+    fn usage_tokens_reject_rules_they_could_never_apply() {
+        for token in ["prompt_cache", "context"] {
+            let error = toml::from_str::<AgentsSidebarConfig>(&format!(
+                "rows = [[{{ token = \"{token}\", rules = [{{ contains = \"cold\", hide = true }}] }}]]"
+            ))
+            .expect_err("rules on a usage token are rejected");
+            assert!(
+                error.to_string().contains("text-valued token"),
+                "{token}: {error}"
+            );
+            let styled = toml::from_str::<AgentsSidebarConfig>(&format!(
+                "rows = [[{{ token = \"{token}\", bold = true }}]]"
+            ));
+            assert!(styled.is_ok(), "{token}: fixed styles stay allowed");
+        }
+    }
+
+    #[test]
+    fn uses_prompt_cache_token_detects_rows_and_overrides() {
+        assert!(AgentsSidebarConfig::default().uses_prompt_cache_token());
+        let mut config = toml::from_str::<AgentsSidebarConfig>("rows = [[\"agent\"]]").unwrap();
+        assert!(!config.uses_prompt_cache_token());
+        config = toml::from_str::<AgentsSidebarConfig>(
+            "rows = [[\"agent\"]]\n[rows_by_agent]\nclaude = [[\"prompt_cache\"]]",
+        )
+        .unwrap();
+        assert!(config.uses_prompt_cache_token());
     }
 
     #[test]

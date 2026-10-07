@@ -202,6 +202,14 @@ pub(super) fn snapshot_with_completions(
                 state_labels,
                 tokens,
                 focused,
+                prompt_cache: agent
+                    .prompt_cache
+                    .as_ref()
+                    .map(protocol::ClientShellPromptCache::from),
+                context_usage: agent
+                    .context_usage
+                    .as_ref()
+                    .map(protocol::ClientShellContextUsage::from),
             }
         })
         .collect();
@@ -318,6 +326,8 @@ pub(super) fn snapshot_with_completions(
         commands: app.client_shell_command_manifest(),
         remote_mount_attempts,
         recent_remote_mount_targets: app.state.recent_remote_mount_targets.clone(),
+        // Stamped where the snapshot is sent, after change detection.
+        server_now_ms: 0,
     };
     (shell, completions)
 }

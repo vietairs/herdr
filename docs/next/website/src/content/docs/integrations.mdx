@@ -83,6 +83,8 @@ Herdr writes the bundled extension to:
 
 If `PI_CODING_AGENT_DIR` is set, Herdr writes to `$PI_CODING_AGENT_DIR/extensions/herdr-agent-state.ts` instead. Herdr creates the extensions directory when the Pi agent directory already exists. Uninstall removes only that extension file.
 
+Pi integration v10 reports context usage and the model's context window after each turn. When the model's catalog entry publishes a prompt-cache lifetime, it also reports the prompt-cache countdown.
+
 ## OMP
 
 Install the OMP integration:
@@ -101,6 +103,8 @@ Herdr uses `PI_CODING_AGENT_DIR` as the complete agent directory when set. Other
 
 The OMP integration reports `omp` as the agent label, lifecycle state, and native session identity through Herdr's socket API. It does not require native process detection for the `omp` executable, and Herdr can resume an OMP pane with `omp --resume=<session>` after a server restart.
 
+OMP integration v11 reports context usage and the model's context window after each tool call and at the end of each turn.
+
 ## Claude Code
 
 Install the Claude Code hook:
@@ -109,11 +113,13 @@ Install the Claude Code hook:
 herdr integration install claude
 ```
 
-The hook reports Claude Code session identity to the local Herdr socket on session start. Claude Code state comes from Herdr's screen manifest detection.
+The hook reports Claude Code session identity to the local Herdr socket on session start, and after each tool call and at the end of each turn it reports when Claude last used its prompt cache (read from the transcript, with the 5-minute or 1-hour lifetime Claude reports) and how many context tokens the last request used. Those two hooks run asynchronously, so they never delay Claude Code. Claude Code state comes from Herdr's screen manifest detection.
 
-Claude integration v10 matches only the documented `SessionStart` sources: `startup`, `resume`, `clear`, `compact`, and `fork`. This prevents Grok's `new` and `load` events from launching the imported Herdr Claude hook, without disabling unrelated Claude-compatible hooks. Reinstall the Claude integration after upgrading to migrate the previous wildcard matcher. New Claude source values require an integration update.
+Claude integration v11 adds the prompt-cache and context-usage hooks and the statusline tap. Like v10, it matches only the documented `SessionStart` sources: `startup`, `resume`, `clear`, `compact`, and `fork`. This prevents Grok's `new` and `load` events from launching the imported Herdr Claude hook, without disabling unrelated Claude-compatible hooks. Reinstall the Claude integration after upgrading to migrate the previous wildcard matcher. New Claude source values require an integration update.
 
 Herdr uses `~/.claude` by default, or `CLAUDE_CONFIG_DIR` when set. The Claude config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
+
+On macOS and Linux the integration also reads Claude Code's statusline data, which carries the exact context window and prompt-cache expiry. If you already have a `statusLine` command, Herdr wraps it with `~/.claude/hooks/herdr-statusline-tap.sh`: your command still receives the same input, and its output and exit code are passed through unchanged; if that file is removed, your command still runs. Herdr never adds a statusline when you have none, because a custom statusline replaces part of Claude Code's footer. Without one, the sidebar shows the context tokens used, without the window or percentage. On Windows the integration does not wrap the statusline, so Claude Code reports tokens only, from its hooks. Uninstalling the integration restores your original command exactly.
 
 ## Codex
 
@@ -126,6 +132,8 @@ herdr integration install codex
 The Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.
 
 Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.
+
+Codex integration v9 adds a `Stop` hook that reports context usage with the model's exact context window, read from the last token count in the session rollout.
 
 ## GitHub Copilot CLI
 
@@ -140,6 +148,8 @@ The Copilot hook reports session identity through the same local socket API used
 Herdr uses `~/.copilot` by default, or `COPILOT_HOME` when set. The Copilot config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with a `SessionStart` hook entry. Uninstall removes Herdr entries from `settings.json` and deletes the hook script.
 
 After Copilot emits a session-bearing event, Herdr can use the reported session id to resume the pane with `copilot --resume=<id>`.
+
+On macOS and Linux, GitHub Copilot CLI integration v4 wraps an existing Copilot `statusLine` command to read context-window use; your command's output is passed through unchanged and uninstalling restores it. A copy of your command is kept in `~/.copilot/herdr-statusline-original.json`, so uninstall can restore it even when the wrapper file is gone. This reading is unverified: the statusline input format has not yet been captured from a live Copilot session, and if your status line goes blank after installing, run `herdr integration uninstall copilot`. Without a custom statusline, or on Windows, Herdr shows no context usage for Copilot.
 
 ## Devin CLI
 
@@ -203,6 +213,8 @@ Local V1 `opencode run` and `opencode --mini` retain their legacy server hooks; 
 
 The plugin reports lifecycle state and session identity while OpenCode runs inside a Herdr pane. After OpenCode emits a session-bearing event, Herdr can use the reported session id to resume the pane with `opencode --session <id>`. Native screen manifest detection remains available when the plugin is not installed.
 
+OpenCode integration v14 reports the root session's context usage from each completed assistant message, with the provider's context limit for the model.
+
 ## Kilo Code CLI
 
 Install the Kilo Code CLI plugin:
@@ -215,6 +227,8 @@ Herdr writes the plugin to `~/.config/kilo/plugin/herdr-agent-state.js`. The Kil
 
 The plugin reports lifecycle state and session identity while Kilo runs inside a Herdr pane. After Kilo emits a session-bearing event, Herdr can use the reported session id to resume the pane with `kilo --session <id>`. Native screen manifest detection remains available when the plugin is not installed.
 
+Kilo Code CLI integration v5 reports the root session's context usage from each completed assistant message, with the provider's context limit for the model.
+
 ## Hermes Agent
 
 Install the Hermes Agent plugin:
@@ -226,6 +240,8 @@ herdr integration install hermes
 Herdr writes `plugins/herdr-agent-state/` under the Hermes home directory and enables `herdr-agent-state` in its `config.yaml`. `HERMES_HOME` defaults to `~/.hermes` on Unix and `%LOCALAPPDATA%\hermes` on Windows. The Hermes config directory must already exist. Restart Hermes after installing so the plugin loads. Uninstall removes the plugin directory and removes `herdr-agent-state` from `plugins.enabled`.
 
 The plugin reports the resumable session id while Hermes runs inside a Herdr pane. Herdr uses screen manifest detection for `working`, `idle`, and `blocked`, and can use the reported session id to resume the pane with `hermes --resume <id>`.
+
+Hermes Agent integration v6 reports the tokens used after each model request. Hermes does not report the context window, so the sidebar shows tokens without a percentage.
 
 ## Qoder CLI
 
@@ -257,6 +273,8 @@ Herdr uses `~/.qwen` by default, or `QWEN_HOME` when set. The Qwen config direct
 
 Herdr resumes stored Qwen Code sessions with `qwen --resume <id>`.
 
+Qwen Code integration v2 adds a `Stop` hook that reports context usage and, when Qwen Code reports it, the context limit.
+
 ## Letta Code
 
 Letta Code integration installation is experimental and CLI-only. It is not listed in the Settings integration screen or the JSON integration API. `herdr integration status` reports it as `letta (experimental)`. Agent detection and `herdr agent start --kind letta` are supported independently of this installation restriction.
@@ -287,6 +305,8 @@ Herdr uses `~/.cursor` by default, or `CURSOR_CONFIG_DIR` when set. The Cursor c
 
 After Cursor emits a session start event, Herdr can use the reported session id to resume the pane with `cursor-agent --resume <id>`. The `cursor-agent` command must be on `PATH` when Herdr restores the pane; Herdr does not launch the generic `agent` command.
 
+On macOS and Linux, Cursor Agent CLI integration v2 wraps an existing `statusLine` command in `~/.cursor/cli-config.json` to read context-window use; your command's output is passed through unchanged and uninstalling restores the file. A copy of your command is kept in `~/.cursor/herdr-statusline-original.json`, so uninstall can restore it even when the wrapper file is gone. This reading is unverified: the statusline input format has not yet been captured from a live Cursor session, and if your status line goes blank after installing, run `herdr integration uninstall cursor`. Without a custom statusline, or on Windows, Herdr shows no context usage for Cursor.
+
 ## MastraCode
 
 Install the MastraCode hook:
@@ -315,6 +335,8 @@ This session-only integration reports the pane's current conversation, but not a
 
 The hook runs on `PreInvocation`, so Herdr learns the conversation once the first prompt is sent. From then on Herdr can resume the pane with `agy --conversation <id>` after a Herdr server restart.
 
+On macOS and Linux, Antigravity CLI integration v4 wraps an existing Antigravity `statusLine` command to read the exact context window; your command's output is passed through unchanged and uninstalling restores it. Without a custom statusline, or on Windows, Herdr shows no context usage for Antigravity.
+
 ## Grok CLI
 
 Install the Grok CLI hook:
@@ -328,6 +350,8 @@ The hook reports session identity through Grok's `SessionStart` hook while Grok 
 Herdr uses `~/.grok` by default, or `GROK_HOME` when set. The Grok config directory must already exist. Grok merges every `hooks/*.json` file in that directory, so install writes a self-contained `hooks/herdr.json` with the Herdr `SessionStart` entry next to `hooks/herdr-agent-state.sh` (`hooks/herdr-agent-state.ps1` on Windows), and never edits other hook files. Uninstall removes exactly those two Herdr-owned files.
 
 After Grok emits a session start event, Herdr can use the reported session id to resume the pane with `grok --resume <id>`.
+
+The Grok CLI integration does not report prompt-cache or context usage yet. This is a known gap.
 
 ## Custom status labels
 

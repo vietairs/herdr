@@ -15,6 +15,7 @@ mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod creation;
 mod custom_commands;
+mod federation_usage;
 mod git_refresh;
 mod ids;
 mod popup;

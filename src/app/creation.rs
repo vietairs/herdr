@@ -388,6 +388,8 @@ impl App {
             tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),
             scroll,
+            prompt_cache: terminal.prompt_cache.clone(),
+            context_usage: terminal.context_usage.clone(),
             revision: terminal.revision,
         })
     }
@@ -789,8 +791,9 @@ impl App {
         // remote's real detection status into this pane's own detection
         // loop (`PaneRuntime::relayed_agent_status_sender`).
         if let Some(sender) = runtime.relayed_agent_status_sender() {
-            router.register_agent_status_sender(raw_terminal_id, sender);
+            router.register_agent_status_sender(raw_terminal_id.clone(), sender);
         }
+        router.register_local_terminal(raw_terminal_id, terminal_id.clone());
         let mut terminal = TerminalState::new(
             terminal_id.clone(),
             pane_info
@@ -822,6 +825,11 @@ impl App {
         } else {
             pane_info.label.clone()
         };
+        // The facts the serving host held when it built the snapshot. They are
+        // on its clock; its first `PaneUsage` frames, which carry that clock,
+        // replace them with corrected values as soon as the mount is driven.
+        terminal.prompt_cache = pane_info.prompt_cache.clone();
+        terminal.context_usage = pane_info.context_usage.clone();
         let pane_state = PaneState::new(terminal_id);
         Ok((pane_id, terminal, runtime, pane_state))
     }
@@ -3118,6 +3126,8 @@ mod federation_materialization_tests {
             tokens: Default::default(),
             agent_session: None,
             scroll: None,
+            prompt_cache: None,
+            context_usage: None,
             revision: 0,
         }
     }

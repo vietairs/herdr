@@ -427,6 +427,65 @@ pub struct PaneReportMetadataParams {
     pub ttl_ms: Option<u64>,
 }
 
+/// Per-pane prompt-cache fact reported by an integration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PromptCacheInfo {
+    /// Reporter id, normalized like metadata sources (for example "herdr:claude").
+    pub source: String,
+    /// Unix epoch milliseconds of the last model request that read or wrote the prompt cache.
+    pub last_request_at_ms: u64,
+    /// Cache lifetime in seconds counted from last_request_at_ms.
+    pub ttl_secs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportPromptCacheParams {
+    pub pane_id: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub last_request_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 86_400))]
+    pub ttl_secs: Option<u32>,
+    #[serde(default)]
+    pub clear: bool,
+}
+
+/// Per-pane context-window usage fact reported by an integration.
+///
+/// JSON API type only: its `skip_serializing_if` is right for JSON and wrong for
+/// positional bincode, so it is never embedded in a bincode wire type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ContextUsageInfo {
+    /// Reporter id, normalized like metadata sources (for example "herdr:claude").
+    pub source: String,
+    /// Tokens the agent's last model request sent as context: input plus cache reads and writes.
+    pub used_tokens: u64,
+    /// The model's context window in tokens. Present only when the reporter observed it exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_tokens: Option<u64>,
+    /// Unix epoch milliseconds at which the reporter observed this reading.
+    pub observed_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportContextUsageParams {
+    pub pane_id: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(max = 100_000_000))]
+    pub used_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 100_000_000))]
+    pub window_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub observed_at_ms: Option<u64>,
+    #[serde(default)]
+    pub clear: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneClearAgentAuthorityParams {
     pub pane_id: String,
@@ -493,6 +552,10 @@ pub struct PaneInfo {
     pub agent_session: Option<AgentSessionInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll: Option<PaneScrollInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<PromptCacheInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<ContextUsageInfo>,
     pub revision: u64,
 }
 

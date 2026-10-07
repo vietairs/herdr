@@ -950,6 +950,68 @@ fn terminal_client_endpoint_request_error_removes_client() {
 }
 
 #[tokio::test]
+async fn client_shell_snapshot_carries_the_send_clock_without_resending_for_it() {
+    let mut server = test_headless_server();
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            surface_scroll: false,
+            client_id: 78,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: false,
+            writer,
+        })
+    );
+    let initial = client_shell_snapshot(&control_rx);
+    assert!(initial.server_now_ms > 0);
+    // Render while the clock moves. The test pane's foreground cwd can change
+    // on its own between renders, so a snapshot may still go out, but never
+    // one that differs from the last only in its send clock.
+    let without_clock = |snapshot: &protocol::ClientShellSnapshot| {
+        let mut snapshot = snapshot.clone();
+        snapshot.revision = 0;
+        snapshot.server_now_ms = 0;
+        snapshot
+    };
+    let mut last = initial.clone();
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(3));
+        server.render_and_stream();
+        while let Ok(bytes) = control_rx.try_recv() {
+            let ServerMessage::EndpointControl { kind, data } = read_server_message(bytes) else {
+                continue;
+            };
+            if kind != protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
+                continue;
+            }
+            let sent: Box<protocol::ClientShellSnapshot> = serde_json::from_str(&data).unwrap();
+            assert_ne!(
+                without_clock(&sent),
+                without_clock(&last),
+                "a snapshot was resent for the clock alone"
+            );
+            last = sent;
+        }
+    }
+    let before = crate::prompt_cache::unix_now_ms();
+
+    server.app.state.update_available = Some("9.9.9".into());
+    server.render_and_stream();
+    let changed = client_shell_snapshot(&control_rx);
+    assert!(changed.revision > initial.revision);
+    assert!(changed.server_now_ms >= before.max(initial.server_now_ms));
+}
+
+#[tokio::test]
 async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots() {
     use crate::api::schema::{
         AgentViewBuiltinField, AgentViewField, AgentViewFilter, AgentViewSetParams, AgentViewValue,

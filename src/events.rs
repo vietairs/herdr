@@ -362,6 +362,18 @@ pub enum AppEvent {
         origin: crate::remote::federation::id::HostKey,
         pane_id: String,
     },
+    /// A live mount's serving host reported the current prompt-cache and
+    /// context-usage facts for one of its terminals, already moved onto this
+    /// server's clock. `terminal_id` is the LOCAL terminal that mirrors it,
+    /// resolved through that mount's own router, so the facts follow the
+    /// terminal wherever its pane has been moved; `None` clears that fact.
+    /// The handler stores both on that terminal
+    /// (`App::handle_federation_pane_usage`).
+    FederationPaneUsage {
+        terminal_id: crate::terminal::TerminalId,
+        prompt_cache: Option<crate::api::schema::PromptCacheInfo>,
+        context_usage: Option<crate::api::schema::ContextUsageInfo>,
+    },
     /// A live mount's resync diff revealed a workspace the mirror had never
     /// seen before — either created out-of-band on the serving host, or the
     /// one this client just asked for with a `WorkspaceCreateRequest`. A

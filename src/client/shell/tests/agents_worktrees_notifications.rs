@@ -366,6 +366,8 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: true,
+            prompt_cache: None,
+            context_usage: None,
         },
         ClientShellAgent {
             pane_id: "pane_2".into(),
@@ -384,6 +386,8 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: false,
+            prompt_cache: None,
+            context_usage: None,
         },
     ];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
@@ -460,6 +464,8 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             state_labels: Vec::new(),
             tokens: vec![("summary".into(), "review complete".into())],
             focused: true,
+            prompt_cache: None,
+            context_usage: None,
         },
         ClientShellAgent {
             pane_id: "pane_2".into(),
@@ -478,6 +484,8 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             state_labels: vec![("blocked".into(), "needs input".into())],
             tokens: vec![("summary".into(), "waiting for Can".into())],
             focused: false,
+            prompt_cache: None,
+            context_usage: None,
         },
     ];
     let mut config = Config::default();
@@ -607,6 +615,8 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        prompt_cache: None,
+        context_usage: None,
     }];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
@@ -676,6 +686,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: true,
+            prompt_cache: None,
+            context_usage: None,
         },
         ClientShellAgent {
             pane_id: "pane_2".into(),
@@ -694,6 +706,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: false,
+            prompt_cache: None,
+            context_usage: None,
         },
         ClientShellAgent {
             pane_id: "pane_3".into(),
@@ -712,6 +726,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: false,
+            prompt_cache: None,
+            context_usage: None,
         },
     ];
     projected.agent_view_label = Some("review".into());
@@ -788,6 +804,8 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        prompt_cache: None,
+        context_usage: None,
     });
     let config =
         ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone());
@@ -1355,6 +1373,8 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: false,
+        prompt_cache: None,
+        context_usage: None,
     });
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
@@ -1516,10 +1536,12 @@ fn agent_row_shows_the_inherited_tab_name_instead_of_the_agent_kind() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        prompt_cache: None,
+        context_usage: None,
     }];
 
     let config = ClientShellConfig::from_config(&Config::default());
-    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None);
+    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None, 0);
     let agent_tokens: Vec<String> = rows
         .iter()
         .flat_map(|row| row.rows.iter())
@@ -1565,10 +1587,12 @@ fn agent_row_falls_back_to_the_agent_kind_when_no_scope_was_named() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        prompt_cache: None,
+        context_usage: None,
     }];
 
     let config = ClientShellConfig::from_config(&Config::default());
-    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None);
+    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None, 0);
     let agent_tokens: Vec<String> = rows
         .iter()
         .flat_map(|row| row.rows.iter())
@@ -1579,4 +1603,349 @@ fn agent_row_falls_back_to_the_agent_kind_when_no_scope_was_named() {
         })
         .collect();
     assert!(agent_tokens.iter().any(|value| value == "claude"));
+}
+
+fn prompt_cache_agent() -> ClientShellAgent {
+    ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: None,
+        label: None,
+        name_source: crate::workspace::naming::NameSource::AgentIdentity,
+        display_agent: Some("claude".into()),
+        agent: Some("claude".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+        prompt_cache: Some(crate::protocol::ClientShellPromptCache {
+            last_request_at_ms: 1_000_000,
+            ttl_secs: 300,
+        }),
+        context_usage: None,
+    }
+}
+
+#[test]
+fn agent_rows_show_prompt_cache_countdown_from_snapshot() {
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![prompt_cache_agent()];
+    let config = ClientShellConfig::from_config(&Config::default());
+
+    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None, 1_048_000);
+
+    let countdowns: Vec<_> = rows
+        .iter()
+        .flat_map(|row| row.rows.iter())
+        .flat_map(|line| line.iter())
+        .filter_map(|token| match &token.kind {
+            crate::ui::ResolvedTokenKind::PromptCache(countdown) => Some(*countdown),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        countdowns,
+        vec![crate::prompt_cache::PromptCacheCountdown {
+            ttl_secs: 300,
+            remaining_secs: 252,
+            tenths_left: 8,
+        }]
+    );
+}
+
+#[test]
+fn prompt_cache_tick_repaints_once_per_second_only_while_live_and_visible() {
+    let composed = |config: ClientShellConfig| {
+        let mut state = ClientShellState::new(config);
+        let mut snapshot = snapshot();
+        snapshot.agents = vec![prompt_cache_agent()];
+        state.set_snapshot(Box::new(snapshot));
+        state.set_pane_surface(surface());
+        state.compose(106, 30).expect("composed frame");
+        state
+    };
+
+    let mut state = composed(ClientShellConfig::from_config(&Config::default()));
+    state.prompt_cache_now_ms = 1_000_000;
+    assert!(!state.tick_prompt_cache(1_000_400));
+    assert!(state.tick_prompt_cache(1_001_000));
+    assert_eq!(state.prompt_cache_now_ms, 1_001_000);
+    // The countdown on screen expired between ticks: one repaint draws `cold`, then
+    // nothing.
+    assert!(state.tick_prompt_cache(1_301_500));
+    assert!(!state.tick_prompt_cache(1_302_500));
+
+    let mut collapsed = composed(ClientShellConfig::from_config(&Config::default()));
+    collapsed.sidebar_collapsed = true;
+    collapsed.prompt_cache_now_ms = 1_001_000;
+    assert!(!collapsed.tick_prompt_cache(1_002_000));
+
+    let mut config = Config::default();
+    config.ui.sidebar.agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+    let mut unused = composed(ClientShellConfig::from_config(&config));
+    unused.prompt_cache_now_ms = 1_001_000;
+    assert!(!unused.tick_prompt_cache(1_002_000));
+}
+
+#[test]
+fn prompt_cache_tick_repaints_cold_after_a_gap_longer_than_the_cache_window() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![prompt_cache_agent()];
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("composed frame");
+
+    // Painted at `5m 3:20`, then the client stalls for ten minutes (ttl + 1 s is 301 s).
+    state.prompt_cache_now_ms = 1_100_000;
+    assert!(state.tick_prompt_cache(1_700_000));
+    let text = frame_rows(&state.compose(106, 30).expect("composed frame")).join("\n");
+    assert!(text.contains("cold"), "{text}");
+    assert!(!state.tick_prompt_cache(1_701_000));
+
+    // Timer phase: the last live tick paints `0:01`, the next one lands past the
+    // live window and must still repaint once.
+    state.prompt_cache_now_ms = 1_299_500;
+    assert!(state.tick_prompt_cache(1_300_020));
+    assert!(state.tick_prompt_cache(1_301_060));
+    assert!(!state.tick_prompt_cache(1_302_000));
+}
+
+/// A shell with an online remote endpoint and an empty local snapshot.
+fn state_with_remote_endpoint() -> (ClientShellState, crate::client::endpoint::ClientEndpointId) {
+    use crate::client::endpoint::{
+        ClientEndpointId, ClientEndpointStatus, ProfileId, SavedSshEndpoint,
+    };
+    let profile = SavedSshEndpoint {
+        id: ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        label: "Build".into(),
+        target: "dev@build.example".into(),
+        session: "agents".into(),
+        enabled: true,
+    };
+    let remote = ClientEndpointId::Ssh(profile.id.clone());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    (state, remote)
+}
+
+fn endpoint_clock_offset_ms(
+    state: &ClientShellState,
+    endpoint_id: &crate::client::endpoint::ClientEndpointId,
+) -> i64 {
+    state
+        .endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        .map(|endpoint| endpoint.server_clock.offset_ms())
+        .expect("endpoint")
+}
+
+#[test]
+fn prompt_cache_countdown_reads_the_endpoint_clock_not_the_client_clock() {
+    let (mut state, remote) = state_with_remote_endpoint();
+    let mut snapshot = snapshot();
+    snapshot.boot_id = "remote-boot".into();
+    snapshot.agents = vec![prompt_cache_agent()];
+    // The endpoint's clock runs three minutes behind this client's.
+    let skew_ms = 180_000;
+    snapshot.server_now_ms = crate::prompt_cache::unix_now_ms() - skew_ms;
+    state.set_endpoint_snapshot(&remote, Box::new(snapshot));
+
+    // 48.5 s after the request on the endpoint's clock, read on the client's clock (the
+    // half second absorbs the offset measurement's own latency).
+    state.prompt_cache_now_ms = 1_048_500 + skew_ms;
+    let text = frame_rows(&state.compose(106, 30).expect("composed frame")).join("\n");
+    assert!(text.contains("5m 4:12"), "{text}");
+
+    // Live on the endpoint's clock even though the client clock is past expiry.
+    state.prompt_cache_now_ms = 1_200_000 + skew_ms;
+    assert!(state.prompt_cache_countdown_visible(1_200_000 + skew_ms));
+    assert!(!state.prompt_cache_countdown_visible(1_302_000 + skew_ms));
+}
+
+#[test]
+fn a_late_snapshot_does_not_shift_the_endpoint_clock() {
+    let (mut state, remote) = state_with_remote_endpoint();
+    let local = crate::client::endpoint::ClientEndpointId::Local;
+    for endpoint_id in [&local, &remote] {
+        for (revision, delay_ms) in [(1, 0), (2, 10_000)] {
+            let mut late = snapshot();
+            late.revision = revision;
+            late.server_now_ms = crate::prompt_cache::unix_now_ms() - delay_ms;
+            state.set_endpoint_snapshot_for_generation(endpoint_id, 4, Box::new(late));
+            assert_eq!(
+                endpoint_clock_offset_ms(&state, endpoint_id),
+                0,
+                "{endpoint_id:?}"
+            );
+        }
+    }
+
+    // A new connection may reach another clock, so its first sample stands.
+    let mut reconnected = snapshot();
+    reconnected.server_now_ms = crate::prompt_cache::unix_now_ms() - 180_000;
+    state.set_endpoint_snapshot_for_generation(&remote, 5, Box::new(reconnected));
+    assert!(endpoint_clock_offset_ms(&state, &remote) <= -180_000);
+
+    // The local endpoint shares this host's clock whatever its snapshot says.
+    let mut skewed = snapshot();
+    skewed.revision = 3;
+    skewed.server_now_ms = crate::prompt_cache::unix_now_ms() - 180_000;
+    state.set_endpoint_snapshot_for_generation(&local, 5, Box::new(skewed));
+    assert_eq!(endpoint_clock_offset_ms(&state, &local), 0);
+}
+
+/// Feeds the remote endpoint's connection-4 clock a snapshot stamped `server_now_ms`
+/// that this client reads at `local_now_ms`, and returns the offset it keeps.
+fn read_endpoint_snapshot_at(
+    state: &mut ClientShellState,
+    remote: &crate::client::endpoint::ClientEndpointId,
+    server_now_ms: u64,
+    local_now_ms: u64,
+) -> i64 {
+    let endpoint = state
+        .endpoints
+        .iter_mut()
+        .find(|endpoint| &endpoint.endpoint_id == remote)
+        .expect("endpoint");
+    endpoint.server_clock = crate::client::shell::endpoints::next_server_clock(
+        endpoint,
+        Some(4),
+        server_now_ms,
+        local_now_ms,
+    );
+    endpoint.server_clock.offset_ms()
+}
+
+#[test]
+fn the_endpoint_clock_follows_a_clock_step_on_the_same_connection() {
+    let (mut state, remote) = state_with_remote_endpoint();
+    state.set_endpoint_snapshot_for_generation(&remote, 4, Box::new(snapshot()));
+    let local_ms = 1_000_000_000_u64;
+    // The endpoint ran ten minutes fast at connect.
+    assert_eq!(
+        read_endpoint_snapshot_at(&mut state, &remote, local_ms + 600_000, local_ms),
+        600_000
+    );
+
+    // Its clock is then stepped back to the right time. One snapshot alone could be
+    // a late one; the next, read a minute later, confirms the step.
+    let stepped_ms = local_ms + 60_000;
+    assert_eq!(
+        read_endpoint_snapshot_at(&mut state, &remote, stepped_ms, stepped_ms),
+        600_000
+    );
+    assert_eq!(
+        read_endpoint_snapshot_at(
+            &mut state,
+            &remote,
+            stepped_ms + 60_000,
+            stepped_ms + 60_000
+        ),
+        0
+    );
+}
+
+#[test]
+fn a_burst_of_queued_snapshots_does_not_lower_the_endpoint_clock() {
+    let (mut state, remote) = state_with_remote_endpoint();
+    state.set_endpoint_snapshot_for_generation(&remote, 4, Box::new(snapshot()));
+    let local_ms = 1_000_000_000_u64;
+    assert_eq!(
+        read_endpoint_snapshot_at(&mut state, &remote, local_ms + 600_000, local_ms),
+        600_000
+    );
+    // The connection stalled for five minutes, then delivered what queued up meanwhile
+    // all at once.
+    let drained_at_ms = local_ms + 300_000;
+    for queued_at_ms in [local_ms + 60_000, local_ms + 120_000, local_ms + 180_000] {
+        assert_eq!(
+            read_endpoint_snapshot_at(&mut state, &remote, queued_at_ms + 600_000, drained_at_ms),
+            600_000
+        );
+    }
+}
+
+fn context_usage_agent(
+    prompt_cache: Option<crate::protocol::ClientShellPromptCache>,
+) -> ClientShellAgent {
+    ClientShellAgent {
+        prompt_cache,
+        context_usage: Some(crate::protocol::ClientShellContextUsage {
+            used_tokens: 84_000,
+            window_tokens: Some(200_000),
+        }),
+        ..prompt_cache_agent()
+    }
+}
+
+#[test]
+fn agent_rows_show_context_usage_from_snapshot() {
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![context_usage_agent(None)];
+    let config = ClientShellConfig::from_config(&Config::default());
+
+    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None, 0);
+
+    let reading = crate::context_usage::ContextReading {
+        used_tokens: 84_000,
+        window_tokens: Some(200_000),
+    };
+    let lines: Vec<_> = rows.iter().flat_map(|row| row.rows.iter()).collect();
+    let context_lines: Vec<_> = lines
+        .iter()
+        .filter(|line| {
+            line.iter()
+                .any(|token| token.kind == crate::ui::ResolvedTokenKind::Context(reading))
+        })
+        .collect();
+    assert_eq!(context_lines.len(), 1);
+    assert!(context_lines[0]
+        .iter()
+        .all(|token| !matches!(token.kind, crate::ui::ResolvedTokenKind::Agent(_))));
+}
+
+#[test]
+fn default_agent_rows_show_the_context_percentage_at_sidebar_width_26() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.sidebar_width = 26;
+    let mut state = ClientShellState::new(config);
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![context_usage_agent(Some(
+        crate::protocol::ClientShellPromptCache {
+            last_request_at_ms: 1_000_000,
+            ttl_secs: 300,
+        },
+    ))];
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+    state.prompt_cache_now_ms = 1_048_000;
+
+    let frame = state.compose(106, 30).expect("composed frame");
+
+    let text = frame_rows(&frame).join("\n");
+    assert!(text.contains("ctx 84k/200k 42%"), "{text}");
+    assert!(text.contains("5m 4:12"), "{text}");
+}
+
+#[test]
+fn context_usage_alone_never_starts_the_prompt_cache_tick() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![context_usage_agent(None)];
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("composed frame");
+
+    state.prompt_cache_now_ms = 1_000_000;
+    assert!(!state.tick_prompt_cache(1_001_000));
 }

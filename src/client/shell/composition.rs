@@ -19,6 +19,51 @@ fn restore_mode_bar(
     }
 }
 
+/// Snapshot of the cells inside `rect`, row by row, clipped to the frame.
+fn save_frame_rect(frame: &FrameData, rect: Rect) -> Vec<crate::protocol::CellData> {
+    let width = usize::from(frame.width);
+    let x_end = usize::from(rect.right().min(frame.width));
+    let x_start = usize::from(rect.x).min(x_end);
+    let mut saved = Vec::new();
+    for y in rect.y..rect.bottom().min(frame.height) {
+        let row = usize::from(y) * width;
+        saved.extend_from_slice(&frame.cells[row + x_start..row + x_end]);
+    }
+    saved
+}
+
+/// Copies cells saved by `save_frame_rect` back and clears the cursor when it lies inside `rect`.
+fn restore_frame_rect(
+    frame: &mut FrameData,
+    rect: Rect,
+    cells: Option<&[crate::protocol::CellData]>,
+) {
+    let Some(cells) = cells else {
+        return;
+    };
+    let width = usize::from(frame.width);
+    let x_end = usize::from(rect.right().min(frame.width));
+    let x_start = usize::from(rect.x).min(x_end);
+    let run = x_end - x_start;
+    if run > 0 {
+        for (index, y) in (rect.y..rect.bottom().min(frame.height)).enumerate() {
+            let row = usize::from(y) * width;
+            let Some(saved) = cells.get(index * run..(index + 1) * run) else {
+                break;
+            };
+            frame.cells[row + x_start..row + x_end].clone_from_slice(saved);
+        }
+    }
+    if frame.cursor.as_ref().is_some_and(|cursor| {
+        cursor.x >= rect.x
+            && cursor.x < rect.right()
+            && cursor.y >= rect.y
+            && cursor.y < rect.bottom()
+    }) {
+        frame.cursor = None;
+    }
+}
+
 impl ClientShellState {
     fn compose_unavailable(&mut self, cols: u16, rows: u16) -> FrameData {
         let layout = self.layout(cols, rows);
@@ -49,7 +94,7 @@ impl ClientShellState {
         // A resize invalidates pane geometry, not the healthy Local workspace chrome.
         let local_snapshot = self.snapshot.as_deref().filter(|_| {
             self.endpoints.len() == 1
-                && !self.sidebar_collapsed
+                && !self.sidebar_layout_collapsed()
                 && layout.sidebar.width > 0
                 && self.endpoint_status(&self.active_endpoint_id)
                     == Some(ClientEndpointStatus::Online)
@@ -77,6 +122,7 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            prompt_cache_now_ms: self.prompt_cache_now_ms,
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -186,8 +232,20 @@ impl ClientShellState {
             return None;
         }
         let layout = self.layout(cols, rows);
-        if self.last_tab_bar_width != Some(layout.tab_bar.width) {
-            self.last_tab_bar_width = Some(layout.tab_bar.width);
+        let overlay_visible = self.sidebar_overlay_visible();
+        let render_layout = if overlay_visible {
+            self.sidebar_overlay_layout(cols, rows, layout)
+        } else {
+            layout
+        };
+        let overlay_rect = if overlay_visible {
+            render_layout.sidebar
+        } else {
+            Rect::default()
+        };
+        let sidebar_presented_collapsed = self.sidebar_layout_collapsed() && !overlay_visible;
+        if self.last_tab_bar_width != Some(render_layout.tab_bar.width) {
+            self.last_tab_bar_width = Some(render_layout.tab_bar.width);
             self.reveal_focused_tab = true;
         }
         let tab_drag_insert_index = match &self.chrome_drag {
@@ -207,7 +265,7 @@ impl ClientShellState {
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
         self.hits = render::render_shell(
             &mut buffer,
-            layout,
+            render_layout,
             snapshot,
             &self.config,
             render::ShellRenderState {
@@ -222,7 +280,7 @@ impl ClientShellState {
                 tab_scroll: &mut self.tab_scroll,
                 reveal_focused_workspace: &mut self.reveal_focused_workspace,
                 reveal_focused_tab: &mut self.reveal_focused_tab,
-                sidebar_collapsed: self.sidebar_collapsed,
+                sidebar_collapsed: sidebar_presented_collapsed,
                 sidebar_section_split: self.sidebar_section_split,
                 tab_drag_insert_index,
                 selected_workspace_id: self
@@ -233,8 +291,11 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                prompt_cache_now_ms: self.prompt_cache_now_ms,
             },
         );
+        self.hits.sidebar_overlay = overlay_rect;
+        super::sidebar_auto_hide::clip_tab_hits_under_sidebar_overlay(&mut self.hits);
         self.hits.panes = surface
             .panes
             .iter()
@@ -307,13 +368,26 @@ impl ClientShellState {
         if !self.config.mouse_capture {
             self.hits.pane_splits.clear();
         }
-        let mode_bar_area = if layout.mobile_header.is_empty()
+        let mode_bar_replaces_tab_bar = layout.mobile_header.is_empty()
             && self.config.tab_bar_position == TabBarPositionConfig::Bottom
-            && !layout.tab_bar.is_empty()
-        {
-            layout.tab_bar
+            && !render_layout.tab_bar.is_empty();
+        let mode_bar_base = if mode_bar_replaces_tab_bar {
+            render_layout.tab_bar
         } else {
             layout.pane_surface
+        };
+        // The drawer covers the left of both the tab bar and the pane surface.
+        let mode_bar_area = if overlay_visible {
+            let start = mode_bar_base.x.max(overlay_rect.right());
+            let trimmed = start - mode_bar_base.x;
+            Rect::new(
+                start,
+                mode_bar_base.y,
+                mode_bar_base.width.saturating_sub(trimmed),
+                mode_bar_base.height,
+            )
+        } else {
+            mode_bar_base
         };
         let mobile_navigate_panel = !layout.mobile_header.is_empty()
             && self.mode == ClientShellMode::Navigate
@@ -332,20 +406,25 @@ impl ClientShellState {
                 &self.config.palette,
             )
         };
-        if mode_bar == Some(layout.tab_bar) {
+        if mode_bar.is_some() && mode_bar_replaces_tab_bar {
             self.hits.tabs.clear();
             self.hits.new_tab = Rect::default();
             self.hits.tab_scroll_left = Rect::default();
             self.hits.tab_scroll_right = Rect::default();
         }
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
+        let overlay_cells = overlay_visible.then(|| save_frame_rect(&frame, overlay_rect));
         let mode_bar_cells = mode_bar.map(|bar| {
             let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
+        restore_frame_rect(&mut frame, overlay_rect, overlay_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
+        if overlay_visible {
+            occlusion.cover(self.hits.sidebar_overlay);
+        }
         let has_selection = self
             .selection
             .as_ref()
@@ -413,6 +492,7 @@ impl ClientShellState {
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         self.render_link_hover(&mut frame, &mut occlusion);
+        restore_frame_rect(&mut frame, overlay_rect, overlay_cells.as_deref());
         if self.mode == ClientShellMode::Copy {
             frame.cursor = None;
             if let Some(copy_mode) = self.copy_mode.as_ref() {
@@ -451,6 +531,7 @@ impl ClientShellState {
             }
         }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
+        restore_frame_rect(&mut frame, overlay_rect, overlay_cells.as_deref());
         self.hits.notification_toast = Rect::default();
         let has_config_diagnostic = self.config_diagnostic.is_some();
         let active_lifecycle = self

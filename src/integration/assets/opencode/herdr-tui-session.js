@@ -1,7 +1,7 @@
 // installed by herdr
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // HERDR_INTEGRATION_ID=opencode-tui
-// HERDR_INTEGRATION_VERSION=13
+// HERDR_INTEGRATION_VERSION=14
 
 import net from "node:net";
 
@@ -11,6 +11,17 @@ const ROUTE_POLL_INTERVAL_MS = 100;
 const SELECTION_RETRY_DELAYS_MS = [100, 400, 1_000];
 
 function requestOnce(sessionID, state, seq, isCurrent = () => true) {
+  return deliver(
+    state === undefined ? "pane.report_agent_session" : "pane.report_agent",
+    {
+      agent_session_id: sessionID,
+      ...(state === undefined ? { session_start_source: "select" } : { state, seq }),
+    },
+    isCurrent,
+  );
+}
+
+function deliver(method, params, isCurrent = () => true) {
   const paneId = process.env.HERDR_PANE_ID;
   const socketPath = process.env.HERDR_SOCKET_PATH;
   if (!paneId || !socketPath) {
@@ -23,13 +34,12 @@ function requestOnce(sessionID, state, seq, isCurrent = () => true) {
     id: `${SOURCE}:tui:${Date.now()}:${Math.floor(Math.random() * 1_000_000)
       .toString()
       .padStart(6, "0")}`,
-    method: state === undefined ? "pane.report_agent_session" : "pane.report_agent",
+    method,
     params: {
       pane_id: paneId,
       source: SOURCE,
       agent: AGENT,
-      agent_session_id: sessionID,
-      ...(state === undefined ? { session_start_source: "select" } : { state, seq }),
+      ...params,
     },
   };
 
@@ -60,6 +70,81 @@ function requestOnce(sessionID, state, seq, isCurrent = () => true) {
     client.on("end", () => settle(false));
     client.on("close", () => settle(false));
   });
+}
+
+// Context usage. The window comes from the plugin client's provider catalog:
+// `client.config.providers()` resolves to `{ data: { providers: Provider[] } }`
+// in the OpenCode v1 and v2 SDKs and the Kilo SDK, and the window is
+// `providers[i].models[modelID].limit.context` of the provider whose id matches
+// the assistant message's `providerID`. Neither agent exposes a prompt-cache
+// lifetime, so only the context fact is reported.
+const CONTEXT_REPORT_MEMORY = 256;
+const reportedContextMessages = new Set();
+const modelWindows = new Map();
+
+function tokenCount(value) {
+  if (value === undefined || value === null) return 0;
+  return Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+// Builds the report params for a finished assistant message, or null when the
+// message is still streaming, is not an assistant turn, or carries no usable
+// token counts (a turn that never reached the model leaves no reading).
+function contextUsageParams(info, windowTokens) {
+  const completed = info?.time?.completed;
+  if (info?.role !== "assistant" || !Number.isInteger(completed) || completed <= 0) return null;
+  const input = tokenCount(info.tokens?.input);
+  const read = tokenCount(info.tokens?.cache?.read);
+  const write = tokenCount(info.tokens?.cache?.write);
+  if (input === undefined || read === undefined || write === undefined) return null;
+  const used = input + read + write;
+  if (used === 0) return null;
+  const params = {
+    pane_id: process.env.HERDR_PANE_ID,
+    source: SOURCE,
+    used_tokens: used,
+    observed_at_ms: completed,
+  };
+  if (Number.isInteger(windowTokens) && windowTokens > 0) params.window_tokens = windowTokens;
+  return params;
+}
+
+// Returns true the first time a finished message is seen, so a replayed update
+// is not reported twice. Memory is bounded to the most recent messages.
+function claimContextReport(info) {
+  const key = `${info.id}:${info.time.completed}`;
+  if (reportedContextMessages.has(key)) return false;
+  reportedContextMessages.add(key);
+  if (reportedContextMessages.size > CONTEXT_REPORT_MEMORY) {
+    reportedContextMessages.delete(reportedContextMessages.values().next().value);
+  }
+  return true;
+}
+
+// Resolves a model's context window once per provider/model. Never throws: a
+// failed lookup is forgotten so a later message retries, and an unknown model
+// stays unknown (the reading is then tokens only).
+async function modelContextWindow(client, providerID, modelID) {
+  if (typeof providerID !== "string" || typeof modelID !== "string" || typeof client?.config?.providers !== "function") {
+    return undefined;
+  }
+  const key = `${providerID}/${modelID}`;
+  let lookup = modelWindows.get(key);
+  if (!lookup) {
+    lookup = (async () => {
+      const result = await client.config.providers();
+      const provider = result?.data?.providers?.find((candidate) => candidate?.id === providerID);
+      const limit = provider?.models?.[modelID]?.limit?.context;
+      return Number.isInteger(limit) && limit > 0 ? limit : undefined;
+    })();
+    modelWindows.set(key, lookup);
+  }
+  try {
+    return await lookup;
+  } catch {
+    modelWindows.delete(key);
+    return undefined;
+  }
 }
 
 export default {
@@ -377,12 +462,33 @@ async function tui(api) {
     }
   }
 
+  // Reports the finished assistant messages of the selected root session. The
+  // provider lookup runs in a detached task so it never delays a state report.
+  function reportContextUsage(info) {
+    const ctx = context;
+    if (!ctx || ctx.settled || !ctx.selected || info?.sessionID !== ctx.selected) return;
+    if (!contextUsageParams(info) || !claimContextReport(info)) return;
+    void (async () => {
+      const windowTokens = await modelContextWindow(api.client, info.providerID, info.modelID);
+      const params = contextUsageParams(info, windowTokens);
+      if (params && !disposed && context === ctx && !ctx.settled && ctx.selected === info.sessionID) {
+        await deliver("pane.report_context_usage", params);
+      }
+    })().catch(() => {});
+  }
+
   const subscriptions = [
     "session.created", "session.updated", "session.deleted", "session.status", "session.idle", "session.error",
     "permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected",
-    "message.part.updated",
+    "message.part.updated", "message.updated",
   ].map((type) => api.event.on(type, (event) => {
     if (type === "message.part.updated" && !terminalTool(event.properties?.part)) return;
+    if (type === "message.updated") {
+      // Context only: a message update says nothing about session state.
+      syncSelection();
+      reportContextUsage(event.properties?.info);
+      return;
+    }
     syncSelection();
     const ctx = context;
     if (!ctx || ctx.settled) return;

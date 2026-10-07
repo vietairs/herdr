@@ -682,3 +682,489 @@ function requestSessionPath(request: unknown): unknown {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
+
+function requestsFor(requests: unknown[], method: string): Record<string, unknown>[] {
+  return requests
+    .filter((request) => isRecord(request) && request.method === method)
+    .map((request) => (request as Record<string, unknown>).params as Record<string, unknown>);
+}
+
+function usageContext(
+  usage: unknown,
+  promptCache?: Record<string, number>,
+  isIdle: () => boolean = () => true,
+) {
+  return {
+    ...piContext(isIdle),
+    getContextUsage: () => usage,
+    model: promptCache ? { promptCache } : {},
+  };
+}
+
+function assistantMessage(usage: Record<string, number>) {
+  return { role: "assistant", timestamp: 1000, durationMs: 500, usage };
+}
+
+test("Pi reports exact context usage and the prompt cache on turn end", async () => {
+  const requests = await startRecordingServer("pi-usage-turn-end");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const context = usageContext(
+    { tokens: 84000, contextWindow: 200000, percent: 42 },
+    { short: 300, long: 3600 },
+  );
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  handlers.get("turn_end")?.(
+    { message: assistantMessage({ cacheRead: 10, cacheWrite: 5, cacheWrite1h: 5 }) },
+    context,
+  );
+  await waitFor(
+    () =>
+      requestsFor(requests, "pane.report_context_usage").length === 1 &&
+      requestsFor(requests, "pane.report_prompt_cache").length === 1,
+  );
+
+  const [usage] = requestsFor(requests, "pane.report_context_usage");
+  expect(usage.pane_id).toBe("test:p1");
+  expect(usage.source).toBe("herdr:pi");
+  expect(usage.used_tokens).toBe(84000);
+  expect(usage.window_tokens).toBe(200000);
+  expect(typeof usage.observed_at_ms).toBe("number");
+  const [cache] = requestsFor(requests, "pane.report_prompt_cache");
+  expect(cache.pane_id).toBe("test:p1");
+  expect(cache.source).toBe("herdr:pi");
+  // The request start, not the response end (timestamp + durationMs).
+  expect(cache.last_request_at_ms).toBe(1000);
+  expect(cache.ttl_secs).toBe(3600);
+});
+
+test("Pi read-only cache hit reuses the last written tier and skips without one", async () => {
+  const requests = await startRecordingServer("pi-cache-tier");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const context = usageContext(undefined, { short: 300, long: 3600 });
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+
+  // A read-only hit before any write has no tier to borrow.
+  handlers.get("turn_end")?.({ message: assistantMessage({ cacheRead: 10, cacheWrite: 0 }) }, context);
+  await Bun.sleep(50);
+  expect(requestsFor(requests, "pane.report_prompt_cache")).toHaveLength(0);
+
+  // A short write, then a read-only hit reuses the short tier.
+  handlers.get("turn_end")?.({ message: assistantMessage({ cacheRead: 0, cacheWrite: 7 }) }, context);
+  await waitFor(() => requestsFor(requests, "pane.report_prompt_cache").length === 1);
+  handlers.get("turn_end")?.({ message: assistantMessage({ cacheRead: 7, cacheWrite: 0 }) }, context);
+  await waitFor(() => requestsFor(requests, "pane.report_prompt_cache").length === 2);
+  expect(requestsFor(requests, "pane.report_prompt_cache").map((cache) => cache.ttl_secs)).toEqual([
+    300, 300,
+  ]);
+
+  // A new session forgets the remembered tier.
+  await handlers.get("session_start")?.({ reason: "new" }, context);
+  handlers.get("turn_end")?.({ message: assistantMessage({ cacheRead: 7, cacheWrite: 0 }) }, context);
+  await Bun.sleep(50);
+  expect(requestsFor(requests, "pane.report_prompt_cache")).toHaveLength(2);
+
+  // Messages that are not assistant replies or touch no cache report nothing.
+  handlers.get("turn_end")?.({ message: { role: "user", usage: { cacheWrite: 5 } } }, context);
+  handlers.get("turn_end")?.({ message: assistantMessage({ cacheRead: 0, cacheWrite: 0 }) }, context);
+  await Bun.sleep(50);
+  expect(requestsFor(requests, "pane.report_prompt_cache")).toHaveLength(2);
+});
+
+test("Pi skips the prompt cache when the model has no lifetime for the tier", async () => {
+  const requests = await startRecordingServer("pi-cache-no-ttl");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const message = assistantMessage({ cacheRead: 0, cacheWrite: 5, cacheWrite1h: 5 });
+  for (const promptCache of [undefined, { short: 300 }, { long: 0 }, { long: 90000 }, { long: 1.5 }]) {
+    const context = usageContext(undefined, promptCache as Record<string, number> | undefined);
+    await handlers.get("session_start")?.({ reason: "startup" }, context);
+    handlers.get("turn_end")?.({ message }, context);
+  }
+  await Bun.sleep(50);
+
+  expect(requestsFor(requests, "pane.report_prompt_cache")).toHaveLength(0);
+});
+
+test("Pi clears context usage when tokens are null after compaction", async () => {
+  const requests = await startRecordingServer("pi-context-clear");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const context = usageContext({ tokens: null, contextWindow: 200000, percent: null });
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  handlers.get("turn_end")?.({}, context);
+  await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+
+  const [usage] = requestsFor(requests, "pane.report_context_usage");
+  expect(usage.clear).toBe(true);
+  expect(usage.used_tokens).toBeUndefined();
+  expect(usage.window_tokens).toBeUndefined();
+  expect(usage.observed_at_ms).toBeUndefined();
+});
+
+test("Pi omits an unusable window and rejects unusable token counts", async () => {
+  const requests = await startRecordingServer("pi-context-shape");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const readings: unknown[] = [
+    { tokens: 5000, contextWindow: 0 },
+    { tokens: -1, contextWindow: 200000 },
+    { tokens: 1.5, contextWindow: 200000 },
+    { tokens: "5", contextWindow: 200000 },
+    null,
+  ];
+  let reading: unknown = readings[0];
+  const context = { ...piContext(() => true), getContextUsage: () => reading };
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  for (reading of readings) {
+    handlers.get("turn_end")?.({}, context);
+  }
+  await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+  await Bun.sleep(50);
+
+  const sent = requestsFor(requests, "pane.report_context_usage");
+  expect(sent).toHaveLength(1);
+  expect(sent[0].used_tokens).toBe(5000);
+  expect("window_tokens" in sent[0]).toBe(false);
+});
+
+test("Pi reports context usage when the agent settles", async () => {
+  const requests = await startRecordingServer("pi-context-settled");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const context = usageContext({ tokens: 1200, contextWindow: 100000, percent: 1 });
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  handlers.get("agent_settled")?.({}, context);
+  await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+
+  expect(requestsFor(requests, "pane.report_context_usage")[0].used_tokens).toBe(1200);
+});
+
+test("Oh My Pi reports exact context usage after a tool and at agent end, and never a prompt cache", async () => {
+  const requests = await startRecordingServer("omp-context-usage");
+  process.env.HERDR_OMP_IDLE_DEBOUNCE_MS = "0";
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+  install(pi);
+
+  let idle = true;
+  const context = {
+    hasUI: true,
+    isIdle: () => idle,
+    getContextUsage: () => ({ tokens: 42000, contextWindow: 1000000, percent: 4.2 }),
+    model: { promptCache: { short: 300, long: 3600 } },
+    sessionManager: {
+      getSessionFile: () => undefined,
+      getSessionId: () => undefined,
+    },
+  };
+  handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+
+  idle = false;
+  handlers.get("agent_start")?.({}, context);
+  handlers.get("tool_execution_end")?.({ toolName: "read" }, context);
+  await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+
+  handlers.get("agent_end")?.({ messages: [assistantMessage({ cacheRead: 3, cacheWrite: 4 })] }, context);
+  await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 2);
+
+  for (const usage of requestsFor(requests, "pane.report_context_usage")) {
+    expect(usage.source).toBe("herdr:omp");
+    expect(usage.used_tokens).toBe(42000);
+    expect(usage.window_tokens).toBe(1000000);
+  }
+  expect(requestsFor(requests, "pane.report_prompt_cache")).toHaveLength(0);
+  expect(handlers.has("turn_end")).toBe(false);
+});
+
+test("Oh My Pi reports nothing when the extension API has no context usage", async () => {
+  const requests = await startRecordingServer("omp-context-missing");
+  process.env.HERDR_OMP_IDLE_DEBOUNCE_MS = "0";
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+  install(pi);
+
+  const context = {
+    hasUI: true,
+    isIdle: () => true,
+    getContextUsage: () => undefined,
+    sessionManager: { getSessionFile: () => undefined, getSessionId: () => undefined },
+  };
+  handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+  handlers.get("tool_execution_end")?.({ toolName: "read" }, context);
+  await Bun.sleep(50);
+
+  expect(requestsFor(requests, "pane.report_context_usage")).toHaveLength(0);
+});
+
+test("context reports are skipped outside herdr", async () => {
+  const requests = await startRecordingServer("context-outside-herdr");
+  delete process.env.HERDR_ENV;
+  const usage = { tokens: 100, contextWindow: 1000, percent: 10 };
+
+  for (const integration of integrations) {
+    const { handlers, pi } = createExtensionHarness();
+    const { default: install } = await importFresh(integration.modulePath);
+    install(pi);
+    const context = usageContext(usage, { short: 300, long: 3600 });
+    handlers.get("turn_end")?.({ message: assistantMessage({ cacheWrite: 1 }) }, context);
+    handlers.get("agent_settled")?.({}, context);
+    handlers.get("tool_execution_end")?.({ toolName: "read" }, context);
+    handlers.get("agent_end")?.({}, context);
+  }
+  await Bun.sleep(50);
+
+  expect(requests).toEqual([]);
+});
+
+// OpenCode and Kilo report the context fact for each finished assistant
+// message, with the window taken from the plugin client's provider catalog.
+
+function providerCatalogClient(contextLimit: number | undefined, calls: { count: number }) {
+  return {
+    config: {
+      async providers() {
+        calls.count += 1;
+        return {
+          data: {
+            providers: [
+              {
+                id: "anthropic",
+                models: {
+                  "claude-opus": contextLimit === undefined ? {} : { limit: { context: contextLimit, output: 32000 } },
+                },
+              },
+            ],
+          },
+        };
+      },
+    },
+  };
+}
+
+function finishedAssistantMessage(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "message-1",
+    sessionID: "root-session",
+    role: "assistant",
+    providerID: "anthropic",
+    modelID: "claude-opus",
+    time: { created: 1_700_000_000_000, completed: 1_700_000_005_000 },
+    tokens: { input: 4000, output: 900, reasoning: 0, cache: { read: 80000, write: 0 } },
+    ...overrides,
+  };
+}
+
+function messageUpdated(info: Record<string, unknown>) {
+  return { event: { type: "message.updated", properties: { info } } };
+}
+
+async function startContextPlugin(
+  socketPlugin: (typeof socketPlugins)[number],
+  name: string,
+  client: unknown,
+) {
+  const requests = await startRecordingServer(name);
+  process.argv = ["bun", "/$bunfs/root/src/index.js", "run"];
+  const { HerdrAgentStatePlugin } = await importFresh(socketPlugin.modulePath);
+  const plugin = await HerdrAgentStatePlugin({ client });
+  return { requests, plugin };
+}
+
+for (const socketPlugin of socketPlugins) {
+  const slug = socketPlugin.name.toLowerCase();
+
+  test(`${socketPlugin.name} reports exact context usage for a finished assistant message`, async () => {
+    const calls = { count: 0 };
+    const { requests, plugin } = await startContextPlugin(
+      socketPlugin,
+      `${slug}-context-exact`,
+      providerCatalogClient(200000, calls),
+    );
+
+    await plugin.event(messageUpdated(finishedAssistantMessage()));
+    await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+
+    const [usage] = requestsFor(requests, "pane.report_context_usage");
+    expect(usage.pane_id).toBe("test:p1");
+    expect(usage.source).toBe(`herdr:${slug}`);
+    expect(usage.used_tokens).toBe(84000);
+    expect(usage.window_tokens).toBe(200000);
+    expect(usage.observed_at_ms).toBe(1_700_000_005_000);
+    expect(requestsFor(requests, "pane.report_prompt_cache")).toHaveLength(0);
+  });
+
+  test(`${socketPlugin.name} sums input, cache read and cache write`, async () => {
+    const { requests, plugin } = await startContextPlugin(
+      socketPlugin,
+      `${slug}-context-sum`,
+      providerCatalogClient(200000, { count: 0 }),
+    );
+
+    await plugin.event(
+      messageUpdated(
+        finishedAssistantMessage({ tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 200, write: 3000 } } }),
+      ),
+    );
+    await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+
+    expect(requestsFor(requests, "pane.report_context_usage")[0].used_tokens).toBe(3210);
+  });
+
+  test(`${socketPlugin.name} skips streaming and user messages`, async () => {
+    const { requests, plugin } = await startContextPlugin(
+      socketPlugin,
+      `${slug}-context-skips`,
+      providerCatalogClient(200000, { count: 0 }),
+    );
+
+    await plugin.event(messageUpdated(finishedAssistantMessage({ id: "streaming", time: { created: 1 } })));
+    await plugin.event(messageUpdated(finishedAssistantMessage({ id: "user-turn", role: "user" })));
+    await plugin.event(messageUpdated(finishedAssistantMessage({ id: "empty", tokens: undefined })));
+    await Bun.sleep(50);
+
+    expect(requestsFor(requests, "pane.report_context_usage")).toHaveLength(0);
+  });
+
+  test(`${socketPlugin.name} reports tokens only when the provider lookup fails`, async () => {
+    const failing = {
+      config: {
+        async providers() {
+          throw new Error("catalog unavailable");
+        },
+      },
+    };
+    const { requests, plugin } = await startContextPlugin(socketPlugin, `${slug}-context-lookup-fails`, failing);
+
+    await plugin.event(messageUpdated(finishedAssistantMessage()));
+    await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+
+    const [usage] = requestsFor(requests, "pane.report_context_usage");
+    expect(usage.used_tokens).toBe(84000);
+    expect("window_tokens" in usage).toBe(false);
+  });
+
+  test(`${socketPlugin.name} reports tokens only when the model has no catalog limit`, async () => {
+    const { requests, plugin } = await startContextPlugin(
+      socketPlugin,
+      `${slug}-context-no-limit`,
+      providerCatalogClient(undefined, { count: 0 }),
+    );
+
+    await plugin.event(messageUpdated(finishedAssistantMessage()));
+    await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+
+    expect("window_tokens" in requestsFor(requests, "pane.report_context_usage")[0]).toBe(false);
+  });
+
+  test(`${socketPlugin.name} looks a model up once`, async () => {
+    const calls = { count: 0 };
+    const { requests, plugin } = await startContextPlugin(
+      socketPlugin,
+      `${slug}-context-lookup-once`,
+      providerCatalogClient(200000, calls),
+    );
+
+    await Promise.all([
+      plugin.event(messageUpdated(finishedAssistantMessage({ id: "message-1" }))),
+      plugin.event(messageUpdated(finishedAssistantMessage({ id: "message-2" }))),
+    ]);
+    await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 2);
+    await plugin.event(messageUpdated(finishedAssistantMessage({ id: "message-3" })));
+    await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 3);
+
+    expect(calls.count).toBe(1);
+  });
+
+  test(`${socketPlugin.name} reports each finished message once`, async () => {
+    const { requests, plugin } = await startContextPlugin(
+      socketPlugin,
+      `${slug}-context-once`,
+      providerCatalogClient(200000, { count: 0 }),
+    );
+
+    await plugin.event(messageUpdated(finishedAssistantMessage()));
+    await plugin.event(messageUpdated(finishedAssistantMessage()));
+    await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+    await Bun.sleep(50);
+
+    expect(requestsFor(requests, "pane.report_context_usage")).toHaveLength(1);
+  });
+
+  test(`${socketPlugin.name} does not delay state reports behind the provider lookup`, async () => {
+    let releaseCatalog: () => void = () => {};
+    const slowCatalog = {
+      config: {
+        providers: () =>
+          new Promise((resolve) => {
+            releaseCatalog = () => resolve({ data: { providers: [] } });
+          }),
+      },
+    };
+    const { requests, plugin } = await startContextPlugin(socketPlugin, `${slug}-context-slow-catalog`, slowCatalog);
+
+    await plugin.event(messageUpdated(finishedAssistantMessage()));
+    await plugin.event({
+      event: { type: "session.idle", properties: { sessionID: "root-session" } },
+    });
+    await waitFor(() => requestsFor(requests, "pane.report_agent").length === 1);
+    expect(requestsFor(requests, "pane.report_context_usage")).toHaveLength(0);
+
+    releaseCatalog();
+    await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+  });
+
+  test(`${socketPlugin.name} reports tokens only without a client and stays disabled outside herdr`, async () => {
+    const requests = await startRecordingServer(`${slug}-context-no-client`);
+    process.argv = ["bun", "/$bunfs/root/src/index.js", "run"];
+    const { HerdrAgentStatePlugin } = await importFresh(socketPlugin.modulePath);
+    const plugin = await HerdrAgentStatePlugin();
+
+    await plugin.event(messageUpdated(finishedAssistantMessage()));
+    await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+    expect("window_tokens" in requestsFor(requests, "pane.report_context_usage")[0]).toBe(false);
+
+    delete process.env.HERDR_ENV;
+    expect(await HerdrAgentStatePlugin({ client: providerCatalogClient(1, { count: 0 }) })).toEqual({});
+  });
+}
+
+for (const socketPlugin of socketPlugins) {
+  test(`${socketPlugin.name} skips child-session messages`, async () => {
+    const { requests, plugin } = await startContextPlugin(
+      socketPlugin,
+      `${socketPlugin.name.toLowerCase()}-context-child`,
+      providerCatalogClient(200000, { count: 0 }),
+    );
+
+    await plugin.event({
+      event: {
+        type: "session.created",
+        properties: { sessionID: "child-session", info: { id: "child-session", parentID: "root-session" } },
+      },
+    });
+    await plugin.event(messageUpdated(finishedAssistantMessage({ id: "child-message", sessionID: "child-session" })));
+    await plugin.event(messageUpdated(finishedAssistantMessage({ id: "root-message" })));
+    await waitFor(() => requestsFor(requests, "pane.report_context_usage").length === 1);
+    await Bun.sleep(50);
+
+    const usages = requestsFor(requests, "pane.report_context_usage");
+    expect(usages).toHaveLength(1);
+    expect(usages[0].used_tokens).toBe(84000);
+  });
+}

@@ -316,6 +316,8 @@ impl RemoteMirror {
                 tokens: HashMap::new(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
         pane_id
@@ -746,6 +748,8 @@ mod tests {
             tokens: Default::default(),
             agent_session: None,
             scroll: None,
+            prompt_cache: None,
+            context_usage: None,
             revision: 0,
         }
     }

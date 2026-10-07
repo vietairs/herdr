@@ -311,6 +311,8 @@ The active palette is applied in this order: built-in theme, `[theme.custom]`, t
 
 The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
 
+Set `sidebar_auto_hide = true` under `[ui]`, or turn on **Settings → Sidebar**, to keep the sidebar collapsed while you work. Moving the pointer onto the collapsed strip (or the left edge when `sidebar_collapsed_mode = "hidden"`) opens the full sidebar over the panes, and moving away hides it again; navigate mode also shows it. The panes keep their size while the sidebar is open over them. `toggle_sidebar` docks the sidebar open until you toggle it again. Drag the sidebar edge to change its width, or bind `keys.grow_sidebar` and `keys.shrink_sidebar` to change it by 2 columns within `ui.sidebar_min_width` and `ui.sidebar_max_width`.
+
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
@@ -368,7 +370,8 @@ The expanded desktop sidebar renders each inner array in `rows` as one line. The
 row_gap = 0
 rows = [
   ["state_icon", "machine", "workspace", "tab"],
-  ["agent"],
+  ["agent", "prompt_cache"],
+  ["context"],
 ]
 
 [ui.sidebar.spaces]
@@ -390,6 +393,8 @@ Agent rows accept these built-in tokens:
 - `agent` — detected or reported agent display name.
 - `terminal_title` — latest OSC 0/2 terminal title after safety normalization.
 - `terminal_title_stripped` — the terminal title with one recognized leading activity or spinner glyph and its following whitespace removed.
+- `prompt_cache` — prompt-cache countdown such as `5m 4:12`, coloured from green to red as the cache nears expiry and shown as `cold` once it has expired. It renders nothing until an integration reports a cache time (the Claude Code and Pi integrations do), and it updates once per second only while a countdown is visible.
+- `context` — context-window use such as `ctx 84k/200k 42%`, green below 50 %, yellow from 50 %, red from 80 %. When the integration can report only the tokens used, it shows `ctx 84k` with no percentage and no colour. Herdr never guesses a window. It renders nothing until an integration reports usage.
 - `$name` — custom pane metadata named `name`.
 
 Space rows accept these built-in tokens:
@@ -432,7 +437,7 @@ The first matching rule wins. Its specified style fields override the occurrence
 
 `gt` and `lt` take finite numeric thresholds and compare strictly greater or less, not equal. Values must parse completely as finite numbers; decimal and exponent forms work, but whitespace, units, `NaN`, and infinity do not match. `ignore_case` is not accepted on numeric rules. Comparisons use floating-point numbers, not exact large-integer arithmetic.
 
-Rules work with text-valued built-ins and custom `$name` tokens in Agent rows, `rows_by_agent` overrides, and Space rows. Custom tokens match their reported value: `$load` reporting `"90"` selects red and bold above, `"60"` selects yellow, and `"90%"` keeps white. Unreported tokens still disappear. `state_icon` and composite `git_status` accept fixed styles only, not rules. Unknown conditions and malformed rules are rejected when loading config; regex, fuzzy matching, and scripts are not supported.
+Rules work with text-valued built-ins and custom `$name` tokens in Agent rows, `rows_by_agent` overrides, and Space rows. Custom tokens match their reported value: `$load` reporting `"90"` selects red and bold above, `"60"` selects yellow, and `"90%"` keeps white. Unreported tokens still disappear. `state_icon`, composite `git_status`, `prompt_cache`, and `context` accept fixed styles only, not rules. Unknown conditions and malformed rules are rejected when loading config; regex, fuzzy matching, and scripts are not supported.
 
 `row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
 

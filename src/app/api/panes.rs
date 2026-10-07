@@ -2464,7 +2464,7 @@ fn normalize_state_labels(
         .collect()
 }
 
-fn pane_not_found(id: String, pane_id: &str) -> String {
+pub(super) fn pane_not_found(id: String, pane_id: &str) -> String {
     encode_error(id, "pane_not_found", format!("pane {pane_id} not found"))
 }
 
@@ -5206,6 +5206,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             }],
             layouts: Vec::new(),

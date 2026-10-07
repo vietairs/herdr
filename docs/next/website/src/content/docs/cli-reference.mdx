@@ -339,6 +339,18 @@ Metadata text is normalized before storage. Herdr trims surrounding whitespace, 
 
 `--source` and `--applies-to-source` must be 80 characters or fewer and may contain only ASCII letters, digits, colon, dot, underscore, and hyphen. `--ttl-ms` makes metadata expire automatically and must be between `1` and `86400000` milliseconds. Omit it for metadata that should stay until replaced, cleared, or the pane closes. `--seq` lets Herdr ignore stale reports from the same `--source`; stale reports are accepted by the API but ignored by pane state. A pane or workspace accepts sequenced token reports from at most 32 distinct sources during its lifetime; clearing or expiry does not release those source slots.
 
+```bash
+herdr pane report-prompt-cache <pane_id> --source ID (--last-request-at MS|now [--ttl SECS] | --clear)
+```
+
+Reports when the agent in a pane last sent a model request that used its prompt cache. `--last-request-at` takes unix epoch milliseconds or `now`; `--ttl` is the cache lifetime in seconds (1 to 86400) and defaults to the previously reported value, or 300. Reports older than the stored time are ignored. `--clear` removes the value. Herdr also clears it when the agent is released or a new agent session starts. The value appears as `prompt_cache` on `pane.get` and `agent.get` and drives the `prompt_cache` sidebar token. It is not kept across a server restart.
+
+```bash
+herdr pane report-context-usage <pane_id> --source ID (--used TOKENS [--window TOKENS] [--observed-at MS|now] | --clear)
+```
+
+Reports how many tokens the agent's current context uses and, when the agent knows it, the exact context window. `--used` and `--window` are token counts up to 100000000; `--observed-at` takes unix epoch milliseconds or `now` and defaults to now. A report observed earlier than the stored one is ignored, and a report without `--window` keeps the previously reported window. `--clear` removes the value; Herdr also clears it when the agent is released or a new agent session starts. The value appears as `context_usage` on `pane.get` and `agent.get` and drives the `context` sidebar token. It is not kept across a server restart.
+
 ## Agents
 
 For the pane-versus-agent model and complete orchestration examples, see [Agent automation](/docs/agent-automation/).

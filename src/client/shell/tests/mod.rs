@@ -70,6 +70,7 @@ pub(super) fn snapshot() -> ClientShellSnapshot {
         commands: Vec::new(),
         remote_mount_attempts: Vec::new(),
         recent_remote_mount_targets: Vec::new(),
+        server_now_ms: 0,
     }
 }
 
@@ -207,6 +208,8 @@ fn pane_scroll_result(
                 max_offset_from_bottom,
                 viewport_rows,
             }),
+            prompt_cache: None,
+            context_usage: None,
             revision: 0,
         },
     }
@@ -268,4 +271,6 @@ mod mobile;
 mod mouse_selection;
 mod popup_focus_projection;
 mod remote_mount;
+mod sidebar_auto_hide;
+mod sidebar_width_keys;
 mod startup_overlays;

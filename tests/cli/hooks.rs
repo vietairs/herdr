@@ -186,6 +186,69 @@ fn claude_hook_ignores_cursor_compatibility_payloads() {
 }
 
 #[test]
+fn claude_cache_hook_ignores_session_start_and_subagents() {
+    assert!(run_claude_hook("cache", r#"{"hook_event_name":"SessionStart"}"#).is_none());
+    assert!(run_claude_hook(
+        "cache",
+        r#"{"hook_event_name":"Stop","agent_id":"agent-abc123","agent_type":"Explore"}"#,
+    )
+    .is_none());
+}
+
+#[test]
+fn claude_cache_hook_reports_prompt_cache_from_transcript() {
+    let transcript =
+        std::env::temp_dir().join(format!("herdr-claude-cache-{}.jsonl", std::process::id()));
+    fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"assistant","isSidechain":false,"timestamp":"2026-10-07T01:12:33.123Z","message":{"model":"claude-opus-4","usage":{"input_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":0}}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let hook_input = serde_json::json!({
+        "hook_event_name": "Stop",
+        "transcript_path": transcript,
+    })
+    .to_string();
+
+    let request = run_claude_hook("cache", &hook_input);
+    let _ = fs::remove_file(&transcript);
+    let request = request.expect("a cache-bearing transcript entry should be reported");
+
+    assert_eq!(request["method"], "pane.report_prompt_cache");
+    assert_eq!(request["params"]["ttl_secs"], 300);
+}
+
+#[test]
+fn claude_cache_hook_reports_context_tokens_for_uncached_entry() {
+    let transcript =
+        std::env::temp_dir().join(format!("herdr-claude-context-{}.jsonl", std::process::id()));
+    fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"assistant","isSidechain":false,"timestamp":"2026-10-07T01:12:33.123Z","message":{"model":"claude-opus-4","usage":{"input_tokens":1200}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let hook_input = serde_json::json!({
+        "hook_event_name": "Stop",
+        "transcript_path": transcript,
+    })
+    .to_string();
+
+    let request = run_claude_hook("cache", &hook_input);
+    let _ = fs::remove_file(&transcript);
+    let request = request.expect("an uncached transcript entry should still report context");
+
+    assert_eq!(request["method"], "pane.report_context_usage");
+    assert_eq!(request["params"]["used_tokens"], 1200);
+    assert!(request["params"].get("window_tokens").is_none());
+}
+
+#[test]
 fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_sessions() {
     let request = run_codex_hook(
         "session",
@@ -222,6 +285,62 @@ fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_ses
         &[("CODEX_THREAD_ID", "parent-session")],
     )
     .is_none());
+}
+
+#[test]
+fn codex_usage_hook_reports_context_usage_from_rollout() {
+    let rollout =
+        std::env::temp_dir().join(format!("herdr-codex-usage-{}.jsonl", std::process::id()));
+    fs::write(
+        &rollout,
+        concat!(
+            r#"{"timestamp":"2026-10-07T01:12:33.123Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":84000,"cached_input_tokens":42000},"model_context_window":258400}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let hook_input = serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": "codex-session",
+        "transcript_path": rollout,
+    })
+    .to_string();
+
+    let request = run_codex_hook("usage", &hook_input);
+    let _ = fs::remove_file(&rollout);
+    let request = request.expect("a token_count rollout entry should be reported");
+
+    assert_eq!(request["method"], "pane.report_context_usage");
+    assert_eq!(request["params"]["source"], "herdr:codex");
+    assert_eq!(request["params"]["used_tokens"], 84000);
+    assert_eq!(request["params"]["window_tokens"], 258400);
+}
+
+#[test]
+fn codex_usage_hook_ignores_non_stop_events() {
+    let rollout = std::env::temp_dir().join(format!(
+        "herdr-codex-usage-ignored-{}.jsonl",
+        std::process::id()
+    ));
+    fs::write(
+        &rollout,
+        concat!(
+            r#"{"timestamp":"2026-10-07T01:12:33.123Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":84000},"model_context_window":258400}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let hook_input = serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "session_id": "codex-session",
+        "transcript_path": rollout,
+    })
+    .to_string();
+
+    let request = run_codex_hook("usage", &hook_input);
+    let _ = fs::remove_file(&rollout);
+
+    assert!(request.is_none());
 }
 
 #[test]

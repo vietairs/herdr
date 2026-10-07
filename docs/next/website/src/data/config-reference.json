@@ -836,6 +836,18 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.grow_sidebar",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Widen the sidebar by 2 columns, up to ui.sidebar_max_width. Unset by default."
+        },
+        {
+          "key": "keys.shrink_sidebar",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Narrow the sidebar by 2 columns, down to ui.sidebar_min_width. Unset by default."
+        },
+        {
           "key": "keys.indexed.tabs",
           "type": "string",
           "default": "unset",
@@ -892,6 +904,12 @@
             "compact",
             "hidden"
           ]
+        },
+        {
+          "key": "ui.sidebar_auto_hide",
+          "type": "boolean",
+          "default": "false",
+          "description": "Keep the sidebar collapsed (per ui.sidebar_collapsed_mode) while you work and show it as a drawer over the panes when the pointer reaches the collapsed strip or left edge, or in navigate mode. toggle_sidebar docks it open. Also available in Settings."
         },
         {
           "key": "ui.mobile_width_threshold",
@@ -1069,8 +1087,8 @@
         {
           "key": "ui.sidebar.agents.rows",
           "type": "list of token rows",
-          "default": "[[\"state_icon\", \"machine\", \"workspace\", \"tab\"], [\"agent\"]]",
-          "description": "Default expanded Agent sidebar layout. Entries may be token strings or inline { token, fg, bold, dim, rules } style tables. Text-valued built-ins and $name metadata tokens accept up to 16 ordered rules using equals, contains, starts_with, gt, or lt; the first match overrides specified styles. Text conditions optionally accept ignore_case for ASCII matching; numeric conditions require full finite numbers. state_icon accepts fixed styles only. At most 16 rows and 16 tokens per row."
+          "default": "[[\"state_icon\", \"machine\", \"workspace\", \"tab\"], [\"agent\", \"prompt_cache\"], [\"context\"]]",
+          "description": "Default expanded Agent sidebar layout. Entries may be token strings or inline { token, fg, bold, dim, rules } style tables. Text-valued built-ins and $name metadata tokens accept up to 16 ordered rules using equals, contains, starts_with, gt, or lt; the first match overrides specified styles. Text conditions optionally accept ignore_case for ASCII matching; numeric conditions require full finite numbers. state_icon accepts fixed styles only. At most 16 rows and 16 tokens per row. prompt_cache shows the prompt-cache countdown reported through pane.report_prompt_cache (5m 4:12, cold) and renders nothing when no report exists. context shows the agent's context-window use reported through pane.report_context_usage (ctx 84k/200k 42%, green below 50%, yellow from 50%, red from 80%); without a reported window it shows only the tokens used."
         },
         {
           "key": "ui.sidebar.agents.rows_by_agent",
