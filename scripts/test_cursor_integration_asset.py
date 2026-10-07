@@ -7,6 +7,7 @@ exact keys the reporter accepts and that anything else sends nothing.
 """
 
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -41,6 +42,7 @@ def tap(original, stdin, env, tap_path=TAP_ASSET):
     return run_tap(original, stdin, env, tap_path=tap_path)
 
 
+@unittest.skipIf(os.name == "nt", "runs the POSIX shell asset against a Unix-socket fake server")
 class CursorStatuslineTapTests(unittest.TestCase):
     def assert_passthrough(self, result, stdin=TOTAL_INPUT_FIXTURE):
         self.assertEqual(result.stdout, "OUT:" + stdin, result.stderr)

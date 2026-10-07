@@ -169,6 +169,7 @@ def stop_payload(**extra):
     return payload
 
 
+@unittest.skipIf(os.name == "nt", "runs the POSIX shell asset against a Unix-socket fake server")
 class CodexUsageHookTests(unittest.TestCase):
     def test_stop_reports_last_token_count_with_window(self):
         older, newer = BASE_MS, BASE_MS + 30_000

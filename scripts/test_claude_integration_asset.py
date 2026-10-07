@@ -302,6 +302,7 @@ def by_method(requests, method):
     return [request for request in requests if request["method"] == method]
 
 
+@unittest.skipIf(os.name == "nt", "runs the POSIX shell asset against a Unix-socket fake server")
 class ClaudeIntegrationAssetTests(unittest.TestCase):
     def test_stop_reports_latest_cache_request_with_one_hour_ttl(self):
         t0, t1 = BASE_MS, BASE_MS + 60_000
@@ -503,6 +504,7 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
             self.assertIn("# HERDR_INTEGRATION_VERSION=11", asset.read_text("utf-8"))
 
 
+@unittest.skipIf(os.name == "nt", "runs the POSIX shell asset against a Unix-socket fake server")
 class ClaudeStatuslineTapTests(unittest.TestCase):
     def assert_passthrough(self, result, stdin=STATUSLINE_FIXTURE):
         self.assertEqual(result.stdout, "OUT:" + stdin, result.stderr)

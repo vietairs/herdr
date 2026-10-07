@@ -63,6 +63,7 @@ def stop(**fields):
     return {"hook_event_name": "Stop", "session_id": "s1", **fields}
 
 
+@unittest.skipIf(os.name == "nt", "runs the POSIX shell asset against a Unix-socket fake server")
 class QwenUsageActionTests(unittest.TestCase):
     def test_stop_reports_used_and_window(self):
         calls = run_hook(stop(input_tokens=84000, context_limit=262144))
@@ -134,6 +135,7 @@ class QwenUsageActionTests(unittest.TestCase):
         self.assertEqual(run_hook(stop(input_tokens=84000), action="bogus"), [])
 
 
+@unittest.skipIf(os.name == "nt", "runs the POSIX shell asset against a Unix-socket fake server")
 class QwenSessionActionTests(unittest.TestCase):
     def test_session_action_unchanged(self):
         calls = run_hook(

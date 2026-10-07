@@ -6,6 +6,7 @@ only compiles on Linux.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -50,6 +51,7 @@ def tap(original, stdin, env, tap_path=TAP_ASSET):
     return run_tap(original, stdin, env, tap_path=tap_path)
 
 
+@unittest.skipIf(os.name == "nt", "runs the POSIX shell asset against a Unix-socket fake server")
 class AntigravityStatuslineTapTests(unittest.TestCase):
     def assert_passthrough(self, result, stdin=STATUSLINE_FIXTURE):
         self.assertEqual(result.stdout, "OUT:" + stdin, result.stderr)
