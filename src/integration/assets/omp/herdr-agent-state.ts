@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=omp
-// HERDR_INTEGRATION_VERSION=10
+// HERDR_INTEGRATION_VERSION=11
 // @ts-nocheck
 
 import net from "node:net";
@@ -242,6 +242,36 @@ function askBlockedMessage(args: any): string {
   return "waiting for user input";
 }
 
+// Reports the agent's exact context usage. Fire and forget: it never throws and
+// a missing or malformed reading sends nothing.
+async function reportContextUsage(ctx: any): Promise<void> {
+  try {
+    const usage = ctx?.getContextUsage?.();
+    if (!usage || typeof usage !== "object") {
+      return;
+    }
+    const params: Record<string, unknown> = { pane_id: paneId, source };
+    if (usage.tokens === null) {
+      params.clear = true;
+    } else if (Number.isInteger(usage.tokens) && usage.tokens >= 0) {
+      params.used_tokens = usage.tokens;
+      if (Number.isInteger(usage.contextWindow) && usage.contextWindow > 0) {
+        params.window_tokens = usage.contextWindow;
+      }
+      params.observed_at_ms = Date.now();
+    } else {
+      return;
+    }
+    await sendRequest({
+      id: `${source}:context:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      method: "pane.report_context_usage",
+      params,
+    });
+  } catch {
+    // Reporting context usage must never disturb the agent.
+  }
+}
+
 export default function (pi) {
   if (!enabled()) {
     return;
@@ -427,6 +457,9 @@ export default function (pi) {
   });
 
   pi.on("tool_execution_end", (event, ctx) => {
+    if (rootSession) {
+      void reportContextUsage(ctx);
+    }
     if (event?.toolName !== "ask") {
       return;
     }
@@ -436,10 +469,11 @@ export default function (pi) {
     deactivateBlocked();
   });
 
-  pi.on("agent_end", (event) => {
+  pi.on("agent_end", (event, ctx) => {
     if (!rootSession) {
       return;
     }
+    void reportContextUsage(ctx);
     if (!agentActive) {
       // OMP can emit duplicate/late end events while auto-retry is already
       // holding the pane in Working. Do not let an unqualified duplicate end

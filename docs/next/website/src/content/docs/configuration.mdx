@@ -311,6 +311,8 @@ The active palette is applied in this order: built-in theme, `[theme.custom]`, t
 
 The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
 
+Set `sidebar_auto_hide = true` under `[ui]`, or turn on **Settings → Sidebar**, to keep the sidebar collapsed while you work. Moving the pointer onto the collapsed strip (or the left edge when `sidebar_collapsed_mode = "hidden"`) opens the full sidebar over the panes, and moving away hides it again; navigate mode also shows it. The panes keep their size while the sidebar is open over them. `toggle_sidebar` docks the sidebar open until you toggle it again. Drag the sidebar edge to change its width, or bind `keys.grow_sidebar` and `keys.shrink_sidebar` to change it by 2 columns within `ui.sidebar_min_width` and `ui.sidebar_max_width`.
+
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
@@ -368,7 +370,8 @@ The expanded desktop sidebar renders each inner array in `rows` as one line. The
 row_gap = 0
 rows = [
   ["state_icon", "machine", "workspace", "tab"],
-  ["agent"],
+  ["agent", "prompt_cache"],
+  ["context"],
 ]
 
 [ui.sidebar.spaces]
@@ -390,6 +393,8 @@ Agent rows accept these built-in tokens:
 - `agent` — detected or reported agent display name.
 - `terminal_title` — latest OSC 0/2 terminal title after safety normalization.
 - `terminal_title_stripped` — the terminal title with one recognized leading activity or spinner glyph and its following whitespace removed.
+- `prompt_cache` — prompt-cache countdown such as `5m 4:12`, coloured from green to red as the cache nears expiry and shown as `cold` once it has expired. It renders nothing until an integration reports a cache time (the Claude Code and Pi integrations do), and it updates once per second only while a countdown is visible.
+- `context` — context-window use such as `ctx 84k/200k 42%`, green below 50 %, yellow from 50 %, red from 80 %. When the integration can report only the tokens used, it shows `ctx 84k` with no percentage and no colour. Herdr never guesses a window. It renders nothing until an integration reports usage.
 - `$name` — custom pane metadata named `name`.
 
 Space rows accept these built-in tokens:

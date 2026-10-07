@@ -701,3 +701,87 @@ test("V2 resends the latest state after a failed delivery", async () => {
   expect(states().at(-1)).toBe("idle");
   dispose();
 });
+
+function contextRequests() {
+  return requests.filter((request) => isRecord(request) && request.method === "pane.report_context_usage");
+}
+
+function assistantInfo(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "message-1",
+    sessionID: "root-a",
+    role: "assistant",
+    providerID: "anthropic",
+    modelID: "claude-opus",
+    time: { created: 1_700_000_000_000, completed: 1_700_000_005_000 },
+    tokens: { input: 4000, output: 900, reasoning: 0, cache: { read: 80000, write: 0 } },
+    ...overrides,
+  };
+}
+
+async function waitForContextRequests(count: number) {
+  const deadline = Date.now() + 1_000;
+  while (contextRequests().length < count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+test("TUI reports context usage only for the selected root session", async () => {
+  const plugin = await loadPlugin();
+  const tui = fakeApi();
+  let catalogCalls = 0;
+  (tui.api.client as Record<string, unknown>).config = {
+    async providers() {
+      catalogCalls += 1;
+      return {
+        data: { providers: [{ id: "anthropic", models: { "claude-opus": { limit: { context: 200000 } } } }] },
+      };
+    },
+  };
+  tui.addSession({ id: "root-a" });
+  tui.addSession({ id: "child-a", parentID: "root-a" });
+  tui.addSession({ id: "root-b" });
+  tui.select("root-a");
+  await plugin.tui(tui.api);
+  await flushReports();
+
+  tui.emit("message.updated", { info: assistantInfo({ id: "streaming", time: { created: 1 } }) });
+  tui.emit("message.updated", { info: assistantInfo({ id: "foreign", sessionID: "root-b" }) });
+  tui.emit("message.updated", { info: assistantInfo({ id: "child", sessionID: "child-a" }) });
+  tui.emit("message.updated", { info: assistantInfo({ id: "user", role: "user" }) });
+  tui.emit("message.updated", { info: assistantInfo() });
+  tui.emit("message.updated", { info: assistantInfo() });
+  await waitForContextRequests(1);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const usages = contextRequests();
+  expect(usages).toHaveLength(1);
+  expect(requestParam(usages[0], "pane_id")).toBe("test:p1");
+  expect(requestParam(usages[0], "source")).toBe("herdr:opencode");
+  expect(requestParam(usages[0], "used_tokens")).toBe(84000);
+  expect(requestParam(usages[0], "window_tokens")).toBe(200000);
+  expect(requestParam(usages[0], "observed_at_ms")).toBe(1_700_000_005_000);
+  expect(catalogCalls).toBe(1);
+});
+
+test("TUI reports tokens only when the provider lookup fails", async () => {
+  const plugin = await loadPlugin();
+  const tui = fakeApi();
+  (tui.api.client as Record<string, unknown>).config = {
+    async providers() {
+      throw new Error("catalog unavailable");
+    },
+  };
+  tui.addSession({ id: "root-a" });
+  tui.select("root-a");
+  await plugin.tui(tui.api);
+  await flushReports();
+
+  tui.emit("message.updated", { info: assistantInfo() });
+  await waitForContextRequests(1);
+
+  const usages = contextRequests();
+  expect(usages).toHaveLength(1);
+  expect(requestParam(usages[0], "used_tokens")).toBe(84000);
+  expect(requestParam(usages[0], "window_tokens")).toBeUndefined();
+});

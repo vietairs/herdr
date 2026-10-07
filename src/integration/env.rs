@@ -19,6 +19,8 @@ pub(crate) const QODERCLI_CONFIG_DIR_ENV_VAR: &str = "QODER_CONFIG_DIR";
 pub(crate) const QWEN_HOME_ENV_VAR: &str = "QWEN_HOME";
 pub(crate) const CURSOR_CONFIG_DIR_ENV_VAR: &str = "CURSOR_CONFIG_DIR";
 pub(crate) const ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR: &str = "ANTIGRAVITY_CLI_CONFIG_DIR";
+/// Herdr-level override of the Antigravity CLI statusline settings directory (a test seam; the CLI does not honor it).
+pub(crate) const ANTIGRAVITY_CLI_SETTINGS_DIR_ENV_VAR: &str = "ANTIGRAVITY_CLI_SETTINGS_DIR";
 pub(crate) const GROK_CONFIG_DIR_ENV_VAR: &str = "GROK_CONFIG_DIR";
 /// The grok CLI's own config-home override (documented alongside
 /// `$GROK_HOME/config.toml` and `$GROK_HOME/auth.json`).
@@ -192,6 +194,15 @@ pub(crate) fn antigravity_cli_dir() -> io::Result<PathBuf> {
     // from ~/.gemini/config; ~/.gemini/antigravity-cli holds runtime data and
     // is never read for hooks.
     config_dir_from_env_or_home(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &[".gemini", "config"])
+}
+
+/// `~/.gemini/antigravity-cli`, where Antigravity CLI keeps `settings.json` (the `statusLine` entry), or the
+/// override. Distinct from `antigravity_cli_dir`, which holds the hooks.
+pub(crate) fn antigravity_cli_settings_dir() -> io::Result<PathBuf> {
+    config_dir_from_env_or_home(
+        ANTIGRAVITY_CLI_SETTINGS_DIR_ENV_VAR,
+        &[".gemini", "antigravity-cli"],
+    )
 }
 
 pub(crate) fn grok_dir() -> io::Result<PathBuf> {

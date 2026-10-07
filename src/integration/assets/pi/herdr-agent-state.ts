@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=pi
-// HERDR_INTEGRATION_VERSION=9
+// HERDR_INTEGRATION_VERSION=10
 // @ts-nocheck
 
 import net from "node:net";
@@ -176,6 +176,81 @@ async function drainStateQueue(): Promise<void> {
   }
 }
 
+// Reports the agent's exact context usage. Fire and forget: it never throws and
+// a missing or malformed reading sends nothing.
+async function reportContextUsage(ctx: any): Promise<void> {
+  try {
+    const usage = ctx?.getContextUsage?.();
+    if (!usage || typeof usage !== "object") {
+      return;
+    }
+    const params: Record<string, unknown> = { pane_id: paneId, source };
+    if (usage.tokens === null) {
+      params.clear = true;
+    } else if (Number.isInteger(usage.tokens) && usage.tokens >= 0) {
+      params.used_tokens = usage.tokens;
+      if (Number.isInteger(usage.contextWindow) && usage.contextWindow > 0) {
+        params.window_tokens = usage.contextWindow;
+      }
+      params.observed_at_ms = Date.now();
+    } else {
+      return;
+    }
+    await sendRequest({
+      id: `${source}:context:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      method: "pane.report_context_usage",
+      params,
+    });
+  } catch {
+    // Reporting context usage must never disturb the agent.
+  }
+}
+
+let lastCacheTier: "short" | "long" | undefined;
+
+// Reports the prompt-cache countdown for one assistant message. The lifetime is
+// taken only from the model catalog entry of the tier the message wrote or, for
+// a read-only hit, the tier last written; nothing is sent when it is unknown.
+async function reportPromptCache(message: any, ctx: any): Promise<void> {
+  try {
+    if (message?.role !== "assistant") {
+      return;
+    }
+    const cacheRead = Number(message.usage?.cacheRead) || 0;
+    const cacheWrite = Number(message.usage?.cacheWrite) || 0;
+    if (cacheRead + cacheWrite <= 0) {
+      return;
+    }
+    if (cacheWrite > 0) {
+      lastCacheTier = Number(message.usage?.cacheWrite1h) > 0 ? "long" : "short";
+    }
+    if (!lastCacheTier) {
+      return;
+    }
+    const ttl = ctx?.model?.promptCache?.[lastCacheTier];
+    if (!Number.isInteger(ttl) || ttl < 1 || ttl > 86400) {
+      return;
+    }
+    const startedAt = Number(message.timestamp);
+    if (!Number.isFinite(startedAt) || startedAt <= 0) {
+      return;
+    }
+    const durationMs = Number(message.durationMs);
+    await sendRequest({
+      id: `${source}:cache:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      method: "pane.report_prompt_cache",
+      params: {
+        pane_id: paneId,
+        source,
+        last_request_at_ms: Math.round(startedAt + (Number.isFinite(durationMs) ? durationMs : 0)),
+        ttl_secs: ttl,
+      },
+    });
+  } catch {
+    // Reporting the prompt cache must never disturb the agent.
+  }
+}
+
 export default function (pi) {
   if (!enabled()) {
     return;
@@ -233,6 +308,7 @@ export default function (pi) {
       return;
     }
     rootSession = true;
+    lastCacheTier = undefined;
     updateSessionRef(ctx);
     await reportSession(event?.reason);
     // A reload can replace this extension mid-run without emitting another agent_start.
@@ -257,5 +333,14 @@ export default function (pi) {
 
     agentActive = false;
     publishState();
+    void reportContextUsage(ctx);
+  });
+
+  pi.on("turn_end", (event, ctx) => {
+    if (!rootSession) {
+      return;
+    }
+    void reportPromptCache(event?.message, ctx);
+    void reportContextUsage(ctx);
   });
 }
