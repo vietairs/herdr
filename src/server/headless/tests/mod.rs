@@ -973,15 +973,36 @@ async fn client_shell_snapshot_carries_the_send_clock_without_resending_for_it()
     );
     let initial = client_shell_snapshot(&control_rx);
     assert!(initial.server_now_ms > 0);
-    // Settle whatever the first render projects for this client.
-    server.render_and_stream();
-    while control_rx.try_recv().is_ok() {}
-
-    // Only the clock moved: nothing is sent.
-    std::thread::sleep(Duration::from_millis(5));
+    // Render while the clock moves. The test pane's foreground cwd can change
+    // on its own between renders, so a snapshot may still go out, but never
+    // one that differs from the last only in its send clock.
+    let without_clock = |snapshot: &protocol::ClientShellSnapshot| {
+        let mut snapshot = snapshot.clone();
+        snapshot.revision = 0;
+        snapshot.server_now_ms = 0;
+        snapshot
+    };
+    let mut last = initial.clone();
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(3));
+        server.render_and_stream();
+        while let Ok(bytes) = control_rx.try_recv() {
+            let ServerMessage::EndpointControl { kind, data } = read_server_message(bytes) else {
+                continue;
+            };
+            if kind != protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
+                continue;
+            }
+            let sent: Box<protocol::ClientShellSnapshot> = serde_json::from_str(&data).unwrap();
+            assert_ne!(
+                without_clock(&sent),
+                without_clock(&last),
+                "a snapshot was resent for the clock alone"
+            );
+            last = sent;
+        }
+    }
     let before = crate::prompt_cache::unix_now_ms();
-    server.render_and_stream();
-    assert!(control_rx.try_recv().is_err());
 
     server.app.state.update_available = Some("9.9.9".into());
     server.render_and_stream();
