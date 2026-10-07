@@ -304,14 +304,18 @@ pub(crate) fn remove_files_unless_named(
     )))
 }
 
-/// Whether `config_path` may still name `name`: true unless the file is
-/// missing, or was read and does not contain the name. The raw bytes are
+/// Whether `config_path` may still name `name`: true unless the path is
+/// absent, or the file was read and does not contain the name. A dangling
+/// symlink is not absent, because its target may come back. The raw bytes are
 /// searched, so a config that is not UTF-8 still counts.
 fn config_may_name(config_path: &Path, name: &str) -> bool {
     match fs::read(config_path) {
         Ok(bytes) => bytes
             .windows(name.len())
             .any(|window| window == name.as_bytes()),
-        Err(err) => err.kind() != io::ErrorKind::NotFound,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            fs::symlink_metadata(config_path).is_ok()
+        }
+        Err(_) => true,
     }
 }

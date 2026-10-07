@@ -5333,6 +5333,25 @@ fn uninstall_cursor_keeps_the_wrapper_and_backup_when_a_non_utf8_config_names_th
 
 #[cfg(not(windows))]
 #[test]
+fn uninstall_cursor_keeps_the_wrapper_and_backup_when_the_cli_config_is_a_dangling_symlink() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let (cursor_dir, wrapper_path, backup_path) = install_cursor_with_wrapped_statusline(&base);
+    let config_path = cursor_dir.join("cli-config.json");
+    let target = base.join("unmounted-dotfiles").join("cli-config.json");
+    fs::remove_file(&config_path).unwrap();
+    std::os::unix::fs::symlink(&target, &config_path).unwrap();
+
+    let result = uninstall_cursor().unwrap();
+
+    assert_cursor_uninstall_kept_the_wrapper(&result, &cursor_dir, &wrapper_path, &backup_path);
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(not(windows))]
+#[test]
 fn uninstall_cursor_keeps_the_wrapper_and_backup_when_the_cli_config_is_unreadable() {
     use std::os::unix::fs::PermissionsExt;
 
