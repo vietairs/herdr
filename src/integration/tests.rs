@@ -2383,9 +2383,13 @@ fn install_copilot_keeps_a_backup_of_the_original_next_to_the_settings() {
     install_copilot().unwrap();
 
     let backup: Value = serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+    let wrapper_path = copilot_dir.join("hooks").join("herdr-statusline-wrap.sh");
     assert_eq!(
         backup,
-        json!({"statusLine.command": COPILOT_USER_STATUSLINE_COMMAND})
+        json!({
+            "statusLine.command": COPILOT_USER_STATUSLINE_COMMAND,
+            "wrapper": wrapper_path.display().to_string(),
+        })
     );
     uninstall_copilot().unwrap();
     assert!(!backup_path.exists());
@@ -2485,6 +2489,124 @@ fn uninstall_copilot_removes_hooks_and_warns_when_wrapper_and_backup_are_gone() 
         .to_string()
         .contains(&hook_path.display().to_string()));
     assert!(!hook_path.exists());
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn uninstall_copilot_keeps_the_wrapper_and_backup_when_the_statusline_type_changed() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let seeded = copilot_statusline_settings(COPILOT_USER_STATUSLINE_COMMAND);
+    let copilot_dir = seed_copilot_dir(&base, "copilot", &seeded);
+    install_copilot().unwrap();
+    let wrapper_path = copilot_dir.join("hooks").join("herdr-statusline-wrap.sh");
+    let backup_path = copilot_dir.join("herdr-statusline-original.json");
+    let mut settings = read_copilot_settings(&copilot_dir);
+    settings["statusLine"]["type"] = json!("script");
+    fs::write(
+        copilot_dir.join("settings.json"),
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let result = uninstall_copilot().unwrap();
+
+    assert!(result.updated_settings, "the hook entries are removed");
+    let hook_path = copilot_dir.join("hooks").join(COPILOT_HOOK_INSTALL_NAME);
+    assert!(!hook_path.exists());
+    let settings = read_copilot_settings(&copilot_dir);
+    assert!(!settings
+        .to_string()
+        .contains(&hook_path.display().to_string()));
+    assert_eq!(
+        settings["statusLine"]["command"].as_str().unwrap(),
+        wrapper_path.display().to_string()
+    );
+    assert!(wrapper_path.exists(), "the settings still name the wrapper");
+    assert!(backup_path.exists(), "the settings still name the wrapper");
+    assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+    assert!(result.warnings[0].starts_with(INSTALL_WARNING_PREFIX));
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn uninstall_copilot_never_restores_the_backup_of_another_wrapper() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let seeded = copilot_statusline_settings(COPILOT_USER_STATUSLINE_COMMAND);
+    let copilot_dir = seed_copilot_dir(&base, "copilot", &seeded);
+    install_copilot().unwrap();
+    // The settings name a wrapper that is gone; the backup belongs to this
+    // directory's wrapper, so it says nothing about that one's original.
+    let other_wrapper = base.join("elsewhere").join("herdr-statusline-wrap.sh");
+    let mut settings = read_copilot_settings(&copilot_dir);
+    settings["statusLine"]["command"] = json!(other_wrapper.display().to_string());
+    fs::write(
+        copilot_dir.join("settings.json"),
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let result = uninstall_copilot().unwrap();
+
+    assert_eq!(
+        read_copilot_settings(&copilot_dir)["statusLine"]["command"]
+            .as_str()
+            .unwrap(),
+        other_wrapper.display().to_string(),
+        "the command is never guessed"
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("statusLine.command")),
+        "{:?}",
+        result.warnings
+    );
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn reinstall_copilot_replaces_the_wrapper_file_instead_of_rewriting_it() {
+    use std::os::unix::fs::MetadataExt;
+
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let seeded = copilot_statusline_settings(COPILOT_USER_STATUSLINE_COMMAND);
+    let copilot_dir = seed_copilot_dir(&base, "copilot", &seeded);
+    let hooks_dir = copilot_dir.join("hooks");
+    let wrapper_path = hooks_dir.join("herdr-statusline-wrap.sh");
+    install_copilot().unwrap();
+    let first = fs::metadata(&wrapper_path).unwrap().ino();
+    // Holding the first file keeps its inode from being reused.
+    let _held = fs::File::open(&wrapper_path).unwrap();
+
+    install_copilot().unwrap();
+
+    assert_ne!(
+        fs::metadata(&wrapper_path).unwrap().ino(),
+        first,
+        "a running statusline must never read a partly written wrapper"
+    );
+    assert!(fs::read_to_string(&wrapper_path)
+        .unwrap()
+        .contains(COPILOT_USER_STATUSLINE_COMMAND));
+    let leftovers = fs::read_dir(&hooks_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect::<Vec<_>>();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 
     clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
@@ -5148,6 +5270,117 @@ fn uninstall_cursor_removes_hooks_when_the_cli_config_is_not_utf8() {
     let _ = fs::remove_dir_all(base);
 }
 
+/// Installs Cursor over a wrapped statusline and returns the Cursor dir with
+/// its wrapper and backup paths.
+#[cfg(not(windows))]
+fn install_cursor_with_wrapped_statusline(base: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let cursor_dir = seed_cursor_dir(base, ".cursor", Some(CURSOR_CLI_CONFIG_WITH_STATUSLINE));
+    install_cursor().unwrap();
+    let wrapper_path = cursor_dir.join("herdr-statusline-wrap.sh");
+    let backup_path = cursor_dir.join("herdr-statusline-original.json");
+    assert!(wrapper_path.exists() && backup_path.exists());
+    (cursor_dir, wrapper_path, backup_path)
+}
+
+/// The hooks are gone while the wrapper and its backup are kept with a warning.
+#[cfg(not(windows))]
+fn assert_cursor_uninstall_kept_the_wrapper(
+    result: &CursorUninstallResult,
+    cursor_dir: &Path,
+    wrapper_path: &Path,
+    backup_path: &Path,
+) {
+    assert!(result.updated_hooks, "the hook entries are removed");
+    assert!(!cursor_dir.join(CURSOR_HOOK_INSTALL_NAME).exists());
+    assert!(!cursor_dir.join("herdr-statusline-tap.sh").exists());
+    assert!(
+        wrapper_path.exists(),
+        "the config may still name the wrapper"
+    );
+    assert!(
+        backup_path.exists(),
+        "the config may still name the wrapper"
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains(&backup_path.display().to_string())),
+        "{:?}",
+        result.warnings
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn uninstall_cursor_keeps_the_wrapper_and_backup_when_a_non_utf8_config_names_the_wrapper() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let (cursor_dir, wrapper_path, backup_path) = install_cursor_with_wrapped_statusline(&base);
+    let config_path = cursor_dir.join("cli-config.json");
+    let mut bytes = fs::read(&config_path).unwrap();
+    bytes.extend_from_slice(b"// \xff\xfe\n");
+    fs::write(&config_path, &bytes).unwrap();
+
+    let result = uninstall_cursor().unwrap();
+
+    assert_cursor_uninstall_kept_the_wrapper(&result, &cursor_dir, &wrapper_path, &backup_path);
+    assert_eq!(fs::read(&config_path).unwrap(), bytes);
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn uninstall_cursor_keeps_the_wrapper_and_backup_when_the_cli_config_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let (cursor_dir, wrapper_path, backup_path) = install_cursor_with_wrapped_statusline(&base);
+    let config_path = cursor_dir.join("cli-config.json");
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads the file anyway, so the case cannot be set up.
+    if fs::read(&config_path).is_err() {
+        let result = uninstall_cursor().unwrap();
+
+        assert_cursor_uninstall_kept_the_wrapper(&result, &cursor_dir, &wrapper_path, &backup_path);
+    }
+
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn uninstall_cursor_keeps_the_wrapper_and_backup_when_the_statusline_shape_is_unrecognised() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let (cursor_dir, wrapper_path, backup_path) = install_cursor_with_wrapped_statusline(&base);
+    let config_path = cursor_dir.join("cli-config.json");
+    let installed = fs::read_to_string(&config_path).unwrap();
+    // A duplicated key is ambiguous, so the restore leaves the statusline alone.
+    let duplicated = installed.replace(
+        "\"padding\": 2,",
+        &format!(
+            "\"command\": \"{}\",\n    \"padding\": 2,",
+            wrapper_path.display()
+        ),
+    );
+    assert_ne!(duplicated, installed);
+    fs::write(&config_path, &duplicated).unwrap();
+
+    let result = uninstall_cursor().unwrap();
+
+    assert_cursor_uninstall_kept_the_wrapper(&result, &cursor_dir, &wrapper_path, &backup_path);
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), duplicated);
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
 #[cfg(not(windows))]
 #[test]
 fn cursor_install_skips_the_statusline_of_a_hard_linked_cli_config() {
@@ -5781,6 +6014,44 @@ fn antigravity_cli_uninstall_removes_hooks_when_the_settings_file_is_not_utf8() 
     assert!(result.updated_hooks);
     assert!(result.removed_hook_file);
     assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+    assert_eq!(fs::read(&settings_path).unwrap(), bytes);
+
+    clear_integration_path_env();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn antigravity_cli_uninstall_keeps_the_tap_when_non_utf8_settings_name_it() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let agy_dir = base.join(".gemini").join("config");
+    fs::create_dir_all(&agy_dir).unwrap();
+    std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
+    let settings_dir = isolate_antigravity_cli_settings_dir(&base);
+    fs::create_dir_all(&settings_dir).unwrap();
+    let settings_path = settings_dir.join("settings.json");
+    fs::write(
+        &settings_path,
+        format!(
+            "{{\"statusLine\": {{\"type\": \"command\", \"command\": \"{ANTIGRAVITY_USER_STATUSLINE_COMMAND}\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    install_antigravity_cli().unwrap();
+    let tap_path = agy_dir.join("hooks").join("herdr-statusline-tap.sh");
+    let mut bytes = fs::read(&settings_path).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("herdr-statusline-tap.sh"));
+    bytes.extend_from_slice(b"// \xff\xfe\n");
+    fs::write(&settings_path, &bytes).unwrap();
+
+    let result = uninstall_antigravity_cli().unwrap();
+
+    assert!(result.updated_hooks);
+    assert!(result.removed_hook_file);
+    assert!(tap_path.exists(), "the settings may still name the tap");
+    assert_eq!(result.warnings.len(), 2, "{:?}", result.warnings);
+    assert!(result.warnings[1].contains(&tap_path.display().to_string()));
     assert_eq!(fs::read(&settings_path).unwrap(), bytes);
 
     clear_integration_path_env();

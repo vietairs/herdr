@@ -51,9 +51,9 @@ use super::statusline_tap::{
 };
 #[cfg(not(windows))]
 use super::statusline_wrapper::{
-    install_statusline_wrapper, lost_wrapper_warning, remove_statusline_wrapper_files,
-    restore_statusline_wrapper, unwrapped_statusline_warning, WrapperRestore,
-    STATUSLINE_WRAPPER_FILE_NAME,
+    install_statusline_wrapper, lost_wrapper_warning, remove_files_unless_named,
+    remove_statusline_wrapper_files, restore_statusline_wrapper, unwrapped_statusline_warning,
+    WrapperRestore, STATUSLINE_WRAPPER_FILE_NAME,
 };
 use super::types::{
     AntigravityCliInstallPaths, AntigravityCliUninstallResult, ClaudeInstallPaths,
@@ -857,8 +857,17 @@ pub(crate) fn uninstall_copilot() -> io::Result<CopilotUninstallResult> {
         Vec::new()
     };
 
+    // A statusline herdr could not restore may still name the wrapper.
     #[cfg(not(windows))]
-    remove_statusline_wrapper_files(&copilot_dir.join("hooks"), &copilot_dir)?;
+    let warnings = {
+        let mut warnings = warnings;
+        warnings.extend(remove_statusline_wrapper_files(
+            &copilot_dir.join("hooks"),
+            &copilot_dir,
+            &settings_path,
+        )?);
+        warnings
+    };
     let removed_hook_file =
         remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
 
@@ -1793,8 +1802,17 @@ pub(crate) fn uninstall_cursor() -> io::Result<CursorUninstallResult> {
         }
     }
 
+    // A config herdr could not read or restore may still name the wrapper.
     #[cfg(not(windows))]
-    remove_statusline_wrapper_files(&cursor_home, &cursor_home)?;
+    let warnings = {
+        let mut warnings = warnings;
+        warnings.extend(remove_statusline_wrapper_files(
+            &cursor_home,
+            &cursor_home,
+            &cursor_home.join(CURSOR_CLI_CONFIG_FILE),
+        )?);
+        warnings
+    };
     let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(CursorUninstallResult {
@@ -2097,11 +2115,16 @@ pub(crate) fn uninstall_antigravity_cli() -> io::Result<AntigravityCliUninstallR
     }
 
     let removed_hook_file = remove_file_if_exists(&hook_path)?;
-    // The settings are restored first so they never point at a removed tap.
+    // The settings are restored first so they never point at a removed tap,
+    // and settings herdr could not read or restore may still name it.
     #[cfg(not(windows))]
     let warnings = {
-        let warnings = restore_antigravity_cli_statusline()?;
-        remove_file_if_exists(&dir.join("hooks").join(STATUSLINE_TAP_FILE_NAME))?;
+        let mut warnings = restore_antigravity_cli_statusline()?;
+        warnings.extend(remove_files_unless_named(
+            &antigravity_cli_settings_dir()?.join("settings.json"),
+            STATUSLINE_TAP_FILE_NAME,
+            &[dir.join("hooks").join(STATUSLINE_TAP_FILE_NAME)],
+        )?);
         warnings
     };
     #[cfg(windows)]

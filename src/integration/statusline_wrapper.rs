@@ -5,12 +5,13 @@
 //! is kept twice: inside the wrapper, and in a backup file next to the agent
 //! config, so losing the wrapper (a deleted hooks directory, a moved config
 //! directory) never loses the original. Uninstall prefers the wrapper's copy
-//! and falls back to the backup.
+//! and falls back to the backup, which names the wrapper it belongs to. Both
+//! copies are kept while the agent config may still name the wrapper.
 
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
@@ -25,8 +26,11 @@ pub(crate) const STATUSLINE_WRAPPER_FILE_NAME: &str = "herdr-statusline-wrap.sh"
 const STATUSLINE_WRAPPER_BACKUP_PREFIX: &str = "# herdr-statusline-original: ";
 /// Backup of the user's original command, next to the agent config file.
 pub(crate) const STATUSLINE_BACKUP_FILE_NAME: &str = "herdr-statusline-original.json";
-/// The one key of the backup file: `{"statusLine.command": <original>}`.
+/// Backup key of the original command:
+/// `{"statusLine.command": <original>, "wrapper": <wrapper path>}`.
 const STATUSLINE_BACKUP_KEY: &str = "statusLine.command";
+/// Backup key of the wrapper path the backup belongs to.
+const STATUSLINE_BACKUP_WRAPPER_KEY: &str = "wrapper";
 
 /// What uninstall found in `statusLine.command`.
 pub(crate) enum WrapperRestore {
@@ -34,7 +38,7 @@ pub(crate) enum WrapperRestore {
     NotWrapped,
     /// A herdr wrapper; the user's original command to put back.
     Restored(String),
-    /// A herdr wrapper whose file and backup are both gone.
+    /// A herdr wrapper whose file and its own backup are both gone.
     Lost,
 }
 
@@ -105,37 +109,47 @@ fn read_wrapper_original(wrapper_path: &Path) -> io::Result<String> {
     Ok(original)
 }
 
-/// The original command in `config_dir`'s backup file; `None` when there is no
-/// backup file.
-fn read_backup(config_dir: &Path) -> io::Result<Option<String>> {
+/// The original command in `config_dir`'s backup file when that backup
+/// belongs to `wrapper_command`; `None` when there is no backup file or it
+/// belongs to another wrapper, whose original this one never wrapped.
+fn read_backup(config_dir: &Path, wrapper_command: &str) -> io::Result<Option<String>> {
     let backup_path = config_dir.join(STATUSLINE_BACKUP_FILE_NAME);
     let content = match fs::read_to_string(&backup_path) {
         Ok(content) => content,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err),
     };
-    serde_json::from_str::<Value>(&content)
+    let backup = serde_json::from_str::<Value>(&content)
         .ok()
         .and_then(|value| {
-            value
-                .get(STATUSLINE_BACKUP_KEY)
+            let original = value.get(STATUSLINE_BACKUP_KEY)?.as_str()?.to_string();
+            let wrapper = value
+                .get(STATUSLINE_BACKUP_WRAPPER_KEY)
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .map(str::to_string);
+            Some((original, wrapper))
         })
-        .map(Some)
         .ok_or_else(|| {
             io::Error::other(format!(
                 "cannot read the original statusLine.command from {}; restore the command in the agent config file by hand",
                 backup_path.display()
             ))
-        })
+        })?;
+    Ok(match backup {
+        (original, Some(wrapper)) if wrapper == wrapper_command => Some(original),
+        _ => None,
+    })
 }
 
-fn write_backup(config_dir: &Path, original: &str) -> io::Result<()> {
+fn write_backup(config_dir: &Path, wrapper_command: &str, original: &str) -> io::Result<()> {
     let mut backup = Map::new();
     backup.insert(
         STATUSLINE_BACKUP_KEY.to_string(),
         Value::String(original.to_string()),
+    );
+    backup.insert(
+        STATUSLINE_BACKUP_WRAPPER_KEY.to_string(),
+        Value::String(wrapper_command.to_string()),
     );
     fs::write(
         config_dir.join(STATUSLINE_BACKUP_FILE_NAME),
@@ -143,9 +157,27 @@ fn write_backup(config_dir: &Path, original: &str) -> io::Result<()> {
     )
 }
 
+/// Writes the wrapper beside `wrapper_path` and renames it into place, so an
+/// agent running the statusline during a reinstall runs the old script or the
+/// new one, never a partly written one.
+fn replace_wrapper_file(wrapper_path: &Path, script: &str) -> io::Result<()> {
+    let staging = wrapper_path.with_file_name(format!(
+        ".{STATUSLINE_WRAPPER_FILE_NAME}.{}.tmp",
+        std::process::id()
+    ));
+    let replaced = fs::write(&staging, script)
+        .and_then(|()| make_executable(&staging))
+        .and_then(|()| fs::rename(&staging, wrapper_path));
+    if replaced.is_err() {
+        // Best effort: the staging file is herdr's own and never run.
+        let _ = remove_file_if_exists(&staging);
+    }
+    replaced
+}
+
 /// The original command behind the wrapper path `wrapper_command`: the
-/// wrapper's own copy, else the backup in `config_dir`. `None` only when the
-/// wrapper file and the backup are both gone. A wrapper file that exists but
+/// wrapper's own copy, else its backup in `config_dir`. `None` only when the
+/// wrapper file and its backup are both gone. A wrapper file that exists but
 /// cannot be read, with no backup, is an error: it holds the only copy.
 fn wrapped_original(wrapper_command: &str, config_dir: &Path) -> io::Result<Option<String>> {
     let wrapper_path = Path::new(wrapper_command);
@@ -153,7 +185,7 @@ fn wrapped_original(wrapper_command: &str, config_dir: &Path) -> io::Result<Opti
         Ok(original) => return Ok(Some(original)),
         Err(err) => err,
     };
-    match read_backup(config_dir)? {
+    match read_backup(config_dir, wrapper_command)? {
         Some(original) => Ok(Some(original)),
         None if fs::symlink_metadata(wrapper_path).is_ok() => Err(wrapper_error),
         None => Ok(None),
@@ -191,9 +223,8 @@ pub(crate) fn install_statusline_wrapper(
         return Ok(None);
     }
     // The backup is written first, so the original survives any later failure.
-    write_backup(config_dir, &original)?;
-    fs::write(&wrapper_path, statusline_wrapper_script(agent, &original)?)?;
-    make_executable(&wrapper_path)?;
+    write_backup(config_dir, &wrapper_command, &original)?;
+    replace_wrapper_file(&wrapper_path, &statusline_wrapper_script(agent, &original)?)?;
     Ok(Some(wrapper_command))
 }
 
@@ -225,13 +256,62 @@ pub(crate) fn unwrapped_statusline_warning(agent: &str, err: &io::Error) -> Stri
     format!("{INSTALL_WARNING_PREFIX} left the {agent} statusline as it was: {err}")
 }
 
-/// Removes the wrapper and tap in `wrapper_dir` and the backup in `config_dir`.
+/// Removes the tap in `wrapper_dir`, then the wrapper and the backup in
+/// `config_dir` unless `config_path` may still name the wrapper: those two
+/// hold the only copies of the original command. The wrapper runs the
+/// original without the tap, so the tap always goes.
 pub(crate) fn remove_statusline_wrapper_files(
     wrapper_dir: &Path,
     config_dir: &Path,
-) -> io::Result<()> {
-    remove_file_if_exists(&wrapper_dir.join(STATUSLINE_WRAPPER_FILE_NAME))?;
+    config_path: &Path,
+) -> io::Result<Option<String>> {
     remove_file_if_exists(&wrapper_dir.join(STATUSLINE_TAP_FILE_NAME))?;
-    remove_file_if_exists(&config_dir.join(STATUSLINE_BACKUP_FILE_NAME))?;
-    Ok(())
+    remove_files_unless_named(
+        config_path,
+        STATUSLINE_WRAPPER_FILE_NAME,
+        &[
+            wrapper_dir.join(STATUSLINE_WRAPPER_FILE_NAME),
+            config_dir.join(STATUSLINE_BACKUP_FILE_NAME),
+        ],
+    )
+}
+
+/// Removes `files` unless `config_path` may still name `name`. They are then
+/// kept, and the warning says so when any of them exists.
+pub(crate) fn remove_files_unless_named(
+    config_path: &Path,
+    name: &str,
+    files: &[PathBuf],
+) -> io::Result<Option<String>> {
+    if !config_may_name(config_path, name) {
+        for file in files {
+            remove_file_if_exists(file)?;
+        }
+        return Ok(None);
+    }
+    let kept = files
+        .iter()
+        .filter(|file| fs::symlink_metadata(file).is_ok())
+        .map(|file| file.display().to_string())
+        .collect::<Vec<_>>();
+    if kept.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{INSTALL_WARNING_PREFIX} kept {} because {} may still name {name}; remove them by hand once it no longer does",
+        kept.join(" and "),
+        config_path.display()
+    )))
+}
+
+/// Whether `config_path` may still name `name`: true unless the file is
+/// missing, or was read and does not contain the name. The raw bytes are
+/// searched, so a config that is not UTF-8 still counts.
+fn config_may_name(config_path: &Path, name: &str) -> bool {
+    match fs::read(config_path) {
+        Ok(bytes) => bytes
+            .windows(name.len())
+            .any(|window| window == name.as_bytes()),
+        Err(err) => err.kind() != io::ErrorKind::NotFound,
+    }
 }
