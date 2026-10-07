@@ -268,4 +268,6 @@ mod mobile;
 mod mouse_selection;
 mod popup_focus_projection;
 mod remote_mount;
+mod sidebar_auto_hide;
+mod sidebar_width_keys;
 mod startup_overlays;

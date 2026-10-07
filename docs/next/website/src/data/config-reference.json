@@ -836,6 +836,18 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.grow_sidebar",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Widen the sidebar by 2 columns, up to ui.sidebar_max_width. Unset by default."
+        },
+        {
+          "key": "keys.shrink_sidebar",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Narrow the sidebar by 2 columns, down to ui.sidebar_min_width. Unset by default."
+        },
+        {
           "key": "keys.indexed.tabs",
           "type": "string",
           "default": "unset",
@@ -892,6 +904,12 @@
             "compact",
             "hidden"
           ]
+        },
+        {
+          "key": "ui.sidebar_auto_hide",
+          "type": "boolean",
+          "default": "false",
+          "description": "Keep the sidebar collapsed (per ui.sidebar_collapsed_mode) while you work and show it as a drawer over the panes when the pointer reaches the collapsed strip or left edge, or in navigate mode. toggle_sidebar docks it open. Also available in Settings."
         },
         {
           "key": "ui.mobile_width_threshold",

@@ -61,6 +61,8 @@ pub(crate) enum KeybindAction {
     ResizePaneUp,
     ResizePaneRight,
     ToggleSidebar,
+    GrowSidebar,
+    ShrinkSidebar,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -147,6 +149,8 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.resize_pane_up, KeybindAction::ResizePaneUp),
         (&keybinds.resize_pane_right, KeybindAction::ResizePaneRight),
         (&keybinds.toggle_sidebar, KeybindAction::ToggleSidebar),
+        (&keybinds.grow_sidebar, KeybindAction::GrowSidebar),
+        (&keybinds.shrink_sidebar, KeybindAction::ShrinkSidebar),
         (&keybinds.reload_config, KeybindAction::ReloadConfig),
         (
             &keybinds.open_notification_target,
@@ -317,6 +321,25 @@ mod tests {
         assert!(matches!(
             resolve_prefix_binding(&keybinds, &one),
             Some(KeybindMatch::Action(KeybindAction::SwitchTab(0)))
+        ));
+    }
+
+    #[test]
+    fn grow_and_shrink_sidebar_resolve_from_direct_bindings() {
+        let keybinds = Keybinds {
+            grow_sidebar: crate::config::ActionKeybinds::direct("ctrl+alt+right"),
+            shrink_sidebar: crate::config::ActionKeybinds::direct("ctrl+alt+left"),
+            ..Keybinds::default()
+        };
+        let modifiers = KeyModifiers::CONTROL | KeyModifiers::ALT;
+
+        assert!(matches!(
+            resolve_direct_binding(&keybinds, &TerminalKey::new(KeyCode::Right, modifiers)),
+            Some(KeybindMatch::Action(KeybindAction::GrowSidebar))
+        ));
+        assert!(matches!(
+            resolve_direct_binding(&keybinds, &TerminalKey::new(KeyCode::Left, modifiers)),
+            Some(KeybindMatch::Action(KeybindAction::ShrinkSidebar))
         ));
     }
 

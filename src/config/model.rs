@@ -462,6 +462,8 @@ pub struct KeysConfig {
     pub resize_pane_right: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
     pub toggle_sidebar: BindingConfig,
+    pub grow_sidebar: BindingConfig,
+    pub shrink_sidebar: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -598,6 +600,8 @@ pub(crate) struct KeysConfigOverlay {
     resize_pane_right: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
+    grow_sidebar: Option<BindingConfig>,
+    shrink_sidebar: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
@@ -710,6 +714,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(resize_pane_up);
         apply_field!(resize_pane_right);
         apply_field!(toggle_sidebar);
+        apply_field!(grow_sidebar);
+        apply_field!(shrink_sidebar);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -815,6 +821,8 @@ impl KeysConfig {
         copy_effective_action_field!(resize_pane_up, keybinds.resize_pane_up);
         copy_effective_action_field!(resize_pane_right, keybinds.resize_pane_right);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
+        copy_effective_action_field!(grow_sidebar, keybinds.grow_sidebar);
+        copy_effective_action_field!(shrink_sidebar, keybinds.shrink_sidebar);
         copy_user_field!(indexed);
 
         profile
@@ -953,6 +961,9 @@ pub struct UiConfig {
     pub sidebar_start_collapsed: bool,
     /// Collapsed sidebar presentation. Default: compact.
     pub sidebar_collapsed_mode: SidebarCollapsedModeConfig,
+    /// Collapse the sidebar while you work and reveal it as a drawer on hover or in navigate mode.
+    /// Default: false.
+    pub sidebar_auto_hide: bool,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
@@ -1207,6 +1218,8 @@ impl Default for KeysConfig {
             resize_pane_up: BindingConfig::empty(),
             resize_pane_right: BindingConfig::empty(),
             toggle_sidebar: BindingConfig::one("prefix+b"),
+            grow_sidebar: BindingConfig::empty(),
+            shrink_sidebar: BindingConfig::empty(),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),
@@ -1230,6 +1243,7 @@ impl Default for UiConfig {
             sidebar_max_width: 36,
             sidebar_start_collapsed: false,
             sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
+            sidebar_auto_hide: false,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             copy_on_select: true,
@@ -1373,6 +1387,19 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grow_and_shrink_sidebar_default_unbound_and_parse() {
+        let defaults = Config::default();
+        assert_eq!(defaults.keys.grow_sidebar, BindingConfig::empty());
+        assert_eq!(defaults.keys.shrink_sidebar, BindingConfig::empty());
+
+        let config: Config =
+            toml::from_str("[keys]\ngrow_sidebar = \"prefix+]\"\nshrink_sidebar = \"prefix+[\"\n")
+                .unwrap();
+        assert_ne!(config.keys.grow_sidebar, BindingConfig::empty());
+        assert_ne!(config.keys.shrink_sidebar, BindingConfig::empty());
+    }
 
     #[test]
     fn update_config_defaults_and_parses() {
@@ -1794,6 +1821,19 @@ sidebar_start_collapsed = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.ui.sidebar_start_collapsed);
+    }
+
+    #[test]
+    fn sidebar_auto_hide_defaults_off_and_parses_on() {
+        let default_config = Config::default();
+        assert!(!default_config.ui.sidebar_auto_hide);
+
+        let toml = r#"
+[ui]
+sidebar_auto_hide = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.sidebar_auto_hide);
     }
 
     #[test]

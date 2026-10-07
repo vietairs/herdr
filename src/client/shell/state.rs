@@ -18,6 +18,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) sidebar_max_width: u16,
     pub(super) sidebar_start_collapsed: bool,
     pub(super) sidebar_collapsed_mode: SidebarCollapsedModeConfig,
+    pub(super) sidebar_auto_hide: bool,
     pub(super) mobile_width_threshold: u16,
     pub(super) tab_bar_position: TabBarPositionConfig,
     pub(super) hide_tab_bar_when_single_tab: bool,
@@ -103,6 +104,8 @@ pub(super) struct ShellHitMap {
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,
+    /// Rect covered by the auto-hide drawer this frame; empty when no drawer is drawn.
+    pub(super) sidebar_overlay: Rect,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
@@ -400,6 +403,7 @@ pub(super) enum ClientSettingsSection {
     Indicators,
     Sound,
     Toast,
+    Sidebar,
     Integrations,
 }
 
@@ -409,6 +413,7 @@ impl ClientSettingsSection {
         Self::Indicators,
         Self::Sound,
         Self::Toast,
+        Self::Sidebar,
         Self::Integrations,
     ];
 
@@ -418,6 +423,7 @@ impl ClientSettingsSection {
             Self::Indicators => "indicators",
             Self::Sound => "sound",
             Self::Toast => "toasts",
+            Self::Sidebar => "sidebar",
             Self::Integrations => "integrations",
         }
     }
@@ -921,6 +927,10 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_collapsed_manual: bool,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_width_manual: bool,
+    /// Session-local: with auto-hide on, the user docked the sidebar open with toggle_sidebar.
+    pub(super) sidebar_auto_hide_pinned: bool,
+    /// Session-local: the pointer is holding the auto-hide drawer open (driven in a later step).
+    pub(super) sidebar_hover_reveal: bool,
     pub(super) sidebar_section_split: f32,
     pub(super) sidebar_section_split_manual: bool,
     pub(super) agent_panel_sort_manual: bool,
@@ -1086,6 +1096,8 @@ impl ClientShellState {
             sidebar_collapsed_manual: preferences.sidebar_collapsed.is_some(),
             sidebar_width,
             sidebar_width_manual: preferences.sidebar_width.is_some(),
+            sidebar_auto_hide_pinned: false,
+            sidebar_hover_reveal: false,
             sidebar_section_split,
             sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
             agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
@@ -1258,7 +1270,7 @@ impl ClientShellState {
         self.config.layout(
             cols,
             rows,
-            self.sidebar_collapsed,
+            self.sidebar_layout_collapsed(),
             self.focused_tab_count(),
             self.sidebar_width,
         )

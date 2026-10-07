@@ -108,7 +108,7 @@ impl ClientShellState {
             let Some(snapshot) = endpoint.snapshot.as_deref() else {
                 continue;
             };
-            let entries = if self.sidebar_collapsed && !mobile && surface_available {
+            let entries = if self.sidebar_presented_collapsed() && !mobile && surface_available {
                 snapshot
                     .workspaces
                     .iter()

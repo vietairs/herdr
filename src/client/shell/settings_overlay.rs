@@ -194,6 +194,18 @@ pub(super) fn render_settings_overlay(
                 &mut choice_hits,
             );
         }
+        ClientSettingsSection::Sidebar => {
+            render_choice_section(
+                buffer,
+                content,
+                "auto-hide sidebar",
+                "collapse the sidebar while you work; reveal it on hover or in navigate mode",
+                &["on", "off"],
+                settings.selected,
+                palette,
+                &mut choice_hits,
+            );
+        }
         ClientSettingsSection::Integrations => {
             render_integrations(buffer, content, settings, palette);
         }

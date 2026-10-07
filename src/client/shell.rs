@@ -32,6 +32,8 @@ mod remote_mount;
 mod render;
 mod scroll;
 mod settings;
+mod sidebar_auto_hide;
+mod sidebar_width;
 mod state;
 mod surface_patch;
 mod text_editor;

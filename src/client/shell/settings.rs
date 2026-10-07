@@ -51,6 +51,7 @@ impl ClientShellState {
             ClientSettingsSection::Indicators => indicator_index(self.config.status_indicators),
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
+            ClientSettingsSection::Sidebar => usize::from(!self.config.sidebar_auto_hide),
             ClientSettingsSection::Integrations => 0,
         }
     }
@@ -97,7 +98,9 @@ impl ClientShellState {
         match self.overlay.as_ref() {
             Some(ClientShellOverlay::Settings(settings)) => match settings.section {
                 ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
-                ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
+                ClientSettingsSection::Indicators
+                | ClientSettingsSection::Sound
+                | ClientSettingsSection::Sidebar => 2,
                 ClientSettingsSection::Toast => 4,
                 ClientSettingsSection::Integrations => settings.integrations.len(),
             },
@@ -221,6 +224,16 @@ impl ClientShellState {
                     crate::config::ConfigEdit::ToastDelivery(delivery),
                     outcome,
                 );
+            }
+            ClientSettingsSection::Sidebar => {
+                if self.save_settings_edit(
+                    crate::config::ConfigEdit::SidebarAutoHide(selected == 0),
+                    outcome,
+                ) {
+                    self.sidebar_hover_reveal = false;
+                    self.invalidate_pane_surface();
+                    outcome.resize = true;
+                }
             }
             ClientSettingsSection::Integrations => self.install_recommended_integrations(outcome),
         }

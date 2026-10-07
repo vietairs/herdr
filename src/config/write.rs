@@ -5,6 +5,7 @@ pub(crate) enum ConfigEdit<'a> {
     Sound(bool),
     ToastDelivery(super::ToastDelivery),
     AutoResizeSplits(bool),
+    SidebarAutoHide(bool),
     /// Persists `[ui] recent_remote_mount_targets` (most-recent-first,
     /// already deduped/capped by the caller). Written server-side only
     /// (`handle_federation_mount_ready`, `src/app/api/workspaces.rs`, which
@@ -22,6 +23,7 @@ impl ConfigEdit<'_> {
             Self::Sound(_) => "sound setting",
             Self::ToastDelivery(_) => "toast setting",
             Self::AutoResizeSplits(_) => "auto-resize splits setting",
+            Self::SidebarAutoHide(_) => "sidebar auto-hide setting",
             Self::RecentRemoteMountTargets(_) => "recent remote mount targets",
         }
     }
@@ -54,6 +56,9 @@ impl ConfigEdit<'_> {
             }
             Self::AutoResizeSplits(enabled) => {
                 super::upsert_section_bool(content, "ui", "auto_resize_splits", enabled)
+            }
+            Self::SidebarAutoHide(enabled) => {
+                super::upsert_section_bool(content, "ui", "sidebar_auto_hide", enabled)
             }
             Self::RecentRemoteMountTargets(targets) => {
                 // Serialized by the `toml` crate rather than hand-quoted: a
@@ -122,6 +127,21 @@ mod tests {
         assert_eq!(
             parsed.ui.accent, "red",
             "an unrelated key must survive the edit"
+        );
+    }
+
+    #[test]
+    fn sidebar_auto_hide_edit_upserts_ui_bool() {
+        let enabled = ConfigEdit::SidebarAutoHide(true).apply("");
+        assert!(enabled.contains("[ui]"));
+        assert!(enabled.contains("sidebar_auto_hide = true"));
+
+        let disabled = ConfigEdit::SidebarAutoHide(false).apply(&enabled);
+        assert!(disabled.contains("sidebar_auto_hide = false"));
+        assert!(!disabled.contains("sidebar_auto_hide = true"));
+        assert_eq!(
+            ConfigEdit::SidebarAutoHide(true).description(),
+            "sidebar auto-hide setting"
         );
     }
 

@@ -6,19 +6,7 @@ const SELECTION_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::fro
 
 impl ClientShellState {
     fn set_sidebar_width_from_column(&mut self, column: u16, outcome: &mut ClientShellInput) {
-        let (min, max) = crate::config::validated_sidebar_bounds(
-            self.config.sidebar_min_width,
-            self.config.sidebar_max_width,
-        )
-        .unwrap_or((18, 36));
-        let width = column.saturating_add(1).clamp(min, max);
-        if self.sidebar_width != width {
-            self.sidebar_width = width;
-            self.sidebar_width_manual = true;
-            self.invalidate_pane_surface();
-            outcome.repaint = true;
-            outcome.resize = true;
-        }
+        self.set_sidebar_width(column.saturating_add(1), outcome);
     }
 
     fn set_sidebar_section_from_row(&mut self, row: u16, outcome: &mut ClientShellInput) {
@@ -652,6 +640,28 @@ impl ClientShellState {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        self.update_sidebar_auto_reveal(mouse, outcome);
+        if !self.sidebar_overlay_masks_panes(mouse) {
+            self.handle_mouse_unmasked(mouse, outcome);
+            return;
+        }
+        // The drawer covers these panes: hide their hit rects while the event is handled so
+        // nothing beneath it is focused, selected or forwarded.
+        let overlay = self.hits.sidebar_overlay;
+        let panes = std::mem::take(&mut self.hits.panes);
+        let splits = std::mem::take(&mut self.hits.pane_splits);
+        self.handle_mouse_unmasked(mouse, outcome);
+        // Restore only if nothing rebuilt the hit map while the drawer masked it.
+        if self.hits.sidebar_overlay == overlay
+            && self.hits.panes.is_empty()
+            && self.hits.pane_splits.is_empty()
+        {
+            self.hits.panes = panes;
+            self.hits.pane_splits = splits;
+        }
+    }
+
+    fn handle_mouse_unmasked(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
         if self.mode == ClientShellMode::Navigate
@@ -1532,7 +1542,8 @@ impl ClientShellState {
                         Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
                             section: ClientSettingsSection::Indicators
                                 | ClientSettingsSection::Sound
-                                | ClientSettingsSection::Toast,
+                                | ClientSettingsSection::Toast
+                                | ClientSettingsSection::Sidebar,
                             ..
                         }))
                     );
@@ -1825,7 +1836,7 @@ impl ClientShellState {
                 if !self.config.mouse_capture {
                     return;
                 }
-                let workspace_id = (!self.sidebar_collapsed)
+                let workspace_id = (!self.sidebar_presented_collapsed())
                     .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
                 if let Some(workspace_id) = workspace_id {
@@ -2071,12 +2082,7 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.sidebar_toggle, point) {
-                    self.sidebar_collapsed = !self.sidebar_collapsed;
-                    self.sidebar_collapsed_manual = true;
-                    self.invalidate_pane_surface();
-                    outcome.repaint = true;
-                    outcome.resize = true;
-                    self.persist_chrome_preferences(outcome);
+                    self.toggle_sidebar(outcome);
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {
