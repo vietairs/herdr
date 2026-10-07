@@ -17,9 +17,32 @@ impl ClientShellState {
         self.config.sidebar_auto_hide
             && !self.sidebar_auto_hide_pinned
             && !self.mobile_layout_active()
-            && self.overlay.is_none()
-            && self.popup_terminal_id.is_none()
+            && !self.sidebar_drawer_blocked()
             && (self.sidebar_hover_reveal || self.mode == ClientShellMode::Navigate)
+    }
+
+    /// True when an open overlay or popup hides the drawer. Menus are exempt: they open from
+    /// the drawer's own rows and launcher, so the drawer stays drawn beneath them.
+    fn sidebar_drawer_blocked(&self) -> bool {
+        self.popup_terminal_id.is_some() || (self.overlay.is_some() && !self.sidebar_menu_open())
+    }
+
+    fn sidebar_menu_open(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_))
+        )
+    }
+
+    /// Drops the hover reveal. Returns true when the drawer state changed.
+    pub(super) fn clear_sidebar_hover_reveal(&mut self) -> bool {
+        std::mem::take(&mut self.sidebar_hover_reveal)
+    }
+
+    /// Drops a hover reveal that an overlay or popup has hidden, so closing that overlay does
+    /// not bring the drawer back with the pointer somewhere else.
+    pub(super) fn clear_blocked_sidebar_hover_reveal(&mut self) -> bool {
+        self.sidebar_drawer_blocked() && self.clear_sidebar_hover_reveal()
     }
 
     /// What the sidebar looks like to the user: collapsed in the docked layout and not
@@ -28,8 +51,8 @@ impl ClientShellState {
         self.sidebar_layout_collapsed() && !self.sidebar_overlay_visible()
     }
 
-    /// Layout used to render chrome while the drawer is visible: the expanded layout for the
-    /// current width, drawn over the docked layout's unchanged pane surface.
+    /// Layout used to render chrome while the drawer is visible: the expanded sidebar for the
+    /// current width, drawn over the docked layout's unchanged tab bar and pane surface.
     pub(super) fn sidebar_overlay_layout(
         &self,
         cols: u16,
@@ -44,8 +67,8 @@ impl ClientShellState {
             self.sidebar_width,
         );
         ClientShellLayout {
-            pane_surface: docked.pane_surface,
-            ..expanded
+            sidebar: expanded.sidebar,
+            ..docked
         }
     }
 
@@ -59,31 +82,38 @@ impl ClientShellState {
     }
 
     /// Opens the drawer when the pointer moves onto the trigger columns and closes it once the
-    /// pointer leaves the drawer (unless its width is being dragged). Only repaints: hover
+    /// pointer leaves the drawer. A drag never closes it, and neither does any event while a
+    /// sidebar gesture or a menu opened from the drawer is in flight. Only repaints: hover
     /// never changes the docked layout, so it never resizes the panes.
     pub(super) fn update_sidebar_auto_reveal(
         &mut self,
         mouse: crossterm::event::MouseEvent,
         outcome: &mut ClientShellInput,
     ) {
+        use crossterm::event::MouseEventKind;
+
         if !self.config.sidebar_auto_hide
             || self.sidebar_auto_hide_pinned
             || self.mobile_layout_active()
+            || self.sidebar_drawer_blocked()
         {
-            if self.sidebar_hover_reveal {
-                self.sidebar_hover_reveal = false;
-                outcome.repaint = true;
-            }
+            outcome.repaint |= self.clear_sidebar_hover_reveal();
             return;
         }
-        let overlay = self.hits.sidebar_overlay;
-        let dragging_width = matches!(self.chrome_drag, Some(ClientChromeDrag::SidebarWidth));
         if self.sidebar_hover_reveal {
-            if !overlay.is_empty() && mouse.column >= overlay.right() && !dragging_width {
+            let overlay = self.hits.sidebar_overlay;
+            let may_close = !overlay.is_empty()
+                && !self.sidebar_menu_open()
+                && match mouse.kind {
+                    MouseEventKind::Drag(_) => false,
+                    MouseEventKind::Up(_) => true,
+                    _ => self.chrome_drag.is_none() && self.workspace_press.is_none(),
+                };
+            if may_close && mouse.column >= overlay.right() {
                 self.sidebar_hover_reveal = false;
                 outcome.repaint = true;
             }
-        } else if mouse.kind == crossterm::event::MouseEventKind::Moved
+        } else if mouse.kind == MouseEventKind::Moved
             && mouse.column < self.sidebar_reveal_trigger_width()
         {
             self.sidebar_hover_reveal = true;
@@ -108,8 +138,19 @@ impl ClientShellState {
             )
     }
 
-    /// Shared by the toggle keybind and the toggle button. With auto-hide on this pins or
-    /// unpins the docked sidebar for the session without touching the saved preference.
+    /// The drawer's collapse button hides the drawer; unlike the toggle keybind it never docks
+    /// the sidebar, so the panes keep their size.
+    pub(super) fn hide_sidebar_drawer(&mut self, outcome: &mut ClientShellInput) {
+        self.sidebar_hover_reveal = false;
+        if self.mode == ClientShellMode::Navigate {
+            self.mode = self.copy_or_terminal_mode();
+            self.navigate_workspace_id = None;
+        }
+        outcome.repaint = true;
+    }
+
+    /// Shared by the toggle keybind and the docked toggle button. With auto-hide on this pins
+    /// or unpins the docked sidebar for the session without touching the saved preference.
     pub(super) fn toggle_sidebar(&mut self, outcome: &mut ClientShellInput) {
         if self.config.sidebar_auto_hide {
             self.sidebar_auto_hide_pinned = !self.sidebar_auto_hide_pinned;
@@ -126,5 +167,30 @@ impl ClientShellState {
         outcome.repaint = true;
         outcome.resize = true;
         self.persist_chrome_preferences(outcome);
+    }
+}
+
+/// Drops or trims tab bar hits that the drawer covers, so a click on the drawer never
+/// reaches a tab drawn beneath it.
+pub(super) fn clip_tab_hits_under_sidebar_overlay(hits: &mut ShellHitMap) {
+    if hits.sidebar_overlay.is_empty() {
+        return;
+    }
+    let edge = hits.sidebar_overlay.right();
+    hits.tabs.retain_mut(|(rect, _)| {
+        if rect.x < edge {
+            rect.width = rect.right().saturating_sub(edge);
+            rect.x = edge;
+        }
+        rect.width > 0
+    });
+    for button in [
+        &mut hits.new_tab,
+        &mut hits.tab_scroll_left,
+        &mut hits.tab_scroll_right,
+    ] {
+        if button.x < edge {
+            *button = Rect::default();
+        }
     }
 }

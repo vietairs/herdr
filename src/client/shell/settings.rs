@@ -230,7 +230,6 @@ impl ClientShellState {
                     crate::config::ConfigEdit::SidebarAutoHide(selected == 0),
                     outcome,
                 ) {
-                    self.sidebar_hover_reveal = false;
                     self.invalidate_pane_surface();
                     outcome.resize = true;
                 }

@@ -72,11 +72,17 @@ impl ClientShellState {
         match crate::config::load_live_config() {
             Ok(loaded) => {
                 let agent_panel_sort = self.config.agent_panel_sort;
+                let sidebar_auto_hide = self.config.sidebar_auto_hide;
                 let diagnostics = self.config.apply_live_config(
                     &loaded.config,
                     &loaded.diagnostics,
                     &loaded.invalid_sections,
                 );
+                if self.config.sidebar_auto_hide != sidebar_auto_hide {
+                    // The session pin belongs to the auto-hide setting it was made under.
+                    self.sidebar_auto_hide_pinned = false;
+                    self.sidebar_hover_reveal = false;
+                }
                 if let Some(appearance) = self.host_appearance {
                     self.config.palette = crate::app::client_palette_for_appearance(
                         &self.config.theme_runtime,

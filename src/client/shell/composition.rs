@@ -295,6 +295,7 @@ impl ClientShellState {
             },
         );
         self.hits.sidebar_overlay = overlay_rect;
+        super::sidebar_auto_hide::clip_tab_hits_under_sidebar_overlay(&mut self.hits);
         self.hits.panes = surface
             .panes
             .iter()
@@ -367,22 +368,26 @@ impl ClientShellState {
         if !self.config.mouse_capture {
             self.hits.pane_splits.clear();
         }
-        let mode_bar_area = if layout.mobile_header.is_empty()
+        let mode_bar_replaces_tab_bar = layout.mobile_header.is_empty()
             && self.config.tab_bar_position == TabBarPositionConfig::Bottom
-            && !render_layout.tab_bar.is_empty()
-        {
+            && !render_layout.tab_bar.is_empty();
+        let mode_bar_base = if mode_bar_replaces_tab_bar {
             render_layout.tab_bar
-        } else if overlay_visible {
-            let start = layout.pane_surface.x.max(overlay_rect.right());
-            let trimmed = start - layout.pane_surface.x;
-            Rect::new(
-                start,
-                layout.pane_surface.y,
-                layout.pane_surface.width.saturating_sub(trimmed),
-                layout.pane_surface.height,
-            )
         } else {
             layout.pane_surface
+        };
+        // The drawer covers the left of both the tab bar and the pane surface.
+        let mode_bar_area = if overlay_visible {
+            let start = mode_bar_base.x.max(overlay_rect.right());
+            let trimmed = start - mode_bar_base.x;
+            Rect::new(
+                start,
+                mode_bar_base.y,
+                mode_bar_base.width.saturating_sub(trimmed),
+                mode_bar_base.height,
+            )
+        } else {
+            mode_bar_base
         };
         let mobile_navigate_panel = !layout.mobile_header.is_empty()
             && self.mode == ClientShellMode::Navigate
@@ -401,7 +406,7 @@ impl ClientShellState {
                 &self.config.palette,
             )
         };
-        if mode_bar == Some(render_layout.tab_bar) {
+        if mode_bar.is_some() && mode_bar_replaces_tab_bar {
             self.hits.tabs.clear();
             self.hits.new_tab = Rect::default();
             self.hits.tab_scroll_left = Rect::default();

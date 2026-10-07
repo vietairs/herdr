@@ -2082,7 +2082,11 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.sidebar_toggle, point) {
-                    self.toggle_sidebar(outcome);
+                    if self.hits.sidebar_overlay.is_empty() {
+                        self.toggle_sidebar(outcome);
+                    } else {
+                        self.hide_sidebar_drawer(outcome);
+                    }
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {

@@ -252,6 +252,9 @@ impl ClientShellState {
                 }
                 RawInputEvent::OuterFocusLost => {
                     outcome.repaint |= self.clear_link_hover();
+                    // No pointer events arrive once the window loses focus, so a hover reveal
+                    // would otherwise stay open indefinitely.
+                    outcome.repaint |= self.clear_sidebar_hover_reveal();
                     self.outer_focused = Some(false);
                     self.release_input_leases(&mut outcome);
                     outcome
@@ -297,6 +300,7 @@ impl ClientShellState {
             }
             self.reconcile_input_source();
         }
+        outcome.repaint |= self.clear_blocked_sidebar_hover_reveal();
         outcome.repaint |= self.resume_mobile_switcher_if_ready();
         outcome
     }
