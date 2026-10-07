@@ -802,7 +802,7 @@ Use `pane.report_prompt_cache` to report when an agent last used its prompt cach
 }
 ```
 
-Use `pane.report_context_usage` to report context-window use. Send `used_tokens` with an optional exact `window_tokens` and `observed_at_ms`, or `clear: true`. Token counts above 100000000 are rejected with `invalid_context_tokens`. A report observed earlier than the stored one is ignored, and a report without `window_tokens` keeps the stored window. The value is exposed as `context_usage` on `PaneInfo` and `AgentInfo`; `window_tokens` is omitted when unknown.
+Use `pane.report_context_usage` to report context-window use. Send `used_tokens` with an optional exact `window_tokens` and an optional `observed_at_ms` (unix epoch milliseconds; Herdr uses the time it receives the report when you omit it), or `clear: true`. Token counts above 100000000 are rejected with `invalid_context_tokens`. A report observed earlier than the stored one is ignored, and a report without `window_tokens` keeps the stored window. The value is exposed as `context_usage` on `PaneInfo` and `AgentInfo`; `window_tokens` is omitted when unknown.
 
 ```json
 {
@@ -812,7 +812,8 @@ Use `pane.report_context_usage` to report context-window use. Send `used_tokens`
     "pane_id": "w1:p1",
     "source": "herdr:codex",
     "used_tokens": 84000,
-    "window_tokens": 258400
+    "window_tokens": 258400,
+    "observed_at_ms": 1760000000000
   }
 }
 ```

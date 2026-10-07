@@ -201,8 +201,13 @@ impl RawSidebarToken {
                 if token.rules.len() > 16 {
                     return Err("sidebar tokens may contain at most 16 rules".into());
                 }
+                // `prompt_cache` and `context` resolve to numbers whose text is
+                // written only where they are drawn, so no value exists to match.
                 if !token.rules.is_empty()
-                    && matches!(token.token.as_str(), "state_icon" | "git_status")
+                    && matches!(
+                        token.token.as_str(),
+                        "state_icon" | "git_status" | "prompt_cache" | "context"
+                    )
                 {
                     return Err("sidebar rules require a text-valued token".into());
                 }
@@ -545,6 +550,24 @@ mod tests {
             toml::from_str::<AgentsSidebarConfig>("rows = [[\"agent\", \"context\"]]").unwrap();
         assert_eq!(config.rows[0][1], AgentSidebarToken::Context);
         assert!(toml::to_string(&config).unwrap().contains("context"));
+    }
+
+    #[test]
+    fn usage_tokens_reject_rules_they_could_never_apply() {
+        for token in ["prompt_cache", "context"] {
+            let error = toml::from_str::<AgentsSidebarConfig>(&format!(
+                "rows = [[{{ token = \"{token}\", rules = [{{ contains = \"cold\", hide = true }}] }}]]"
+            ))
+            .expect_err("rules on a usage token are rejected");
+            assert!(
+                error.to_string().contains("text-valued token"),
+                "{token}: {error}"
+            );
+            let styled = toml::from_str::<AgentsSidebarConfig>(&format!(
+                "rows = [[{{ token = \"{token}\", bold = true }}]]"
+            ));
+            assert!(styled.is_ok(), "{token}: fixed styles stay allowed");
+        }
     }
 
     #[test]

@@ -1633,17 +1633,26 @@ type UsageFacts = (Option<PromptCacheInfo>, Option<ContextUsageInfo>);
 ///
 /// `last` only ever keeps entries holding at least one fact, so a terminal
 /// whose facts were already cleared is forgotten rather than re-cleared when
-/// it later leaves the agent list.
+/// it later leaves the agent list. A context reading whose observation time
+/// alone moved is not a change (statusline taps re-send it on every refresh),
+/// matching how the host itself stores it. Every frame carries `host_now_ms`.
 fn pane_usage_frames(
     facts: &[FederatedAgentFacts],
     last: &mut HashMap<String, UsageFacts>,
+    host_now_ms: u64,
 ) -> Vec<PaneUsageMessage> {
     let mut frames = Vec::new();
     for entry in facts {
         let previous = last.get(&entry.terminal_id);
         let unchanged = match previous {
             Some((prompt_cache, context_usage)) => {
-                *prompt_cache == entry.prompt_cache && *context_usage == entry.context_usage
+                *prompt_cache == entry.prompt_cache
+                    && match (context_usage, &entry.context_usage) {
+                        (Some(sent), Some(current)) => {
+                            crate::context_usage::same_context_reading(sent, current)
+                        }
+                        (sent, current) => sent == current,
+                    }
             }
             None => entry.prompt_cache.is_none() && entry.context_usage.is_none(),
         };
@@ -1663,6 +1672,7 @@ fn pane_usage_frames(
             mount_generation: MOUNT_GENERATION,
             prompt_cache: entry.prompt_cache.clone(),
             context_usage: entry.context_usage.clone(),
+            host_now_ms,
         });
     }
     let mut vanished: Vec<String> = last
@@ -1679,6 +1689,7 @@ fn pane_usage_frames(
             mount_generation: MOUNT_GENERATION,
             prompt_cache: None,
             context_usage: None,
+            host_now_ms,
         });
     }
     frames
@@ -1724,7 +1735,7 @@ fn poll_agent_statuses(
             return false;
         }
     }
-    for usage in pane_usage_frames(&facts, last_usage) {
+    for usage in pane_usage_frames(&facts, last_usage, crate::prompt_cache::unix_now_ms()) {
         if !enqueue_outbound(
             out_tx,
             FederationMessage::PaneUsage(usage),
@@ -3512,6 +3523,8 @@ mod pane_usage_frames_tests {
     use crate::api::schema::{ContextUsageInfo, PromptCacheInfo};
     use crate::server::federation_actor::FederatedAgentFacts;
 
+    const NOW: u64 = 1_700_000_000_000;
+
     fn cache(at: u64) -> PromptCacheInfo {
         PromptCacheInfo {
             source: "herdr:claude".to_string(),
@@ -3553,6 +3566,7 @@ mod pane_usage_frames_tests {
                 facts("term_3", None, Some(context(500))),
             ],
             &mut last,
+            NOW,
         );
 
         let mut sent: Vec<_> = frames
@@ -3574,9 +3588,9 @@ mod pane_usage_frames_tests {
     fn pane_usage_frames_unchanged_facts_send_nothing() {
         let mut last = HashMap::new();
         let current = [facts("term_1", Some(cache(10)), Some(context(500)))];
-        assert_eq!(pane_usage_frames(&current, &mut last).len(), 1);
+        assert_eq!(pane_usage_frames(&current, &mut last, NOW).len(), 1);
 
-        assert!(pane_usage_frames(&current, &mut last).is_empty());
+        assert!(pane_usage_frames(&current, &mut last, NOW).is_empty());
     }
 
     #[test]
@@ -3585,11 +3599,13 @@ mod pane_usage_frames_tests {
         pane_usage_frames(
             &[facts("term_1", Some(cache(10)), Some(context(500)))],
             &mut last,
+            NOW,
         );
 
         let frames = pane_usage_frames(
             &[facts("term_1", Some(cache(10)), Some(context(900)))],
             &mut last,
+            NOW,
         );
 
         assert_eq!(
@@ -3599,6 +3615,7 @@ mod pane_usage_frames_tests {
                 mount_generation: MOUNT_GENERATION,
                 prompt_cache: Some(cache(10)),
                 context_usage: Some(context(900)),
+                host_now_ms: NOW,
             }]
         );
     }
@@ -3606,9 +3623,9 @@ mod pane_usage_frames_tests {
     #[test]
     fn pane_usage_frames_vanished_terminal_with_a_fact_sends_one_clearing_frame() {
         let mut last = HashMap::new();
-        pane_usage_frames(&[facts("term_1", Some(cache(10)), None)], &mut last);
+        pane_usage_frames(&[facts("term_1", Some(cache(10)), None)], &mut last, NOW);
 
-        let frames = pane_usage_frames(&[], &mut last);
+        let frames = pane_usage_frames(&[], &mut last, NOW);
 
         assert_eq!(
             frames,
@@ -3617,18 +3634,39 @@ mod pane_usage_frames_tests {
                 mount_generation: MOUNT_GENERATION,
                 prompt_cache: None,
                 context_usage: None,
+                host_now_ms: NOW,
             }]
         );
         assert!(!last.contains_key("term_1"));
-        assert!(pane_usage_frames(&[], &mut last).is_empty());
+        assert!(pane_usage_frames(&[], &mut last, NOW).is_empty());
+    }
+
+    #[test]
+    fn pane_usage_frames_ignore_a_context_reading_whose_observation_time_alone_moved() {
+        let mut last = HashMap::new();
+        pane_usage_frames(
+            &[facts("term_1", Some(cache(10)), Some(context(500)))],
+            &mut last,
+            NOW,
+        );
+        let mut refreshed = context(500);
+        refreshed.observed_at_ms = 9_000;
+
+        let frames = pane_usage_frames(
+            &[facts("term_1", Some(cache(10)), Some(refreshed))],
+            &mut last,
+            NOW,
+        );
+
+        assert!(frames.is_empty());
     }
 
     #[test]
     fn pane_usage_frames_vanished_terminal_without_facts_sends_nothing() {
         let mut last = HashMap::new();
-        pane_usage_frames(&[facts("term_1", Some(cache(10)), None)], &mut last);
-        pane_usage_frames(&[facts("term_1", None, None)], &mut last);
+        pane_usage_frames(&[facts("term_1", Some(cache(10)), None)], &mut last, NOW);
+        pane_usage_frames(&[facts("term_1", None, None)], &mut last, NOW);
 
-        assert!(pane_usage_frames(&[], &mut last).is_empty());
+        assert!(pane_usage_frames(&[], &mut last, NOW).is_empty());
     }
 }

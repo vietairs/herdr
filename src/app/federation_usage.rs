@@ -5,29 +5,24 @@
 
 use crate::api::schema::{ContextUsageInfo, PromptCacheInfo};
 use crate::app::App;
-use crate::remote::federation::id::HostKey;
+use crate::terminal::TerminalId;
 
 impl App {
-    /// Stores the serving host's facts on the matching mirror terminal of a
-    /// workspace mounted from `origin`. Unknown terminal or origin mismatch →
-    /// no-op. Changed → revision bump + pane.updated.
+    /// Stores the serving host's facts on `terminal_id`, the local terminal
+    /// the mount's own router resolved for them. Unknown terminal → no-op.
+    /// Changed → revision bump + pane.updated for the pane holding it,
+    /// whichever workspace that pane has been moved to.
     ///
     /// Runs once per received usage frame, which the serving host sends only
     /// when a terminal's facts change, so the walk is bounded by agent churn
     /// and never runs per render.
     pub(crate) fn handle_federation_pane_usage(
         &mut self,
-        origin: HostKey,
-        terminal_id: String,
+        terminal_id: &TerminalId,
         prompt_cache: Option<PromptCacheInfo>,
         context_usage: Option<ContextUsageInfo>,
     ) {
-        let Some((ws_idx, pane_id, local_terminal_id)) =
-            self.federation_mirror_pane(&origin, &terminal_id)
-        else {
-            return;
-        };
-        let Some(terminal) = self.state.terminals.get_mut(&local_terminal_id) else {
+        let Some(terminal) = self.state.terminals.get_mut(terminal_id) else {
             return;
         };
         if terminal.prompt_cache == prompt_cache && terminal.context_usage == context_usage {
@@ -36,32 +31,28 @@ impl App {
         terminal.prompt_cache = prompt_cache;
         terminal.context_usage = context_usage;
         terminal.revision = terminal.revision.saturating_add(1);
-        self.emit_pane_updated(ws_idx, pane_id);
+        if let Some((ws_idx, pane_id)) = self.pane_holding_terminal(terminal_id) {
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
         self.render_dirty.request_generic();
     }
 
-    /// The first pane of a workspace mounted from `origin` whose runtime
-    /// mirrors the serving host's raw `remote_terminal_id`, with its local
-    /// terminal id.
-    fn federation_mirror_pane(
+    /// The workspace index and pane currently showing `terminal_id`.
+    fn pane_holding_terminal(
         &self,
-        origin: &HostKey,
-        remote_terminal_id: &str,
-    ) -> Option<(usize, crate::layout::PaneId, crate::terminal::TerminalId)> {
-        (0..self.state.workspaces.len())
-            .filter(|ws_idx| self.workspace_matches_federation_origin(*ws_idx, origin))
-            .find_map(|ws_idx| {
-                self.state.workspaces[ws_idx]
+        terminal_id: &TerminalId,
+    ) -> Option<(usize, crate::layout::PaneId)> {
+        self.state
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(ws_idx, workspace)| {
+                workspace
                     .tabs
                     .iter()
                     .flat_map(|tab| tab.panes.iter())
-                    .find(|(_, pane)| {
-                        self.terminal_runtimes
-                            .get(&pane.attached_terminal_id)
-                            .and_then(|runtime| runtime.remote_terminal_id())
-                            == Some(remote_terminal_id)
-                    })
-                    .map(|(pane_id, pane)| (ws_idx, *pane_id, pane.attached_terminal_id.clone()))
+                    .find(|(_, pane)| &pane.attached_terminal_id == terminal_id)
+                    .map(|(pane_id, _)| (ws_idx, *pane_id))
             })
     }
 }
@@ -78,6 +69,7 @@ mod tests {
     use crate::remote::federation::id::{HostKey, Mount, ServerInstanceId};
     use crate::remote::federation::protocol::EventCursor;
     use crate::remote::federation::reducer::RemoteMirror;
+    use crate::terminal::TerminalId;
 
     fn origin() -> HostKey {
         HostKey::new("alice@10.0.0.1", "s1")
@@ -145,8 +137,11 @@ mod tests {
     }
 
     /// An App holding one workspace materialized from a mount of `origin()`,
-    /// whose single pane mirrors the serving host's `term_1`.
-    fn mounted_app() -> (App, usize, crate::layout::PaneId) {
+    /// whose single pane mirrors the serving host's `term_1`, and that
+    /// mount's router.
+    fn mounted_app_with_router(
+        snapshot: SessionSnapshot,
+    ) -> (App, usize, crate::layout::PaneId, TerminalChannelRouter) {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
@@ -160,7 +155,7 @@ mod tests {
             server_instance_id: ServerInstanceId("inst-a".to_string()),
             mount_generation: 1,
         });
-        mirror.apply_snapshot(&mounted_snapshot(), EventCursor(0));
+        mirror.apply_snapshot(&snapshot, EventCursor(0));
         let mut router = TerminalChannelRouter::new();
         let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
         let (clipboard_tx, _clipboard_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -169,7 +164,21 @@ mod tests {
             .expect("materialization succeeds against a loopback-shaped snapshot");
         let ws_idx = created[0];
         let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        (app, ws_idx, pane_id, router)
+    }
+
+    fn mounted_app() -> (App, usize, crate::layout::PaneId) {
+        let (app, ws_idx, pane_id, _router) = mounted_app_with_router(mounted_snapshot());
         (app, ws_idx, pane_id)
+    }
+
+    /// The local terminal the mounted pane is attached to.
+    fn mirror_terminal(app: &App, ws_idx: usize, pane_id: crate::layout::PaneId) -> TerminalId {
+        app.state.workspaces[ws_idx]
+            .pane_state(pane_id)
+            .expect("the mounted pane exists")
+            .attached_terminal_id
+            .clone()
     }
 
     fn cache() -> PromptCacheInfo {
@@ -208,15 +217,11 @@ mod tests {
     #[tokio::test]
     async fn federation_pane_usage_sets_both_facts_on_the_mirror_pane() {
         let (mut app, ws_idx, pane_id) = mounted_app();
+        let terminal = mirror_terminal(&app, ws_idx, pane_id);
         let revision = info(&app, ws_idx, pane_id).revision;
         let sequence = app.event_hub.current_sequence();
 
-        app.handle_federation_pane_usage(
-            origin(),
-            "term_1".to_string(),
-            Some(cache()),
-            Some(context()),
-        );
+        app.handle_federation_pane_usage(&terminal, Some(cache()), Some(context()));
 
         let pane = info(&app, ws_idx, pane_id);
         assert_eq!(pane.prompt_cache, Some(cache()));
@@ -228,16 +233,12 @@ mod tests {
     #[tokio::test]
     async fn federation_pane_usage_with_none_clears_the_facts() {
         let (mut app, ws_idx, pane_id) = mounted_app();
-        app.handle_federation_pane_usage(
-            origin(),
-            "term_1".to_string(),
-            Some(cache()),
-            Some(context()),
-        );
+        let terminal = mirror_terminal(&app, ws_idx, pane_id);
+        app.handle_federation_pane_usage(&terminal, Some(cache()), Some(context()));
         let revision = info(&app, ws_idx, pane_id).revision;
         let sequence = app.event_hub.current_sequence();
 
-        app.handle_federation_pane_usage(origin(), "term_1".to_string(), None, None);
+        app.handle_federation_pane_usage(&terminal, None, None);
 
         let pane = info(&app, ws_idx, pane_id);
         assert_eq!(pane.prompt_cache, None);
@@ -247,23 +248,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn federation_pane_usage_ignores_other_origins_and_unknown_terminals() {
+    async fn federation_pane_usage_ignores_unknown_terminals() {
         let (mut app, ws_idx, pane_id) = mounted_app();
         let revision = info(&app, ws_idx, pane_id).revision;
         let sequence = app.event_hub.current_sequence();
 
-        app.handle_federation_pane_usage(
-            HostKey::new("bob@10.0.0.2", "s1"),
-            "term_1".to_string(),
-            Some(cache()),
-            Some(context()),
-        );
-        app.handle_federation_pane_usage(
-            origin(),
-            "term_404".to_string(),
-            Some(cache()),
-            Some(context()),
-        );
+        app.handle_federation_pane_usage(&TerminalId::alloc(), Some(cache()), Some(context()));
 
         let pane = info(&app, ws_idx, pane_id);
         assert_eq!(pane.prompt_cache, None);
@@ -273,23 +263,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn federation_pane_usage_follows_a_mirror_pane_moved_out_of_its_mount() {
+        let (mut app, ws_idx, pane_id, router) = mounted_app_with_router(mounted_snapshot());
+        let terminal = router
+            .local_terminal_id("term_1")
+            .expect("the mount maps the serving host's terminal to its mirror")
+            .clone();
+        assert_eq!(terminal, mirror_terminal(&app, ws_idx, pane_id));
+        let public_pane_id = app.public_pane_id(ws_idx, pane_id).unwrap();
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "move".into(),
+            method: crate::api::schema::Method::PaneMove(crate::api::schema::PaneMoveParams {
+                pane_id: public_pane_id,
+                destination: crate::api::schema::PaneMoveDestination::NewWorkspace {
+                    label: Some("local".into()),
+                    tab_label: None,
+                },
+                focus: false,
+            }),
+        });
+        let _: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&response).expect("the move succeeds");
+        let (moved_ws_idx, moved_pane_id) = app
+            .pane_holding_terminal(&terminal)
+            .expect("the moved pane still shows the mirror terminal");
+        assert!(
+            app.state.workspaces[moved_ws_idx]
+                .worktree_space()
+                .is_none_or(|space| space.key != format!("federation:{}", origin().as_str())),
+            "the pane now lives outside the mounted workspace"
+        );
+        let sequence = app.event_hub.current_sequence();
+
+        app.handle_federation_pane_usage(&terminal, Some(cache()), Some(context()));
+
+        let pane = info(&app, moved_ws_idx, moved_pane_id);
+        assert_eq!(pane.prompt_cache, Some(cache()));
+        assert_eq!(pane.context_usage, Some(context()));
+        assert_eq!(pane_updated_count(&app, sequence), 1);
+    }
+
+    #[tokio::test]
+    async fn mounted_pane_starts_with_the_facts_in_the_mount_snapshot() {
+        let mut snapshot = mounted_snapshot();
+        snapshot.panes[0].prompt_cache = Some(cache());
+        snapshot.panes[0].context_usage = Some(context());
+
+        let (app, ws_idx, pane_id, _router) = mounted_app_with_router(snapshot);
+
+        let pane = info(&app, ws_idx, pane_id);
+        assert_eq!(pane.prompt_cache, Some(cache()));
+        assert_eq!(pane.context_usage, Some(context()));
+    }
+
+    #[tokio::test]
     async fn federation_pane_usage_unchanged_value_does_not_bump_revision() {
         let (mut app, ws_idx, pane_id) = mounted_app();
-        app.handle_federation_pane_usage(
-            origin(),
-            "term_1".to_string(),
-            Some(cache()),
-            Some(context()),
-        );
+        let terminal = mirror_terminal(&app, ws_idx, pane_id);
+        app.handle_federation_pane_usage(&terminal, Some(cache()), Some(context()));
         let revision = info(&app, ws_idx, pane_id).revision;
         let sequence = app.event_hub.current_sequence();
 
-        app.handle_federation_pane_usage(
-            origin(),
-            "term_1".to_string(),
-            Some(cache()),
-            Some(context()),
-        );
+        app.handle_federation_pane_usage(&terminal, Some(cache()), Some(context()));
 
         assert_eq!(info(&app, ws_idx, pane_id).revision, revision);
         assert_eq!(pane_updated_count(&app, sequence), 0);

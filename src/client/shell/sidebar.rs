@@ -437,7 +437,11 @@ pub(crate) fn render_sidebar(
         config,
         state.agent_scroll,
         hits,
-        state.prompt_cache_now_ms,
+        super::endpoints::endpoint_server_clock_ms(
+            state.endpoints,
+            state.active_endpoint_id,
+            state.prompt_cache_now_ms,
+        ),
     );
 
     hits.sidebar_toggle = Rect::new(

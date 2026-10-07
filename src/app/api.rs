@@ -241,13 +241,12 @@ impl App {
         }
 
         if let AppEvent::FederationPaneUsage {
-            origin,
             terminal_id,
             prompt_cache,
             context_usage,
         } = ev
         {
-            self.handle_federation_pane_usage(origin, terminal_id, prompt_cache, context_usage);
+            self.handle_federation_pane_usage(&terminal_id, prompt_cache, context_usage);
             return Vec::new();
         }
 

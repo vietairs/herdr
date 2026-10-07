@@ -1675,7 +1675,10 @@ fn prompt_cache_tick_repaints_once_per_second_only_while_live_and_visible() {
     assert!(!state.tick_prompt_cache(1_000_400));
     assert!(state.tick_prompt_cache(1_001_000));
     assert_eq!(state.prompt_cache_now_ms, 1_001_000);
-    assert!(!state.tick_prompt_cache(1_301_500));
+    // The countdown on screen expired between ticks: one repaint draws `cold`, then
+    // nothing.
+    assert!(state.tick_prompt_cache(1_301_500));
+    assert!(!state.tick_prompt_cache(1_302_500));
 
     let mut collapsed = composed(ClientShellConfig::from_config(&Config::default()));
     collapsed.sidebar_collapsed = true;
@@ -1687,6 +1690,118 @@ fn prompt_cache_tick_repaints_once_per_second_only_while_live_and_visible() {
     let mut unused = composed(ClientShellConfig::from_config(&config));
     unused.prompt_cache_now_ms = 1_001_000;
     assert!(!unused.tick_prompt_cache(1_002_000));
+}
+
+#[test]
+fn prompt_cache_tick_repaints_cold_after_a_gap_longer_than_the_cache_window() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![prompt_cache_agent()];
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("composed frame");
+
+    // Painted at `5m 3:20`, then the client stalls for ten minutes (ttl + 1 s is 301 s).
+    state.prompt_cache_now_ms = 1_100_000;
+    assert!(state.tick_prompt_cache(1_700_000));
+    let text = frame_rows(&state.compose(106, 30).expect("composed frame")).join("\n");
+    assert!(text.contains("cold"), "{text}");
+    assert!(!state.tick_prompt_cache(1_701_000));
+
+    // Timer phase: the last live tick paints `0:01`, the next one lands past the
+    // live window and must still repaint once.
+    state.prompt_cache_now_ms = 1_299_500;
+    assert!(state.tick_prompt_cache(1_300_020));
+    assert!(state.tick_prompt_cache(1_301_060));
+    assert!(!state.tick_prompt_cache(1_302_000));
+}
+
+/// A shell with an online remote endpoint and an empty local snapshot.
+fn state_with_remote_endpoint() -> (ClientShellState, crate::client::endpoint::ClientEndpointId) {
+    use crate::client::endpoint::{
+        ClientEndpointId, ClientEndpointStatus, ProfileId, SavedSshEndpoint,
+    };
+    let profile = SavedSshEndpoint {
+        id: ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        label: "Build".into(),
+        target: "dev@build.example".into(),
+        session: "agents".into(),
+        enabled: true,
+    };
+    let remote = ClientEndpointId::Ssh(profile.id.clone());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    (state, remote)
+}
+
+fn endpoint_clock_offset_ms(
+    state: &ClientShellState,
+    endpoint_id: &crate::client::endpoint::ClientEndpointId,
+) -> i64 {
+    state
+        .endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        .map(|endpoint| endpoint.server_clock_offset_ms)
+        .expect("endpoint")
+}
+
+#[test]
+fn prompt_cache_countdown_reads_the_endpoint_clock_not_the_client_clock() {
+    let (mut state, remote) = state_with_remote_endpoint();
+    let mut snapshot = snapshot();
+    snapshot.boot_id = "remote-boot".into();
+    snapshot.agents = vec![prompt_cache_agent()];
+    // The endpoint's clock runs three minutes behind this client's.
+    let skew_ms = 180_000;
+    snapshot.server_now_ms = crate::prompt_cache::unix_now_ms() - skew_ms;
+    state.set_endpoint_snapshot(&remote, Box::new(snapshot));
+
+    // 48.5 s after the request on the endpoint's clock, read on the client's clock (the
+    // half second absorbs the offset measurement's own latency).
+    state.prompt_cache_now_ms = 1_048_500 + skew_ms;
+    let text = frame_rows(&state.compose(106, 30).expect("composed frame")).join("\n");
+    assert!(text.contains("5m 4:12"), "{text}");
+
+    // Live on the endpoint's clock even though the client clock is past expiry.
+    state.prompt_cache_now_ms = 1_200_000 + skew_ms;
+    assert!(state.prompt_cache_countdown_visible(1_200_000 + skew_ms));
+    assert!(!state.prompt_cache_countdown_visible(1_302_000 + skew_ms));
+}
+
+#[test]
+fn a_late_snapshot_does_not_shift_the_endpoint_clock() {
+    let (mut state, remote) = state_with_remote_endpoint();
+    let local = crate::client::endpoint::ClientEndpointId::Local;
+    for endpoint_id in [&local, &remote] {
+        for (revision, delay_ms) in [(1, 0), (2, 10_000)] {
+            let mut late = snapshot();
+            late.revision = revision;
+            late.server_now_ms = crate::prompt_cache::unix_now_ms() - delay_ms;
+            state.set_endpoint_snapshot_for_generation(endpoint_id, 4, Box::new(late));
+            assert_eq!(
+                endpoint_clock_offset_ms(&state, endpoint_id),
+                0,
+                "{endpoint_id:?}"
+            );
+        }
+    }
+
+    // A new connection may reach another clock, so its first sample stands.
+    let mut reconnected = snapshot();
+    reconnected.server_now_ms = crate::prompt_cache::unix_now_ms() - 180_000;
+    state.set_endpoint_snapshot_for_generation(&remote, 5, Box::new(reconnected));
+    assert!(endpoint_clock_offset_ms(&state, &remote) <= -180_000);
+
+    // The local endpoint shares this host's clock whatever its snapshot says.
+    let mut skewed = snapshot();
+    skewed.revision = 3;
+    skewed.server_now_ms = crate::prompt_cache::unix_now_ms() - 180_000;
+    state.set_endpoint_snapshot_for_generation(&local, 5, Box::new(skewed));
+    assert_eq!(endpoint_clock_offset_ms(&state, &local), 0);
 }
 
 fn context_usage_agent(

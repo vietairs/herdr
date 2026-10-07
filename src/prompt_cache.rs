@@ -8,6 +8,35 @@ pub(crate) fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Skew below this is treated as none: it is under the countdown's one-second
+/// resolution, and measuring it across a socket mostly measures delivery latency.
+const CLOCK_SKEW_TOLERANCE_MS: u64 = 1000;
+
+/// How far another host's wall clock runs ahead of ours (negative when behind),
+/// from its `remote_now_ms` read at roughly our `local_now_ms`. 0 when the remote
+/// sent no clock (an older peer) or the two agree within a second.
+pub(crate) fn remote_clock_offset_ms(remote_now_ms: u64, local_now_ms: u64) -> i64 {
+    if remote_now_ms == 0 || remote_now_ms.abs_diff(local_now_ms) < CLOCK_SKEW_TOLERANCE_MS {
+        return 0;
+    }
+    let offset = i128::from(remote_now_ms) - i128::from(local_now_ms);
+    i64::try_from(offset).unwrap_or(if offset < 0 { i64::MIN } else { i64::MAX })
+}
+
+/// `at_ms` on our clock to the remote clock `remote_offset_ms` describes.
+pub(crate) fn local_to_remote_clock_ms(at_ms: u64, remote_offset_ms: i64) -> u64 {
+    at_ms.saturating_add_signed(remote_offset_ms)
+}
+
+/// A remote timestamp `remote_at_ms` on our clock. A zero timestamp stays zero so
+/// "never" is not shifted into a real instant.
+pub(crate) fn remote_to_local_clock_ms(remote_at_ms: u64, remote_offset_ms: i64) -> u64 {
+    if remote_at_ms == 0 {
+        return 0;
+    }
+    remote_at_ms.saturating_add_signed(remote_offset_ms.saturating_neg())
+}
+
 /// How much of a prompt-cache window is left at one instant. `Copy` so token
 /// resolution in the render path never allocates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +207,24 @@ mod tests {
         ] {
             assert_eq!(prompt_cache_countdown_text_width(case), text(case).len());
         }
+    }
+
+    #[test]
+    fn remote_clock_offset_ignores_sub_second_skew_and_missing_clocks() {
+        assert_eq!(remote_clock_offset_ms(0, L), 0);
+        assert_eq!(remote_clock_offset_ms(L + 999, L), 0);
+        assert_eq!(remote_clock_offset_ms(L - 999, L), 0);
+        assert_eq!(remote_clock_offset_ms(L + 180_000, L), 180_000);
+        assert_eq!(remote_clock_offset_ms(L - 180_000, L), -180_000);
+    }
+
+    #[test]
+    fn clock_translation_round_trips_and_keeps_zero() {
+        assert_eq!(local_to_remote_clock_ms(L, -180_000), L - 180_000);
+        assert_eq!(remote_to_local_clock_ms(L - 180_000, -180_000), L);
+        assert_eq!(remote_to_local_clock_ms(L + 5000, 5000), L);
+        assert_eq!(remote_to_local_clock_ms(0, -180_000), 0);
+        assert_eq!(local_to_remote_clock_ms(5, -180_000), 0);
     }
 
     #[test]

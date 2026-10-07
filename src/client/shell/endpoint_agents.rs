@@ -155,7 +155,7 @@ fn agent_rows(
                             &agent.pane_id,
                             config,
                             Some(&endpoint.label),
-                            now_unix_ms,
+                            endpoint.server_clock_ms(now_unix_ms),
                         )
                     })
                     .map(|agent| ((endpoint.endpoint_id.clone(), agent.pane_id.clone()), agent))

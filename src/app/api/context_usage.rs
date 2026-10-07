@@ -55,14 +55,10 @@ impl App {
                 && params.window_tokens.is_none()
                 && params.observed_at_ms.is_none()
         } else {
-            params.used_tokens.is_some() && params.observed_at_ms.is_some_and(|at| at > 0)
+            params.used_tokens.is_some() && params.observed_at_ms.is_none_or(|at| at > 0)
         };
         if !request_shape_valid {
-            return encode_error(
-                id,
-                "invalid_context_usage",
-                "set used_tokens and observed_at_ms, or clear",
-            );
+            return encode_error(id, "invalid_context_usage", "set used_tokens, or clear");
         }
         if params
             .used_tokens
@@ -91,9 +87,18 @@ impl App {
         let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        // A hook that lands after its agent exited must not bring the fact back on
+        // the shell left behind; same gate as `pane.report_metadata`.
+        if terminal.metadata_report_blocked_by_process_exit(&source, None, None) {
+            return encode_success(id, ResponseResult::Ok {});
+        }
 
-        let changed = match (params.used_tokens, params.observed_at_ms) {
-            (Some(used_tokens), Some(observed_at_ms)) => {
+        let changed = match params.used_tokens {
+            Some(used_tokens) => {
+                // A reporter that sends no observation time observed it now.
+                let observed_at_ms = params
+                    .observed_at_ms
+                    .unwrap_or_else(crate::prompt_cache::unix_now_ms);
                 match merge_context_usage_report(
                     terminal.context_usage.as_ref(),
                     source,
@@ -101,14 +106,25 @@ impl App {
                     params.window_tokens,
                     observed_at_ms,
                 ) {
-                    Some(next) if terminal.context_usage.as_ref() != Some(&next) => {
-                        terminal.context_usage = Some(next);
-                        true
-                    }
-                    _ => false,
+                    // Statusline taps re-send an unchanged reading on every
+                    // refresh. Only the observation time moves, so record it
+                    // without a revision, event or render.
+                    Some(next) => match terminal.context_usage.as_mut() {
+                        Some(stored)
+                            if crate::context_usage::same_context_reading(stored, &next) =>
+                        {
+                            stored.observed_at_ms = next.observed_at_ms;
+                            false
+                        }
+                        _ => {
+                            terminal.context_usage = Some(next);
+                            true
+                        }
+                    },
+                    None => false,
                 }
             }
-            _ => terminal.context_usage.take().is_some(),
+            None => terminal.context_usage.take().is_some(),
         };
         if changed {
             terminal.revision = terminal.revision.saturating_add(1);
@@ -288,10 +304,6 @@ mod tests {
         missing_tokens.used_tokens = None;
         assert_eq!(code(&mut app, missing_tokens), "invalid_context_usage");
 
-        let mut missing_time = params(&pane);
-        missing_time.observed_at_ms = None;
-        assert_eq!(code(&mut app, missing_time), "invalid_context_usage");
-
         let mut zero_time = params(&pane);
         zero_time.observed_at_ms = Some(0);
         assert_eq!(code(&mut app, zero_time), "invalid_context_usage");
@@ -326,6 +338,69 @@ mod tests {
         zero.observed_at_ms = Some(2_000_000);
         assert_ok(&app.handle_pane_report_context_usage("r".into(), zero));
         assert_eq!(fact(&app, &pane).unwrap().used_tokens, 0);
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn context_usage_report_without_observation_time_is_observed_now() {
+        let (mut app, pane) = app_with_test_workspace();
+        let before = crate::prompt_cache::unix_now_ms();
+
+        let mut untimed = params(&pane);
+        untimed.observed_at_ms = None;
+        assert_ok(&app.handle_pane_report_context_usage("r".into(), untimed));
+
+        let stored = fact(&app, &pane).expect("the report is stored");
+        assert_eq!(stored.used_tokens, 84_000);
+        assert!(stored.observed_at_ms >= before);
+        assert!(stored.observed_at_ms <= crate::prompt_cache::unix_now_ms());
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn context_usage_report_with_the_same_reading_only_moves_the_observation_time() {
+        let (mut app, pane) = app_with_test_workspace();
+        assert_ok(&app.handle_pane_report_context_usage("r".into(), params(&pane)));
+        let before = revision(&app, &pane);
+        let sequence = app.event_hub.current_sequence();
+        app.render_dirty.take();
+
+        let mut refreshed = params(&pane);
+        refreshed.observed_at_ms = Some(2_000_000);
+        assert_ok(&app.handle_pane_report_context_usage("r".into(), refreshed));
+
+        assert_eq!(
+            fact(&app, &pane),
+            Some(info("herdr:claude", 84_000, Some(200_000), 2_000_000))
+        );
+        assert_eq!(revision(&app, &pane), before);
+        assert!(app.event_hub.events_after(sequence).is_empty());
+        assert!(!app.render_dirty.is_pending());
+
+        // A changed reading still counts as a change.
+        let mut grown = params(&pane);
+        grown.used_tokens = Some(90_000);
+        grown.observed_at_ms = Some(3_000_000);
+        assert_ok(&app.handle_pane_report_context_usage("r".into(), grown));
+        assert_eq!(revision(&app, &pane), before + 1);
+        assert!(app.render_dirty.is_pending());
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn context_usage_report_after_the_agent_process_exited_is_ignored() {
+        let (mut app, pane) = app_with_test_workspace();
+        assert_ok(&app.handle_pane_report_context_usage("r".into(), params(&pane)));
+        super::super::prompt_cache::tests::release_agent_by_process_exit(&mut app, &pane);
+        assert_eq!(fact(&app, &pane), None);
+        let before = revision(&app, &pane);
+
+        let mut late = params(&pane);
+        late.observed_at_ms = Some(2_000_000);
+        assert_ok(&app.handle_pane_report_context_usage("r".into(), late));
+
+        assert_eq!(fact(&app, &pane), None);
+        assert_eq!(revision(&app, &pane), before);
         shutdown_test_runtimes(&mut app);
     }
 

@@ -390,8 +390,8 @@ pub struct AgentStatusMessage {
 /// Per-terminal usage facts from the serving host: the full current value of
 /// both, sent whenever either changes. Rides the agent-status channel. A
 /// `None` fact means the serving host no longer holds it, so the receiver
-/// clears its copy. Timestamps are the serving host's own wall clock and are
-/// forwarded verbatim.
+/// clears its copy. Timestamps are the serving host's own wall clock;
+/// `host_now_ms` lets the receiver move them onto its own clock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneUsageMessage {
     /// Raw (un-namespaced) serving-host terminal id.
@@ -403,6 +403,10 @@ pub struct PaneUsageMessage {
     pub prompt_cache: Option<crate::api::schema::PromptCacheInfo>,
     #[serde(default)]
     pub context_usage: Option<crate::api::schema::ContextUsageInfo>,
+    /// The serving host's wall clock (unix epoch ms) when it built this frame.
+    /// 0 when absent: the receiver then assumes both clocks agree.
+    #[serde(default)]
+    pub host_now_ms: u64,
 }
 
 /// Clipboard-channel message. `origin_tag` identifies which side produced
@@ -1155,12 +1159,14 @@ mod tests {
                 window_tokens: Some(200_000),
                 observed_at_ms: 1_700_000_000_500,
             }),
+            host_now_ms: 1_700_000_001_000,
         });
         let cleared = FederationMessage::PaneUsage(PaneUsageMessage {
             terminal_id: "term_1".to_string(),
             mount_generation: 1,
             prompt_cache: None,
             context_usage: None,
+            host_now_ms: 1_700_000_001_000,
         });
         for msg in [with_facts, cleared] {
             assert_eq!(msg.channel(), Channel::AgentStatus);

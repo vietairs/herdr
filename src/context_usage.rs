@@ -9,6 +9,15 @@ pub(crate) struct ContextReading {
     pub(crate) window_tokens: Option<u64>,
 }
 
+/// Whether two stored facts carry the same reading from the same reporter, so only
+/// their observation time can differ.
+pub(crate) fn same_context_reading(
+    a: &crate::api::schema::ContextUsageInfo,
+    b: &crate::api::schema::ContextUsageInfo,
+) -> bool {
+    a.source == b.source && a.used_tokens == b.used_tokens && a.window_tokens == b.window_tokens
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextLevel {
     Unknown,

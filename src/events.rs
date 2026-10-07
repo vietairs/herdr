@@ -363,13 +363,14 @@ pub enum AppEvent {
         pane_id: String,
     },
     /// A live mount's serving host reported the current prompt-cache and
-    /// context-usage facts for one of its terminals. `terminal_id` is the
-    /// raw (un-namespaced) serving-host id; `None` clears that fact on the
-    /// mirror pane. The handler stores both on the local mirror terminal of
-    /// a workspace mounted from `origin` (`App::handle_federation_pane_usage`).
+    /// context-usage facts for one of its terminals, already moved onto this
+    /// server's clock. `terminal_id` is the LOCAL terminal that mirrors it,
+    /// resolved through that mount's own router, so the facts follow the
+    /// terminal wherever its pane has been moved; `None` clears that fact.
+    /// The handler stores both on that terminal
+    /// (`App::handle_federation_pane_usage`).
     FederationPaneUsage {
-        origin: crate::remote::federation::id::HostKey,
-        terminal_id: String,
+        terminal_id: crate::terminal::TerminalId,
         prompt_cache: Option<crate::api::schema::PromptCacheInfo>,
         context_usage: Option<crate::api::schema::ContextUsageInfo>,
     },

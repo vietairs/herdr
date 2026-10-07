@@ -16,6 +16,10 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) snapshot: Option<Box<ClientShellSnapshot>>,
     /// Connection generation that produced `snapshot`. `None` is reserved for local tests.
     pub(crate) snapshot_generation: Option<u64>,
+    /// How far this endpoint's wall clock runs ahead of this client's, estimated from
+    /// the snapshots of `snapshot_generation`. Its absolute timestamps are read against
+    /// the local clock shifted by this much.
+    pub(crate) server_clock_offset_ms: i64,
     pub(crate) agent_recency: HashMap<String, u64>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
@@ -70,6 +74,8 @@ impl ClientShellState {
                 ),
                 snapshot: previous.and_then(|endpoint| endpoint.snapshot.clone()),
                 snapshot_generation: previous.and_then(|endpoint| endpoint.snapshot_generation),
+                server_clock_offset_ms: previous
+                    .map_or(0, |endpoint| endpoint.server_clock_offset_ms),
                 agent_recency: previous
                     .map(|endpoint| endpoint.agent_recency.clone())
                     .unwrap_or_default(),
@@ -615,6 +621,12 @@ impl ClientShellState {
         });
         let endpoint = &mut self.endpoints[index];
         endpoint.agent_recency = recency;
+        endpoint.server_clock_offset_ms = next_server_clock_offset_ms(
+            endpoint,
+            generation,
+            snapshot.server_now_ms,
+            crate::prompt_cache::unix_now_ms(),
+        );
         endpoint.snapshot_generation = generation;
         endpoint.snapshot = Some(snapshot);
         let pending_matches =
@@ -711,6 +723,51 @@ impl ClientShellState {
     }
 }
 
+impl ClientShellEndpoint {
+    /// This endpoint's clock at the local instant `local_now_ms`, the instant its
+    /// absolute timestamps are compared with.
+    pub(super) fn server_clock_ms(&self, local_now_ms: u64) -> u64 {
+        crate::prompt_cache::local_to_remote_clock_ms(local_now_ms, self.server_clock_offset_ms)
+    }
+}
+
+/// The clock offset to keep for `endpoint` once a snapshot stamped `server_now_ms`
+/// arrives at `local_now_ms` on `generation`. The local endpoint shares this host's
+/// clock. A snapshot's delivery and processing delay only lowers a sample, so within
+/// one connection the largest sample is the closest to the true offset; a new
+/// connection may reach a different clock and starts over.
+fn next_server_clock_offset_ms(
+    endpoint: &ClientShellEndpoint,
+    generation: Option<u64>,
+    server_now_ms: u64,
+    local_now_ms: u64,
+) -> i64 {
+    if endpoint.endpoint_id.is_local() {
+        return 0;
+    }
+    let sample = crate::prompt_cache::remote_clock_offset_ms(server_now_ms, local_now_ms);
+    if endpoint.snapshot.is_some() && endpoint.snapshot_generation == generation {
+        endpoint.server_clock_offset_ms.max(sample)
+    } else {
+        sample
+    }
+}
+
+/// `endpoint_id`'s clock at the local instant `local_now_ms`; the local clock when the
+/// endpoint is unknown.
+pub(super) fn endpoint_server_clock_ms(
+    endpoints: &[ClientShellEndpoint],
+    endpoint_id: &ClientEndpointId,
+    local_now_ms: u64,
+) -> u64 {
+    endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        .map_or(local_now_ms, |endpoint| {
+            endpoint.server_clock_ms(local_now_ms)
+        })
+}
+
 pub(super) fn endpoint_status_presentation(
     status: ClientEndpointStatus,
     palette: &Palette,
@@ -731,6 +788,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         status: ClientEndpointStatus::Online,
         snapshot: None,
         snapshot_generation: None,
+        server_clock_offset_ms: 0,
         agent_recency: HashMap::new(),
         agent_presentation: Default::default(),
         agent_view_projection: None,

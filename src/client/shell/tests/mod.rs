@@ -70,6 +70,7 @@ pub(super) fn snapshot() -> ClientShellSnapshot {
         commands: Vec::new(),
         remote_mount_attempts: Vec::new(),
         recent_remote_mount_targets: Vec::new(),
+        server_now_ms: 0,
     }
 }
 

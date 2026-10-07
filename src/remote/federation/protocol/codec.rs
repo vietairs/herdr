@@ -470,6 +470,7 @@ mod tests {
                 assert_eq!(msg.terminal_id, "term_1");
                 assert_eq!(msg.prompt_cache, None);
                 assert_eq!(msg.context_usage, None);
+                assert_eq!(msg.host_now_ms, 0, "an absent clock reads as none");
             }
             other => panic!("expected PaneUsage, got {other:?}"),
         }

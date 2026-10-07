@@ -950,6 +950,47 @@ fn terminal_client_endpoint_request_error_removes_client() {
 }
 
 #[tokio::test]
+async fn client_shell_snapshot_carries_the_send_clock_without_resending_for_it() {
+    let mut server = test_headless_server();
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            surface_scroll: false,
+            client_id: 78,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: false,
+            writer,
+        })
+    );
+    let initial = client_shell_snapshot(&control_rx);
+    assert!(initial.server_now_ms > 0);
+    // Settle whatever the first render projects for this client.
+    server.render_and_stream();
+    while control_rx.try_recv().is_ok() {}
+
+    // Only the clock moved: nothing is sent.
+    std::thread::sleep(Duration::from_millis(5));
+    let before = crate::prompt_cache::unix_now_ms();
+    server.render_and_stream();
+    assert!(control_rx.try_recv().is_err());
+
+    server.app.state.update_available = Some("9.9.9".into());
+    server.render_and_stream();
+    let changed = client_shell_snapshot(&control_rx);
+    assert!(changed.revision > initial.revision);
+    assert!(changed.server_now_ms >= before.max(initial.server_now_ms));
+}
+
+#[tokio::test]
 async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots() {
     use crate::api::schema::{
         AgentViewBuiltinField, AgentViewField, AgentViewFilter, AgentViewSetParams, AgentViewValue,

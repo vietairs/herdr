@@ -85,6 +85,11 @@ impl App {
         let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        // A hook that lands after its agent exited must not bring the fact back on
+        // the shell left behind; same gate as `pane.report_metadata`.
+        if terminal.metadata_report_blocked_by_process_exit(&source, None, None) {
+            return encode_success(id, ResponseResult::Ok {});
+        }
 
         let changed = match params.last_request_at_ms {
             None => terminal.prompt_cache.take().is_some(),
@@ -319,6 +324,42 @@ pub(super) mod tests {
         );
 
         assert_eq!(fact(&app, &pane), None);
+        shutdown_test_runtimes(&mut app);
+    }
+
+    /// Releases the pane's Claude agent the way a real process exit does.
+    pub(in crate::app::api) fn release_agent_by_process_exit(app: &mut App, pane_id: &str) {
+        let (ws_idx, pane) = app.parse_pane_id(pane_id).unwrap();
+        let terminal_id = app.state.terminal_id_for_pane(ws_idx, pane).unwrap();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Working,
+            );
+        let update = app
+            .state
+            .publish_pane_process_exit_if_agent(pane, false)
+            .expect("process exit update");
+        assert!(update.agent_released);
+    }
+
+    #[test]
+    fn prompt_cache_report_after_the_agent_process_exited_is_ignored() {
+        let (mut app, pane) = app_with_test_workspace();
+        assert_ok(&app.handle_pane_report_prompt_cache("r".into(), params(&pane)));
+        release_agent_by_process_exit(&mut app, &pane);
+        assert_eq!(fact(&app, &pane), None);
+        let before = revision(&app, &pane);
+
+        let mut late = params(&pane);
+        late.last_request_at_ms = Some(2_000_000);
+        assert_ok(&app.handle_pane_report_prompt_cache("r".into(), late));
+
+        assert_eq!(fact(&app, &pane), None);
+        assert_eq!(revision(&app, &pane), before);
         shutdown_test_runtimes(&mut app);
     }
 

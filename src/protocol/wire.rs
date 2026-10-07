@@ -996,6 +996,16 @@ pub struct ClientShellSnapshot {
     /// successfully dialled, for the mount dialog's recents list.
     #[serde(default)]
     pub recent_remote_mount_targets: Vec<String>,
+    /// The endpoint's wall clock (unix epoch ms) when it sent this snapshot, so
+    /// a client can correct the endpoint's absolute timestamps (prompt-cache
+    /// request times) for clock skew. Stamped at send time and excluded from
+    /// the server's change detection, so it never forces a snapshot by itself.
+    ///
+    /// `default` (not `skip_serializing_if`) so an older endpoint's snapshot
+    /// decodes as 0, "no clock": the client then assumes no skew. Appended last
+    /// because the bincode codec is positional.
+    #[serde(default)]
+    pub server_now_ms: u64,
 }
 
 /// One target's outcome from `AppState::remote_mount_attempts`, flattened
@@ -3263,6 +3273,7 @@ mod tests {
                 },
             ],
             recent_remote_mount_targets: vec!["host-b".into(), "host-a".into()],
+            server_now_ms: 1_760_000_000_000,
         }));
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
