@@ -202,6 +202,14 @@ pub(super) fn snapshot_with_completions(
                 state_labels,
                 tokens,
                 focused,
+                prompt_cache: agent
+                    .prompt_cache
+                    .as_ref()
+                    .map(protocol::ClientShellPromptCache::from),
+                context_usage: agent
+                    .context_usage
+                    .as_ref()
+                    .map(protocol::ClientShellContextUsage::from),
             }
         })
         .collect();

@@ -207,6 +207,8 @@ fn pane_scroll_result(
                 max_offset_from_bottom,
                 viewport_rows,
             }),
+            prompt_cache: None,
+            context_usage: None,
             revision: 0,
         },
     }

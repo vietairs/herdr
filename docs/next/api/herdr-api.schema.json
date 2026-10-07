@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 24,
+  "protocol": 25,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -78,6 +78,42 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "ContextUsageInfo": {
+          "description": "Per-pane context-window usage fact reported by an integration.\n\nJSON API type only: its `skip_serializing_if` is right for JSON and wrong for\npositional bincode, so it is never embedded in a bincode wire type.",
+          "properties": {
+            "observed_at_ms": {
+              "description": "Unix epoch milliseconds at which the reporter observed this reading.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "description": "Reporter id, normalized like metadata sources (for example \"herdr:claude\").",
+              "type": "string"
+            },
+            "used_tokens": {
+              "description": "Tokens the agent's last model request sent as context: input plus cache reads and writes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "window_tokens": {
+              "description": "The model's context window in tokens. Present only when the reporter observed it exactly.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "source",
+            "used_tokens",
+            "observed_at_ms"
+          ],
+          "type": "object"
         },
         "EventData": {
           "oneOf": [
@@ -813,6 +849,16 @@
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
             },
+            "context_usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/ContextUsageInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "cwd": {
               "type": [
                 "string",
@@ -848,6 +894,16 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "prompt_cache": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/PromptCacheInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "restore_error": {
               "type": [
@@ -1066,6 +1122,33 @@
             "offset_from_bottom",
             "max_offset_from_bottom",
             "viewport_rows"
+          ],
+          "type": "object"
+        },
+        "PromptCacheInfo": {
+          "description": "Per-pane prompt-cache fact reported by an integration.",
+          "properties": {
+            "last_request_at_ms": {
+              "description": "Unix epoch milliseconds of the last model request that read or wrote the prompt cache.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "description": "Reporter id, normalized like metadata sources (for example \"herdr:claude\").",
+              "type": "string"
+            },
+            "ttl_secs": {
+              "description": "Cache lifetime in seconds counted from last_request_at_ms.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source",
+            "last_request_at_ms",
+            "ttl_secs"
           ],
           "type": "object"
         },
@@ -3055,6 +3138,51 @@
           ],
           "type": "object"
         },
+        "PaneReportContextUsageParams": {
+          "properties": {
+            "clear": {
+              "default": false,
+              "type": "boolean"
+            },
+            "observed_at_ms": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "used_tokens": {
+              "format": "uint64",
+              "maximum": 100000000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "window_tokens": {
+              "format": "uint64",
+              "maximum": 100000000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "source"
+          ],
+          "type": "object"
+        },
         "PaneReportMetadataParams": {
           "properties": {
             "agent": {
@@ -3129,6 +3257,42 @@
             "ttl_ms": {
               "format": "uint64",
               "maximum": 86400000,
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "source"
+          ],
+          "type": "object"
+        },
+        "PaneReportPromptCacheParams": {
+          "properties": {
+            "clear": {
+              "default": false,
+              "type": "boolean"
+            },
+            "last_request_at_ms": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "ttl_secs": {
+              "format": "uint32",
+              "maximum": 86400,
               "minimum": 1,
               "type": [
                 "integer",
@@ -6146,6 +6310,38 @@
         {
           "properties": {
             "method": {
+              "const": "pane.report_prompt_cache",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportPromptCacheParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.report_context_usage",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportContextUsageParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.clear_agent_authority",
               "type": "string"
             },
@@ -6736,6 +6932,16 @@
                 "null"
               ]
             },
+            "context_usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/ContextUsageInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "cwd": {
               "type": [
                 "string",
@@ -6783,6 +6989,16 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "prompt_cache": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PromptCacheInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "revision": {
               "format": "uint64",
@@ -6969,6 +7185,42 @@
             "failed"
           ],
           "type": "string"
+        },
+        "ContextUsageInfo": {
+          "description": "Per-pane context-window usage fact reported by an integration.\n\nJSON API type only: its `skip_serializing_if` is right for JSON and wrong for\npositional bincode, so it is never embedded in a bincode wire type.",
+          "properties": {
+            "observed_at_ms": {
+              "description": "Unix epoch milliseconds at which the reporter observed this reading.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "description": "Reporter id, normalized like metadata sources (for example \"herdr:claude\").",
+              "type": "string"
+            },
+            "used_tokens": {
+              "description": "Tokens the agent's last model request sent as context: input plus cache reads and writes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "window_tokens": {
+              "description": "The model's context window in tokens. Present only when the reporter observed it exactly.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "source",
+            "used_tokens",
+            "observed_at_ms"
+          ],
+          "type": "object"
         },
         "EventData": {
           "oneOf": [
@@ -8099,6 +8351,16 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
+            "context_usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/ContextUsageInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "cwd": {
               "type": [
                 "string",
@@ -8134,6 +8396,16 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "prompt_cache": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PromptCacheInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "restore_error": {
               "type": [
@@ -9367,6 +9639,33 @@
               "type": "string"
             }
           ]
+        },
+        "PromptCacheInfo": {
+          "description": "Per-pane prompt-cache fact reported by an integration.",
+          "properties": {
+            "last_request_at_ms": {
+              "description": "Unix epoch milliseconds of the last model request that read or wrote the prompt cache.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "description": "Reporter id, normalized like metadata sources (for example \"herdr:claude\").",
+              "type": "string"
+            },
+            "ttl_secs": {
+              "description": "Cache lifetime in seconds counted from last_request_at_ms.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source",
+            "last_request_at_ms",
+            "ttl_secs"
+          ],
+          "type": "object"
         },
         "ReadFormat": {
           "enum": [

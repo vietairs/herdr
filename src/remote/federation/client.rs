@@ -2177,6 +2177,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
             write_frame(
@@ -2354,6 +2356,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
             write_frame(
@@ -2479,6 +2483,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
             write_frame(
@@ -2762,6 +2768,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
             write_frame(
@@ -2932,6 +2940,8 @@ mod tests {
                 tokens: Default::default(),
                 agent_session: None,
                 scroll: None,
+                prompt_cache: None,
+                context_usage: None,
                 revision: 0,
             });
             write_frame(
@@ -3063,6 +3073,8 @@ mod tests {
                     tokens: Default::default(),
                     agent_session: None,
                     scroll: None,
+                    prompt_cache: None,
+                    context_usage: None,
                     revision: 0,
                 });
             write_frame(

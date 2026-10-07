@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -1211,6 +1211,52 @@ pub struct ClientShellAgent {
     pub state_labels: Vec<(String, String)>,
     pub tokens: Vec<(String, String)>,
     pub focused: bool,
+    /// Shared runtime fact from `pane.report_prompt_cache`.
+    /// `#[serde(default)]` only: bincode is positional, and generation-1 JSON
+    /// endpoints omit it.
+    #[serde(default)]
+    pub prompt_cache: Option<ClientShellPromptCache>,
+    /// Shared runtime fact from `pane.report_context_usage`.
+    /// `#[serde(default)]` only: bincode is positional, and generation-1 JSON
+    /// endpoints omit it.
+    #[serde(default)]
+    pub context_usage: Option<ClientShellContextUsage>,
+}
+
+/// Wire-only prompt-cache fact for the client shell. No `source`, no
+/// `skip_serializing_if`: the API's `PromptCacheInfo` is JSON-shaped, and
+/// this copy keeps the positional bincode layout independent of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellPromptCache {
+    pub last_request_at_ms: u64,
+    pub ttl_secs: u32,
+}
+
+/// Wire-only context-usage fact for the client shell. No `source`, no
+/// `skip_serializing_if` (`window_tokens: None` is encoded as a positional
+/// `None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellContextUsage {
+    pub used_tokens: u64,
+    pub window_tokens: Option<u64>,
+}
+
+impl From<&crate::api::schema::PromptCacheInfo> for ClientShellPromptCache {
+    fn from(info: &crate::api::schema::PromptCacheInfo) -> Self {
+        Self {
+            last_request_at_ms: info.last_request_at_ms,
+            ttl_secs: info.ttl_secs,
+        }
+    }
+}
+
+impl From<&crate::api::schema::ContextUsageInfo> for ClientShellContextUsage {
+    fn from(info: &crate::api::schema::ContextUsageInfo) -> Self {
+        Self {
+            used_tokens: info.used_tokens,
+            window_tokens: info.window_tokens,
+        }
+    }
 }
 
 /// Origin-relative geometry for one pane in a rendered pane surface.
@@ -2020,10 +2066,13 @@ mod tests {
     /// `ClientShellWorkspace`/`ClientShellTab` round-trip through bincode,
     /// positionally encoded. Adding `name_source: NameSource` alongside the
     /// still-present `custom_label: bool` is a positional-layout change (a
-    /// new field), so `PROTOCOL_VERSION` moved 23 -> 24 with it.
+    /// new field), so `PROTOCOL_VERSION` moved 23 -> 24 with it. Appending
+    /// `ClientShellAgent.prompt_cache` and `ClientShellAgent.context_usage`
+    /// is another positional-layout change, so the version moved 24 -> 25
+    /// for both fields together.
     #[test]
-    fn client_shell_structs_round_trip_at_protocol_24() {
-        assert_eq!(PROTOCOL_VERSION, 24);
+    fn client_shell_structs_round_trip_at_protocol_25() {
+        assert_eq!(PROTOCOL_VERSION, 25);
 
         let workspace = ClientShellWorkspace {
             workspace_id: "w1".into(),
@@ -2062,6 +2111,100 @@ mod tests {
         let (decoded, _): (ClientShellTab, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(tab, decoded);
+    }
+
+    fn client_shell_agent_with_usage_facts(
+        context_usage: Option<ClientShellContextUsage>,
+    ) -> ClientShellAgent {
+        ClientShellAgent {
+            pane_id: "w1:p1".into(),
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            name: Some("claude".into()),
+            label: Some("claude".into()),
+            name_source: crate::workspace::naming::NameSource::Override,
+            display_agent: Some("Claude".into()),
+            agent: Some("claude".into()),
+            title: Some("title".into()),
+            terminal_title: Some("terminal".into()),
+            terminal_title_stripped: Some("terminal".into()),
+            agent_status: crate::api::schema::AgentStatus::Working,
+            state_change_seq: 3,
+            state_labels: vec![("working".into(), "thinking".into())],
+            tokens: vec![("model".into(), "opus".into())],
+            focused: true,
+            prompt_cache: Some(ClientShellPromptCache {
+                last_request_at_ms: 1_700_000_000_000,
+                ttl_secs: 3600,
+            }),
+            context_usage,
+        }
+    }
+
+    /// Both usage facts are positional bincode fields; an inner `None`
+    /// (`window_tokens`) must still round-trip, and a JSON payload that
+    /// predates the fields decodes them as absent.
+    #[test]
+    fn client_shell_agent_usage_facts_round_trip_bincode_and_default_in_json() {
+        for context_usage in [
+            Some(ClientShellContextUsage {
+                used_tokens: 84_000,
+                window_tokens: Some(200_000),
+            }),
+            Some(ClientShellContextUsage {
+                used_tokens: 84_000,
+                window_tokens: None,
+            }),
+        ] {
+            let agent = client_shell_agent_with_usage_facts(context_usage);
+            let encoded =
+                bincode::serde::encode_to_vec(&agent, bincode::config::standard()).unwrap();
+            let (decoded, _): (ClientShellAgent, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(agent, decoded);
+        }
+
+        let agent = client_shell_agent_with_usage_facts(Some(ClientShellContextUsage {
+            used_tokens: 84_000,
+            window_tokens: Some(200_000),
+        }));
+        let mut json = serde_json::to_value(&agent).unwrap();
+        let object = json.as_object_mut().unwrap();
+        assert!(object.remove("prompt_cache").is_some());
+        assert!(object.remove("context_usage").is_some());
+        let decoded: ClientShellAgent = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.prompt_cache, None);
+        assert_eq!(decoded.context_usage, None);
+    }
+
+    #[test]
+    fn client_shell_usage_facts_map_from_api_facts_without_source() {
+        let prompt_cache = crate::api::schema::PromptCacheInfo {
+            source: "herdr:claude".into(),
+            last_request_at_ms: 7,
+            ttl_secs: 300,
+        };
+        assert_eq!(
+            ClientShellPromptCache::from(&prompt_cache),
+            ClientShellPromptCache {
+                last_request_at_ms: 7,
+                ttl_secs: 300,
+            }
+        );
+
+        let context_usage = crate::api::schema::ContextUsageInfo {
+            source: "herdr:codex".into(),
+            used_tokens: 5,
+            window_tokens: None,
+            observed_at_ms: 9,
+        };
+        assert_eq!(
+            ClientShellContextUsage::from(&context_usage),
+            ClientShellContextUsage {
+                used_tokens: 5,
+                window_tokens: None,
+            }
+        );
     }
 
     /// A generation-1 endpoint client's JSON payload carries `custom_label`

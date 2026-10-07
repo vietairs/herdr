@@ -122,6 +122,7 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            prompt_cache_now_ms: self.prompt_cache_now_ms,
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -290,6 +291,7 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                prompt_cache_now_ms: self.prompt_cache_now_ms,
             },
         );
         self.hits.sidebar_overlay = overlay_rect;

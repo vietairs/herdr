@@ -122,6 +122,12 @@ pub(crate) fn resolved_token_spans(
                     + usize::from(*behind > 0) * display_width(&format!("↓{behind}"))
                     + usize::from(*ahead > 0 && *behind > 0)
             }
+            ResolvedTokenKind::PromptCache(countdown) => {
+                crate::prompt_cache::prompt_cache_countdown_text_width(*countdown)
+            }
+            ResolvedTokenKind::Context(reading) => {
+                crate::context_usage::context_usage_text_width(*reading)
+            }
             _ => 0,
         })
         .collect::<Vec<_>>();
@@ -263,6 +269,33 @@ pub(crate) fn resolved_token_spans(
                     ));
                 }
             }
+            ResolvedTokenKind::PromptCache(countdown) => {
+                let mut text = String::with_capacity(
+                    crate::prompt_cache::prompt_cache_countdown_text_width(*countdown),
+                );
+                // Writing into a String cannot fail.
+                let _ =
+                    crate::prompt_cache::write_prompt_cache_countdown_text(*countdown, &mut text);
+                spans.push(Span::styled(
+                    text,
+                    apply_token_style(prompt_cache_base_style(*countdown, palette), token.style),
+                ));
+            }
+            ResolvedTokenKind::Context(reading) => {
+                let mut text =
+                    String::with_capacity(crate::context_usage::context_usage_text_width(*reading));
+                // Writing into a String cannot fail.
+                let _ = crate::context_usage::write_context_usage_text(*reading, &mut text);
+                let base = match crate::context_usage::context_level(*reading) {
+                    crate::context_usage::ContextLevel::Low => Style::default().fg(palette.green),
+                    crate::context_usage::ContextLevel::Warn => Style::default().fg(palette.yellow),
+                    crate::context_usage::ContextLevel::Critical => {
+                        Style::default().fg(palette.red)
+                    }
+                    crate::context_usage::ContextLevel::Unknown => secondary_style,
+                };
+                spans.push(Span::styled(text, apply_token_style(base, token.style)));
+            }
             ResolvedTokenKind::TerminalTitle(text) | ResolvedTokenKind::Custom(text) => {
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
@@ -272,6 +305,27 @@ pub(crate) fn resolved_token_spans(
         }
     }
     spans
+}
+
+/// Time-left gradient: green while most of the window remains, red and bold in the last
+/// tenth, grey once expired.
+fn prompt_cache_base_style(
+    countdown: crate::prompt_cache::PromptCacheCountdown,
+    palette: &Palette,
+) -> Style {
+    if countdown.remaining_secs == 0 {
+        return Style::default().fg(palette.overlay0);
+    }
+    match countdown.tenths_left {
+        8.. => Style::default().fg(palette.green),
+        6..=7 => Style::default().fg(palette.teal),
+        4..=5 => Style::default().fg(palette.yellow),
+        2..=3 => Style::default().fg(palette.peach),
+        1 => Style::default().fg(palette.red),
+        0 => Style::default()
+            .fg(palette.red)
+            .add_modifier(Modifier::BOLD),
+    }
 }
 
 fn apply_token_style(mut style: Style, patch: crate::config::SidebarTokenStyle) -> Style {

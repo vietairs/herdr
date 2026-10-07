@@ -3,10 +3,10 @@ use crate::api::schema::{
     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
     PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
     PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
-    PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
-    SplitDirection,
+    PaneReportContextUsageParams, PaneReportMetadataParams, PaneReportPromptCacheParams,
+    PaneResizeParams, PaneRightClickTarget, PaneSendInputParams, PaneSendKeysParams,
+    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneWaitForOutputParams,
+    PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request, SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -40,6 +40,8 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "report-agent-session" => pane_report_agent_session(&args[1..]),
         "release-agent" => pane_release_agent(&args[1..]),
         "report-metadata" => pane_report_metadata(&args[1..]),
+        "report-prompt-cache" => pane_report_prompt_cache(&args[1..]),
+        "report-context-usage" => pane_report_context_usage(&args[1..]),
         "run" => pane_run(&args[1..]),
         "help" | "--help" | "-h" => {
             print_pane_help();
@@ -1669,6 +1671,185 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
+const REPORT_PROMPT_CACHE_USAGE: &str = "herdr pane report-prompt-cache <pane_id> --source ID (--last-request-at MS|now [--ttl SECS] | --clear)";
+const REPORT_CONTEXT_USAGE_USAGE: &str = "herdr pane report-context-usage <pane_id> --source ID (--used TOKENS [--window TOKENS] [--observed-at MS|now] | --clear)";
+
+/// Returns the value after `args[*index]` and advances `index` past both.
+fn take_flag_value<'a>(
+    args: &'a [String],
+    index: &mut usize,
+    flag: &str,
+) -> Result<&'a str, String> {
+    let value = args
+        .get(*index + 1)
+        .ok_or_else(|| format!("missing value for {flag}"))?;
+    *index += 2;
+    Ok(value)
+}
+
+/// Parses a numeric flag value, mapping any parse failure to the shared message.
+fn parse_number_flag<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String> {
+    value
+        .parse::<T>()
+        .map_err(|_| format!("invalid value for {flag}: {value}"))
+}
+
+/// Parses a unix-millisecond flag value that also accepts `now`.
+fn parse_time_flag(flag: &str, value: &str, now_unix_ms: u64) -> Result<u64, String> {
+    if value == "now" {
+        Ok(now_unix_ms)
+    } else {
+        parse_number_flag(flag, value)
+    }
+}
+
+/// Trims the reporter id; an absent or blank id is rejected.
+fn required_source(source: Option<&str>) -> Result<String, String> {
+    source
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "missing required --source".to_string())
+}
+
+/// Parses `<pane_id> --source ID (--last-request-at MS|now [--ttl SECS] | --clear)`.
+fn parse_report_prompt_cache_args(
+    args: &[String],
+    now_unix_ms: u64,
+) -> Result<PaneReportPromptCacheParams, String> {
+    let Some(raw_pane_id) = args.first() else {
+        return Err(format!("usage: {REPORT_PROMPT_CACHE_USAGE}"));
+    };
+    let pane_id = super::normalize_pane_id(raw_pane_id);
+    let mut source = None;
+    let mut last_request_at_ms = None;
+    let mut ttl_secs = None;
+    let mut clear = false;
+
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source" => source = Some(take_flag_value(args, &mut index, "--source")?),
+            "--last-request-at" => {
+                let value = take_flag_value(args, &mut index, "--last-request-at")?;
+                last_request_at_ms =
+                    Some(parse_time_flag("--last-request-at", value, now_unix_ms)?);
+            }
+            "--ttl" => {
+                let value = take_flag_value(args, &mut index, "--ttl")?;
+                ttl_secs = Some(parse_number_flag::<u32>("--ttl", value)?);
+            }
+            "--clear" => {
+                clear = true;
+                index += 1;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+
+    let source = required_source(source)?;
+    if clear && (last_request_at_ms.is_some() || ttl_secs.is_some()) {
+        return Err("cannot combine --clear with --last-request-at or --ttl".to_string());
+    }
+    if !clear && last_request_at_ms.is_none() {
+        return Err("missing --last-request-at or --clear".to_string());
+    }
+    Ok(PaneReportPromptCacheParams {
+        pane_id,
+        source,
+        last_request_at_ms,
+        ttl_secs,
+        clear,
+    })
+}
+
+fn pane_report_prompt_cache(args: &[String]) -> std::io::Result<i32> {
+    match parse_report_prompt_cache_args(args, crate::prompt_cache::unix_now_ms()) {
+        Ok(params) => super::send_ok_request(Method::PaneReportPromptCache(params)),
+        Err(message) => {
+            eprintln!("{message}");
+            Ok(2)
+        }
+    }
+}
+
+/// Parses `<pane_id> --source ID (--used TOKENS [--window TOKENS] [--observed-at MS|now] | --clear)`.
+/// A missing `--observed-at` resolves to `now_unix_ms`.
+fn parse_report_context_usage_args(
+    args: &[String],
+    now_unix_ms: u64,
+) -> Result<PaneReportContextUsageParams, String> {
+    let Some(raw_pane_id) = args.first() else {
+        return Err(format!("usage: {REPORT_CONTEXT_USAGE_USAGE}"));
+    };
+    let pane_id = super::normalize_pane_id(raw_pane_id);
+    let mut source = None;
+    let mut used_tokens = None;
+    let mut window_tokens = None;
+    let mut observed_at_ms = None;
+    let mut clear = false;
+
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source" => source = Some(take_flag_value(args, &mut index, "--source")?),
+            "--used" => {
+                let value = take_flag_value(args, &mut index, "--used")?;
+                used_tokens = Some(parse_number_flag::<u64>("--used", value)?);
+            }
+            "--window" => {
+                let value = take_flag_value(args, &mut index, "--window")?;
+                window_tokens = Some(parse_number_flag::<u64>("--window", value)?);
+            }
+            "--observed-at" => {
+                let value = take_flag_value(args, &mut index, "--observed-at")?;
+                observed_at_ms = Some(parse_time_flag("--observed-at", value, now_unix_ms)?);
+            }
+            "--clear" => {
+                clear = true;
+                index += 1;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+
+    let source = required_source(source)?;
+    if clear && (used_tokens.is_some() || window_tokens.is_some() || observed_at_ms.is_some()) {
+        return Err("cannot combine --clear with --used, --window or --observed-at".to_string());
+    }
+    if clear {
+        return Ok(PaneReportContextUsageParams {
+            pane_id,
+            source,
+            used_tokens: None,
+            window_tokens: None,
+            observed_at_ms: None,
+            clear,
+        });
+    }
+    if used_tokens.is_none() {
+        return Err("missing --used or --clear".to_string());
+    }
+    Ok(PaneReportContextUsageParams {
+        pane_id,
+        source,
+        used_tokens,
+        window_tokens,
+        observed_at_ms: Some(observed_at_ms.unwrap_or(now_unix_ms)),
+        clear,
+    })
+}
+
+fn pane_report_context_usage(args: &[String]) -> std::io::Result<i32> {
+    match parse_report_context_usage_args(args, crate::prompt_cache::unix_now_ms()) {
+        Ok(params) => super::send_ok_request(Method::PaneReportContextUsage(params)),
+        Err(message) => {
+            eprintln!("{message}");
+            Ok(2)
+        }
+    }
+}
+
 fn print_pane_help() {
     eprintln!("herdr pane commands:");
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
@@ -1702,6 +1883,8 @@ fn print_pane_help() {
     eprintln!("  herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
+    eprintln!("  {REPORT_PROMPT_CACHE_USAGE}");
+    eprintln!("  {REPORT_CONTEXT_USAGE_USAGE}");
     eprintln!("  herdr pane run <pane_id> <command>");
 }
 
@@ -1711,6 +1894,211 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_report_prompt_cache_args_accepts_ms_and_ttl() {
+        let params = parse_report_prompt_cache_args(
+            &args(&[
+                "p1",
+                "--source",
+                " herdr:claude ",
+                "--last-request-at",
+                "1700000000000",
+                "--ttl",
+                "3600",
+            ]),
+            42,
+        )
+        .expect("valid report");
+        assert_eq!(params.pane_id, "p1");
+        assert_eq!(params.source, "herdr:claude");
+        assert_eq!(params.last_request_at_ms, Some(1_700_000_000_000));
+        assert_eq!(params.ttl_secs, Some(3600));
+        assert!(!params.clear);
+    }
+
+    #[test]
+    fn parse_report_prompt_cache_args_resolves_now() {
+        let params = parse_report_prompt_cache_args(
+            &args(&["p1", "--source", "s", "--last-request-at", "now"]),
+            42,
+        )
+        .expect("valid report");
+        assert_eq!(params.last_request_at_ms, Some(42));
+        assert_eq!(params.ttl_secs, None);
+        assert!(!params.clear);
+    }
+
+    #[test]
+    fn parse_report_prompt_cache_args_accepts_clear() {
+        let params = parse_report_prompt_cache_args(&args(&["p1", "--source", "s", "--clear"]), 42)
+            .expect("valid clear");
+        assert!(params.clear);
+        assert_eq!(params.last_request_at_ms, None);
+        assert_eq!(params.ttl_secs, None);
+    }
+
+    #[test]
+    fn parse_report_prompt_cache_args_rejects_bad_combinations() {
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &["p1", "--source", "s", "--clear", "--last-request-at", "5"],
+                "cannot combine --clear with --last-request-at or --ttl",
+            ),
+            (
+                &["p1", "--source", "s", "--clear", "--ttl", "300"],
+                "cannot combine --clear with --last-request-at or --ttl",
+            ),
+            (
+                &["p1", "--source", "s"],
+                "missing --last-request-at or --clear",
+            ),
+            (
+                &["p1", "--last-request-at", "5"],
+                "missing required --source",
+            ),
+            (
+                &[
+                    "p1",
+                    "--source",
+                    "s",
+                    "--last-request-at",
+                    "5",
+                    "--ttl",
+                    "abc",
+                ],
+                "invalid value for --ttl: abc",
+            ),
+            (
+                &["p1", "--source", "s", "--last-request-at", "yesterday"],
+                "invalid value for --last-request-at: yesterday",
+            ),
+            (
+                &["p1", "--source", "s", "--bogus"],
+                "unknown option: --bogus",
+            ),
+            (&["p1", "--source"], "missing value for --source"),
+            (&[], REPORT_PROMPT_CACHE_USAGE),
+        ];
+        for (input, expected) in cases {
+            let error = parse_report_prompt_cache_args(&args(input), 42)
+                .expect_err("invalid report must be rejected");
+            assert!(
+                error.ends_with(expected),
+                "{input:?}: expected {expected:?}, got {error:?}"
+            );
+            if !expected.starts_with("herdr ") {
+                assert_eq!(&error, expected, "{input:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_report_context_usage_args_accepts_used_window_and_time() {
+        let params = parse_report_context_usage_args(
+            &args(&[
+                "p1",
+                "--source",
+                "herdr:codex",
+                "--used",
+                "84000",
+                "--window",
+                "258400",
+                "--observed-at",
+                "1700000000000",
+            ]),
+            42,
+        )
+        .expect("valid report");
+        assert_eq!(params.pane_id, "p1");
+        assert_eq!(params.source, "herdr:codex");
+        assert_eq!(params.used_tokens, Some(84_000));
+        assert_eq!(params.window_tokens, Some(258_400));
+        assert_eq!(params.observed_at_ms, Some(1_700_000_000_000));
+        assert!(!params.clear);
+    }
+
+    #[test]
+    fn parse_report_context_usage_args_defaults_observed_at_to_now() {
+        let params =
+            parse_report_context_usage_args(&args(&["p1", "--source", "s", "--used", "10"]), 42)
+                .expect("valid report");
+        assert_eq!(params.observed_at_ms, Some(42));
+        assert_eq!(params.window_tokens, None);
+
+        let params = parse_report_context_usage_args(
+            &args(&[
+                "p1",
+                "--source",
+                "s",
+                "--used",
+                "10",
+                "--observed-at",
+                "now",
+            ]),
+            42,
+        )
+        .expect("valid report");
+        assert_eq!(params.observed_at_ms, Some(42));
+        assert_eq!(params.window_tokens, None);
+    }
+
+    #[test]
+    fn parse_report_context_usage_args_accepts_clear() {
+        let params =
+            parse_report_context_usage_args(&args(&["p1", "--source", "s", "--clear"]), 42)
+                .expect("valid clear");
+        assert!(params.clear);
+        assert_eq!(params.used_tokens, None);
+        assert_eq!(params.window_tokens, None);
+        assert_eq!(params.observed_at_ms, None);
+    }
+
+    #[test]
+    fn parse_report_context_usage_args_rejects_bad_combinations() {
+        let combine = "cannot combine --clear with --used, --window or --observed-at";
+        let cases: &[(&[&str], &str)] = &[
+            (&["p1", "--source", "s", "--clear", "--used", "5"], combine),
+            (
+                &["p1", "--source", "s", "--clear", "--window", "5"],
+                combine,
+            ),
+            (
+                &["p1", "--source", "s", "--clear", "--observed-at", "5"],
+                combine,
+            ),
+            (&["p1", "--source", "s"], "missing --used or --clear"),
+            (&["p1", "--used", "5"], "missing required --source"),
+            (
+                &["p1", "--source", "s", "--used", "12k"],
+                "invalid value for --used: 12k",
+            ),
+            (
+                &["p1", "--source", "s", "--used", "5", "--window", "x"],
+                "invalid value for --window: x",
+            ),
+            (
+                &["p1", "--source", "s", "--bogus"],
+                "unknown option: --bogus",
+            ),
+            (
+                &["p1", "--source", "s", "--used"],
+                "missing value for --used",
+            ),
+            (&[], REPORT_CONTEXT_USAGE_USAGE),
+        ];
+        for (input, expected) in cases {
+            let error = parse_report_context_usage_args(&args(input), 42)
+                .expect_err("invalid report must be rejected");
+            assert!(
+                error.ends_with(expected),
+                "{input:?}: expected {expected:?}, got {error:?}"
+            );
+            if !expected.starts_with("herdr ") {
+                assert_eq!(&error, expected, "{input:?}");
+            }
+        }
     }
 
     #[test]

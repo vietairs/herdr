@@ -1737,6 +1737,12 @@ impl AppState {
                 self.session_dirty = true;
             }
             let mutation = mutation?;
+            // A released agent or a new session no longer owns the cached prompt
+            // and the context reading.
+            if mutation.agent_released || mutation.session_ref_changed {
+                terminal.prompt_cache = None;
+                terminal.context_usage = None;
+            }
             let completion_reset = mutation.session_ref_changed
                 || mutation
                     .effective_state_change
@@ -4685,6 +4691,63 @@ mod tests {
             state.toast.as_ref().map(|toast| toast.kind),
             Some(ToastKind::Finished)
         ));
+    }
+
+    #[test]
+    fn pane_process_exit_release_clears_prompt_cache() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(1);
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.terminal_id_for_pane(0, pane_id).unwrap();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        terminal.prompt_cache = Some(crate::api::schema::PromptCacheInfo {
+            source: "herdr:claude".into(),
+            last_request_at_ms: 1,
+            ttl_secs: 300,
+        });
+
+        let update = state
+            .publish_pane_process_exit_if_agent(pane_id, false)
+            .expect("process exit update");
+
+        assert!(update.agent_released);
+        assert!(state
+            .terminals
+            .get(&terminal_id)
+            .unwrap()
+            .prompt_cache
+            .is_none());
+    }
+
+    #[test]
+    fn pane_process_exit_release_clears_context_usage() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(1);
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.terminal_id_for_pane(0, pane_id).unwrap();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        terminal.context_usage = Some(crate::api::schema::ContextUsageInfo {
+            source: "herdr:claude".into(),
+            used_tokens: 84_000,
+            window_tokens: Some(200_000),
+            observed_at_ms: 1,
+        });
+
+        let update = state
+            .publish_pane_process_exit_if_agent(pane_id, false)
+            .expect("process exit update");
+
+        assert!(update.agent_released);
+        assert!(state
+            .terminals
+            .get(&terminal_id)
+            .unwrap()
+            .context_usage
+            .is_none());
     }
 
     #[test]

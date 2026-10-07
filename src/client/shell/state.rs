@@ -923,6 +923,9 @@ pub(crate) struct ClientShellState {
     pub(super) graphics: crate::kitty_graphics::surface::ClientState,
     pub(super) graphics_cell_size: crate::kitty_graphics::HostCellSize,
     pub(super) popup_terminal_id: Option<String>,
+    /// Wall clock (unix ms) the prompt-cache countdown is drawn against; refreshed by
+    /// `tick_prompt_cache` so render never reads the clock.
+    pub(super) prompt_cache_now_ms: u64,
     pub(super) sidebar_collapsed: bool,
     pub(super) sidebar_collapsed_manual: bool,
     pub(super) sidebar_width: u16,
@@ -1092,6 +1095,7 @@ impl ClientShellState {
                 height_px: 1,
             },
             popup_terminal_id: None,
+            prompt_cache_now_ms: crate::prompt_cache::unix_now_ms(),
             sidebar_collapsed,
             sidebar_collapsed_manual: preferences.sidebar_collapsed.is_some(),
             sidebar_width,

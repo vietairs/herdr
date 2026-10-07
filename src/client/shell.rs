@@ -28,6 +28,7 @@ mod notification_policy;
 mod notifications;
 mod overlay_input;
 mod preferences;
+mod prompt_cache_tick;
 mod remote_mount;
 mod render;
 mod scroll;

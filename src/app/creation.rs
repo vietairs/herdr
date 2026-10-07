@@ -388,6 +388,8 @@ impl App {
             tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),
             scroll,
+            prompt_cache: terminal.prompt_cache.clone(),
+            context_usage: terminal.context_usage.clone(),
             revision: terminal.revision,
         })
     }
@@ -3118,6 +3120,8 @@ mod federation_materialization_tests {
             tokens: Default::default(),
             agent_session: None,
             scroll: None,
+            prompt_cache: None,
+            context_usage: None,
             revision: 0,
         }
     }

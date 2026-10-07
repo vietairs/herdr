@@ -20,7 +20,14 @@ pub(crate) enum ResolvedTokenKind {
     Agent(String),
     TerminalTitle(String),
     Branch(String),
-    GitStatus { ahead: usize, behind: usize },
+    GitStatus {
+        ahead: usize,
+        behind: usize,
+    },
+    /// Carries the `Copy` countdown; the text is written only where it is drawn.
+    PromptCache(crate::prompt_cache::PromptCacheCountdown),
+    /// Carries the `Copy` reading; the text is written only where it is drawn.
+    Context(crate::context_usage::ContextReading),
     Custom(String),
 }
 
@@ -36,7 +43,9 @@ impl ResolvedTokenKind {
             | Self::TerminalTitle(value)
             | Self::Branch(value)
             | Self::Custom(value) => Some(value),
-            Self::StateIcon | Self::GitStatus { .. } => None,
+            Self::StateIcon | Self::GitStatus { .. } | Self::PromptCache(_) | Self::Context(_) => {
+                None
+            }
         }
     }
 }
@@ -62,6 +71,8 @@ pub(crate) struct AgentTokenContext<'a> {
     pub(crate) terminal_title_stripped: Option<&'a str>,
     pub(crate) canonical_agent: Option<crate::detect::Agent>,
     pub(crate) tokens: &'a std::collections::HashMap<String, String>,
+    pub(crate) prompt_cache: Option<crate::prompt_cache::PromptCacheCountdown>,
+    pub(crate) context_usage: Option<crate::context_usage::ContextReading>,
 }
 
 pub(crate) fn agent_rows(
@@ -103,6 +114,12 @@ pub(crate) fn agent_rows(
                         AgentSidebarToken::TerminalTitleStripped => context
                             .terminal_title_stripped
                             .map(|value| ResolvedTokenKind::TerminalTitle(value.to_string())),
+                        AgentSidebarToken::PromptCache => {
+                            context.prompt_cache.map(ResolvedTokenKind::PromptCache)
+                        }
+                        AgentSidebarToken::Context => {
+                            context.context_usage.map(ResolvedTokenKind::Context)
+                        }
                         AgentSidebarToken::Custom(name) => context
                             .tokens
                             .get(name)
@@ -201,6 +218,8 @@ mod tests {
         terminal_title_stripped: Option<String>,
         canonical_agent: Option<crate::detect::Agent>,
         tokens: std::collections::HashMap<String, String>,
+        prompt_cache: Option<crate::prompt_cache::PromptCacheCountdown>,
+        context_usage: Option<crate::context_usage::ContextReading>,
     }
 
     fn entry() -> Entry {
@@ -213,6 +232,8 @@ mod tests {
             terminal_title_stripped: None,
             canonical_agent: Some(crate::detect::Agent::Pi),
             tokens: std::collections::HashMap::new(),
+            prompt_cache: None,
+            context_usage: None,
         }
     }
 
@@ -227,7 +248,61 @@ mod tests {
             terminal_title_stripped: entry.terminal_title_stripped.as_deref(),
             canonical_agent: entry.canonical_agent,
             tokens: &entry.tokens,
+            prompt_cache: entry.prompt_cache,
+            context_usage: entry.context_usage,
         }
+    }
+
+    #[test]
+    fn context_token_resolves_from_context_and_elides_when_absent() {
+        let config: AgentsSidebarConfig =
+            toml::from_str("rows = [[\"agent\", \"context\"]]").unwrap();
+        let reading = crate::context_usage::ContextReading {
+            used_tokens: 84_000,
+            window_tokens: Some(200_000),
+        };
+        let mut entry = entry();
+        entry.context_usage = Some(reading);
+        let rows = agent_rows(&config, context(&entry), "working");
+        assert_eq!(rows[0].len(), 2);
+        assert_eq!(rows[0][1].kind, ResolvedTokenKind::Context(reading));
+
+        entry.context_usage = None;
+        let rows = agent_rows(&config, context(&entry), "working");
+        assert_eq!(rows[0].len(), 1);
+    }
+
+    #[test]
+    fn context_span_colour_follows_thresholds() {
+        use ratatui::style::{Color, Style};
+        let palette = super::super::Palette::catppuccin();
+        let secondary = Style::default().fg(Color::Blue);
+        let render = |used: u64, window: Option<u64>| {
+            let reading = crate::context_usage::ContextReading {
+                used_tokens: used,
+                window_tokens: window,
+            };
+            let token = ResolvedToken::unstyled(ResolvedTokenKind::Context(reading));
+            let spans = super::super::resolved_token_spans(
+                &[token],
+                ("*", secondary),
+                secondary,
+                secondary,
+                secondary,
+                secondary,
+                &palette,
+                40,
+            );
+            let mut expected = String::new();
+            crate::context_usage::write_context_usage_text(reading, &mut expected).unwrap();
+            assert_eq!(spans.len(), 1);
+            assert_eq!(spans[0].content, expected);
+            spans[0].style
+        };
+        assert_eq!(render(84_000, Some(200_000)).fg, Some(palette.green));
+        assert_eq!(render(120_000, Some(200_000)).fg, Some(palette.yellow));
+        assert_eq!(render(170_000, Some(200_000)).fg, Some(palette.red));
+        assert_eq!(render(84_000, None), secondary);
     }
 
     #[test]
@@ -506,6 +581,77 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
                 ResolvedToken::unstyled(ResolvedTokenKind::Custom("custom title".into())),
             ]]
         );
+    }
+
+    #[test]
+    fn prompt_cache_token_resolves_from_context_and_elides_when_absent() {
+        use crate::prompt_cache::PromptCacheCountdown;
+        let config = AgentsSidebarConfig {
+            rows: vec![vec![
+                AgentSidebarToken::Agent,
+                AgentSidebarToken::PromptCache,
+            ]],
+            ..Default::default()
+        };
+        let countdown = PromptCacheCountdown {
+            ttl_secs: 300,
+            remaining_secs: 252,
+            tenths_left: 8,
+        };
+        let mut entry = entry();
+        entry.prompt_cache = Some(countdown);
+        let rows = agent_rows(&config, context(&entry), "working");
+        assert_eq!(rows[0].len(), 2);
+        assert_eq!(rows[0][1].kind, ResolvedTokenKind::PromptCache(countdown));
+
+        entry.prompt_cache = None;
+        let rows = agent_rows(&config, context(&entry), "working");
+        assert_eq!(rows[0].len(), 1);
+        assert_eq!(rows[0][0].kind, ResolvedTokenKind::Agent("pi".into()));
+    }
+
+    #[test]
+    fn prompt_cache_span_uses_time_left_gradient() {
+        use crate::prompt_cache::PromptCacheCountdown;
+        use ratatui::style::{Modifier, Style};
+        let palette = super::super::Palette::catppuccin();
+        let cases = [
+            (9u8, 250u64, palette.green, false),
+            (5, 150, palette.yellow, false),
+            (0, 3, palette.red, true),
+            (0, 0, palette.overlay0, false),
+        ];
+        for (tenths_left, remaining_secs, color, bold) in cases {
+            let countdown = PromptCacheCountdown {
+                ttl_secs: 300,
+                remaining_secs,
+                tenths_left,
+            };
+            let row = vec![ResolvedToken::unstyled(ResolvedTokenKind::PromptCache(
+                countdown,
+            ))];
+            let spans = super::super::resolved_token_spans(
+                &row,
+                ("*", Style::default()),
+                Style::default(),
+                Style::default(),
+                Style::default(),
+                Style::default(),
+                &palette,
+                40,
+            );
+            assert_eq!(spans.len(), 1);
+            let mut expected = String::new();
+            crate::prompt_cache::write_prompt_cache_countdown_text(countdown, &mut expected)
+                .unwrap();
+            assert_eq!(spans[0].content, expected);
+            assert_eq!(spans[0].style.fg, Some(color));
+            assert_eq!(
+                spans[0].style.add_modifier.contains(Modifier::BOLD),
+                bold,
+                "tenths {tenths_left}"
+            );
+        }
     }
 
     #[test]

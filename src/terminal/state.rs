@@ -163,6 +163,8 @@ pub struct TerminalState {
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
+    pub prompt_cache: Option<crate::api::schema::PromptCacheInfo>,
+    pub context_usage: Option<crate::api::schema::ContextUsageInfo>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     reported_resume: Option<crate::agent_resume::ReportedAgentResume>,
     reported_resume_revision: u64,
@@ -210,6 +212,8 @@ impl TerminalState {
             hook_authority: None,
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
+            prompt_cache: None,
+            context_usage: None,
             persisted_agent_session: None,
             reported_resume: None,
             reported_resume_revision: 0,
@@ -2371,6 +2375,8 @@ impl TerminalState {
         self.hook_authority = None;
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
+        self.prompt_cache = None;
+        self.context_usage = None;
         self.metadata_report_agents.clear();
         self.suppressed_full_lifecycle_hook_reports.clear();
         self.stale_full_lifecycle_hook_sessions.clear();
@@ -6591,6 +6597,35 @@ mod tests {
         assert!(terminal.persisted_agent_session.is_none());
         assert!(!terminal.respawn_shell_on_exit);
         assert!(!terminal.finish_agent_process_acquisition());
+    }
+
+    #[test]
+    fn respawn_clears_prompt_cache() {
+        let mut terminal = test_terminal();
+        terminal.prompt_cache = Some(crate::api::schema::PromptCacheInfo {
+            source: "herdr:claude".into(),
+            last_request_at_ms: 1,
+            ttl_secs: 300,
+        });
+
+        terminal.clear_agent_runtime_identity_after_respawn();
+
+        assert!(terminal.prompt_cache.is_none());
+    }
+
+    #[test]
+    fn respawn_clears_context_usage() {
+        let mut terminal = test_terminal();
+        terminal.context_usage = Some(crate::api::schema::ContextUsageInfo {
+            source: "herdr:claude".into(),
+            used_tokens: 84_000,
+            window_tokens: Some(200_000),
+            observed_at_ms: 1,
+        });
+
+        terminal.clear_agent_runtime_identity_after_respawn();
+
+        assert!(terminal.context_usage.is_none());
     }
 
     #[test]

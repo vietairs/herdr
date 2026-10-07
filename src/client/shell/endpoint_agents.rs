@@ -8,8 +8,9 @@ pub(super) fn render_collapsed(
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
     hits: &mut ShellHitMap,
+    now_unix_ms: u64,
 ) {
-    let rows = agent_rows(endpoints, active_endpoint_id, config);
+    let rows = agent_rows(endpoints, active_endpoint_id, config, now_unix_ms);
     for (index, row) in rows.into_iter().take(area.height as usize).enumerate() {
         let rect = Rect::new(area.x, area.y + index as u16, area.width, 1);
         if row.agent.focused {
@@ -51,6 +52,7 @@ pub(super) fn render_expanded(
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
+    now_unix_ms: u64,
 ) {
     if !super::agent_sidebar::render_agent_panel_header(
         buffer,
@@ -61,7 +63,7 @@ pub(super) fn render_expanded(
     ) {
         return;
     }
-    let rows = agent_rows(endpoints, active_endpoint_id, config);
+    let rows = agent_rows(endpoints, active_endpoint_id, config, now_unix_ms);
     super::agent_sidebar::render_agent_list(
         buffer,
         area,
@@ -97,7 +99,12 @@ impl ClientShellState {
         if body_height == 0 {
             return;
         }
-        let rows = agent_rows(&self.endpoints, &self.active_endpoint_id, &self.config);
+        let rows = agent_rows(
+            &self.endpoints,
+            &self.active_endpoint_id,
+            &self.config,
+            self.prompt_cache_now_ms,
+        );
         let Some(target) = rows
             .iter()
             .position(|row| &row.endpoint_id == endpoint_id && row.agent.pane_id == pane_id)
@@ -133,6 +140,7 @@ fn agent_rows(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
+    now_unix_ms: u64,
 ) -> Vec<EndpointAgentRow> {
     let mut rendered_rows = endpoints
         .iter()
@@ -147,6 +155,7 @@ fn agent_rows(
                             &agent.pane_id,
                             config,
                             Some(&endpoint.label),
+                            now_unix_ms,
                         )
                     })
                     .map(|agent| ((endpoint.endpoint_id.clone(), agent.pane_id.clone()), agent))

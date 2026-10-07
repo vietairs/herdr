@@ -366,6 +366,8 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: true,
+            prompt_cache: None,
+            context_usage: None,
         },
         ClientShellAgent {
             pane_id: "pane_2".into(),
@@ -384,6 +386,8 @@ fn pane_cycle_last_and_agent_actions_resolve_to_stable_pane_ids() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: false,
+            prompt_cache: None,
+            context_usage: None,
         },
     ];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
@@ -460,6 +464,8 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             state_labels: Vec::new(),
             tokens: vec![("summary".into(), "review complete".into())],
             focused: true,
+            prompt_cache: None,
+            context_usage: None,
         },
         ClientShellAgent {
             pane_id: "pane_2".into(),
@@ -478,6 +484,8 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             state_labels: vec![("blocked".into(), "needs input".into())],
             tokens: vec![("summary".into(), "waiting for Can".into())],
             focused: false,
+            prompt_cache: None,
+            context_usage: None,
         },
     ];
     let mut config = Config::default();
@@ -607,6 +615,8 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        prompt_cache: None,
+        context_usage: None,
     }];
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
@@ -676,6 +686,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: true,
+            prompt_cache: None,
+            context_usage: None,
         },
         ClientShellAgent {
             pane_id: "pane_2".into(),
@@ -694,6 +706,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: false,
+            prompt_cache: None,
+            context_usage: None,
         },
         ClientShellAgent {
             pane_id: "pane_3".into(),
@@ -712,6 +726,8 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
             state_labels: Vec::new(),
             tokens: Vec::new(),
             focused: false,
+            prompt_cache: None,
+            context_usage: None,
         },
     ];
     projected.agent_view_label = Some("review".into());
@@ -788,6 +804,8 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        prompt_cache: None,
+        context_usage: None,
     });
     let config =
         ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone());
@@ -1355,6 +1373,8 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: false,
+        prompt_cache: None,
+        context_usage: None,
     });
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
@@ -1516,10 +1536,12 @@ fn agent_row_shows_the_inherited_tab_name_instead_of_the_agent_kind() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        prompt_cache: None,
+        context_usage: None,
     }];
 
     let config = ClientShellConfig::from_config(&Config::default());
-    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None);
+    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None, 0);
     let agent_tokens: Vec<String> = rows
         .iter()
         .flat_map(|row| row.rows.iter())
@@ -1565,10 +1587,12 @@ fn agent_row_falls_back_to_the_agent_kind_when_no_scope_was_named() {
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        prompt_cache: None,
+        context_usage: None,
     }];
 
     let config = ClientShellConfig::from_config(&Config::default());
-    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None);
+    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None, 0);
     let agent_tokens: Vec<String> = rows
         .iter()
         .flat_map(|row| row.rows.iter())
@@ -1579,4 +1603,163 @@ fn agent_row_falls_back_to_the_agent_kind_when_no_scope_was_named() {
         })
         .collect();
     assert!(agent_tokens.iter().any(|value| value == "claude"));
+}
+
+fn prompt_cache_agent() -> ClientShellAgent {
+    ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: None,
+        label: None,
+        name_source: crate::workspace::naming::NameSource::AgentIdentity,
+        display_agent: Some("claude".into()),
+        agent: Some("claude".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+        prompt_cache: Some(crate::protocol::ClientShellPromptCache {
+            last_request_at_ms: 1_000_000,
+            ttl_secs: 300,
+        }),
+        context_usage: None,
+    }
+}
+
+#[test]
+fn agent_rows_show_prompt_cache_countdown_from_snapshot() {
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![prompt_cache_agent()];
+    let config = ClientShellConfig::from_config(&Config::default());
+
+    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None, 1_048_000);
+
+    let countdowns: Vec<_> = rows
+        .iter()
+        .flat_map(|row| row.rows.iter())
+        .flat_map(|line| line.iter())
+        .filter_map(|token| match &token.kind {
+            crate::ui::ResolvedTokenKind::PromptCache(countdown) => Some(*countdown),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        countdowns,
+        vec![crate::prompt_cache::PromptCacheCountdown {
+            ttl_secs: 300,
+            remaining_secs: 252,
+            tenths_left: 8,
+        }]
+    );
+}
+
+#[test]
+fn prompt_cache_tick_repaints_once_per_second_only_while_live_and_visible() {
+    let composed = |config: ClientShellConfig| {
+        let mut state = ClientShellState::new(config);
+        let mut snapshot = snapshot();
+        snapshot.agents = vec![prompt_cache_agent()];
+        state.set_snapshot(Box::new(snapshot));
+        state.set_pane_surface(surface());
+        state.compose(106, 30).expect("composed frame");
+        state
+    };
+
+    let mut state = composed(ClientShellConfig::from_config(&Config::default()));
+    state.prompt_cache_now_ms = 1_000_000;
+    assert!(!state.tick_prompt_cache(1_000_400));
+    assert!(state.tick_prompt_cache(1_001_000));
+    assert_eq!(state.prompt_cache_now_ms, 1_001_000);
+    assert!(!state.tick_prompt_cache(1_301_500));
+
+    let mut collapsed = composed(ClientShellConfig::from_config(&Config::default()));
+    collapsed.sidebar_collapsed = true;
+    collapsed.prompt_cache_now_ms = 1_001_000;
+    assert!(!collapsed.tick_prompt_cache(1_002_000));
+
+    let mut config = Config::default();
+    config.ui.sidebar.agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+    let mut unused = composed(ClientShellConfig::from_config(&config));
+    unused.prompt_cache_now_ms = 1_001_000;
+    assert!(!unused.tick_prompt_cache(1_002_000));
+}
+
+fn context_usage_agent(
+    prompt_cache: Option<crate::protocol::ClientShellPromptCache>,
+) -> ClientShellAgent {
+    ClientShellAgent {
+        prompt_cache,
+        context_usage: Some(crate::protocol::ClientShellContextUsage {
+            used_tokens: 84_000,
+            window_tokens: Some(200_000),
+        }),
+        ..prompt_cache_agent()
+    }
+}
+
+#[test]
+fn agent_rows_show_context_usage_from_snapshot() {
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![context_usage_agent(None)];
+    let config = ClientShellConfig::from_config(&Config::default());
+
+    let rows = super::super::agent_sidebar::agent_rows(&snapshot, &config, None, 0);
+
+    let reading = crate::context_usage::ContextReading {
+        used_tokens: 84_000,
+        window_tokens: Some(200_000),
+    };
+    let lines: Vec<_> = rows.iter().flat_map(|row| row.rows.iter()).collect();
+    let context_lines: Vec<_> = lines
+        .iter()
+        .filter(|line| {
+            line.iter()
+                .any(|token| token.kind == crate::ui::ResolvedTokenKind::Context(reading))
+        })
+        .collect();
+    assert_eq!(context_lines.len(), 1);
+    assert!(context_lines[0]
+        .iter()
+        .all(|token| !matches!(token.kind, crate::ui::ResolvedTokenKind::Agent(_))));
+}
+
+#[test]
+fn default_agent_rows_show_the_context_percentage_at_sidebar_width_26() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.sidebar_width = 26;
+    let mut state = ClientShellState::new(config);
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![context_usage_agent(Some(
+        crate::protocol::ClientShellPromptCache {
+            last_request_at_ms: 1_000_000,
+            ttl_secs: 300,
+        },
+    ))];
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+    state.prompt_cache_now_ms = 1_048_000;
+
+    let frame = state.compose(106, 30).expect("composed frame");
+
+    let text = frame_rows(&frame).join("\n");
+    assert!(text.contains("ctx 84k/200k 42%"), "{text}");
+    assert!(text.contains("5m 4:12"), "{text}");
+}
+
+#[test]
+fn context_usage_alone_never_starts_the_prompt_cache_tick() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut snapshot = snapshot();
+    snapshot.agents = vec![context_usage_agent(None)];
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("composed frame");
+
+    state.prompt_cache_now_ms = 1_000_000;
+    assert!(!state.tick_prompt_cache(1_001_000));
 }

@@ -39,6 +39,8 @@ fn agent(
         state_labels: Vec::new(),
         tokens: Vec::new(),
         focused: true,
+        prompt_cache: None,
+        context_usage: None,
     }
 }
 
