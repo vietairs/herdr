@@ -735,7 +735,8 @@ test("Pi reports exact context usage and the prompt cache on turn end", async ()
   const [cache] = requestsFor(requests, "pane.report_prompt_cache");
   expect(cache.pane_id).toBe("test:p1");
   expect(cache.source).toBe("herdr:pi");
-  expect(cache.last_request_at_ms).toBe(1500);
+  // The request start, not the response end (timestamp + durationMs).
+  expect(cache.last_request_at_ms).toBe(1000);
   expect(cache.ttl_secs).toBe(3600);
 });
 

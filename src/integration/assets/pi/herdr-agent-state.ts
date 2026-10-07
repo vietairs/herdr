@@ -231,18 +231,19 @@ async function reportPromptCache(message: any, ctx: any): Promise<void> {
     if (!Number.isInteger(ttl) || ttl < 1 || ttl > 86400) {
       return;
     }
+    // The cache lifetime runs from the request, which is when the message
+    // started; the response time is not added.
     const startedAt = Number(message.timestamp);
     if (!Number.isFinite(startedAt) || startedAt <= 0) {
       return;
     }
-    const durationMs = Number(message.durationMs);
     await sendRequest({
       id: `${source}:cache:${Date.now()}:${Math.random().toString(36).slice(2)}`,
       method: "pane.report_prompt_cache",
       params: {
         pane_id: paneId,
         source,
-        last_request_at_ms: Math.round(startedAt + (Number.isFinite(durationMs) ? durationMs : 0)),
+        last_request_at_ms: Math.round(startedAt),
         ttl_secs: ttl,
       },
     });

@@ -23,6 +23,7 @@ from scripts.test_claude_integration_asset import (
     run_tap,
     settle_requests,
     wait_for_requests,
+    write_echo_executable,
 )
 
 ASSET_DIR = Path(__file__).parents[1] / "src/integration/assets/cursor"
@@ -180,6 +181,17 @@ class CursorStatuslineTapTests(unittest.TestCase):
         self.assertEqual(by_method(requests, "pane.report_prompt_cache"), [])
         self.assertEqual(len(by_method(requests, "pane.report_context_usage")), 1)
         self.assertNotIn("clear", requests[0]["params"])
+
+    def test_original_executable_path_with_a_space_runs_directly(self):
+        with tempfile.TemporaryDirectory(prefix="hct") as work:
+            original = write_echo_executable(work)
+            missing = os.path.join(work, "does-not-exist")
+            with FakeHerdrSocket() as fake:
+                buffered = tap(original, TOTAL_INPUT_FIXTURE, herdr_env(fake.path))
+                # The fallback without a buffer runs it the same way.
+                unbuffered = tap(original, TOTAL_INPUT_FIXTURE, herdr_env(fake.path, TMPDIR=missing))
+        self.assert_passthrough(buffered)
+        self.assert_passthrough(unbuffered)
 
     def test_tap_file_deleted_still_runs_the_original(self):
         with tempfile.TemporaryDirectory(prefix="hct") as work:

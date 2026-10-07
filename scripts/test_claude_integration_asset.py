@@ -252,6 +252,16 @@ ECHO_STDIN = (
 )
 
 
+def write_echo_executable(directory):
+    """An executable at a path with a space; echoes its stdin after "OUT:" and exits 3."""
+    script_dir = Path(directory) / "Application Support"
+    script_dir.mkdir()
+    script = script_dir / "line.sh"
+    script.write_text("#!/bin/sh\nprintf 'OUT:'; cat; exit 3\n", "utf-8")
+    script.chmod(0o755)
+    return str(script)
+
+
 def run_hook(action, payload, transcript_lines=None, transcript_text=None, extra_env=None):
     """Runs the hook and returns the requests the fake socket received."""
     with tempfile.TemporaryDirectory(prefix="hct") as work:
@@ -629,6 +639,47 @@ class ClaudeStatuslineTapTests(unittest.TestCase):
                     ECHO_STDIN, STATUSLINE_FIXTURE, herdr_env(fake.path, TMPDIR=missing)
                 )
         self.assert_passthrough(result)
+
+    def test_statusline_runs_an_executable_path_with_a_space_directly(self):
+        with tempfile.TemporaryDirectory(prefix="hct") as work:
+            original = write_echo_executable(work)
+            missing = os.path.join(work, "does-not-exist")
+            with FakeHerdrSocket() as fake:
+                buffered = run_tap(original, STATUSLINE_FIXTURE, herdr_env(fake.path))
+                # The fallback without a buffer runs it the same way.
+                unbuffered = run_tap(
+                    original, STATUSLINE_FIXTURE, herdr_env(fake.path, TMPDIR=missing)
+                )
+        self.assert_passthrough(buffered)
+        self.assert_passthrough(unbuffered)
+
+    def test_cancelled_statusline_run_removes_its_input_buffer(self):
+        with tempfile.TemporaryDirectory(prefix="hct") as tmpdir:
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": tmpdir}
+            process = subprocess.Popen(
+                ["sh", str(TAP_ASSET), ECHO_STDIN],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+            try:
+                # Still buffering: the input is not finished yet.
+                process.stdin.write(b'{"session_id":')
+                process.stdin.flush()
+                deadline = time.monotonic() + 5
+                while not os.listdir(tmpdir) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(os.listdir(tmpdir), "the tap never buffered its input")
+                process.terminate()
+                time.sleep(0.2)
+                process.stdin.close()
+                process.wait(timeout=10)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+            self.assertEqual(os.listdir(tmpdir), [])
+            self.assertEqual(process.returncode, 143)
 
     def test_tap_asset_carries_version_eleven(self):
         self.assertIn("# HERDR_INTEGRATION_VERSION=11", TAP_ASSET.read_text("utf-8"))

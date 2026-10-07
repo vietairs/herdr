@@ -100,16 +100,32 @@ PY
 statusline_original="${1:-}"
 [ -n "$statusline_original" ] || exit 0
 
+# Replaces this process with the original. An executable file runs as it is,
+# the way an agent that runs the command without a shell ran it; anything else
+# is shell text.
+statusline_exec_original() {
+  if [ -f "$statusline_original" ] && [ -x "$statusline_original" ]; then
+    exec "$statusline_original"
+  fi
+  exec sh -c "$statusline_original"
+}
+
 # The input is buffered so the reporter and the original each read all of it.
 statusline_input=$(mktemp "${TMPDIR:-/tmp}/herdr-statusline.XXXXXX" 2>/dev/null) ||
-  exec sh -c "$statusline_original"
+  statusline_exec_original
+# A run cancelled before the buffer is unlinked still removes it.
+trap 'rm -f "$statusline_input"; exit 129' HUP
+trap 'rm -f "$statusline_input"; exit 130' INT
+trap 'rm -f "$statusline_input"; exit 143' TERM
 cat >"$statusline_input" 2>/dev/null
 # `command` keeps a failed redirection from exiting the shell.
 if ! { command exec 3<"$statusline_input" 4<"$statusline_input"; } 2>/dev/null; then
   rm -f "$statusline_input"
-  exec sh -c "$statusline_original"
+  trap - HUP INT TERM
+  statusline_exec_original
 fi
 rm -f "$statusline_input"
+trap - HUP INT TERM
 
 if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_SOCKET_PATH:-}" ] &&
   [ -n "${HERDR_PANE_ID:-}" ] && command -v python3 >/dev/null 2>&1; then
@@ -120,5 +136,6 @@ fi
 exec 3<&-
 # The original replaces this process: same input bytes, its own output and
 # exit status, and cancelling the tap cancels the original.
-exec sh -c "$statusline_original" <&4 4<&-
+exec <&4 4<&-
+statusline_exec_original
 # --- herdr statusline passthrough end ---

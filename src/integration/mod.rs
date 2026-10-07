@@ -9,6 +9,8 @@ mod opencode_config;
 mod registry;
 #[cfg(not(windows))]
 mod statusline_tap;
+#[cfg(not(windows))]
+mod statusline_wrapper;
 mod targets;
 mod types;
 mod version;

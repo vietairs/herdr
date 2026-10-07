@@ -23,6 +23,8 @@ pub(crate) struct KimiInstallPaths {
 pub(crate) struct CopilotInstallPaths {
     pub hook_path: PathBuf,
     pub settings_path: PathBuf,
+    /// `warning:` messages for statusline changes that were skipped.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -86,6 +88,8 @@ pub(crate) struct LettaInstallPaths {
 pub(crate) struct CursorInstallPaths {
     pub hook_path: PathBuf,
     pub hooks_path: PathBuf,
+    /// `warning:` messages for statusline changes that were skipped.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -94,6 +98,8 @@ pub(crate) struct CursorUninstallResult {
     pub hooks_path: PathBuf,
     pub removed_hook_file: bool,
     pub updated_hooks: bool,
+    /// `warning:` messages for statusline changes that were skipped.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -235,6 +241,8 @@ pub(crate) struct CopilotUninstallResult {
     pub settings_path: PathBuf,
     pub removed_hook_file: bool,
     pub updated_settings: bool,
+    /// `warning:` messages for statusline changes that were skipped.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -282,6 +290,8 @@ pub(crate) struct HermesUninstallResult {
 pub(crate) struct AntigravityCliInstallPaths {
     pub hook_path: PathBuf,
     pub hooks_path: PathBuf,
+    /// `warning:` messages for statusline changes that were skipped.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -290,4 +300,6 @@ pub(crate) struct AntigravityCliUninstallResult {
     pub hooks_path: PathBuf,
     pub removed_hook_file: bool,
     pub updated_hooks: bool,
+    /// `warning:` messages for statusline changes that were skipped.
+    pub warnings: Vec<String>,
 }

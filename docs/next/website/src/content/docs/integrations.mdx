@@ -149,7 +149,7 @@ Herdr uses `~/.copilot` by default, or `COPILOT_HOME` when set. The Copilot conf
 
 After Copilot emits a session-bearing event, Herdr can use the reported session id to resume the pane with `copilot --resume=<id>`.
 
-On macOS and Linux, GitHub Copilot CLI integration v4 wraps an existing Copilot `statusLine` command to read context-window use; your command's output is passed through unchanged and uninstalling restores it. This reading is unverified: the statusline input format has not yet been captured from a live Copilot session, and if your status line goes blank after installing, run `herdr integration uninstall copilot`. Without a custom statusline, or on Windows, Herdr shows no context usage for Copilot.
+On macOS and Linux, GitHub Copilot CLI integration v4 wraps an existing Copilot `statusLine` command to read context-window use; your command's output is passed through unchanged and uninstalling restores it. A copy of your command is kept in `~/.copilot/herdr-statusline-original.json`, so uninstall can restore it even when the wrapper file is gone. This reading is unverified: the statusline input format has not yet been captured from a live Copilot session, and if your status line goes blank after installing, run `herdr integration uninstall copilot`. Without a custom statusline, or on Windows, Herdr shows no context usage for Copilot.
 
 ## Devin CLI
 
@@ -305,7 +305,7 @@ Herdr uses `~/.cursor` by default, or `CURSOR_CONFIG_DIR` when set. The Cursor c
 
 After Cursor emits a session start event, Herdr can use the reported session id to resume the pane with `cursor-agent --resume <id>`. The `cursor-agent` command must be on `PATH` when Herdr restores the pane; Herdr does not launch the generic `agent` command.
 
-On macOS and Linux, Cursor Agent CLI integration v2 wraps an existing `statusLine` command in `~/.cursor/cli-config.json` to read context-window use; your command's output is passed through unchanged and uninstalling restores the file. This reading is unverified: the statusline input format has not yet been captured from a live Cursor session, and if your status line goes blank after installing, run `herdr integration uninstall cursor`. Without a custom statusline, or on Windows, Herdr shows no context usage for Cursor.
+On macOS and Linux, Cursor Agent CLI integration v2 wraps an existing `statusLine` command in `~/.cursor/cli-config.json` to read context-window use; your command's output is passed through unchanged and uninstalling restores the file. A copy of your command is kept in `~/.cursor/herdr-statusline-original.json`, so uninstall can restore it even when the wrapper file is gone. This reading is unverified: the statusline input format has not yet been captured from a live Cursor session, and if your status line goes blank after installing, run `herdr integration uninstall cursor`. Without a custom statusline, or on Windows, Herdr shows no context usage for Cursor.
 
 ## MastraCode
 
