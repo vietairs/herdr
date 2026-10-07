@@ -19,7 +19,7 @@ pub(crate) struct ClientShellEndpoint {
     /// How far this endpoint's wall clock runs ahead of this client's, estimated from
     /// the snapshots of `snapshot_generation`. Its absolute timestamps are read against
     /// the local clock shifted by this much.
-    pub(crate) server_clock_offset_ms: i64,
+    pub(crate) server_clock: crate::prompt_cache::ClockOffsetEstimate,
     pub(crate) agent_recency: HashMap<String, u64>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
@@ -74,8 +74,9 @@ impl ClientShellState {
                 ),
                 snapshot: previous.and_then(|endpoint| endpoint.snapshot.clone()),
                 snapshot_generation: previous.and_then(|endpoint| endpoint.snapshot_generation),
-                server_clock_offset_ms: previous
-                    .map_or(0, |endpoint| endpoint.server_clock_offset_ms),
+                server_clock: previous
+                    .map(|endpoint| endpoint.server_clock)
+                    .unwrap_or_default(),
                 agent_recency: previous
                     .map(|endpoint| endpoint.agent_recency.clone())
                     .unwrap_or_default(),
@@ -621,7 +622,7 @@ impl ClientShellState {
         });
         let endpoint = &mut self.endpoints[index];
         endpoint.agent_recency = recency;
-        endpoint.server_clock_offset_ms = next_server_clock_offset_ms(
+        endpoint.server_clock = next_server_clock(
             endpoint,
             generation,
             snapshot.server_now_ms,
@@ -727,30 +728,33 @@ impl ClientShellEndpoint {
     /// This endpoint's clock at the local instant `local_now_ms`, the instant its
     /// absolute timestamps are compared with.
     pub(super) fn server_clock_ms(&self, local_now_ms: u64) -> u64 {
-        crate::prompt_cache::local_to_remote_clock_ms(local_now_ms, self.server_clock_offset_ms)
+        crate::prompt_cache::local_to_remote_clock_ms(local_now_ms, self.server_clock.offset_ms())
     }
 }
 
-/// The clock offset to keep for `endpoint` once a snapshot stamped `server_now_ms`
+/// The clock estimate to keep for `endpoint` once a snapshot stamped `server_now_ms`
 /// arrives at `local_now_ms` on `generation`. The local endpoint shares this host's
-/// clock. A snapshot's delivery and processing delay only lowers a sample, so within
-/// one connection the largest sample is the closest to the true offset; a new
-/// connection may reach a different clock and starts over.
-fn next_server_clock_offset_ms(
+/// clock. Within one connection the estimate absorbs delivery delay and follows clock
+/// steps; a new connection may reach a different clock and starts over.
+pub(super) fn next_server_clock(
     endpoint: &ClientShellEndpoint,
     generation: Option<u64>,
     server_now_ms: u64,
     local_now_ms: u64,
-) -> i64 {
+) -> crate::prompt_cache::ClockOffsetEstimate {
     if endpoint.endpoint_id.is_local() {
-        return 0;
+        return Default::default();
     }
-    let sample = crate::prompt_cache::remote_clock_offset_ms(server_now_ms, local_now_ms);
-    if endpoint.snapshot.is_some() && endpoint.snapshot_generation == generation {
-        endpoint.server_clock_offset_ms.max(sample)
+    let mut clock = if endpoint.snapshot.is_some() && endpoint.snapshot_generation == generation {
+        endpoint.server_clock
     } else {
-        sample
-    }
+        Default::default()
+    };
+    clock.observe(
+        crate::prompt_cache::remote_clock_offset_ms(server_now_ms, local_now_ms),
+        server_now_ms,
+    );
+    clock
 }
 
 /// `endpoint_id`'s clock at the local instant `local_now_ms`; the local clock when the
@@ -788,7 +792,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         status: ClientEndpointStatus::Online,
         snapshot: None,
         snapshot_generation: None,
-        server_clock_offset_ms: 0,
+        server_clock: Default::default(),
         agent_recency: HashMap::new(),
         agent_presentation: Default::default(),
         agent_view_projection: None,

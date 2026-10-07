@@ -1745,7 +1745,7 @@ fn endpoint_clock_offset_ms(
         .endpoints
         .iter()
         .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
-        .map(|endpoint| endpoint.server_clock_offset_ms)
+        .map(|endpoint| endpoint.server_clock.offset_ms())
         .expect("endpoint")
 }
 
@@ -1802,6 +1802,77 @@ fn a_late_snapshot_does_not_shift_the_endpoint_clock() {
     skewed.server_now_ms = crate::prompt_cache::unix_now_ms() - 180_000;
     state.set_endpoint_snapshot_for_generation(&local, 5, Box::new(skewed));
     assert_eq!(endpoint_clock_offset_ms(&state, &local), 0);
+}
+
+/// Feeds the remote endpoint's connection-4 clock a snapshot stamped `server_now_ms`
+/// that this client reads at `local_now_ms`, and returns the offset it keeps.
+fn read_endpoint_snapshot_at(
+    state: &mut ClientShellState,
+    remote: &crate::client::endpoint::ClientEndpointId,
+    server_now_ms: u64,
+    local_now_ms: u64,
+) -> i64 {
+    let endpoint = state
+        .endpoints
+        .iter_mut()
+        .find(|endpoint| &endpoint.endpoint_id == remote)
+        .expect("endpoint");
+    endpoint.server_clock = crate::client::shell::endpoints::next_server_clock(
+        endpoint,
+        Some(4),
+        server_now_ms,
+        local_now_ms,
+    );
+    endpoint.server_clock.offset_ms()
+}
+
+#[test]
+fn the_endpoint_clock_follows_a_clock_step_on_the_same_connection() {
+    let (mut state, remote) = state_with_remote_endpoint();
+    state.set_endpoint_snapshot_for_generation(&remote, 4, Box::new(snapshot()));
+    let local_ms = 1_000_000_000_u64;
+    // The endpoint ran ten minutes fast at connect.
+    assert_eq!(
+        read_endpoint_snapshot_at(&mut state, &remote, local_ms + 600_000, local_ms),
+        600_000
+    );
+
+    // Its clock is then stepped back to the right time. One snapshot alone could be
+    // a late one; the next, read a minute later, confirms the step.
+    let stepped_ms = local_ms + 60_000;
+    assert_eq!(
+        read_endpoint_snapshot_at(&mut state, &remote, stepped_ms, stepped_ms),
+        600_000
+    );
+    assert_eq!(
+        read_endpoint_snapshot_at(
+            &mut state,
+            &remote,
+            stepped_ms + 60_000,
+            stepped_ms + 60_000
+        ),
+        0
+    );
+}
+
+#[test]
+fn a_burst_of_queued_snapshots_does_not_lower_the_endpoint_clock() {
+    let (mut state, remote) = state_with_remote_endpoint();
+    state.set_endpoint_snapshot_for_generation(&remote, 4, Box::new(snapshot()));
+    let local_ms = 1_000_000_000_u64;
+    assert_eq!(
+        read_endpoint_snapshot_at(&mut state, &remote, local_ms + 600_000, local_ms),
+        600_000
+    );
+    // The connection stalled for five minutes, then delivered what queued up meanwhile
+    // all at once.
+    let drained_at_ms = local_ms + 300_000;
+    for queued_at_ms in [local_ms + 60_000, local_ms + 120_000, local_ms + 180_000] {
+        assert_eq!(
+            read_endpoint_snapshot_at(&mut state, &remote, queued_at_ms + 600_000, drained_at_ms),
+            600_000
+        );
+    }
 }
 
 fn context_usage_agent(

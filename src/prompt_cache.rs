@@ -23,6 +23,84 @@ pub(crate) fn remote_clock_offset_ms(remote_now_ms: u64, local_now_ms: u64) -> i
     i64::try_from(offset).unwrap_or(if offset < 0 { i64::MIN } else { i64::MAX })
 }
 
+/// A sample this far below the estimate is a clock step rather than delivery delay,
+/// which stays far shorter on a live connection.
+const CLOCK_STEP_DOWN_MS: i64 = 30_000;
+
+/// A low sample confirms a step only when the remote stamped it at least this long
+/// after the held one, so the frames one poll stamps together count once.
+const CLOCK_STEP_CONFIRM_SPACING_MS: u64 = 5_000;
+
+/// Two low samples this close describe one steady new offset. Messages from a backlog
+/// read in a burst differ by the gaps between their stamps, which the spacing above
+/// keeps wider than this.
+const CLOCK_STEP_AGREEMENT_MS: u64 = 2_000;
+
+/// Running estimate of another host's clock offset over one connection.
+///
+/// A timestamped message can wait in a queue before it is read, and that delay only
+/// lowers a sample, so the largest sample is the closest to the true offset. A clock
+/// step can lower the true offset too, so a sample more than `CLOCK_STEP_DOWN_MS`
+/// below the estimate is held, and replaces the estimate once a later one confirms
+/// it: stamped at least `CLOCK_STEP_CONFIRM_SPACING_MS` after it by the remote, and
+/// within `CLOCK_STEP_AGREEMENT_MS` of it. Delayed messages, alone or drained from a
+/// backlog together, never agree that way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ClockOffsetEstimate {
+    offset_ms: i64,
+    sampled: bool,
+    /// The held low sample and the remote stamp it was taken from.
+    stepped_down: Option<(i64, u64)>,
+}
+
+impl ClockOffsetEstimate {
+    /// The current offset; 0 before the first sample.
+    pub(crate) fn offset_ms(&self) -> i64 {
+        self.offset_ms
+    }
+
+    /// Folds in one `remote_clock_offset_ms` sample taken from the remote stamp
+    /// `remote_now_ms`. The first sample on a connection stands on its own.
+    pub(crate) fn observe(&mut self, sample_ms: i64, remote_now_ms: u64) {
+        if !self.sampled {
+            self.offset_ms = sample_ms;
+            self.sampled = true;
+            return;
+        }
+        if sample_ms >= self.offset_ms.saturating_sub(CLOCK_STEP_DOWN_MS) {
+            self.stepped_down = None;
+            self.offset_ms = self.offset_ms.max(sample_ms);
+            return;
+        }
+        let Some((held_ms, held_remote_ms)) = self.stepped_down else {
+            self.stepped_down = Some((sample_ms, remote_now_ms));
+            return;
+        };
+        let confirm_after_ms = held_remote_ms.saturating_add(CLOCK_STEP_CONFIRM_SPACING_MS);
+        if remote_now_ms >= held_remote_ms && remote_now_ms < confirm_after_ms {
+            // Stamped with or just after the held sample, as one poll's frames are:
+            // not a second opinion.
+            return;
+        }
+        if remote_now_ms >= confirm_after_ms
+            && held_ms.abs_diff(sample_ms) <= CLOCK_STEP_AGREEMENT_MS
+        {
+            self.offset_ms = held_ms.max(sample_ms);
+            self.stepped_down = None;
+            return;
+        }
+        // A disagreeing sample, or a remote stamp that went backwards because that
+        // clock stepped since the held one: hold this one instead.
+        self.stepped_down = Some((sample_ms, remote_now_ms));
+    }
+
+    /// True when the offset moved by at least the countdown's one-second resolution,
+    /// so timestamps already moved with `previous_ms` read differently now.
+    pub(crate) fn moved_from(&self, previous_ms: i64) -> bool {
+        self.offset_ms.abs_diff(previous_ms) >= CLOCK_SKEW_TOLERANCE_MS
+    }
+}
+
 /// `at_ms` on our clock to the remote clock `remote_offset_ms` describes.
 pub(crate) fn local_to_remote_clock_ms(at_ms: u64, remote_offset_ms: i64) -> u64 {
     at_ms.saturating_add_signed(remote_offset_ms)
@@ -216,6 +294,141 @@ mod tests {
         assert_eq!(remote_clock_offset_ms(L - 999, L), 0);
         assert_eq!(remote_clock_offset_ms(L + 180_000, L), 180_000);
         assert_eq!(remote_clock_offset_ms(L - 180_000, L), -180_000);
+    }
+
+    /// The estimate after `samples`, each `(sample_ms, remote_now_ms)`.
+    fn estimate_after_stamped(samples: &[(i64, u64)]) -> ClockOffsetEstimate {
+        let mut estimate = ClockOffsetEstimate::default();
+        for &(sample_ms, remote_now_ms) in samples {
+            estimate.observe(sample_ms, remote_now_ms);
+        }
+        estimate
+    }
+
+    /// The estimate after `samples` read one minute apart on both clocks, so each one's
+    /// remote stamp is a minute after the last.
+    fn estimate_after(samples: &[i64]) -> ClockOffsetEstimate {
+        let stamped: Vec<(i64, u64)> = samples
+            .iter()
+            .zip(0_u64..)
+            .map(|(&sample_ms, minute)| {
+                let local_now_ms = L + minute * 60_000;
+                (sample_ms, local_now_ms.saturating_add_signed(sample_ms))
+            })
+            .collect();
+        estimate_after_stamped(&stamped)
+    }
+
+    #[test]
+    fn clock_offset_estimate_keeps_the_largest_sample_through_delivery_delay() {
+        assert_eq!(ClockOffsetEstimate::default().offset_ms(), 0);
+        assert_eq!(estimate_after(&[-180_000]).offset_ms(), -180_000);
+        assert_eq!(
+            estimate_after(&[600_000, 597_000, 600_040, 590_000, 571_000]).offset_ms(),
+            600_040
+        );
+        assert_eq!(estimate_after(&[0, -5_000, 0, -10_000]).offset_ms(), 0);
+    }
+
+    #[test]
+    fn clock_offset_estimate_follows_a_clock_step_down_after_two_samples() {
+        // A single low sample is a delayed message, not a step.
+        assert_eq!(estimate_after(&[600_000, 0]).offset_ms(), 600_000);
+        assert_eq!(
+            estimate_after(&[600_000, 0, 600_000, 0]).offset_ms(),
+            600_000
+        );
+        // Two in a row that agree are a step: take the larger of them.
+        assert_eq!(estimate_after(&[600_000, -40, 0]).offset_ms(), 0);
+        assert_eq!(estimate_after(&[600_000, 0, -40, 0, -200]).offset_ms(), 0);
+        // Two that disagree are delayed messages; the later one waits for a third.
+        assert_eq!(estimate_after(&[600_000, 300_000, 0]).offset_ms(), 600_000);
+        assert_eq!(estimate_after(&[600_000, 300_000, 0, -40]).offset_ms(), 0);
+        // Upward steps were always taken at once.
+        assert_eq!(estimate_after(&[0, 600_000]).offset_ms(), 600_000);
+    }
+
+    #[test]
+    fn clock_offset_estimate_counts_one_polls_low_samples_once() {
+        // Frames stamped by one poll share its stamp, so a late poll that changed two
+        // terminals is still one delayed message.
+        let late_poll_ms = L + 60_000;
+        assert_eq!(
+            estimate_after_stamped(&[
+                (600_000, L + 600_000),
+                (0, late_poll_ms),
+                (-40, late_poll_ms),
+            ])
+            .offset_ms(),
+            600_000
+        );
+        // The step is still taken once a later poll agrees.
+        assert_eq!(
+            estimate_after_stamped(&[
+                (600_000, L + 600_000),
+                (0, late_poll_ms),
+                (-40, late_poll_ms),
+                (-40, late_poll_ms + 60_000),
+            ])
+            .offset_ms(),
+            0
+        );
+    }
+
+    #[test]
+    fn clock_offset_estimate_ignores_a_backlog_read_in_a_burst() {
+        // Read together at one local instant `L`, stamped minutes apart while the link
+        // was stalled: each sample is the true offset less its frame's age.
+        let burst: Vec<(i64, u64)> = [300_000_i64, 200_000, 100_000]
+            .iter()
+            .map(|&age_ms| {
+                (
+                    600_000 - age_ms,
+                    L + 600_000 - u64::try_from(age_ms).unwrap(),
+                )
+            })
+            .collect();
+        let mut samples = vec![(600_000, L)];
+        samples.extend(&burst);
+        assert_eq!(estimate_after_stamped(&samples).offset_ms(), 600_000);
+
+        // Polls a second apart are inside the spacing until they no longer agree.
+        let backlog: Vec<(i64, u64)> = (0..=10_u64)
+            .map(|second| {
+                let age_ms = 120_000 - second * 1000;
+                (
+                    600_000 - i64::try_from(age_ms).unwrap(),
+                    L + 600_000 - age_ms,
+                )
+            })
+            .collect();
+        let mut samples = vec![(600_000, L)];
+        samples.extend(&backlog);
+        assert_eq!(estimate_after_stamped(&samples).offset_ms(), 600_000);
+    }
+
+    #[test]
+    fn clock_offset_estimate_holds_a_new_sample_after_the_remote_clock_steps_back() {
+        // The held sample's stamp is later than anything the remote sends once its
+        // clock steps back ten minutes, so the samples after the step confirm it.
+        assert_eq!(
+            estimate_after_stamped(&[
+                (600_000, L + 600_000),
+                (0, L + 600_000 + 60_000),
+                (-600_000, L),
+                (-600_000, L + 60_000),
+            ])
+            .offset_ms(),
+            -600_000
+        );
+    }
+
+    #[test]
+    fn clock_offset_estimate_reports_moves_of_a_second_or_more() {
+        let estimate = estimate_after(&[-180_000]);
+        assert!(!estimate.moved_from(-180_999));
+        assert!(estimate.moved_from(-181_000));
+        assert!(estimate.moved_from(0));
     }
 
     #[test]
