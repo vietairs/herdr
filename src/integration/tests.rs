@@ -5286,6 +5286,7 @@ fn isolate_antigravity_cli_settings_dir(base: &Path) -> PathBuf {
     settings_dir
 }
 
+#[cfg(not(windows))]
 const ANTIGRAVITY_USER_STATUSLINE_COMMAND: &str = "bash ~/agy-statusline.sh";
 
 #[cfg(not(windows))]

@@ -20,6 +20,8 @@ pub(crate) const QWEN_HOME_ENV_VAR: &str = "QWEN_HOME";
 pub(crate) const CURSOR_CONFIG_DIR_ENV_VAR: &str = "CURSOR_CONFIG_DIR";
 pub(crate) const ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR: &str = "ANTIGRAVITY_CLI_CONFIG_DIR";
 /// Herdr-level override of the Antigravity CLI statusline settings directory (a test seam; the CLI does not honor it).
+/// The statusline tap is Unix-only; Windows test builds still clear the variable.
+#[cfg(any(not(windows), test))]
 pub(crate) const ANTIGRAVITY_CLI_SETTINGS_DIR_ENV_VAR: &str = "ANTIGRAVITY_CLI_SETTINGS_DIR";
 pub(crate) const GROK_CONFIG_DIR_ENV_VAR: &str = "GROK_CONFIG_DIR";
 /// The grok CLI's own config-home override (documented alongside
@@ -198,6 +200,7 @@ pub(crate) fn antigravity_cli_dir() -> io::Result<PathBuf> {
 
 /// `~/.gemini/antigravity-cli`, where Antigravity CLI keeps `settings.json` (the `statusLine` entry), or the
 /// override. Distinct from `antigravity_cli_dir`, which holds the hooks.
+#[cfg(not(windows))]
 pub(crate) fn antigravity_cli_settings_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(
         ANTIGRAVITY_CLI_SETTINGS_DIR_ENV_VAR,

@@ -29,11 +29,12 @@ use super::config_edit::{
     remove_hook_commands, remove_kimi_config_block, remove_simple_command_hook,
 };
 use super::config_file::{check_config_targets, write_config};
+#[cfg(not(windows))]
+use super::env::antigravity_cli_settings_dir;
 use super::env::{
-    antigravity_cli_dir, antigravity_cli_settings_dir, claude_dir, codex_dir, copilot_dir,
-    cursor_dir, devin_dir, droid_dir, grok_dir, hermes_dir, hermes_plugin_dir, kilo_dir, kimi_dir,
-    letta_dir, mastracode_dir, omp_extension_dir, opencode_dir, opencode_state_dir,
-    pi_extension_dir, qodercli_dir, qwen_dir,
+    antigravity_cli_dir, claude_dir, codex_dir, copilot_dir, cursor_dir, devin_dir, droid_dir,
+    grok_dir, hermes_dir, hermes_plugin_dir, kilo_dir, kimi_dir, letta_dir, mastracode_dir,
+    omp_extension_dir, opencode_dir, opencode_state_dir, pi_extension_dir, qodercli_dir, qwen_dir,
 };
 use super::file_ops::{
     make_executable, remove_dir_all_if_exists, remove_file_if_exists, remove_legacy_bash_hook_file,
