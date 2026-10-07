@@ -1665,6 +1665,7 @@ impl AppState {
             AppEvent::FederationSplitPaneFailed { .. } => Vec::new(),
             AppEvent::FederationResyncPaneCreated(_) => Vec::new(),
             AppEvent::FederationResyncPaneRemoved { .. } => Vec::new(),
+            AppEvent::FederationPaneUsage { .. } => Vec::new(),
             AppEvent::FederationResyncWorkspaceCreated { .. } => Vec::new(),
             AppEvent::FederationResyncWorkspaceRemoved { .. } => Vec::new(),
             AppEvent::FederationWorkspaceCreateAccepted { .. } => Vec::new(),

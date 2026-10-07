@@ -37,7 +37,7 @@ use crate::api::schema::common::AgentStatus;
 use crate::api::EventHub;
 use crate::pane::RelayedAgentStatus;
 
-use super::id::{HostKey, Mount, ServerInstanceId};
+use super::id::{fence, FenceResult, HostKey, Mount, ServerInstanceId};
 use super::protocol::{
     Capability, ClipboardMessage, ClipboardStageRequest, FaultReason, FederationMessage, Handshake,
     HandshakeResponse, MountSnapshot, RejectReason, ScrollbackReplay, TabCloseRequest,
@@ -879,6 +879,27 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                         agent: status_msg.agent.clone(),
                     },
                 );
+            }
+            // Fenced exactly like `AgentStatus` above: the drive task's own
+            // generation against the mirror's mount. The wire
+            // `mount_generation` is a constant on every serving host, so it
+            // cannot tell a superseded drive task from the live one.
+            FederationMessage::PaneUsage(usage) => {
+                if let FenceResult::RejectStale { .. } = fence(mirror.mount(), generation) {
+                    continue;
+                }
+                let Some(ctx) = split_materialization else {
+                    continue;
+                };
+                let _ = ctx
+                    .events
+                    .send(crate::events::AppEvent::FederationPaneUsage {
+                        origin: ctx.origin.clone(),
+                        terminal_id: usage.terminal_id,
+                        prompt_cache: usage.prompt_cache,
+                        context_usage: usage.context_usage,
+                    })
+                    .await;
             }
             // Handshake/HandshakeResponse/MountSnapshot are already
             // consumed during `connect_and_mount`.
@@ -3610,6 +3631,16 @@ mod tests {
     async fn drive_mount_script(
         frames: Vec<FederationMessage>,
     ) -> (Vec<crate::events::AppEvent>, Vec<FederationMessage>) {
+        drive_mount_script_at_generation_offset(frames, 0).await
+    }
+
+    /// `drive_mount_script`, but the drive task runs with a generation
+    /// `generation_offset` ahead of the mirror's own mount generation — the
+    /// shape of a drive task that outlived the mount it was started for.
+    async fn drive_mount_script_at_generation_offset(
+        frames: Vec<FederationMessage>,
+        generation_offset: u64,
+    ) -> (Vec<crate::events::AppEvent>, Vec<FederationMessage>) {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
         let (client_reader, client_writer) = tokio::io::split(client_side);
         let (mut server_reader, mut server_writer) = tokio::io::split(server_side);
@@ -3654,7 +3685,7 @@ mod tests {
             .connect_and_mount(client_reader, client_writer)
             .await
             .expect("the loopback mount succeeds");
-        let generation = mounted.mirror.mount().mount_generation;
+        let generation = mounted.mirror.mount().mount_generation + generation_offset;
         let MountedConnection {
             mut mirror,
             mut reader,
@@ -3704,6 +3735,65 @@ mod tests {
             outbound.push(msg);
         }
         (events, outbound)
+    }
+
+    fn pane_usage_frame() -> FederationMessage {
+        FederationMessage::PaneUsage(crate::remote::federation::protocol::PaneUsageMessage {
+            terminal_id: "term_1".to_string(),
+            // The wire field is a constant on every serving host; the drive
+            // task's own generation is the fence, so a value no mount ever
+            // holds must not matter.
+            mount_generation: 99,
+            prompt_cache: Some(crate::api::schema::PromptCacheInfo {
+                source: "herdr:claude".to_string(),
+                last_request_at_ms: 1_700_000_000_000,
+                ttl_secs: 300,
+            }),
+            context_usage: Some(crate::api::schema::ContextUsageInfo {
+                source: "herdr:claude".to_string(),
+                used_tokens: 42_000,
+                window_tokens: Some(200_000),
+                observed_at_ms: 1_700_000_000_500,
+            }),
+        })
+    }
+
+    #[tokio::test]
+    async fn pane_usage_frame_becomes_an_app_event_and_stale_generation_is_dropped() {
+        let (events, _outbound) = drive_mount_script(vec![pane_usage_frame()]).await;
+        let usage: Vec<_> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                crate::events::AppEvent::FederationPaneUsage {
+                    origin,
+                    terminal_id,
+                    prompt_cache,
+                    context_usage,
+                } => Some((origin, terminal_id, prompt_cache, context_usage)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage.len(), 1, "one frame yields one usage event");
+        let (origin, terminal_id, prompt_cache, context_usage) = &usage[0];
+        assert_eq!(*origin, host_key());
+        assert_eq!(terminal_id, "term_1", "the raw serving-host terminal id");
+        assert_eq!(
+            prompt_cache.as_ref().map(|fact| fact.last_request_at_ms),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(
+            context_usage.as_ref().map(|fact| fact.used_tokens),
+            Some(42_000)
+        );
+
+        let (stale_events, _outbound) =
+            drive_mount_script_at_generation_offset(vec![pane_usage_frame()], 1).await;
+        assert!(
+            !stale_events
+                .iter()
+                .any(|event| matches!(event, crate::events::AppEvent::FederationPaneUsage { .. })),
+            "a drive task whose generation the mirror no longer holds forwards nothing"
+        );
     }
 
     fn tab_created(request_id: u64) -> FederationMessage {

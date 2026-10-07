@@ -41,6 +41,7 @@ use tracing::{debug, error, warn};
 use crate::api::schema::common::AgentStatus;
 use crate::api::schema::events::EventKind;
 use crate::api::schema::session::SessionSnapshot;
+use crate::api::schema::{ContextUsageInfo, PromptCacheInfo};
 use crate::ipc::{LocalListener, LocalStream};
 use crate::remote::federation::id::ServerInstanceId;
 use crate::remote::federation::protocol::codec;
@@ -49,14 +50,14 @@ use crate::remote::federation::protocol::{
     AgentStatusMessage, Capability, Channel, ClipboardStageFailure, ClipboardStageRequest,
     ClipboardStageResponse, ClosePaneRequest, ClosePaneResponse, EventChannelMessage, EventCursor,
     EventFrame, FaultMessage, FederationMessage, Handshake, HandshakeResponse, MountSnapshot,
-    ScrollbackReplay, SplitPaneRequest, SplitPaneResponse, TabCloseRequest, TabCloseResponse,
-    TabCreateRequest, TabCreateResponse, TerminalChannelMessage, WorkspaceCloseRequest,
-    WorkspaceCloseResponse, WorkspaceCreateRequest, WorkspaceCreateResponse,
+    PaneUsageMessage, ScrollbackReplay, SplitPaneRequest, SplitPaneResponse, TabCloseRequest,
+    TabCloseResponse, TabCreateRequest, TabCreateResponse, TerminalChannelMessage,
+    WorkspaceCloseRequest, WorkspaceCloseResponse, WorkspaceCreateRequest, WorkspaceCreateResponse,
     FEDERATION_PROTOCOL_VERSION,
 };
 use crate::remote::federation::tee;
 use crate::server::client_transport::ServerEvent;
-use crate::server::federation_actor::FederationCommand;
+use crate::server::federation_actor::{FederatedAgentFacts, FederationCommand};
 use crate::server::federation_fault::{FirstCauseCell, TunnelExit};
 use crate::server::federation_lease::{AcceptEpoch, Admission, ConnId};
 
@@ -1548,6 +1549,7 @@ fn ticker_loop(
 ) {
     let mut cursor = initial_cursor.0;
     let mut last_agent: HashMap<String, (AgentStatus, Option<String>)> = HashMap::new();
+    let mut last_usage: HashMap<String, UsageFacts> = HashMap::new();
     let mut tick: u32 = 0;
     while !shutdown.load(Ordering::SeqCst) {
         std::thread::sleep(OUTBOUND_POLL_INTERVAL);
@@ -1562,6 +1564,7 @@ fn ticker_loop(
             && !poll_agent_statuses(
                 server_event_tx,
                 &mut last_agent,
+                &mut last_usage,
                 out_tx,
                 first_cause,
                 shutdown,
@@ -1620,36 +1623,111 @@ fn poll_events(
     true
 }
 
-/// Fetch agent statuses from the actor and emit a frame for each one whose
-/// status OR identified agent changed since the last poll (a pane's agent
-/// identity can become known after its status was already sent once, e.g.
-/// screen-text detection resolving after the first `Working` poll — that
+/// The two usage facts a mount mirrors for one terminal, as last sent.
+type UsageFacts = (Option<PromptCacheInfo>, Option<ContextUsageInfo>);
+
+/// Pure diff: the `PaneUsage` frames to send for this poll. Sends an entry
+/// whose facts differ from `last` (an absent `last` entry counts as
+/// `(None, None)`), and a `(None, None)` frame for every terminal in `last`
+/// that is missing from `facts` while `last` held a `Some`; updates `last`.
+///
+/// `last` only ever keeps entries holding at least one fact, so a terminal
+/// whose facts were already cleared is forgotten rather than re-cleared when
+/// it later leaves the agent list.
+fn pane_usage_frames(
+    facts: &[FederatedAgentFacts],
+    last: &mut HashMap<String, UsageFacts>,
+) -> Vec<PaneUsageMessage> {
+    let mut frames = Vec::new();
+    for entry in facts {
+        let previous = last.get(&entry.terminal_id);
+        let unchanged = match previous {
+            Some((prompt_cache, context_usage)) => {
+                *prompt_cache == entry.prompt_cache && *context_usage == entry.context_usage
+            }
+            None => entry.prompt_cache.is_none() && entry.context_usage.is_none(),
+        };
+        if unchanged {
+            continue;
+        }
+        if entry.prompt_cache.is_none() && entry.context_usage.is_none() {
+            last.remove(&entry.terminal_id);
+        } else {
+            last.insert(
+                entry.terminal_id.clone(),
+                (entry.prompt_cache.clone(), entry.context_usage.clone()),
+            );
+        }
+        frames.push(PaneUsageMessage {
+            terminal_id: entry.terminal_id.clone(),
+            mount_generation: MOUNT_GENERATION,
+            prompt_cache: entry.prompt_cache.clone(),
+            context_usage: entry.context_usage.clone(),
+        });
+    }
+    let mut vanished: Vec<String> = last
+        .keys()
+        .filter(|terminal_id| !facts.iter().any(|entry| &entry.terminal_id == *terminal_id))
+        .cloned()
+        .collect();
+    // Deterministic frame order for the same poll result.
+    vanished.sort_unstable();
+    for terminal_id in vanished {
+        last.remove(&terminal_id);
+        frames.push(PaneUsageMessage {
+            terminal_id,
+            mount_generation: MOUNT_GENERATION,
+            prompt_cache: None,
+            context_usage: None,
+        });
+    }
+    frames
+}
+
+/// Fetch agent facts from the actor and emit a status frame for each terminal
+/// whose status OR identified agent changed since the last poll (a pane's
+/// agent identity can become known after its status was already sent once,
+/// e.g. screen-text detection resolving after the first `Working` poll — that
 /// must still reach the client so `AgentStatusMessage::agent` isn't
-/// permanently `None` for it). Returns `false` if the actor or the writer is
-/// gone. Mirrors `serve::poll_agent_statuses`.
+/// permanently `None` for it), then a usage frame for each terminal whose
+/// usage facts changed (see `pane_usage_frames`). Returns `false` if the
+/// actor or the writer is gone. Mirrors `serve::poll_agent_statuses` for the
+/// status frames.
 fn poll_agent_statuses(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     last: &mut HashMap<String, (AgentStatus, Option<String>)>,
+    last_usage: &mut HashMap<String, UsageFacts>,
     out_tx: &std_mpsc::SyncSender<FederationMessage>,
     first_cause: &FirstCauseCell,
     shutdown: &AtomicBool,
 ) -> bool {
-    let Some(statuses) = request_agent_statuses(server_event_tx) else {
+    let Some(facts) = request_agent_statuses(server_event_tx) else {
         return false;
     };
-    for (terminal_id, status, agent) in statuses {
-        if last.get(&terminal_id) == Some(&(status, agent.clone())) {
+    for entry in &facts {
+        let current = (entry.status, entry.agent.clone());
+        if last.get(&entry.terminal_id) == Some(&current) {
             continue;
         }
-        last.insert(terminal_id.clone(), (status, agent.clone()));
+        last.insert(entry.terminal_id.clone(), current);
         if !enqueue_outbound(
             out_tx,
             FederationMessage::AgentStatus(AgentStatusMessage {
-                terminal_id,
+                terminal_id: entry.terminal_id.clone(),
                 mount_generation: MOUNT_GENERATION,
-                status,
-                agent,
+                status: entry.status,
+                agent: entry.agent.clone(),
             }),
+            first_cause,
+            shutdown,
+        ) {
+            return false;
+        }
+    }
+    for usage in pane_usage_frames(&facts, last_usage) {
+        if !enqueue_outbound(
+            out_tx,
+            FederationMessage::PaneUsage(usage),
             first_cause,
             shutdown,
         ) {
@@ -1674,11 +1752,11 @@ fn request_events_after(
     rx.blocking_recv().ok()
 }
 
-/// Blocking actor round-trip: the current agent statuses. `None` if the event
-/// loop is gone.
+/// Blocking actor round-trip: the current per-terminal agent facts. `None` if
+/// the event loop is gone.
 fn request_agent_statuses(
     server_event_tx: &mpsc::Sender<ServerEvent>,
-) -> Option<Vec<(String, AgentStatus, Option<String>)>> {
+) -> Option<Vec<FederatedAgentFacts>> {
     let (reply, rx) = oneshot::channel();
     server_event_tx
         .blocking_send(ServerEvent::Federation(FederationCommand::AgentStatuses(
@@ -3425,5 +3503,132 @@ mod tests {
             }
             other => panic!("expected TabCreateResponse::Failed, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod pane_usage_frames_tests {
+    use super::*;
+    use crate::api::schema::{ContextUsageInfo, PromptCacheInfo};
+    use crate::server::federation_actor::FederatedAgentFacts;
+
+    fn cache(at: u64) -> PromptCacheInfo {
+        PromptCacheInfo {
+            source: "herdr:claude".to_string(),
+            last_request_at_ms: at,
+            ttl_secs: 300,
+        }
+    }
+
+    fn context(used: u64) -> ContextUsageInfo {
+        ContextUsageInfo {
+            source: "herdr:claude".to_string(),
+            used_tokens: used,
+            window_tokens: Some(200_000),
+            observed_at_ms: 1_000,
+        }
+    }
+
+    fn facts(
+        terminal_id: &str,
+        prompt_cache: Option<PromptCacheInfo>,
+        context_usage: Option<ContextUsageInfo>,
+    ) -> FederatedAgentFacts {
+        FederatedAgentFacts {
+            terminal_id: terminal_id.to_string(),
+            status: AgentStatus::Working,
+            agent: Some("claude".to_string()),
+            prompt_cache,
+            context_usage,
+        }
+    }
+
+    #[test]
+    fn pane_usage_frames_first_poll_sends_only_non_empty_entries() {
+        let mut last = HashMap::new();
+        let frames = pane_usage_frames(
+            &[
+                facts("term_1", Some(cache(10)), None),
+                facts("term_2", None, None),
+                facts("term_3", None, Some(context(500))),
+            ],
+            &mut last,
+        );
+
+        let mut sent: Vec<_> = frames
+            .iter()
+            .map(|frame| frame.terminal_id.as_str())
+            .collect();
+        sent.sort_unstable();
+        assert_eq!(sent, vec!["term_1", "term_3"]);
+        let term_1 = frames
+            .iter()
+            .find(|frame| frame.terminal_id == "term_1")
+            .expect("term_1 has a fact");
+        assert_eq!(term_1.prompt_cache, Some(cache(10)));
+        assert_eq!(term_1.context_usage, None);
+        assert_eq!(term_1.mount_generation, MOUNT_GENERATION);
+    }
+
+    #[test]
+    fn pane_usage_frames_unchanged_facts_send_nothing() {
+        let mut last = HashMap::new();
+        let current = [facts("term_1", Some(cache(10)), Some(context(500)))];
+        assert_eq!(pane_usage_frames(&current, &mut last).len(), 1);
+
+        assert!(pane_usage_frames(&current, &mut last).is_empty());
+    }
+
+    #[test]
+    fn pane_usage_frames_changed_context_sends_both_current_facts() {
+        let mut last = HashMap::new();
+        pane_usage_frames(
+            &[facts("term_1", Some(cache(10)), Some(context(500)))],
+            &mut last,
+        );
+
+        let frames = pane_usage_frames(
+            &[facts("term_1", Some(cache(10)), Some(context(900)))],
+            &mut last,
+        );
+
+        assert_eq!(
+            frames,
+            vec![PaneUsageMessage {
+                terminal_id: "term_1".to_string(),
+                mount_generation: MOUNT_GENERATION,
+                prompt_cache: Some(cache(10)),
+                context_usage: Some(context(900)),
+            }]
+        );
+    }
+
+    #[test]
+    fn pane_usage_frames_vanished_terminal_with_a_fact_sends_one_clearing_frame() {
+        let mut last = HashMap::new();
+        pane_usage_frames(&[facts("term_1", Some(cache(10)), None)], &mut last);
+
+        let frames = pane_usage_frames(&[], &mut last);
+
+        assert_eq!(
+            frames,
+            vec![PaneUsageMessage {
+                terminal_id: "term_1".to_string(),
+                mount_generation: MOUNT_GENERATION,
+                prompt_cache: None,
+                context_usage: None,
+            }]
+        );
+        assert!(!last.contains_key("term_1"));
+        assert!(pane_usage_frames(&[], &mut last).is_empty());
+    }
+
+    #[test]
+    fn pane_usage_frames_vanished_terminal_without_facts_sends_nothing() {
+        let mut last = HashMap::new();
+        pane_usage_frames(&[facts("term_1", Some(cache(10)), None)], &mut last);
+        pane_usage_frames(&[facts("term_1", None, None)], &mut last);
+
+        assert!(pane_usage_frames(&[], &mut last).is_empty());
     }
 }

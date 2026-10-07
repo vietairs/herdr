@@ -39,6 +39,21 @@ use crate::remote::federation::protocol::EventCursor;
 use crate::remote::federation::serve::empty_snapshot;
 use crate::server::federation_lease::{AcceptEpoch, Admission, ConnId, FederationLease};
 
+/// One terminal's agent facts as the serving host reports them to a mount:
+/// the agent status and identity behind `AgentStatusMessage`, plus both usage
+/// facts behind `PaneUsageMessage`, forwarded verbatim from `AgentInfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+// Only the Unix federation accept path reads these fields; the actor that
+// builds them compiles on every target.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct FederatedAgentFacts {
+    pub(crate) terminal_id: String,
+    pub(crate) status: AgentStatus,
+    pub(crate) agent: Option<String>,
+    pub(crate) prompt_cache: Option<crate::api::schema::PromptCacheInfo>,
+    pub(crate) context_usage: Option<crate::api::schema::ContextUsageInfo>,
+}
+
 /// A request from a co-located federation connection to be serviced against the
 /// live `App` (and the single-controller [`FederationLease`]) on the server
 /// event loop. Read-only queries and the two remote-input forwards
@@ -129,12 +144,12 @@ pub(crate) enum FederationCommand {
         connid: ConnId,
         terminal_id: String,
     },
-    /// Current per-terminal agent statuses, paired with the identified
-    /// agent's canonical label (`AgentInfo.agent`, e.g. `"claude"`) so the
-    /// relay can populate `AgentStatusMessage::agent` for remote-mirrored
-    /// panes on the client end (`None` when this host has not identified an
-    /// agent for that terminal yet).
-    AgentStatuses(oneshot::Sender<Vec<(String, AgentStatus, Option<String>)>>),
+    /// Current per-terminal agent facts: the status, the identified agent's
+    /// canonical label (`AgentInfo.agent`, e.g. `"claude"`, `None` when this
+    /// host has not identified an agent for that terminal yet) and both usage
+    /// facts, so the relay can populate `AgentStatusMessage` and
+    /// `PaneUsageMessage` for remote-mirrored panes on the client end.
+    AgentStatuses(oneshot::Sender<Vec<FederatedAgentFacts>>),
     /// Performs a real split of `target_pane_id` (a raw, un-namespaced
     /// remote pane id) on this host's own live workspace, mirroring
     /// `AppFederationHost::split_pane`'s contract but going through the
@@ -481,7 +496,13 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                     ResponseResult::AgentList { agents } => Some(
                         agents
                             .into_iter()
-                            .map(|agent| (agent.terminal_id, agent.agent_status, agent.agent))
+                            .map(|agent| FederatedAgentFacts {
+                                terminal_id: agent.terminal_id,
+                                status: agent.agent_status,
+                                agent: agent.agent,
+                                prompt_cache: agent.prompt_cache,
+                                context_usage: agent.context_usage,
+                            })
                             .collect(),
                     ),
                     _ => None,

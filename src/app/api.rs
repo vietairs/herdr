@@ -240,6 +240,17 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::FederationPaneUsage {
+            origin,
+            terminal_id,
+            prompt_cache,
+            context_usage,
+        } = ev
+        {
+            self.handle_federation_pane_usage(origin, terminal_id, prompt_cache, context_usage);
+            return Vec::new();
+        }
+
         if let AppEvent::FederationResyncWorkspaceCreated {
             origin,
             workspace_id,

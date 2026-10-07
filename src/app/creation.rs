@@ -2805,7 +2805,7 @@ impl App {
     /// `origin`. Shared origin fence for the federation resync handlers: a
     /// differently-mounted host must not be able to mutate another mount's
     /// workspace by guessing its ids.
-    fn workspace_matches_federation_origin(
+    pub(crate) fn workspace_matches_federation_origin(
         &self,
         ws_idx: usize,
         origin: &crate::remote::federation::id::HostKey,

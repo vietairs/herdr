@@ -446,6 +446,36 @@ mod tests {
     }
 
     #[test]
+    fn pane_usage_without_fact_keys_decodes_as_none() {
+        // A frame whose serving host has neither fact for the terminal may
+        // omit both keys; `#[serde(default)]` must read that as "no fact"
+        // rather than failing the whole frame.
+        let json = serde_json::json!({
+            "PaneUsage": {
+                "terminal_id": "term_1",
+                "mount_generation": 1,
+            }
+        });
+        let payload = serde_json::to_vec(&json).expect("json encode should succeed");
+        let mut frame = Vec::with_capacity(8 + payload.len());
+        frame.extend_from_slice(&FEDERATION_PROTOCOL_VERSION.to_le_bytes());
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&payload);
+
+        let (decoded, _consumed): (FederationMessage, usize) =
+            decode(&frame, Channel::AgentStatus.max_len()).expect("decode should succeed");
+
+        match decoded {
+            FederationMessage::PaneUsage(msg) => {
+                assert_eq!(msg.terminal_id, "term_1");
+                assert_eq!(msg.prompt_cache, None);
+                assert_eq!(msg.context_usage, None);
+            }
+            other => panic!("expected PaneUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn decode_rejects_truncated_frame_as_malformed() {
         let msg = FederationMessage::Event(EventChannelMessage::Reset);
         let frame = encode(&msg).expect("encode should succeed");
