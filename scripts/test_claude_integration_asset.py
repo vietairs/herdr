@@ -192,13 +192,18 @@ def tap_command(tap_path, original):
     )
 
 
+# Tap tests point TMPDIR here so the per-session usage memory the tap keeps
+# under it never leaks between tests or into the real temp directory.
+TAP_TMPDIR = None
+
+
 def herdr_env(socket_path, **extra):
     env = {
         "HERDR_ENV": "1",
         "HERDR_SOCKET_PATH": socket_path,
         "HERDR_PANE_ID": "p1",
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "TMPDIR": tempfile.gettempdir(),
+        "TMPDIR": TAP_TMPDIR or tempfile.gettempdir(),
     }
     env.update(extra)
     return env
@@ -535,6 +540,17 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
 
 @unittest.skipIf(os.name == "nt", "runs the POSIX shell asset against a Unix-socket fake server")
 class ClaudeStatuslineTapTests(unittest.TestCase):
+    def setUp(self):
+        global TAP_TMPDIR
+        self._tap_tmpdir = tempfile.TemporaryDirectory(prefix="hct")
+        TAP_TMPDIR = self._tap_tmpdir.name
+        self.addCleanup(self._release_tap_tmpdir)
+
+    def _release_tap_tmpdir(self):
+        global TAP_TMPDIR
+        TAP_TMPDIR = None
+        self._tap_tmpdir.cleanup()
+
     def assert_passthrough(self, result, stdin=STATUSLINE_FIXTURE):
         self.assertEqual(result.stdout, "OUT:" + stdin, result.stderr)
         self.assertEqual(result.returncode, 3, result.stderr)
@@ -633,6 +649,106 @@ class ClaudeStatuslineTapTests(unittest.TestCase):
         cache = self.run_tap_with_transcript(text="not json\n{\"type\": \"user\"}\n")
         self.assertEqual(len(cache), 1, cache)
         self.assertEqual(cache[0]["params"]["last_request_at_ms"], 1_760_000_000_000)
+
+    def state_dir(self):
+        return Path(TAP_TMPDIR) / f"herdr-statusline-{os.getuid()}"
+
+    def seed_state(self, session_id, used_tokens, change_ms):
+        directory = self.state_dir()
+        directory.mkdir(mode=0o700, exist_ok=True)
+        directory.chmod(0o700)
+        (directory / session_id).write_text(f"{used_tokens} {change_ms}", "ascii")
+
+    def run_usage_tap(self, transcript_ms, cache_read=83895, session_id="obs"):
+        """One tap run; usage sums to cache_read + 105. Returns the cache anchor."""
+        transcript = os.path.join(TAP_TMPDIR, "transcript.jsonl")
+        with open(transcript, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(assistant(transcript_ms, input_tokens=1, creation=10, read=20))
+                + "\n"
+            )
+        status = json.loads(STATUSLINE_FIXTURE)
+        status["transcript_path"] = transcript
+        status["context_window"]["current_usage"]["cache_read_input_tokens"] = cache_read
+        if session_id is None:
+            del status["session_id"]
+        else:
+            status["session_id"] = session_id
+        stdin = json.dumps(status)
+        with FakeHerdrSocket() as fake:
+            result = run_tap(ECHO_STDIN, stdin, herdr_env(fake.path))
+            requests = wait_for_requests(fake, 2)
+        self.assert_passthrough(result, stdin)
+        cache = by_method(requests, "pane.report_prompt_cache")
+        self.assertEqual(len(cache), 1, requests)
+        return cache[0]["params"]["last_request_at_ms"]
+
+    def test_statusline_first_sight_of_usage_claims_no_change(self):
+        transcript_ms = BASE_MS + 5_000
+        self.assertEqual(self.run_usage_tap(transcript_ms), transcript_ms)
+        state = (self.state_dir() / "obs").read_text("ascii")
+        self.assertEqual(state, "84000 0")
+
+    def test_statusline_anchors_at_the_second_a_usage_change_was_first_seen(self):
+        transcript_ms = BASE_MS + 5_000
+        self.assertEqual(self.run_usage_tap(transcript_ms), transcript_ms)
+        before_s = int(time.time())
+        anchor = self.run_usage_tap(transcript_ms, cache_read=90_000)
+        after_s = int(time.time())
+        self.assertEqual(anchor % 1000, 0)
+        self.assertTrue(before_s * 1000 <= anchor <= after_s * 1000, anchor)
+        self.assertGreater(anchor, transcript_ms)
+        self.assertEqual((self.state_dir() / "obs").read_text("ascii"), f"90105 {anchor}")
+
+    def test_statusline_counts_the_first_reply_after_no_usage_as_a_change(self):
+        status = json.loads(STATUSLINE_FIXTURE)
+        status["context_window"]["current_usage"] = None
+        status["session_id"] = "obs"
+        stdin = json.dumps(status)
+        with FakeHerdrSocket() as fake:
+            result = run_tap(ECHO_STDIN, stdin, herdr_env(fake.path))
+            wait_for_requests(fake, 2)
+        self.assert_passthrough(result, stdin)
+        self.assertEqual((self.state_dir() / "obs").read_text("ascii"), "0 0")
+        transcript_ms = BASE_MS + 5_000
+        before_s = int(time.time())
+        anchor = self.run_usage_tap(transcript_ms)
+        after_s = int(time.time())
+        self.assertTrue(before_s * 1000 <= anchor <= after_s * 1000, anchor)
+
+    def test_statusline_keeps_the_stored_change_time_while_usage_is_unchanged(self):
+        stored_ms = BASE_MS + 20_000
+        self.seed_state("obs", 84_000, stored_ms)
+        self.assertEqual(self.run_usage_tap(BASE_MS + 5_000), stored_ms)
+        self.assertEqual((self.state_dir() / "obs").read_text("ascii"), f"84000 {stored_ms}")
+
+    def test_statusline_prefers_a_later_transcript_over_the_stored_change(self):
+        self.seed_state("obs", 84_000, BASE_MS + 20_000)
+        transcript_ms = BASE_MS + 40_000
+        self.assertEqual(self.run_usage_tap(transcript_ms), transcript_ms)
+
+    def test_statusline_ignores_a_missing_or_unsafe_session_id(self):
+        transcript_ms = BASE_MS + 5_000
+        for session_id in (None, "", "../escape", "a/b", "..", "a b", 7):
+            with self.subTest(session_id=session_id):
+                self.assertEqual(
+                    self.run_usage_tap(transcript_ms, session_id=session_id),
+                    transcript_ms,
+                )
+                anchor = self.run_usage_tap(
+                    transcript_ms, cache_read=90_000, session_id=session_id
+                )
+                self.assertEqual(anchor, transcript_ms)
+        self.assertFalse(self.state_dir().exists())
+
+    def test_statusline_refuses_a_state_dir_it_does_not_own_privately(self):
+        self.state_dir().mkdir(mode=0o700)
+        self.state_dir().chmod(0o777)
+        transcript_ms = BASE_MS + 5_000
+        self.run_usage_tap(transcript_ms)
+        anchor = self.run_usage_tap(transcript_ms, cache_read=90_000)
+        self.assertEqual(anchor, transcript_ms)
+        self.assertEqual(os.listdir(self.state_dir()), [])
 
     def test_statusline_with_tap_file_deleted_still_runs_the_original(self):
         with tempfile.TemporaryDirectory(prefix="hct") as work:

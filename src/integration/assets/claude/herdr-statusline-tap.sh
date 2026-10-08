@@ -15,7 +15,9 @@ import json
 import os
 import random
 import socket
+import stat
 import sys
+import tempfile
 import time
 
 source = "herdr:claude"
@@ -25,6 +27,9 @@ TTL_SECS = {"5m": 300, "1h": 3600}
 # Only the end of a transcript is read: the newest entries hold the anchor.
 TRANSCRIPT_TAIL_BYTES = 262144
 EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+SAFE_SESSION_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+)
 
 
 def is_int(value):
@@ -96,6 +101,67 @@ def transcript_anchor_ms(path):
     return None
 
 
+def observed_change_ms(status, used_tokens, now_ms):
+    """Second (ms) at which this session's token usage was first seen to change, else None.
+
+    tokenline counts the cache countdown from when its statusline first sees a
+    new response's usage when that is later than the transcript line, so herdr
+    keeps the same per-session memory: "<used_tokens> <change_ms>" in a private
+    per-user directory. The first run only records the usage; it is not a
+    change. Any error turns the feature off for the run.
+    """
+    try:
+        session_id = status.get("session_id")
+        if (
+            not isinstance(session_id, str)
+            or not 0 < len(session_id) <= 128
+            or session_id.strip(".") == ""
+            or not all(char in SAFE_SESSION_CHARS for char in session_id)
+        ):
+            return None
+        uid = os.getuid()
+        directory = os.path.join(tempfile.gettempdir(), f"herdr-statusline-{uid}")
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            pass
+        info = os.lstat(directory)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != uid
+            or info.st_mode & 0o022
+        ):
+            return None
+        path = os.path.join(directory, session_id)
+        stored_tokens = None
+        stored_change_ms = 0
+        try:
+            with open(path, "r", encoding="ascii") as handle:
+                fields = handle.read().split()
+            if len(fields) == 2:
+                stored_tokens, stored_change_ms = int(fields[0]), int(fields[1])
+        except Exception:
+            stored_tokens = None
+            stored_change_ms = 0
+        if stored_tokens == used_tokens:
+            return stored_change_ms if stored_change_ms > 0 else None
+        change_ms = 0 if stored_tokens is None else now_ms // 1000 * 1000
+        temporary = f"{path}.{os.getpid()}.tmp"
+        try:
+            with open(temporary, "w", encoding="ascii") as handle:
+                handle.write(f"{used_tokens} {change_ms}")
+            os.replace(temporary, path)
+        except Exception:
+            try:
+                os.remove(temporary)
+            except Exception:
+                pass
+            return None
+        return change_ms if change_ms > 0 else None
+    except Exception:
+        return None
+
+
 def send(method, params):
     request = {
         "id": f"{source}:{int(time.time() * 1000)}:{random.randrange(1000000):06d}",
@@ -117,19 +183,25 @@ def send(method, params):
 
 
 def report(status):
+    change_ms = None
     context = status.get("context_window")
     if isinstance(context, dict) and "current_usage" in context:
         usage = context["current_usage"]
         if usage is None:
             # Before the first reply and right after a compaction.
             send("pane.report_context_usage", {"clear": True})
+            # Counted as zero usage, as tokenline does, so the first reply of a
+            # new session is a change rather than a first sighting.
+            change_ms = observed_change_ms(status, 0, int(time.time() * 1000))
         elif isinstance(usage, dict):
-            params = {
-                "used_tokens": token_count(usage.get("input_tokens"))
+            used_tokens = (
+                token_count(usage.get("input_tokens"))
                 + token_count(usage.get("cache_creation_input_tokens"))
-                + token_count(usage.get("cache_read_input_tokens")),
-                "observed_at_ms": int(time.time() * 1000),
-            }
+                + token_count(usage.get("cache_read_input_tokens"))
+            )
+            now_ms = int(time.time() * 1000)
+            change_ms = observed_change_ms(status, used_tokens, now_ms)
+            params = {"used_tokens": used_tokens, "observed_at_ms": now_ms}
             window = context.get("context_window_size")
             if is_int(window) and window > 0:
                 params["window_tokens"] = window
@@ -140,10 +212,15 @@ def report(status):
         ttl_secs = TTL_SECS.get(ttl) if isinstance(ttl, str) else None
         expires_at = cache.get("expires_at")
         if ttl_secs is not None and is_int(expires_at) and expires_at > ttl_secs:
-            anchor_ms = None
+            candidates = []
             transcript_path = status.get("transcript_path")
             if isinstance(transcript_path, str) and transcript_path:
-                anchor_ms = transcript_anchor_ms(transcript_path)
+                transcript_ms = transcript_anchor_ms(transcript_path)
+                if transcript_ms is not None:
+                    candidates.append(transcript_ms)
+            if change_ms is not None:
+                candidates.append(change_ms)
+            anchor_ms = max(candidates) if candidates else None
             if anchor_ms is None:
                 anchor_ms = (expires_at - ttl_secs) * 1000
             send(
