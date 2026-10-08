@@ -338,7 +338,7 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
         cache = requests[0]["params"]
         self.assertEqual(cache["pane_id"], "p1")
         self.assertEqual(cache["source"], "herdr:claude")
-        self.assertEqual(cache["last_request_at_ms"], t1)
+        self.assertEqual(cache["last_request_at_ms"], t1 + 5_000)
         self.assertEqual(cache["ttl_secs"], 3600)
         context = requests[1]["params"]
         self.assertEqual(context["pane_id"], "p1")
@@ -384,7 +384,7 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
         self.assertEqual(len(by_method(requests, "pane.report_prompt_cache")), 1)
         self.assertEqual(by_method(requests, "pane.report_context_usage"), [])
 
-    def test_prompt_cache_time_is_the_preceding_user_entry(self):
+    def test_prompt_cache_time_is_the_last_assistant_entry_itself(self):
         t0 = BASE_MS
         lines = [
             user(t0),
@@ -397,9 +397,9 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
 
         cache = by_method(requests, "pane.report_prompt_cache")
         self.assertEqual(len(cache), 1)
-        self.assertEqual(cache[0]["params"]["last_request_at_ms"], t0)
+        self.assertEqual(cache[0]["params"]["last_request_at_ms"], t0 + 52_000)
 
-    def test_prompt_cache_time_falls_back_to_the_entry_without_a_user_line(self):
+    def test_prompt_cache_time_ignores_user_lines_entirely(self):
         entry_ms = BASE_MS + 7_000
         lines = [assistant(entry_ms, input_tokens=1, creation=10, read=20, ephemeral_5m=10)]
 
@@ -408,6 +408,17 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
         cache = by_method(requests, "pane.report_prompt_cache")
         self.assertEqual(len(cache), 1)
         self.assertEqual(cache[0]["params"]["last_request_at_ms"], entry_ms)
+
+    def test_prompt_cache_time_is_floored_to_whole_seconds(self):
+        lines = [
+            user(BASE_MS),
+            assistant(BASE_MS + 9_999, input_tokens=1, creation=10, read=20, ephemeral_5m=10),
+        ]
+
+        requests = run_hook("cache", stop_payload(), lines)
+
+        cache = by_method(requests, "pane.report_prompt_cache")
+        self.assertEqual(cache[0]["params"]["last_request_at_ms"], BASE_MS + 9_000)
 
     def test_post_tool_use_without_ephemeral_split_omits_ttl(self):
         lines = [user(BASE_MS), assistant(BASE_MS + 3_000, input_tokens=1, read=900)]
@@ -419,7 +430,7 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
         cache = by_method(requests, "pane.report_prompt_cache")
         self.assertEqual(len(cache), 1)
         self.assertNotIn("ttl_secs", cache[0]["params"])
-        self.assertEqual(cache[0]["params"]["last_request_at_ms"], BASE_MS)
+        self.assertEqual(cache[0]["params"]["last_request_at_ms"], BASE_MS + 3_000)
 
     def test_five_minute_ttl(self):
         lines = [
@@ -452,7 +463,7 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
 
         cache = by_method(requests, "pane.report_prompt_cache")
         self.assertEqual(len(cache), 1)
-        self.assertEqual(cache[0]["params"]["last_request_at_ms"], good_user)
+        self.assertEqual(cache[0]["params"]["last_request_at_ms"], good_user + 1_000)
         self.assertEqual(cache[0]["params"]["ttl_secs"], 3600)
         context = by_method(requests, "pane.report_context_usage")
         self.assertEqual(len(context), 1)
@@ -509,9 +520,17 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
         self.assertEqual(requests[0]["method"], "pane.report_agent_session")
         self.assertEqual(requests[0]["params"]["agent_session_id"], "claude-session")
 
-    def test_assets_carry_version_eleven(self):
+    def test_powershell_hook_anchors_at_the_assistant_entry_without_a_user_walk_back(self):
+        # No PowerShell runtime is available to execute the hook here, so pin
+        # the anchor rule statically: floored own timestamp, no user-entry walk.
+        text = POWERSHELL_ASSET.read_text("utf-8")
+        self.assertIn("[math]::Floor($found.Ms / 1000) * 1000", text)
+        self.assertNotIn('$candidate.type -cne "user"', text)
+        self.assertNotIn("$earlier", text)
+
+    def test_assets_carry_version_twelve(self):
         for asset in (ASSET, POWERSHELL_ASSET):
-            self.assertIn("# HERDR_INTEGRATION_VERSION=11", asset.read_text("utf-8"))
+            self.assertIn("# HERDR_INTEGRATION_VERSION=12", asset.read_text("utf-8"))
 
 
 @unittest.skipIf(os.name == "nt", "runs the POSIX shell asset against a Unix-socket fake server")
@@ -558,6 +577,62 @@ class ClaudeStatuslineTapTests(unittest.TestCase):
         self.assertEqual(cache[0]["params"]["source"], "herdr:claude")
         self.assertEqual(cache[0]["params"]["last_request_at_ms"], 1_760_000_000_000)
         self.assertEqual(cache[0]["params"]["ttl_secs"], 3600)
+
+    def run_tap_with_transcript(self, lines=None, text=None, path="<given>"):
+        """Runs the tap with a transcript_path in the status JSON; returns cache requests."""
+        with tempfile.TemporaryDirectory(prefix="hct") as work:
+            transcript = os.path.join(work, "transcript.jsonl")
+            if lines is not None:
+                with open(transcript, "w", encoding="utf-8") as handle:
+                    for line in lines:
+                        handle.write(json.dumps(line) + "\n")
+            elif text is not None:
+                with open(transcript, "w", encoding="utf-8") as handle:
+                    handle.write(text)
+            status = json.loads(STATUSLINE_FIXTURE)
+            if path == "<given>":
+                status["transcript_path"] = transcript
+            elif path is not None:
+                status["transcript_path"] = path
+            stdin = json.dumps(status)
+            with FakeHerdrSocket() as fake:
+                result = run_tap(ECHO_STDIN, stdin, herdr_env(fake.path))
+                requests = wait_for_requests(fake, 2)
+            self.assert_passthrough(result, stdin)
+            return by_method(requests, "pane.report_prompt_cache")
+
+    def test_statusline_anchors_the_cache_at_the_last_assistant_entry(self):
+        lines = [
+            user(BASE_MS),
+            assistant(BASE_MS + 4_000, input_tokens=1, creation=10, read=20, ephemeral_1h=10),
+            assistant(BASE_MS + 30_000, input_tokens=1, creation=10, read=20, ephemeral_1h=10),
+            assistant(BASE_MS + 40_000, input_tokens=9, sidechain=True, creation=9),
+            assistant(BASE_MS + 41_000, input_tokens=9, creation=9, model="<synthetic>"),
+            assistant(BASE_MS + 42_000, input_tokens=9, creation=0, read=0),
+        ]
+        cache = self.run_tap_with_transcript(lines)
+        self.assertEqual(len(cache), 1, cache)
+        self.assertEqual(cache[0]["params"]["last_request_at_ms"], BASE_MS + 30_000)
+        self.assertEqual(cache[0]["params"]["ttl_secs"], 3600)
+
+    def test_statusline_floors_a_sub_second_transcript_timestamp(self):
+        lines = [assistant(BASE_MS + 12_987, input_tokens=1, creation=10, read=20)]
+        cache = self.run_tap_with_transcript(lines)
+        self.assertEqual(len(cache), 1, cache)
+        self.assertEqual(cache[0]["params"]["last_request_at_ms"], BASE_MS + 12_000)
+
+    def test_statusline_falls_back_to_expiry_when_the_transcript_is_missing(self):
+        for path in (None, "/nonexistent/herdr-transcript.jsonl", 42):
+            with self.subTest(path=path):
+                cache = self.run_tap_with_transcript(path=path)
+                self.assertEqual(len(cache), 1, cache)
+                self.assertEqual(cache[0]["params"]["last_request_at_ms"], 1_760_000_000_000)
+                self.assertEqual(cache[0]["params"]["ttl_secs"], 3600)
+
+    def test_statusline_falls_back_to_expiry_when_the_transcript_has_no_anchor(self):
+        cache = self.run_tap_with_transcript(text="not json\n{\"type\": \"user\"}\n")
+        self.assertEqual(len(cache), 1, cache)
+        self.assertEqual(cache[0]["params"]["last_request_at_ms"], 1_760_000_000_000)
 
     def test_statusline_with_tap_file_deleted_still_runs_the_original(self):
         with tempfile.TemporaryDirectory(prefix="hct") as work:
@@ -681,8 +756,8 @@ class ClaudeStatuslineTapTests(unittest.TestCase):
             self.assertEqual(os.listdir(tmpdir), [])
             self.assertEqual(process.returncode, 143)
 
-    def test_tap_asset_carries_version_eleven(self):
-        self.assertIn("# HERDR_INTEGRATION_VERSION=11", TAP_ASSET.read_text("utf-8"))
+    def test_tap_asset_carries_version_twelve(self):
+        self.assertIn("# HERDR_INTEGRATION_VERSION=12", TAP_ASSET.read_text("utf-8"))
 
 
 if __name__ == "__main__":

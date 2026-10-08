@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=11
+# HERDR_INTEGRATION_VERSION=12
 
 set -eu
 
@@ -147,7 +147,7 @@ def main_chain_assistant(entry):
 
 
 def latest_cache_request(entries):
-    """(request time ms, ttl secs or None) of the newest cache-bearing entry."""
+    """(anchor time ms, ttl secs or None) of the newest cache-bearing entry."""
     for index in range(len(entries) - 1, -1, -1):
         found = main_chain_assistant(entries[index])
         if found is None:
@@ -158,17 +158,10 @@ def latest_cache_request(entries):
             or positive_int(usage.get("cache_read_input_tokens"))
         ):
             continue
-        # The request left when the user prompt or tool result before this
-        # response arrived; later lines of one response trail it by seconds.
-        request_ms = entry_ms
-        for earlier in range(index - 1, -1, -1):
-            candidate = entries[earlier]
-            if candidate.get("type") != "user" or candidate.get("isSidechain") is True:
-                continue
-            candidate_ms = parse_timestamp_ms(candidate.get("timestamp"))
-            if candidate_ms is not None:
-                request_ms = candidate_ms
-                break
+        # The countdown counts from the end of Claude's last response, matching
+        # statusline tools such as tokenline. The timestamp is floored to whole
+        # seconds so both show the same second.
+        request_ms = entry_ms // 1000 * 1000
         ttl_secs = None
         split = usage.get("cache_creation")
         if isinstance(split, dict):

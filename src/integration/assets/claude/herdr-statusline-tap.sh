@@ -4,12 +4,13 @@
 # runs the statusline command it wraps, unchanged, and reports context usage
 # and prompt-cache expiry to herdr in the background.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=11
+# HERDR_INTEGRATION_VERSION=12
 #
 # usage: sh herdr-statusline-tap.sh ORIGINAL_COMMAND
 # no `set -e`: every failure path must still run the original command.
 
 statusline_report_py=$(cat <<'PY'
+import datetime
 import json
 import os
 import random
@@ -21,6 +22,9 @@ source = "herdr:claude"
 pane_id = os.environ.get("HERDR_PANE_ID")
 socket_path = os.environ.get("HERDR_SOCKET_PATH")
 TTL_SECS = {"5m": 300, "1h": 3600}
+# Only the end of a transcript is read: the newest entries hold the anchor.
+TRANSCRIPT_TAIL_BYTES = 262144
+EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
 def is_int(value):
@@ -29,6 +33,67 @@ def is_int(value):
 
 def token_count(value):
     return value if is_int(value) and value > 0 else 0
+
+
+def parse_timestamp_ms(value):
+    """Milliseconds since the epoch for an ISO-8601 string, else None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        moment = datetime.datetime.fromisoformat(text)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        return (moment - EPOCH) // datetime.timedelta(milliseconds=1)
+    except Exception:
+        return None
+
+
+def is_cache_bearing(entry):
+    """True for a real main-thread assistant entry that used the prompt cache."""
+    if entry.get("type") != "assistant" or entry.get("isSidechain") is True:
+        return False
+    message = entry.get("message")
+    if not isinstance(message, dict) or message.get("model") == "<synthetic>":
+        return False
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return False
+    for key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+        if is_int(usage.get(key)) and usage[key] > 0:
+            return True
+    return False
+
+
+def transcript_anchor_ms(path):
+    """End of Claude's last cached response, floored to a whole second, else None.
+
+    The countdown counts from the end of the last response, matching statusline
+    tools such as tokenline; flooring makes both show the same second.
+    """
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = max(0, size - TRANSCRIPT_TAIL_BYTES)
+            handle.seek(start)
+            data = handle.read()
+        lines = data.decode("utf-8", errors="replace").split("\n")
+        if start > 0:
+            lines = lines[1:]
+        for line in reversed(lines):
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(entry, dict) or not is_cache_bearing(entry):
+                continue
+            timestamp_ms = parse_timestamp_ms(entry.get("timestamp"))
+            if timestamp_ms is not None:
+                return timestamp_ms // 1000 * 1000
+    except Exception:
+        pass
+    return None
 
 
 def send(method, params):
@@ -75,12 +140,15 @@ def report(status):
         ttl_secs = TTL_SECS.get(ttl) if isinstance(ttl, str) else None
         expires_at = cache.get("expires_at")
         if ttl_secs is not None and is_int(expires_at) and expires_at > ttl_secs:
+            anchor_ms = None
+            transcript_path = status.get("transcript_path")
+            if isinstance(transcript_path, str) and transcript_path:
+                anchor_ms = transcript_anchor_ms(transcript_path)
+            if anchor_ms is None:
+                anchor_ms = (expires_at - ttl_secs) * 1000
             send(
                 "pane.report_prompt_cache",
-                {
-                    "last_request_at_ms": (expires_at - ttl_secs) * 1000,
-                    "ttl_secs": ttl_secs,
-                },
+                {"last_request_at_ms": anchor_ms, "ttl_secs": ttl_secs},
             )
 
 
