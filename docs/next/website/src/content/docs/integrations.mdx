@@ -117,7 +117,7 @@ The hook reports Claude Code session identity to the local Herdr socket on sessi
 
 Claude integration v11 adds the prompt-cache and context-usage hooks and the statusline tap. Like v10, it matches only the documented `SessionStart` sources: `startup`, `resume`, `clear`, `compact`, and `fork`. This prevents Grok's `new` and `load` events from launching the imported Herdr Claude hook, without disabling unrelated Claude-compatible hooks. Reinstall the Claude integration after upgrading to migrate the previous wildcard matcher. New Claude source values require an integration update.
 
-Claude integration v12 counts the prompt-cache countdown from the end of Claude's last response instead of from when the request was sent, so it matches statusline tools that do the same. Reinstall the integration to update.
+Claude integration v12 counts the prompt-cache countdown from the end of Claude's last response instead of from when the request was sent, so it matches statusline tools that do the same, and when the statusline first sees new token usage after that moment it counts from that second instead. Reinstall the integration to update.
 
 Herdr uses `~/.claude` by default, or `CLAUDE_CONFIG_DIR` when set. The Claude config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
 
