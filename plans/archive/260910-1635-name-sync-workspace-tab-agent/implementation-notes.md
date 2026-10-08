@@ -408,3 +408,10 @@ flow, signature, attribute or assertion semantics changed.
   drop the label, `not agreed + Ordinal` must keep it. Coverage of the gate is complete; the
   suggested third case is a non-issue, not a gap.
 - Reversibility: n/a. A test that cannot fail is worse than no test, because it reads as assurance.
+
+### Archived this plan dir via /hvn:plan-gc archive
+
+- What: moved this dir to plans/archive/ with a ledger.md; this log moves with it.
+- Why: pipeline-progress.md contains "# PIPELINE COMPLETE"; PR #26 is MERGED (95e61cb2, 2026-09-10).
+- Evidence: `gh pr view 26 --json state` returned MERGED; classify.mjs labelled the dir COMPLETE.
+- Reversibility: `git mv` back, or `/hvn:plan-gc undo` while this is the latest archive batch.
