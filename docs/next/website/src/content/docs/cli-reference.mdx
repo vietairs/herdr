@@ -343,7 +343,7 @@ Metadata text is normalized before storage. Herdr trims surrounding whitespace, 
 herdr pane report-prompt-cache <pane_id> --source ID (--last-request-at MS|now [--ttl SECS] | --clear)
 ```
 
-Reports when the agent in a pane last sent a model request that used its prompt cache. `--last-request-at` takes unix epoch milliseconds or `now`; `--ttl` is the cache lifetime in seconds (1 to 86400) and defaults to the previously reported value, or 300. Reports older than the stored time are ignored. `--clear` removes the value. Herdr also clears it when the agent is released or a new agent session starts. The value appears as `prompt_cache` on `pane.get` and `agent.get` and drives the `prompt_cache` sidebar token. It is not kept across a server restart.
+Reports when the agent in a pane last used its prompt cache. `--last-request-at` takes unix epoch milliseconds or `now`; `--ttl` is the cache lifetime in seconds (1 to 86400) and defaults to the previously reported value, or 300. Reports older than the stored time are ignored. `--clear` removes the value. Herdr also clears it when the agent is released or a new agent session starts. The value appears as `prompt_cache` on `pane.get` and `agent.get` and drives the `prompt_cache` sidebar token. It is not kept across a server restart.
 
 ```bash
 herdr pane report-context-usage <pane_id> --source ID (--used TOKENS [--window TOKENS] [--observed-at MS|now] | --clear)

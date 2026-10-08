@@ -2,7 +2,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=11
+# HERDR_INTEGRATION_VERSION=12
 
 param([string]$Action = "")
 
@@ -87,18 +87,10 @@ if ($Action -eq "cache") {
         if ($null -eq $found) { continue }
         $usage = $found.Usage
         if (-not ((Test-PositiveInteger $usage.cache_creation_input_tokens) -or (Test-PositiveInteger $usage.cache_read_input_tokens))) { continue }
-        # The request left when the user prompt or tool result before this
-        # response arrived; later lines of one response trail it by seconds.
-        $cacheRequestMs = $found.Ms
-        for ($earlier = $index - 1; $earlier -ge 0; $earlier--) {
-            $candidate = $entries[$earlier]
-            if ($candidate.type -cne "user" -or $candidate.isSidechain -eq $true) { continue }
-            $candidateMs = ConvertTo-UnixMilliseconds $candidate.timestamp
-            if ($null -ne $candidateMs) {
-                $cacheRequestMs = $candidateMs
-                break
-            }
-        }
+        # The countdown counts from the end of Claude's last response, matching
+        # statusline tools such as tokenline. The timestamp is floored to whole
+        # seconds so both show the same second.
+        $cacheRequestMs = [long][math]::Floor($found.Ms / 1000) * 1000
         if (Test-PositiveInteger $usage.cache_creation.ephemeral_1h_input_tokens) {
             $cacheTtl = 3600
         } elseif (Test-PositiveInteger $usage.cache_creation.ephemeral_5m_input_tokens) {
