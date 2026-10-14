@@ -173,7 +173,9 @@ impl HeadlessServer {
     /// the PTYs' pixel dimensions, and under `latest` its surface is the area.
     /// Under `smallest` the area is the minimum over the tab's viewers, falling
     /// back to the controller's surface when no viewer has a valid size, and
-    /// its growth is debounced (`debounce_tab_growth`).
+    /// its growth is debounced (`debounce_tab_growth`). A tab nobody views is
+    /// sized from its controller and keeps no debounce state, so a viewer that
+    /// later arrives starts from its own size.
     pub(super) fn tab_size_area(
         &mut self,
         controller_id: u64,
@@ -190,14 +192,19 @@ impl HeadlessServer {
             ClientSizePolicy::Latest => controller_size,
             ClientSizePolicy::Smallest => match self.tab_id_for_target(target) {
                 Some(tab_id) => {
-                    let candidate = smallest_valid_size(
-                        self.shell_tab_viewers(&tab_id)
-                            .into_iter()
-                            .filter_map(|viewer| self.clients.get(&viewer))
-                            .map(|viewer| viewer.terminal_size),
-                    )
-                    .unwrap_or(controller_size);
-                    self.tab_size_growth.debounce(tab_id, candidate)
+                    let viewers = self.shell_tab_viewers(&tab_id);
+                    if viewers.is_empty() {
+                        controller_size
+                    } else {
+                        let candidate = smallest_valid_size(
+                            viewers
+                                .into_iter()
+                                .filter_map(|viewer| self.clients.get(&viewer))
+                                .map(|viewer| viewer.terminal_size),
+                        )
+                        .unwrap_or(controller_size);
+                        self.tab_size_growth.debounce(tab_id, candidate)
+                    }
                 }
                 None => controller_size,
             },
@@ -289,13 +296,27 @@ impl HeadlessServer {
     ///
     /// The generic tab resize skips these terminals (`host_owns_terminal_size`),
     /// so this is the only host path that sizes them while host viewers are on
-    /// the tab. A vote of `None` stays mount-exclusive and is left alone.
+    /// the tab. A vote of `None` stays mount-exclusive and is left alone. A tab
+    /// nobody views is left to `settle_unviewed_mount_size_votes`, which gives
+    /// the vote back unclamped; clamping it here first would resize the
+    /// terminal twice in one pass.
+    ///
+    /// Every path that sizes a voted terminal passes no cell pixel size: a
+    /// mount's vote carries none, and one shared value keeps
+    /// `PaneRuntime::resize` (which compares pixels too) from treating the
+    /// same grid as a new size.
     pub(super) fn clamp_mount_size_votes_in_tab(
         &self,
         target: crate::ui::TabSurfaceTarget,
         size: TabSizeArea,
     ) {
         if self.client_size_policy() != ClientSizePolicy::Smallest || !self.has_sized_mount_votes()
+        {
+            return;
+        }
+        if self
+            .tab_id_for_target(target)
+            .is_none_or(|tab_id| self.shell_tab_viewers(&tab_id).is_empty())
         {
             return;
         }
@@ -339,8 +360,8 @@ impl HeadlessServer {
             runtime.resize(
                 pane.inner_rect.height.min(vote_rows),
                 pane.inner_rect.width.min(vote_cols),
-                size.cell_size.width_px,
-                size.cell_size.height_px,
+                0,
+                0,
             );
             publish_mounted_pty_size(&self.app, terminal_id);
         }

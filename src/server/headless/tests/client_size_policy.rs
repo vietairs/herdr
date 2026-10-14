@@ -638,6 +638,93 @@ async fn smallest_the_mount_vote_applies_once_the_host_viewer_leaves() {
     shutdown_test_runtimes(&mut server);
 }
 
+/// Each real PTY resize bumps the runtime's content sequence by two (around the
+/// emulator resize), and these tests write no output, so this counts resizes.
+fn resize_count(server: &HeadlessServer, pane_id: crate::layout::PaneId) -> u64 {
+    server.app.state.workspaces[0].test_runtimes[&pane_id].content_seq() / 2
+}
+
+#[tokio::test]
+async fn smallest_a_mounted_terminal_on_a_tab_nobody_views_is_resized_once() {
+    let mut server = smallest_server();
+    let mounted = mount_shared_terminal(&mut server);
+    let other_tab = server.app.state.workspaces[0].test_add_tab(Some("other"));
+    let other_pane = server.app.state.workspaces[0].tabs[other_tab].root_pane;
+    server.app.state.workspaces[0].insert_test_runtime(
+        other_pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 23, b""),
+    );
+    let other_tab_id = server.app.public_tab_id(0, other_tab).expect("tab id");
+    let _viewer = connect_sized_shell(&mut server, 7, SMALL);
+    let _other = connect_sized_shell(&mut server, 8, LARGE);
+    shell_api_request(
+        &mut server,
+        8,
+        api::schema::Method::TabFocus(api::schema::TabTarget {
+            tab_id: other_tab_id.clone(),
+        }),
+    );
+    // The viewer's cell size is known, so its pixel size differs from the
+    // mount's, which carries none.
+    assert!(server.handle_server_event(ServerEvent::ClientShellResize {
+        client_id: 7,
+        surface_cols: SMALL.0,
+        surface_rows: SMALL.1,
+        cell_width_px: 8,
+        cell_height_px: 16,
+        pixel_mouse: false,
+    }));
+    mount_resize(&mut server, &mounted, (120, 40));
+    assert_eq!(shared_pty_size(&server, mounted.pane_id), SMALL_PTY);
+
+    let before = resize_count(&server, mounted.pane_id);
+    shell_api_request(
+        &mut server,
+        7,
+        api::schema::Method::TabFocus(api::schema::TabTarget {
+            tab_id: other_tab_id,
+        }),
+    );
+    assert_eq!(shared_pty_size(&server, mounted.pane_id), (40, 120));
+    // Any later re-sizing pass leaves the unviewed terminal alone.
+    assert!(server.reapply_controlled_shell_tab_geometry(true));
+    assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 8 }));
+
+    assert_eq!(shared_pty_size(&server, mounted.pane_id), (40, 120));
+    assert_eq!(
+        resize_count(&server, mounted.pane_id) - before,
+        1,
+        "the terminal grows back to the vote once and is not flipped again"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn smallest_a_viewer_leaving_a_mount_bounded_terminal_does_not_resize_it() {
+    let mut server = smallest_server();
+    let mounted = mount_shared_terminal(&mut server);
+    let _viewer = connect_sized_shell(&mut server, 7, LARGE);
+    assert!(server.handle_server_event(ServerEvent::ClientShellResize {
+        client_id: 7,
+        surface_cols: LARGE.0,
+        surface_rows: LARGE.1,
+        cell_width_px: 8,
+        cell_height_px: 16,
+        pixel_mouse: false,
+    }));
+    mount_resize(&mut server, &mounted, (50, 20));
+    assert_eq!(shared_pty_size(&server, mounted.pane_id), (20, 50));
+
+    let before = resize_count(&server, mounted.pane_id);
+    assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 7 }));
+
+    // The vote already bounded the PTY, so handing it back changes nothing,
+    // the pixel size included.
+    assert_eq!(shared_pty_size(&server, mounted.pane_id), (20, 50));
+    assert_eq!(resize_count(&server, mounted.pane_id), before);
+    shutdown_test_runtimes(&mut server);
+}
+
 #[tokio::test]
 async fn smallest_a_mount_redraw_without_a_size_stays_exclusive() {
     let mut server = smallest_server();
@@ -890,6 +977,42 @@ async fn smallest_shrinks_at_once_and_grows_at_most_one_debounce_late() {
         std::time::Duration::from_millis(1)
     ));
     assert_eq!(shared_pty_size(&server, pane_id), LARGE_PTY);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn smallest_a_viewer_arriving_at_a_tab_nobody_viewed_takes_its_size_at_once() {
+    let mut server = smallest_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let shared_tab_id = server.app.public_tab_id(0, 0).expect("tab id");
+    let other_tab = server.app.state.workspaces[0].test_add_tab(Some("other"));
+    let other_pane = server.app.state.workspaces[0].tabs[other_tab].root_pane;
+    server.app.state.workspaces[0].insert_test_runtime(
+        other_pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 23, b""),
+    );
+    let other_tab_id = server.app.public_tab_id(0, other_tab).expect("tab id");
+    let _small = connect_sized_shell(&mut server, 7, SMALL);
+    let _large = connect_sized_shell(&mut server, 8, LARGE);
+    let focus = |server: &mut HeadlessServer, client_id, tab_id: &str| {
+        shell_api_request(
+            server,
+            client_id,
+            api::schema::Method::TabFocus(api::schema::TabTarget {
+                tab_id: tab_id.to_string(),
+            }),
+        );
+    };
+    focus(&mut server, 8, &other_tab_id);
+    focus(&mut server, 7, &other_tab_id);
+    // Nobody views the shared tab; its controller still sizes it.
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+    advance_size_clock(&mut server, std::time::Duration::from_secs(1));
+
+    focus(&mut server, 8, &shared_tab_id);
+
+    assert_eq!(shared_pty_size(&server, pane_id), LARGE_PTY);
+    assert_eq!(server.next_tab_size_growth_due(), None);
     shutdown_test_runtimes(&mut server);
 }
 
