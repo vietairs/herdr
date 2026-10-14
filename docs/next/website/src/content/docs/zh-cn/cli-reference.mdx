@@ -164,6 +164,8 @@ herdr workspace close <workspace_id> [--group]
 herdr workspace create --cwd ~/project --label api --no-focus
 ```
 
+工作区是顶层项目或工作上下文。创建工作区也会创建第一个标签页和根窗格。JSON 响应中的 `.result.workspace.workspace_id`、`.result.tab.tab_id` 和 `.result.root_pane.pane_id` 是对应 ID。
+
 ## Worktree
 
 ```bash
@@ -226,10 +228,12 @@ herdr pane close <pane_id>
 读取输出:
 
 ```bash
-herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N]
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]
 herdr pane read <pane_id> --source visible --ansi
 herdr pane read <pane_id> --source recent-unwrapped --lines 120
 ```
+
+`pane read` 直接打印 UTF-8 终端文本。默认去除 ANSI 转义;来源包含样式时,使用 `--format ansi` 或 `--ansi` 保留。`detection` 来源始终是纯文本。对 recent 类来源,`--lines N` 会在可选的取消折行之前选择最后 N 个已渲染终端行;省略时默认读取 80 行。对 `visible` 和 `detection`,省略 `--lines` 会返回完整快照,指定时保留按换行分隔的最后 N 行。`agent read` 使用相同的输出和行数行为。
 
 发送输入:
 
@@ -241,7 +245,9 @@ herdr pane run <pane_id> <command>
 
 `<key>` 使用 Herdr 的组合键语法: `a` 这类普通可打印键,`enter`、`tab`、`esc`、`backspace`、`left`、`right`、`up`、`down` 这类特殊键,`ctrl+h`、`control+j`、`alt+x`、`shift+tab` 这类修饰组合键,`f1` 这类功能键,以及 `minus`、`plus`、`backtick` 这类命名标点。旧式的 `C-c` 和 `c-c` 作为 `ctrl+c` 的别名被接受。
 
-`pane run` 把文本和回车作为一个原子操作提交。发送命令时优先用它,而不是 `send-text` 加 `send-keys Enter`。
+标准拼写是 `esc`;也接受 `escape`。
+
+`pane run` 会遵循当前的 bracketed paste 模式,并把文本和 Enter 作为一个原子操作提交。发送命令时优先用它,而不是 `send-text` 加 `send-keys Enter`;单独的发送操作仍是底层操作,不会提交命令。
 
 从自定义钩子上报智能体状态:
 
@@ -306,12 +312,14 @@ herdr pane report-metadata <pane_id> \
 
 ## 智能体
 
+窗格与智能体的模型和完整协调示例见[智能体自动化](/zh-cn/docs/agent-automation/)。
+
 ```bash
 herdr agent list
 herdr agent get <target>
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
-herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
 herdr agent send-keys <target> <key> [key ...]
+herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent wait <target> [--until STATUS]... [--timeout MS]
@@ -321,7 +329,7 @@ herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 ```
 
-智能体目标可以是终端 ID、唯一的智能体名称、检测到或上报的智能体标签,以及旧式窗格 ID。名称和标签是智能体的身份。终端 ID 和旧式窗格 ID 是底层的逃生舱。
+智能体目标只能是唯一的实时智能体名称,或当前承载该智能体的窗格 ID。终端 ID 和单独的智能体 kind 标签不能作为目标。通过 `agent start` 启动的智能体必须有名称;手动启动的智能体保持未命名,通过窗格 ID 寻址。
 
 `agent start` 会在现有可用 shell 窗格中启动智能体:交互式 shell 必须占用前台,不能有正在前台运行的命令、编辑器或智能体。拓扑必须单独创建。名称在实时智能体中必须唯一,并匹配 `[a-z][a-z0-9_-]{0,31}`。支持的 kind 是 `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qwen`、`letta`、`maki` 和 `muse`。名称属于当前窗格占用者,在该智能体退出、release 或被替换时清除;短暂的检测不确定不会清除它。
 
@@ -354,18 +362,12 @@ herdr terminal title clear
 
 `terminal title clear` 把外层终端窗口标题交还给 `ui.window_title`。
 
-## 等待
+## 输出等待
 
 等待窗格中的输出:
 
 ```bash
-herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]
-```
-
-等待智能体状态:
-
-```bash
-herdr agent wait <target> [--until STATUS]... [--timeout MS]
+herdr pane wait-output <pane_id> (--match <text> | --regex <pattern>) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]
 ```
 
 普通命令和服务器用 `pane wait-output`。编程智能体用 `agent wait`。
@@ -466,14 +468,12 @@ herdr plugin log list [--plugin ID] [--limit N]
 托管终端窗格:
 
 ```bash
-herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|split|tab|zoomed] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
+herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|popup|split|tab|zoomed] [--width SIZE] [--height SIZE] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
 herdr plugin pane focus <pane_id>
 herdr plugin pane close <pane_id>
 ```
 
-`plugin pane open` 要求插件已链接、已启用并与当前平台兼容。它把清单声明的 `[[panes]]` 命令作为 Herdr 管理的终端窗格启动。清单的默认值是 `overlay`,在活动窗格上方打开一个临时的缩放覆盖层。它也可以作为分割、新标签页或缩放窗格打开。非终端的原生插件窗格是之后的能力面。
-
-新窗格使用 `TERM_PROGRAM=herdr` 标识自身，并将 `TERM_PROGRAM_VERSION` 设为 Herdr 的版本。它们保留 `TERM=xterm-256color` 和 `COLORTERM=truecolor`。应用显式的启动环境值之前，Herdr 会移除继承的外层终端会话标记（iTerm2、WezTerm、Kitty、Windows Terminal、tmux、screen 和 Zellij）、iTerm2 的 `LC_TERMINAL` 身份，以及已知的 Claude Code、Codex 和 OMP 会话标记。这可防止新窗格冒充最初启动服务器的终端或智能体会话。API 密钥和显示设置等普通环境变量仍会继承，而不会被连接客户端的环境替换。SSH 智能体转发有自己的重连处理。现有窗格进程不受此清理影响。
+`plugin pane open` 要求插件已链接、已启用并与当前平台兼容。它把清单声明的 `[[panes]]` 命令作为 Herdr 管理的终端窗格启动。清单的默认值是 `overlay`,在活动窗格上方打开一个临时的缩放覆盖层。它也可以作为分割、新标签页、缩放窗格,或不改变标签页布局的会话级模态 `popup` 打开。`--width` 和 `--height` 以终端单元格数或 `80%` 这样的百分比设置弹窗外层尺寸;省略时默认为终端大小的一半,过小的值会限制为弹窗最小尺寸。弹窗不是 Herdr 窗格,不会收到 `HERDR_PANE_ID`,也不参与 pane 或智能体 API。非终端的原生插件窗格是之后的能力面。
 
 新窗格使用 `TERM_PROGRAM=herdr` 标识自身，并将 `TERM_PROGRAM_VERSION` 设为 Herdr 的版本。它们保留 `TERM=xterm-256color` 和 `COLORTERM=truecolor`。由于 Herdr 会在调整大小时重排文本,新窗格还会获得 `fish_handle_reflow=0`;继承或显式指定的 `fish_handle_reflow` 值会保留。应用显式的启动环境值之前，Herdr 会移除继承的外层终端会话标记（iTerm2、WezTerm、Kitty、Windows Terminal、tmux、screen 和 Zellij）、iTerm2 的 `LC_TERMINAL` 身份，以及已知的 Claude Code、Codex 和 OMP 会话标记。这可防止新窗格冒充最初启动服务器的终端或智能体会话。API 密钥和显示设置等普通环境变量仍会继承，而不会被连接客户端的环境替换。SSH 智能体转发有自己的重连处理。现有窗格进程不受此清理影响。
 
@@ -487,6 +487,8 @@ herdr plugin pane close <pane_id>
 | `recent` | 带终端折行的最近回滚内容。 |
 | `recent-unwrapped` | 不带软折行的最近回滚内容。最适合日志。 |
 | `detection` | 智能体屏幕检测使用的底部缓冲区快照。 |
+
+此表描述读取时的含义。仅对 `pane wait-output` 而言,`recent` 和 `recent-unwrapped` 都搜索 recent 的未折行快照,默认写法仍是 `recent`。
 
 ## 环境变量
 

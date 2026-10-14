@@ -164,6 +164,8 @@ herdr workspace close <workspace_id> [--group]
 herdr workspace create --cwd ~/project --label api --no-focus
 ```
 
+ワークスペースは最上位のプロジェクトまたは作業コンテキストです。作成時に最初のタブとルートペインも作られます。JSON レスポンスの `.result.workspace.workspace_id`、`.result.tab.tab_id`、`.result.root_pane.pane_id` から各 ID を取得できます。
+
 ## Worktree
 
 ```bash
@@ -226,10 +228,12 @@ herdr pane close <pane_id>
 出力を読む:
 
 ```bash
-herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N]
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]
 herdr pane read <pane_id> --source visible --ansi
 herdr pane read <pane_id> --source recent-unwrapped --lines 120
 ```
+
+`pane read` は UTF-8 のターミナルテキストを直接出力します。デフォルトでは ANSI エスケープを除去し、ソースに装飾が含まれる場合は `--format ansi` または `--ansi` で保持します。`detection` ソースは常にプレーンテキストです。recent 系ソースでは、`--lines N` は折り返し解除の前に末尾の N 描画行を選び、省略時は 80 行です。`visible` と `detection` では、省略時にスナップショット全体を返し、指定時は改行で区切られた末尾 N 行を返します。`agent read` も同じ出力と行数の動作です。
 
 入力を送る:
 
@@ -241,7 +245,9 @@ herdr pane run <pane_id> <command>
 
 `<key>` は Herdr のキーコンボ構文を使います: `a` のような通常の印字可能キー、`enter`、`tab`、`esc`、`backspace`、`left`、`right`、`up`、`down` のような特殊キー、`ctrl+h`、`control+j`、`alt+x`、`shift+tab` のような修飾キーコード、`f1` のようなファンクションキー、そして `minus`、`plus`、`backtick` のような名前付き記号です。レガシーな `C-c` と `c-c` は `ctrl+c` のエイリアスとして受け付けられます。
 
-`pane run` はテキストと Enter をアトミックに送信します。コマンドには `send-text` + `send-keys Enter` よりこちらを使ってください。
+標準表記は `esc` ですが、`escape` も使えます。
+
+`pane run` は現在の bracketed paste モードを尊重し、テキストと Enter をアトミックに送信します。コマンドには `send-text` + `send-keys Enter` よりこちらを使ってください。個別の送信操作は低レベルのままで、コマンドを送信しません。
 
 カスタムフックからエージェント状態を報告する:
 
@@ -306,12 +312,14 @@ herdr pane report-metadata <pane_id> \
 
 ## エージェント
 
+ペインとエージェントの使い分けや一連の連携例は、[エージェント自動化](/ja/docs/agent-automation/) を参照してください。
+
 ```bash
 herdr agent list
 herdr agent get <target>
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
-herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
 herdr agent send-keys <target> <key> [key ...]
+herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent wait <target> [--until STATUS]... [--timeout MS]
@@ -321,7 +329,7 @@ herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 ```
 
-エージェントターゲットには、ターミナル ID、一意なエージェント名、検出または報告されたエージェントラベル、レガシーなペイン ID が使えます。名前とラベルはエージェントのアイデンティティです。ターミナル ID とレガシーペイン ID は低レベルな逃げ道です。
+エージェントターゲットは、一意なライブエージェント名、または現在そのエージェントをホストしているペイン ID です。ターミナル ID とエージェント kind のラベルだけでは指定できません。`agent start` で起動するエージェントには名前が必須で、手動で起動したエージェントは名前なしのままペイン ID で指定します。
 
 `agent start` は既存の利用可能なシェルペインを起動対象にします。対話シェル自身がフォアグラウンドを所有し、フォアグラウンドのコマンド、エディタ、エージェントが動いていない必要があります。トポロジーは別に作成します。名前はライブエージェント間で一意で、`[a-z][a-z0-9_-]{0,31}` に一致する必要があります。対応する kind は `pi`、`claude`、`codex`、`gemini`、`cursor`、`devin`、`agy`、`cline`、`omp`、`mastracode`、`opencode`、`copilot`、`kimi`、`kiro`、`droid`、`amp`、`grok`、`hermes`、`kilo`、`qodercli`、`qwen`、`letta`、`maki`、`muse` です。名前は現在のペイン占有者に属し、そのエージェントの終了、release、置換で消えます。一時的に検出できないだけでは消えません。
 
@@ -354,18 +362,12 @@ herdr terminal title clear
 
 `terminal title clear` は外側ターミナルウィンドウタイトルを `ui.window_title` に戻します。
 
-## Wait
+## 出力待機
 
 ペインの出力を待つ:
 
 ```bash
-herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]
-```
-
-エージェントの状態を待つ:
-
-```bash
-herdr agent wait <target> [--until STATUS]... [--timeout MS]
+herdr pane wait-output <pane_id> (--match <text> | --regex <pattern>) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]
 ```
 
 通常のコマンドやサーバーには `pane wait-output` を使います。コーディングエージェントには `agent wait` を使います。
@@ -466,14 +468,12 @@ herdr plugin log list [--plugin ID] [--limit N]
 管理されたターミナルペイン:
 
 ```bash
-herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|split|tab|zoomed] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
+herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|popup|split|tab|zoomed] [--width SIZE] [--height SIZE] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]
 herdr plugin pane focus <pane_id>
 herdr plugin pane close <pane_id>
 ```
 
-`plugin pane open` は、プラグインがリンクされ、有効で、現在のプラットフォームと互換であることを要求します。マニフェストで宣言された `[[panes]]` コマンドを Herdr 管理のターミナルペインとして起動します。マニフェストのデフォルトは `overlay` で、アクティブなペインの上に一時的なズームオーバーレイを開きます。分割、新しいタブ、ズームされたペインとして開くこともできます。ターミナル以外のネイティブなプラグインペインは今後の対応面です。
-
-新しいペインでは `TERM_PROGRAM=herdr` として識別され、`TERM_PROGRAM_VERSION` には Herdr のバージョンが設定されます。`TERM=xterm-256color` と `COLORTERM=truecolor` は維持されます。Herdr は、明示的な起動環境の値を適用する前に、継承した外側のターミナルのセッションマーカー（iTerm2、WezTerm、Kitty、Windows Terminal、tmux、screen、Zellij）、iTerm2 の `LC_TERMINAL` 識別子、既知の Claude Code、Codex、OMP セッションマーカーを削除します。これにより、新しいペインがサーバーを最初に起動したターミナルやエージェントのセッションを名乗ることを防ぎます。API キーやディスプレイ設定を含む通常の環境変数は、アタッチ中クライアントの環境に置き換えられず、引き続き継承されます。SSH エージェント転送には独自の再接続処理があります。このクリーンアップによって既存ペインのプロセスは変更されません。
+`plugin pane open` は、プラグインがリンクされ、有効で、現在のプラットフォームと互換であることを要求します。マニフェストで宣言された `[[panes]]` コマンドを Herdr 管理のターミナルペインとして起動します。マニフェストのデフォルトは `overlay` で、アクティブなペインの上に一時的なズームオーバーレイを開きます。分割、新しいタブ、ズームされたペイン、またはタブレイアウトを変更しないセッションモーダルな `popup` として開くこともできます。`--width` と `--height` は、外側のポップアップ寸法をターミナルセル数または `80%` のような割合で指定します。省略した寸法はデフォルトでターミナルの半分になり、小さすぎる値はポップアップの最小サイズに制限されます。ポップアップは Herdr ペインではなく、`HERDR_PANE_ID` を受け取らず、pane API やエージェント API に参加しません。ターミナル以外のネイティブなプラグインペインは今後の対応面です。
 
 新しいペインでは `TERM_PROGRAM=herdr` として識別され、`TERM_PROGRAM_VERSION` には Herdr のバージョンが設定されます。`TERM=xterm-256color` と `COLORTERM=truecolor` は維持されます。リサイズ時に Herdr がテキストを折り返し直すため、`fish_handle_reflow=0` も設定します。継承した値や明示的な `fish_handle_reflow` の指定は優先されます。Herdr は、明示的な起動環境の値を適用する前に、継承した外側のターミナルのセッションマーカー（iTerm2、WezTerm、Kitty、Windows Terminal、tmux、screen、Zellij）、iTerm2 の `LC_TERMINAL` 識別子、既知の Claude Code、Codex、OMP セッションマーカーを削除します。これにより、新しいペインがサーバーを最初に起動したターミナルやエージェントのセッションを名乗ることを防ぎます。API キーやディスプレイ設定を含む通常の環境変数は、アタッチ中クライアントの環境に置き換えられず、引き続き継承されます。SSH エージェント転送には独自の再接続処理があります。このクリーンアップによって既存ペインのプロセスは変更されません。
 
@@ -487,6 +487,8 @@ herdr plugin pane close <pane_id>
 | `recent` | ターミナルの折り返しを含む直近のスクロールバック。 |
 | `recent-unwrapped` | ソフト折り返しなしの直近のスクロールバック。ログに最適。 |
 | `detection` | エージェントのスクリーン検出が使う下部バッファのスナップショット。 |
+
+この表は読み取り時の意味です。`pane wait-output` に限り、`recent` と `recent-unwrapped` はどちらも recent の折り返し前スナップショットを検索し、デフォルト表記は `recent` です。
 
 ## 環境変数
 
