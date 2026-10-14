@@ -252,7 +252,11 @@ impl HeadlessServer {
             .copied()
             .filter(|controller_id| self.clients.contains_key(controller_id))
             .unwrap_or(client_id);
-        self.apply_shell_tab_geometry_to_target(controller_id, target, start_pending_agent_resumes)
+        self.apply_shell_tab_geometry_for_size_event(
+            controller_id,
+            target,
+            start_pending_agent_resumes,
+        )
     }
 
     /// A shell client resized its own surface. When it is the only viewer of
@@ -478,7 +482,7 @@ impl HeadlessServer {
                 // settle pass covers a pane hidden by zoom); without them the
                 // vote applies unclamped, as it would under `latest`.
                 let rearbitrated = viewed_tab.is_some_and(|(controller_id, target)| {
-                    self.apply_shell_tab_geometry_to_target(controller_id, target, true)
+                    self.apply_shell_tab_geometry_for_size_event(controller_id, target, true)
                 });
                 let vote = self
                     .app

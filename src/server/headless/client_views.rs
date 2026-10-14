@@ -522,9 +522,21 @@ impl HeadlessServer {
     }
 
     fn finish_shell_tab_geometry_change(&mut self, start_pending_agent_resumes: bool) {
+        self.finish_shell_tab_geometry_change_with(start_pending_agent_resumes, true);
+    }
+
+    /// `recompute_clients` is whether every client's view must be recomputed;
+    /// a pass that changed no PTY size leaves every view as it was.
+    fn finish_shell_tab_geometry_change_with(
+        &mut self,
+        start_pending_agent_resumes: bool,
+        recompute_clients: bool,
+    ) {
         self.settle_unviewed_mount_size_votes();
-        for client in self.clients.values_mut() {
-            client.request_recompute();
+        if recompute_clients {
+            for client in self.clients.values_mut() {
+                client.request_recompute();
+            }
         }
         if !start_pending_agent_resumes {
             self.app.pending_agent_resume_deadline = None;
@@ -553,7 +565,7 @@ impl HeadlessServer {
         self.apply_shell_tab_geometry_to_target(client_id, target, start_pending_agent_resumes)
     }
 
-    pub(super) fn apply_shell_tab_geometry_to_target(
+    fn apply_shell_tab_geometry_to_target(
         &mut self,
         client_id: u64,
         target: crate::ui::TabSurfaceTarget,
@@ -564,6 +576,69 @@ impl HeadlessServer {
         }
         self.finish_shell_tab_geometry_change(start_pending_agent_resumes);
         true
+    }
+
+    /// `apply_shell_tab_geometry_to_target` for a size event (a viewer's
+    /// resize, a mount's vote) that usually changes no PTY: every client's
+    /// view is recomputed only when a PTY sized with `target` changed, so a
+    /// window-drag storm that leaves the minimum alone costs no frame on the
+    /// other clients. With one client every tab takes its size, so its view is
+    /// always recomputed. Returns whether the tab was re-sized at all.
+    pub(super) fn apply_shell_tab_geometry_for_size_event(
+        &mut self,
+        client_id: u64,
+        target: crate::ui::TabSurfaceTarget,
+        start_pending_agent_resumes: bool,
+    ) -> bool {
+        let before = self.tab_pty_sizes(target);
+        if !self.resize_shell_tab_geometry_to_target(client_id, target) {
+            return false;
+        }
+        let pty_resized = self.app_client_count() == 1 || self.tab_pty_sizes(target) != before;
+        self.finish_shell_tab_geometry_change_with(start_pending_agent_resumes, pty_resized);
+        true
+    }
+
+    /// `(rows, cols)` of every PTY `resize_shell_tab_geometry_to_target` sizes
+    /// for `target`: its panes' terminals and the popup when the tab owns it.
+    fn tab_pty_sizes(&self, target: crate::ui::TabSurfaceTarget) -> Vec<(u16, u16)> {
+        let Some(tab) = self
+            .app
+            .state
+            .workspaces
+            .get(target.workspace_index)
+            .and_then(|workspace| workspace.tabs.get(target.tab_index))
+        else {
+            return Vec::new();
+        };
+        let mut sizes = tab
+            .layout
+            .pane_ids()
+            .into_iter()
+            .filter_map(|pane_id| {
+                self.app.state.runtime_for_pane_in_workspace(
+                    &self.app.terminal_runtimes,
+                    target.workspace_index,
+                    pane_id,
+                )
+            })
+            .map(|runtime| runtime.current_size())
+            .collect::<Vec<_>>();
+        let owns_popup = self
+            .popup_owner_tab_id
+            .as_deref()
+            .is_some_and(|owner| self.tab_id_for_target(target).as_deref() == Some(owner));
+        if owns_popup {
+            sizes.extend(
+                self.app
+                    .state
+                    .popup_pane
+                    .as_ref()
+                    .and_then(|popup| self.app.terminal_runtimes.get(&popup.terminal_id))
+                    .map(|runtime| runtime.current_size()),
+            );
+        }
+        sizes
     }
 
     /// Sizes `target`'s PTYs for the tab as `client_id` controls it, through

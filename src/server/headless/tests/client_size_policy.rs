@@ -252,6 +252,51 @@ async fn smallest_ignores_a_resize_storm_from_the_larger_viewer() {
     shutdown_test_runtimes(&mut server);
 }
 
+/// Renders and sends every client a frame, so each one holds its last surface
+/// until something asks it to recompute.
+fn render_every_client(server: &mut HeadlessServer) {
+    server.render_and_stream();
+    for client_id in server.clients.keys() {
+        assert!(
+            server.clients[client_id]
+                .render_state
+                .last_pane_surface()
+                .is_some(),
+            "client {client_id} was sent a frame"
+        );
+    }
+}
+
+fn recompute_requested(server: &HeadlessServer, client_id: u64) -> bool {
+    server.clients[&client_id]
+        .render_state
+        .last_pane_surface()
+        .is_none()
+}
+
+#[tokio::test]
+async fn smallest_a_resize_that_changes_no_pty_recomputes_no_other_client() {
+    let mut server = smallest_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let _large = connect_sized_shell(&mut server, 7, LARGE);
+    let _small = connect_sized_shell(&mut server, 8, SMALL);
+    render_every_client(&mut server);
+
+    for step in 1..5_u16 {
+        resize_shell(&mut server, 7, (LARGE.0 + step, LARGE.1 + step));
+    }
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+    assert!(
+        !recompute_requested(&server, 8),
+        "the minimum did not move, so the small viewer's view did not either"
+    );
+
+    // A resize that moves the minimum still reaches every client.
+    resize_shell(&mut server, 7, (60, 15));
+    assert!(recompute_requested(&server, 8));
+    shutdown_test_runtimes(&mut server);
+}
+
 #[tokio::test]
 async fn smallest_lets_a_viewer_that_is_not_the_controller_shrink_the_tab() {
     let mut server = smallest_server();
@@ -639,6 +684,23 @@ async fn smallest_a_smaller_mount_bounds_the_host_viewer() {
     // A host resize re-lays the tab out but keeps the mount's bound.
     resize_shell(&mut server, 7, (110, 38));
     assert_eq!(shared_pty_size(&server, mounted.pane_id), (20, 50));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn smallest_a_mount_vote_that_changes_no_pty_recomputes_no_client() {
+    let mut server = smallest_server();
+    let mounted = mount_shared_terminal(&mut server);
+    let _host = connect_sized_shell(&mut server, 7, SMALL);
+    let _other = connect_sized_shell(&mut server, 8, LARGE);
+    mount_resize(&mut server, &mounted, (120, 40));
+    render_every_client(&mut server);
+
+    mount_resize(&mut server, &mounted, (130, 45));
+
+    assert_eq!(shared_pty_size(&server, mounted.pane_id), SMALL_PTY);
+    assert!(!recompute_requested(&server, 7));
+    assert!(!recompute_requested(&server, 8));
     shutdown_test_runtimes(&mut server);
 }
 
