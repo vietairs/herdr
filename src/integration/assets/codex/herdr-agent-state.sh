@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
-# HERDR_INTEGRATION_VERSION=9
+# HERDR_INTEGRATION_VERSION=10
 
 set -eu
 
@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session|usage) ;;
+  session|working|idle|usage) ;;
   *) exit 0 ;;
 esac
 
@@ -54,10 +54,10 @@ if hook_input_file:
         hook_input = {}
 
 hook_event_name = str(hook_input.get("hook_event_name") or "")
-# Session reports keep tolerating a payload without an event name; usage
-# reports only run from the Stop hook.
-allowed_events = {"session": {"SessionStart", ""}, "usage": {"Stop"}}
-if hook_event_name not in allowed_events.get(action, set()):
+# State reports tolerate a payload without an event name; usage reports only
+# run from the Stop hook.
+expected_events = {"session": ("SessionStart",), "working": ("UserPromptSubmit",), "idle": ("Stop", "Interrupt"), "usage": ("Stop",)}[action]
+if (hook_event_name or action == "usage") and hook_event_name not in expected_events:
     raise SystemExit(0)
 
 
@@ -128,12 +128,16 @@ request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):0
 report_seq = time.time_ns()
 session_id = hook_input.get("session_id")
 agent_session_id = session_id if isinstance(session_id, str) and session_id else None
-transcript_path = hook_input.get("transcript_path")
-if not isinstance(transcript_path, str) or not transcript_path.strip():
-    raise SystemExit(0)
+if action in ("session", "usage"):
+    transcript_path = hook_input.get("transcript_path")
+    if not isinstance(transcript_path, str) or not transcript_path.strip():
+        raise SystemExit(0)
 inherited_session_id = os.environ.get("CODEX_THREAD_ID")
 if inherited_session_id and inherited_session_id != agent_session_id:
     raise SystemExit(0)
+session_start_source = hook_input.get("source") if action == "session" else None
+if not isinstance(session_start_source, str) or not session_start_source:
+    session_start_source = None
 if action == "usage":
     reading = latest_context_usage(transcript_path)
     if reading is None:
@@ -153,9 +157,6 @@ if action == "usage":
         "params": usage_params,
     }
 elif agent_session_id:
-    session_start_source = hook_input.get("source") if hook_event_name == "SessionStart" else None
-    if not isinstance(session_start_source, str) or not session_start_source:
-        session_start_source = None
     params = {
         "pane_id": pane_id,
         "source": source,
@@ -163,11 +164,16 @@ elif agent_session_id:
         "seq": report_seq,
         "agent_session_id": agent_session_id,
     }
-    if session_start_source:
-        params["session_start_source"] = session_start_source
+    if action == "session":
+        if session_start_source:
+            params["session_start_source"] = session_start_source
+        method = "pane.report_agent_session"
+    else:
+        params["state"] = action
+        method = "pane.report_agent"
     request = {
         "id": request_id,
-        "method": "pane.report_agent_session",
+        "method": method,
         "params": params,
     }
 else:

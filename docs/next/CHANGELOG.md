@@ -9,7 +9,7 @@
 - The sidebar can hide itself. Turn on `ui.sidebar_auto_hide` (or **Settings → Sidebar**) and the sidebar stays collapsed while you work, opens over the panes when the pointer reaches the left edge or in navigate mode, and hides again when you move away. `toggle_sidebar` docks it open. New `keys.grow_sidebar` and `keys.shrink_sidebar` actions (unbound by default) change the sidebar width from the keyboard.
 - Agent rows can show a prompt-cache countdown. The new `prompt_cache` sidebar token, now in the default agent layout, shows how long the agent's prompt cache stays warm (for example `5m 4:12`) and turns to `cold` when it expires. Integrations report it with `herdr pane report-prompt-cache` or the `pane.report_prompt_cache` API method.
 - Agent rows can show context-window use. The new `context` sidebar token, on its own row in the default agent layout, shows tokens used against the agent's exact context window (for example `ctx 84k/200k 42%`), coloured as the context fills; with no known window it shows only the tokens. Integrations report it with `herdr pane report-context-usage` or the `pane.report_context_usage` API method. Mounted remote panes show both the countdown and context use.
-- Integrations report the new facts: Claude Code v12 (prompt-cache and context hooks; on macOS and Linux it also wraps your existing statusline, keeping its output unchanged, to read the exact window; without a statusline, and on Windows, it reports tokens only), Codex v9, Qwen Code v2, Pi v10, OMP v11, OpenCode v14, Kilo Code CLI v5, Hermes Agent v6 (tokens only), Antigravity CLI v4, GitHub Copilot CLI v4 and Cursor Agent CLI v2 (these three on macOS and Linux, when you have a custom statusline; Copilot and Cursor are unverified until tested against a live session). Grok CLI does not report usage yet (known gap). Run `herdr integration install <agent>` to update. Clients and servers must be upgraded together: the client protocol moved to version 25. Both ends of a federation mount must be upgraded together: the federation protocol moved to version 8.
+- Integrations report the new facts: Claude Code v12 (prompt-cache and context hooks; on macOS and Linux it also wraps your existing statusline, keeping its output unchanged, to read the exact window; without a statusline, and on Windows, it reports tokens only), Codex v10, Qwen Code v2, Pi v10, OMP v11, OpenCode v14, Kilo Code CLI v5, Hermes Agent v6 (tokens only), Antigravity CLI v4, GitHub Copilot CLI v4 and Cursor Agent CLI v2 (these three on macOS and Linux, when you have a custom statusline; Copilot and Cursor are unverified until tested against a live session). Grok CLI does not report usage yet (known gap). Run `herdr integration install <agent>` to update. Clients and servers must be upgraded together: the client protocol moved to version 25. Both ends of a federation mount must be upgraded together: the federation protocol moved to version 8.
 
 ### Fixed
 - The Claude Code prompt-cache countdown in the sidebar now counts from the end of Claude's last response instead of from when the request was sent, so it matches statusline tools that do the same and no longer runs behind them by the response time. Claude Code integration v12 includes the change; run `herdr integration install claude` to update.
@@ -47,6 +47,56 @@
   installed CLI speak the same protocol; until then CLI commands report a client/server version
   mismatch. The federation protocol version is unchanged at 7, so mounts to hosts running 0.9.0
   keep working.
+
+## [0.9.4] - 2026-10-13
+
+### Added
+- `herdr plugin update` updates plugins installed from GitHub, all at once or by name. Running plugin panes keep working on their old files, and new runs pick up the update without a config reload. Locally linked plugins are left alone. (#4245, thanks @JJLiebig)
+- Windows notifications stay in Notification Center. Clicking one jumps to its pane and brings the terminal window forward. (#4773, #4803, thanks @JJLiebig)
+
+### Changed
+- An elevated Windows server now only accepts administrator clients by default. To let normal clients from the same account in, set `[server] allow_unelevated_clients = true` or start the server with `--allow-unelevated-clients`. Permission errors now say how to fix them, and sessions you can't reach show as unavailable instead of stopped. (#4717, #4769, #4777, #4779, thanks @JJLiebig)
+- On Linux and macOS, closing the shell that started Herdr no longer stops the server. Scripts that stopped Herdr with `SIGHUP` should use `herdr server stop` or `SIGTERM`. The server log now says why the server stopped. (#4920, #4965)
+- With mouse capture on, plugins that handle a link get first pick when you click it. Turn capture off to use your terminal's own link shortcuts, like Command-click on macOS. (#4874, #5064, thanks @JJLiebig)
+- Antigravity and Grok count as idle once they are back at their prompt, even if their own background tasks or subagents are still running. (#3530, #4735, #4959)
+- Ctrl+Shift+letter reaches plain shells as the Ctrl key, like in Alacritty and WezTerm. Super, Hyper and Meta shortcuts no longer type escape-code junk into apps that can't read them. (#4356, #5017)
+
+### Fixed
+- Restarting a Mac or shutting down Windows keeps your agents' sessions. Herdr saves before the system starts closing apps, so agents come back where they were. (#4414, #5013, #5057, #5092, thanks @JJLiebig)
+- Session saves are written to disk before they replace the old file, so a crash or power cut can't leave an unreadable save. (#5150, #5152, thanks @JJLiebig)
+- The server keeps running when the machine runs out of processes or threads, instead of taking every pane down with it. (#3324, #4958)
+- An out-of-range workspace number returns `workspace_not_found` instead of crashing the server. (#5096, #5171)
+- Suspending an agent with Ctrl+Z and bringing it back with `fg` keeps its name and saved conversation. (#1647, #4964)
+- Restoring a session stays responsive when a checkout's Git data is slow or missing. Worktree groups survive checkouts that are temporarily unavailable, and opening the same repository twice no longer nests one workspace inside the other. (#4926, #4736, #4945, #4770, #4772, thanks @minatoaquaMK2 and @JJLiebig)
+- Closing a workspace's only pane asks first, like closing its last tab already does. Turn this off with `ui.confirm_close = false`. (#5143, #5173)
+- Ctrl shortcuts like Ctrl+W work on non-Latin keyboard layouts such as Russian, Greek or Hebrew. Latin layouts and AltGr characters keep their normal meaning. (#1079, #4961)
+- Accent keys and AltGr shortcuts work on Windows. (#4688, #5021, thanks @JJLiebig)
+- Shift+Enter and other enhanced keys keep working after the outer terminal resets, for example after VS Code's Reload Window. (#4985, #5088)
+- Quick Escape taps work on macOS with WezTerm's Kitty keyboard mode. (#1266, #5089)
+- Kitty keyboard apps get key releases and F1, F2 and F4 correctly, and Backspace works when the terminal sends Ctrl+H for it. (#4184, #4403, #3244, #5017)
+- Keyboard and terminal color replies no longer leak stray characters into pane input, and a half-finished color reply no longer freezes typing. (#4856, #4025, #5052, #5017, #5087)
+- Fish no longer repeats prompt fragments while you resize a pane. The same problem with zsh and Powerlevel10k is still open, waiting on a Ghostty fix. (#3672, #4977)
+- Apps that ask for pixel mouse coordinates get them, and clicks land in the right place on terminals that only report cells. (#4750, #3675, #5017, #4971)
+- Turning off Kitty graphics makes panes stop advertising image support, so apps fall back to text. (#4978, #4979)
+- Typing shows up faster, especially in PowerShell. (#4884, #5149, thanks @JJLiebig)
+- Big sessions use less CPU on busy agents and idle shells, hidden panes use less memory, and Windows panes need fewer threads. (#4506, #5083, #4845, #4847, #4849, #4850, #4873, #5085, #5091, thanks @JJLiebig)
+- New workspaces, tabs and splits start their shell at the right size instead of borrowing another pane's size. (#4419, #4873)
+- Forwarded SSH agents are no longer contacted every second, which could eventually break SSH and Git authentication. (#4931, #4962)
+- Sidebar width, collapsed groups and agent sorting on remote machines survive reconnects. Switching workspaces quickly while changing machines no longer gets canceled. (#4364, #5019, #4536, #5061, thanks @minatoaquaMK2 and @JJLiebig)
+- The sidebar collapse button stays clickable when the agent list has a scrollbar. (#4692, #4734, thanks @minatoaquaMK2)
+- The welcome screen shows your configured prefix. (#4745, #4747, thanks @JJLiebig)
+- Ctrl+[ leaves workspace navigation. (#1431, #2340, thanks @qaz74107410)
+- Keybindings that use `+` survive config reloads, and `/` opens Go To search on layouts where it needs Shift. (#4960, #4963, #4983, #5090, thanks @minatoaquaMK2)
+- Pasting from WezTerm on Windows into remote panes no longer types encoded key data. Copying no longer adds duplicate clipboard history entries, and closing a pane no longer hangs on a pending Enter. (#4725, #4730, #4709, #4872, thanks @JJLiebig)
+- Windows shells started through Scoop or 32-bit wrappers keep their working directory in new tabs and after restarts. (#4472, #4749, #5062, thanks @JJLiebig)
+- Windows ARM64 machines can be used as remote hosts through the x64 build, on a best-effort basis. (#4752)
+- Codex reports finished turns through its integration when started with `--no-daemon`, its startup update screen shows as blocked, and Codex and Pi status is recognized in more cases. (#4507, #4811, #4756, #5174, thanks @JJLiebig)
+- Antigravity permission, question and workspace-trust dialogs show as blocked, and its thinking spinner shows as working. (#3871, #3419, #3530, #4959)
+- Hermes started through its Python installer is recognized, and installing or removing its integration keeps your YAML plugin list intact. (#4910, #4909, #4911, #4984, thanks @minatoaquaMK2)
+- On macOS, `pane run` and `agent start` refuse commands too long for a shell that is still starting, instead of silently cutting them off. (#4950, #4988, thanks @minatoaquaMK2)
+
+### Removed
+- The experimental `HERDR_WINDOWS_INPUT_BACKEND=crossterm` setting is gone. Windows always uses its native console input. (#5017)
 
 ## [0.9.3] - 2026-09-29
 

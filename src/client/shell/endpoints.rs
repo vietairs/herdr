@@ -40,6 +40,11 @@ pub(crate) enum ClientEndpointFocusTarget {
     Workspace(String),
     Tab(String),
     Pane(String),
+    #[cfg(windows)]
+    Notification {
+        pane_id: String,
+        boot_id: String,
+    },
 }
 
 impl ClientShellState {

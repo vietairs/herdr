@@ -239,6 +239,19 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         10,
         None,
     )?;
+    for (event, action) in [
+        ("UserPromptSubmit", "working"),
+        ("Stop", "idle"),
+        ("Interrupt", "idle"),
+    ] {
+        ensure_command_hook(
+            hooks,
+            event,
+            hook_command(&hook_path, Some(action)),
+            10,
+            None,
+        )?;
+    }
     remove_hook_commands(hooks, "Stop", &hook_path, Some("usage"))?;
     ensure_command_hook(
         hooks,
@@ -761,6 +774,7 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
             updated_hooks |=
                 remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
             updated_hooks |= remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
+            updated_hooks |= remove_hook_commands(hooks, "Interrupt", &hook_path, Some("idle"))?;
             updated_hooks |= remove_hook_commands(hooks, "Stop", &hook_path, Some("usage"))?;
         }
 
