@@ -424,6 +424,12 @@ impl PtySizeNotice {
         (packed != 0).then_some((cols, rows))
     }
 
+    /// Back to unpublished: the mount no longer votes for this terminal, so
+    /// a later subscription must not replay a bound it no longer has.
+    fn reset(&self) {
+        self.0.store(0, std::sync::atomic::Ordering::Release);
+    }
+
     fn is_published(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::Acquire) != 0
     }
@@ -474,6 +480,10 @@ pub(crate) fn sync_terminal_size_ownership(app: &mut App, lease: &FederationLeas
     if !lease.has_mounted_controller() {
         app.state.federation_owned_terminal_sizes.clear();
         app.state.federation_mount_follows_pty_size = false;
+        // The next mount starts from its own size, not this one's bound.
+        for notice in app.state.federation_pty_size_notices.values() {
+            notice.reset();
+        }
     }
 }
 
@@ -511,9 +521,14 @@ fn vote_terminal_size(
 }
 
 /// Drops the mount's claim on `terminal_id` — it stopped driving that
-/// terminal, so the host may size it again. Reopening re-claims it.
+/// terminal, so the host may size it again. Reopening re-claims it, and starts
+/// from no size notice: the host stops publishing once the vote is gone, so a
+/// kept notice would replay a stale bound to the reopened mirror.
 fn release_terminal_size(app: &mut App, terminal_id: &str) -> bool {
     resolve_owned_terminal_id(app, terminal_id).is_some_and(|released| {
+        if let Some(notice) = app.state.federation_pty_size_notices.get(&released) {
+            notice.reset();
+        }
         app.state
             .federation_owned_terminal_sizes
             .remove(&released)

@@ -932,6 +932,53 @@ async fn reloading_into_latest_publishes_the_mounts_own_size_back() {
     shutdown_test_runtimes(&mut server);
 }
 
+#[tokio::test]
+async fn releasing_the_mount_vote_resets_its_pty_size_notice() {
+    let mut server = smallest_server();
+    let mounted = mount_shared_terminal(&mut server);
+    let notice = subscribe_mounted_pty_size(&mut server, &mounted);
+    let _host = connect_sized_shell(&mut server, 7, SMALL);
+    mount_resize(&mut server, &mounted, (120, 40));
+    assert_eq!(notice.load(), Some((SMALL_PTY.1, SMALL_PTY.0)));
+
+    server.handle_server_event(ServerEvent::Federation(
+        FederationCommand::ReleaseTerminalSize {
+            epoch: mounted.epoch,
+            connid: MOUNT_CONNID,
+            terminal_id: mounted.terminal_id.clone(),
+        },
+    ));
+
+    assert_eq!(notice.load(), None, "a reopened mirror starts unbounded");
+    assert_eq!(
+        subscribe_mounted_pty_size(&mut server, &mounted).load(),
+        None
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn the_mount_session_ending_resets_its_pty_size_notices() {
+    let mut server = smallest_server();
+    let mounted = mount_shared_terminal(&mut server);
+    let notice = subscribe_mounted_pty_size(&mut server, &mounted);
+    let _host = connect_sized_shell(&mut server, 7, SMALL);
+    mount_resize(&mut server, &mounted, (120, 40));
+    assert_eq!(notice.load(), Some((SMALL_PTY.1, SMALL_PTY.0)));
+
+    server.handle_server_event(ServerEvent::Federation(FederationCommand::Release {
+        epoch: mounted.epoch,
+        connid: MOUNT_CONNID,
+    }));
+
+    assert_eq!(
+        notice.load(),
+        None,
+        "a reconnecting mount is sent no old bound"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
 // A legacy mount (one that never agreed `PTY_SIZE_NOTICE`) ignores the host's
 // size notice, so sharing its size would leave its mirror wider than the PTY.
 
