@@ -578,6 +578,10 @@ impl HeadlessServer {
         };
         let super::client_size_policy::TabSizeArea { area, cell_size } = size;
         if self.app_client_count() == 1 {
+            // Every tab takes this area, but only `target` is viewed.
+            if let Some(tab_id) = self.tab_id_for_target(target) {
+                self.retain_tab_size_growth(|viewed| viewed == tab_id);
+            }
             for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
                 for tab_index in 0..workspace.tabs.len() {
                     crate::ui::resize_tab_surface(
@@ -648,6 +652,7 @@ impl HeadlessServer {
         for viewers in viewed_tabs.values_mut() {
             viewers.sort_unstable();
         }
+        self.retain_tab_size_growth(|tab_id| viewed_tabs.contains_key(tab_id));
         for (tab_id, viewers) in viewed_tabs {
             let controller_is_viewing = self
                 .tab_geometry_controllers

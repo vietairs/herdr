@@ -18,7 +18,43 @@ const LARGE_PTY: (u16, u16) = (35, 99);
 fn smallest_server() -> HeadlessServer {
     let mut server = test_headless_server();
     server.app.state.client_size_policy = ClientSizePolicy::Smallest;
+    server.tab_size_growth.test_now = Some(std::time::Instant::now());
     server
+}
+
+/// Moves the size-policy test clock on by `elapsed` and runs the server's due
+/// growth, as its loop timer would. Returns whether a tab was re-sized.
+fn advance_size_clock(server: &mut HeadlessServer, elapsed: std::time::Duration) -> bool {
+    let now = server
+        .tab_size_growth
+        .test_now
+        .expect("smallest_server sets a test clock");
+    server.tab_size_growth.test_now = Some(now + elapsed);
+    server.apply_due_tab_size_growth()
+}
+
+/// Asserts the PTY still holds `held` right up to the growth debounce, then
+/// grows to `grown` once it elapses.
+fn assert_grows_after_debounce(
+    server: &mut HeadlessServer,
+    pane_id: crate::layout::PaneId,
+    held: (u16, u16),
+    grown: (u16, u16),
+) {
+    let debounce = crate::server::headless::client_size_policy::SIZE_GROWTH_DEBOUNCE;
+    assert_eq!(shared_pty_size(server, pane_id), held, "growth waits");
+    assert!(server.next_tab_size_growth_due().is_some());
+    assert!(!advance_size_clock(
+        server,
+        debounce - std::time::Duration::from_millis(1)
+    ));
+    assert_eq!(shared_pty_size(server, pane_id), held, "still waiting");
+    assert!(advance_size_clock(
+        server,
+        std::time::Duration::from_millis(1)
+    ));
+    assert_eq!(shared_pty_size(server, pane_id), grown, "grown once due");
+    assert_eq!(server.next_tab_size_growth_due(), None);
 }
 
 fn shared_pty_size(server: &HeadlessServer, pane_id: crate::layout::PaneId) -> (u16, u16) {
@@ -164,7 +200,7 @@ async fn smallest_grows_the_tab_when_the_small_viewer_detaches() {
 
     assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 8 }));
 
-    assert_eq!(shared_pty_size(&server, pane_id), LARGE_PTY);
+    assert_grows_after_debounce(&mut server, pane_id, SMALL_PTY, LARGE_PTY);
     shutdown_test_runtimes(&mut server);
 }
 
@@ -193,14 +229,11 @@ async fn smallest_grows_the_tab_when_the_small_viewer_switches_tab() {
     );
 
     assert_eq!(
-        shared_pty_size(&server, pane_id),
-        LARGE_PTY,
-        "the tab the small viewer left is sized by the remaining viewer"
-    );
-    assert_eq!(
         server.app.state.workspaces[0].test_runtimes[&second_pane].current_size(),
         SMALL_PTY
     );
+    // The tab the small viewer left is sized by the remaining viewer.
+    assert_grows_after_debounce(&mut server, pane_id, SMALL_PTY, LARGE_PTY);
     shutdown_test_runtimes(&mut server);
 }
 
@@ -791,5 +824,87 @@ async fn reloading_into_latest_publishes_the_mounts_own_size_back() {
     // stay bounded by the stale notice when it grows.
     mount_resize(&mut server, &mounted, (130, 45));
     assert_eq!(notice.load(), Some((130, 45)));
+    shutdown_test_runtimes(&mut server);
+}
+
+// Growth debounce: shrinking applies at once, growing waits briefly.
+
+#[tokio::test]
+async fn smallest_a_small_viewer_returning_within_the_debounce_costs_no_reflow() {
+    let mut server = smallest_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let _large = connect_sized_shell(&mut server, 7, LARGE);
+    let _small = connect_sized_shell(&mut server, 8, SMALL);
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+
+    assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 8 }));
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+    assert!(!advance_size_clock(
+        &mut server,
+        std::time::Duration::from_millis(50)
+    ));
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+    let _small_again = connect_sized_shell(&mut server, 9, SMALL);
+
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+    assert_eq!(
+        server.next_tab_size_growth_due(),
+        None,
+        "the pending growth was cancelled"
+    );
+    advance_size_clock(&mut server, std::time::Duration::from_secs(1));
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn smallest_shrinks_at_once_and_grows_at_most_one_debounce_late() {
+    let mut server = smallest_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let _large = connect_sized_shell(&mut server, 7, LARGE);
+    assert_eq!(shared_pty_size(&server, pane_id), LARGE_PTY);
+
+    resize_shell(&mut server, 7, SMALL);
+    assert_eq!(
+        shared_pty_size(&server, pane_id),
+        SMALL_PTY,
+        "shrinks at once"
+    );
+
+    // Growing in steps keeps the first deadline, so a drag lands on time.
+    let debounce = crate::server::headless::client_size_policy::SIZE_GROWTH_DEBOUNCE;
+    resize_shell(&mut server, 7, (80, 25));
+    let due = server.next_tab_size_growth_due();
+    assert!(due.is_some());
+    advance_size_clock(&mut server, debounce / 2);
+    resize_shell(&mut server, 7, LARGE);
+    assert_eq!(server.next_tab_size_growth_due(), due);
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+    assert!(!advance_size_clock(
+        &mut server,
+        debounce / 2 - std::time::Duration::from_millis(1)
+    ));
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+    assert!(advance_size_clock(
+        &mut server,
+        std::time::Duration::from_millis(1)
+    ));
+    assert_eq!(shared_pty_size(&server, pane_id), LARGE_PTY);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn latest_grows_without_a_debounce() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let _large = connect_sized_shell(&mut server, 7, LARGE);
+    let _small = connect_sized_shell(&mut server, 8, SMALL);
+    server.claim_shell_tab_geometry(8, false);
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+
+    assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 8 }));
+
+    assert_eq!(shared_pty_size(&server, pane_id), LARGE_PTY);
+    assert_eq!(server.next_tab_size_growth_due(), None);
     shutdown_test_runtimes(&mut server);
 }

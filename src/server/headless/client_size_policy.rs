@@ -41,6 +41,103 @@ pub(super) fn smallest_valid_size(
         .reduce(|(min_cols, min_rows), (cols, rows)| (min_cols.min(cols), min_rows.min(rows)))
 }
 
+/// How long a `smallest` tab waits before it grows. Shrinking applies at once,
+/// so no viewer is ever cropped; growing waits, so a smaller viewer that
+/// reconnects or flips back to the tab within this window costs the programs
+/// in it no reflow at all.
+pub(super) const SIZE_GROWTH_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// A `smallest` tab's applied size and any growth it is waiting to apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TabSizeGrowth {
+    /// `(cols, rows)` the tab is laid out in now.
+    pub(super) applied: (u16, u16),
+    /// When the deferred growth applies; `None` when the tab is not growing.
+    pub(super) due: Option<Instant>,
+}
+
+/// Debounces growth of a tab's arbitrated size from `previous` to `candidate`.
+///
+/// A dimension that shrinks applies at once. Any growth waits until
+/// `SIZE_GROWTH_DEBOUNCE` after the first call that saw it, then applies in
+/// full; the window is not extended by later growth, so a burst of resizes
+/// lands at most that late. A tab with no `previous` size takes `candidate`.
+pub(super) fn debounce_tab_growth(
+    previous: Option<TabSizeGrowth>,
+    candidate: (u16, u16),
+    now: Instant,
+) -> TabSizeGrowth {
+    let settled = TabSizeGrowth {
+        applied: candidate,
+        due: None,
+    };
+    let Some(previous) = previous else {
+        return settled;
+    };
+    let (applied_cols, applied_rows) = previous.applied;
+    if candidate.0 <= applied_cols && candidate.1 <= applied_rows {
+        return settled;
+    }
+    let due = previous
+        .due
+        .unwrap_or_else(|| now.checked_add(SIZE_GROWTH_DEBOUNCE).unwrap_or(now));
+    if now >= due {
+        return settled;
+    }
+    TabSizeGrowth {
+        applied: (candidate.0.min(applied_cols), candidate.1.min(applied_rows)),
+        due: Some(due),
+    }
+}
+
+/// Per-tab growth debounce state for the `smallest` policy, keyed by stable tab
+/// id. Only viewed tabs keep an entry: a tab nobody views is dropped, so a
+/// viewer returning to it later starts from its own size instead of a stale one.
+#[derive(Debug, Default)]
+pub(super) struct TabSizeGrowthTracker {
+    tabs: HashMap<String, TabSizeGrowth>,
+    /// Test clock; production reads `Instant::now()`.
+    #[cfg(test)]
+    pub(super) test_now: Option<Instant>,
+}
+
+impl TabSizeGrowthTracker {
+    pub(super) fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.test_now {
+            return now;
+        }
+        Instant::now()
+    }
+
+    fn debounce(&mut self, tab_id: String, candidate: (u16, u16)) -> (u16, u16) {
+        let now = self.now();
+        let growth = debounce_tab_growth(self.tabs.get(&tab_id).copied(), candidate, now);
+        self.tabs.insert(tab_id, growth);
+        growth.applied
+    }
+
+    fn retain_tabs(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.tabs.retain(|tab_id, _| keep(tab_id));
+    }
+
+    pub(super) fn next_due(&self) -> Option<Instant> {
+        self.tabs.values().filter_map(|growth| growth.due).min()
+    }
+
+    /// Drops every entry whose growth was due by `now`. Called after the due
+    /// re-sizing pass, so a tab that pass did not reach cannot keep a past
+    /// deadline and spin the server loop.
+    fn forget_due(&mut self, now: Instant) {
+        self.tabs
+            .retain(|_, growth| growth.due.is_none_or(|due| due > now));
+    }
+
+    fn clear(&mut self) {
+        self.tabs.clear();
+    }
+}
+
 /// The area a tab's panes are laid out in to size their PTYs, and the cell
 /// size used for the PTYs' pixel dimensions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,9 +172,10 @@ impl HeadlessServer {
     /// `controller_id` is the client sizing the tab: its cell size always sets
     /// the PTYs' pixel dimensions, and under `latest` its surface is the area.
     /// Under `smallest` the area is the minimum over the tab's viewers, falling
-    /// back to the controller's surface when no viewer has a valid size.
+    /// back to the controller's surface when no viewer has a valid size, and
+    /// its growth is debounced (`debounce_tab_growth`).
     pub(super) fn tab_size_area(
-        &self,
+        &mut self,
         controller_id: u64,
         target: crate::ui::TabSurfaceTarget,
     ) -> Option<TabSizeArea> {
@@ -87,19 +185,22 @@ impl HeadlessServer {
         } else {
             crate::kitty_graphics::HostCellSize::default()
         };
+        let controller_size = controller.terminal_size;
         let (cols, rows) = match self.client_size_policy() {
-            ClientSizePolicy::Latest => controller.terminal_size,
-            ClientSizePolicy::Smallest => self
-                .tab_id_for_target(target)
-                .and_then(|tab_id| {
-                    smallest_valid_size(
+            ClientSizePolicy::Latest => controller_size,
+            ClientSizePolicy::Smallest => match self.tab_id_for_target(target) {
+                Some(tab_id) => {
+                    let candidate = smallest_valid_size(
                         self.shell_tab_viewers(&tab_id)
                             .into_iter()
                             .filter_map(|viewer| self.clients.get(&viewer))
                             .map(|viewer| viewer.terminal_size),
                     )
-                })
-                .unwrap_or(controller.terminal_size),
+                    .unwrap_or(controller_size);
+                    self.tab_size_growth.debounce(tab_id, candidate)
+                }
+                None => controller_size,
+            },
         };
         Some(TabSizeArea {
             area: Rect::new(0, 0, cols, rows),
@@ -139,6 +240,29 @@ impl HeadlessServer {
             .filter(|controller_id| self.clients.contains_key(controller_id))
             .unwrap_or(client_id);
         self.apply_shell_tab_geometry_to_target(controller_id, target, start_pending_agent_resumes)
+    }
+
+    /// Drops the growth state of every tab `keep` rejects (see
+    /// `TabSizeGrowthTracker`).
+    pub(super) fn retain_tab_size_growth(&mut self, keep: impl FnMut(&str) -> bool) {
+        self.tab_size_growth.retain_tabs(keep);
+    }
+
+    /// When the next deferred tab growth is due, for the server loop's timer.
+    pub(super) fn next_tab_size_growth_due(&self) -> Option<Instant> {
+        self.tab_size_growth.next_due()
+    }
+
+    /// Applies every tab growth that is due. Returns whether a tab was
+    /// re-sized, which needs a render.
+    pub(super) fn apply_due_tab_size_growth(&mut self) -> bool {
+        let now = self.tab_size_growth.now();
+        if self.tab_size_growth.next_due().is_none_or(|due| now < due) {
+            return false;
+        }
+        let resized = self.reapply_controlled_shell_tab_geometry(true);
+        self.tab_size_growth.forget_due(now);
+        resized
     }
 
     /// Under `smallest`, re-arbitrates every viewed tab after a client joined,
@@ -358,6 +482,8 @@ impl HeadlessServer {
                 publish_mounted_pty_size(&self.app, terminal_id);
             }
         }
+        // Growth debounce state belongs to `smallest` only.
+        self.tab_size_growth.clear();
         info!(policy = ?self.client_size_policy(), "client size policy changed");
         self.reapply_controlled_shell_tab_geometry(true);
     }
@@ -388,6 +514,84 @@ mod tests {
         );
         assert_eq!(smallest_valid_size([(0, 0), (9, 50), (50, 2)]), None);
         assert_eq!(smallest_valid_size(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn debounce_tab_growth_shrinks_at_once_and_defers_growth() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let first = debounce_tab_growth(None, (100, 35), at(0));
+        assert_eq!(
+            first,
+            TabSizeGrowth {
+                applied: (100, 35),
+                due: None
+            }
+        );
+
+        let shrunk = debounce_tab_growth(Some(first), (68, 17), at(0));
+        assert_eq!(
+            shrunk,
+            TabSizeGrowth {
+                applied: (68, 17),
+                due: None
+            }
+        );
+
+        let deadline = at(0) + SIZE_GROWTH_DEBOUNCE;
+        let waiting = debounce_tab_growth(Some(shrunk), (100, 35), at(0));
+        assert_eq!(
+            waiting,
+            TabSizeGrowth {
+                applied: (68, 17),
+                due: Some(deadline)
+            }
+        );
+
+        // Later growth keeps the first deadline.
+        let still = debounce_tab_growth(Some(waiting), (120, 40), at(100));
+        assert_eq!(
+            still,
+            TabSizeGrowth {
+                applied: (68, 17),
+                due: Some(deadline)
+            }
+        );
+
+        let grown = debounce_tab_growth(Some(still), (120, 40), deadline);
+        assert_eq!(
+            grown,
+            TabSizeGrowth {
+                applied: (120, 40),
+                due: None
+            }
+        );
+    }
+
+    #[test]
+    fn debounce_tab_growth_applies_a_shrink_while_deferring_the_other_dimension() {
+        let now = Instant::now();
+        let applied = TabSizeGrowth {
+            applied: (100, 35),
+            due: None,
+        };
+        let mixed = debounce_tab_growth(Some(applied), (80, 40), now);
+        assert_eq!(
+            mixed,
+            TabSizeGrowth {
+                applied: (80, 35),
+                due: Some(now + SIZE_GROWTH_DEBOUNCE)
+            }
+        );
+        // Returning to a size that no longer grows cancels the deferral.
+        let back = debounce_tab_growth(Some(mixed), (80, 30), now);
+        assert_eq!(
+            back,
+            TabSizeGrowth {
+                applied: (80, 30),
+                due: None
+            }
+        );
     }
 
     /// Deterministic xorshift, so the sweep below is reproducible without a

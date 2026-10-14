@@ -228,6 +228,8 @@ pub struct HeadlessServer {
     foreground_client_id: Option<u64>,
     /// Ephemeral shell connection controlling PTY geometry for each stable tab id.
     tab_geometry_controllers: HashMap<String, u64>,
+    /// Deferred growth of `smallest`-policy tabs, keyed by stable tab id.
+    tab_size_growth: client_size_policy::TabSizeGrowthTracker,
     /// Stable tab id whose viewers may see and interact with the one terminal popup.
     popup_owner_tab_id: Option<String>,
     /// Process-local identity used to reject shell replacements from an earlier server boot.
@@ -423,6 +425,7 @@ impl HeadlessServer {
             next_client_id: 1,
             foreground_client_id: None,
             tab_geometry_controllers: HashMap::new(),
+            tab_size_growth: Default::default(),
             popup_owner_tab_id: None,
             client_shell_boot_id: format!(
                 "{}-{}",
@@ -695,6 +698,7 @@ impl HeadlessServer {
                 .pending_alt_screen_reads
                 .iter()
                 .map(|pending| pending.next_deadline())
+                .chain(self.next_tab_size_growth_due())
                 .fold(next_deadline, |deadline, pending| {
                     Some(deadline.map_or(pending, |current| current.min(pending)))
                 });
@@ -3536,6 +3540,7 @@ impl HeadlessServer {
         }
 
         changed |= self.app.handle_tab_bar_status_tasks(now);
+        changed |= self.apply_due_tab_size_growth();
 
         if geometry_dirty {
             self.app.pending_agent_resume_deadline = None;
