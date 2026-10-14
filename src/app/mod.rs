@@ -646,7 +646,8 @@ impl App {
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
-            federation_owned_terminal_sizes: std::collections::HashSet::new(),
+            federation_owned_terminal_sizes: std::collections::HashMap::new(),
+            client_size_policy: config.server.client_size_policy,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
@@ -1156,6 +1157,7 @@ impl App {
             } else {
                 self.state.headless_size = config.headless_size();
             }
+            self.state.client_size_policy = config.server.client_size_policy;
         }
 
         if !invalid_section("advanced") {

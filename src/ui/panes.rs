@@ -316,7 +316,8 @@ fn stable_scrollbar_gutter(
 /// behind either reverts their geometry within one frame, leaving every
 /// repaint laid out for the wrong width.
 fn host_owns_terminal_size(app: &AppState, terminal_id: &crate::terminal::TerminalId) -> bool {
-    !app.federation_owned_terminal_sizes.contains(terminal_id)
+    !app.federation_owned_terminal_sizes
+        .contains_key(terminal_id)
         && !app.direct_attach_resize_locks.contains(terminal_id)
 }
 

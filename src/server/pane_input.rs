@@ -226,6 +226,35 @@ pub(super) fn apply_client_popup_input_events(
     Ok(keyboard_forwarded)
 }
 
+/// Fits a pane-relative mouse position to the PTY grid `(rows, cols)`.
+///
+/// A client lays a pane out at its own surface size, which can be larger than
+/// the PTY when another, smaller client bounds the tab's size: the extra cells
+/// are blank padding with nothing behind them. A press or motion there has no
+/// cell to land on and is dropped. A release, drag or wheel event is clamped to
+/// the nearest cell instead, so a gesture that started inside the grid still
+/// ends there and an application never sees a button stuck down.
+pub(super) fn fit_mouse_position_to_grid(
+    kind: MouseEventKind,
+    position: crate::protocol::ClientMousePosition,
+    (rows, cols): (u16, u16),
+) -> Option<crate::protocol::ClientMousePosition> {
+    let (column, row) = match position {
+        crate::protocol::ClientMousePosition::Cell { column, row }
+        | crate::protocol::ClientMousePosition::Pixels { column, row, .. } => (column, row),
+    };
+    if column < cols && row < rows {
+        return Some(position);
+    }
+    if cols == 0 || rows == 0 || matches!(kind, MouseEventKind::Down(_) | MouseEventKind::Moved) {
+        return None;
+    }
+    Some(crate::protocol::ClientMousePosition::Cell {
+        column: column.min(cols - 1),
+        row: row.min(rows - 1),
+    })
+}
+
 pub(super) fn apply_client_terminal_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
@@ -243,7 +272,12 @@ pub(super) fn apply_client_terminal_input_events(
         {
             let kind = kind.to_crossterm();
             let modifiers = KeyModifiers::from_bits_truncate(*modifiers);
-            let position = match position {
+            let Some(position) =
+                fit_mouse_position_to_grid(kind, *position, runtime.current_size())
+            else {
+                continue;
+            };
+            let position = match &position {
                 crate::protocol::ClientMousePosition::Cell { column, row } => {
                     crate::input::mouse::Position::Cell {
                         column: *column,
@@ -526,5 +560,110 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn mouse_outside_the_pty_grid_drops_presses_and_clamps_releases() {
+        use crate::protocol::ClientMousePosition::{Cell, Pixels};
+        let grid = (17, 67);
+        let inside = Cell {
+            column: 66,
+            row: 16,
+        };
+        assert_eq!(
+            fit_mouse_position_to_grid(
+                MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                inside,
+                grid
+            ),
+            Some(inside)
+        );
+        let padding = Pixels {
+            x: 900,
+            y: 500,
+            column: 90,
+            row: 30,
+        };
+        for kind in [
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            MouseEventKind::Moved,
+        ] {
+            assert_eq!(fit_mouse_position_to_grid(kind, padding, grid), None);
+        }
+        for kind in [
+            MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            MouseEventKind::ScrollUp,
+        ] {
+            assert_eq!(
+                fit_mouse_position_to_grid(kind, padding, grid),
+                Some(Cell {
+                    column: 66,
+                    row: 16
+                })
+            );
+        }
+        assert_eq!(
+            fit_mouse_position_to_grid(
+                MouseEventKind::ScrollDown,
+                Cell { column: 3, row: 40 },
+                grid
+            ),
+            Some(Cell { column: 3, row: 16 })
+        );
+        assert_eq!(
+            fit_mouse_position_to_grid(MouseEventKind::ScrollDown, inside, (0, 0)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_click_in_pane_padding_never_reaches_the_child() {
+        // SGR mouse reporting, so every forwarded press or release is visible.
+        let (runtime, mut input) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                20,
+                5,
+                0,
+                b"\x1b[?1000h\x1b[?1006h",
+                8,
+            );
+        let mouse = |kind, column, row| ClientPaneInputEvent::Mouse {
+            kind,
+            position: crate::protocol::ClientMousePosition::Cell { column, row },
+            geometry: None,
+            modifiers: 0,
+            lines: 1,
+        };
+        let left = crate::protocol::ClientMouseButton::Left;
+
+        apply_client_pane_input_events(
+            &runtime,
+            &[mouse(crate::protocol::ClientMouseKind::Down(left), 30, 2)],
+        )
+        .expect("padding press");
+        assert!(
+            input.try_recv().is_err(),
+            "a press in the padding is dropped"
+        );
+
+        apply_client_pane_input_events(
+            &runtime,
+            &[
+                mouse(crate::protocol::ClientMouseKind::Down(left), 4, 2),
+                mouse(crate::protocol::ClientMouseKind::Up(left), 30, 2),
+            ],
+        )
+        .expect("press inside, release in the padding");
+        assert_eq!(
+            input.try_recv().expect("press inside the grid"),
+            Bytes::from_static(b"\x1b[<0;5;3M")
+        );
+        assert_eq!(
+            input
+                .try_recv()
+                .expect("release clamped to the last column"),
+            Bytes::from_static(b"\x1b[<0;20;3m")
+        );
     }
 }

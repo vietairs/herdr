@@ -33,6 +33,16 @@
           "type": "integer",
           "default": "40",
           "description": "Virtual terminal height used for layout and newly created panes when no client is attached. Must be greater than zero."
+        },
+        {
+          "key": "server.client_size_policy",
+          "type": "enum",
+          "default": "\"smallest\"",
+          "description": "How a tab's pane sizes are chosen when several clients, or a federation mount, view it. `smallest` sizes the tab to the smallest width and height among its viewers, so nothing is cropped and larger screens show blank padding; a mount's size counts as one more viewer while host clients are on the tab. `latest` lets the client that most recently focused, typed in, or resized the tab size it, cropping the others, and a mount keeps exclusive control of the terminals it shows. Reloadable live via the [server] section.",
+          "values": [
+            "smallest",
+            "latest"
+          ]
         }
       ]
     },

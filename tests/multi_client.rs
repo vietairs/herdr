@@ -79,7 +79,16 @@ fn spawn_server(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
     fs::create_dir_all(config.join("herdr")).unwrap();
     fs::create_dir_all(runtime).unwrap();
     register_runtime_dir(runtime);
-    fs::write(config.join("herdr/config.toml"), "onboarding = false\n").unwrap();
+    // These tests assert latest-client-wins geometry; the production default is `smallest`.
+    // Debug builds read `herdr-dev`, release builds `herdr`; cover both.
+    for app_dir in ["herdr", "herdr-dev"] {
+        fs::create_dir_all(config.join(app_dir)).unwrap();
+        fs::write(
+            config.join(app_dir).join("config.toml"),
+            "onboarding = false\n[server]\nclient_size_policy = \"latest\"\n",
+        )
+        .unwrap();
+    }
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 24,

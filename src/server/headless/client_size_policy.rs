@@ -1,0 +1,518 @@
+//! Per-tab PTY size arbitration between the clients that view a tab.
+//!
+//! One terminal has exactly one PTY size, while every attached client lays the
+//! tab out at its own surface size. `[server] client_size_policy` decides which
+//! size wins:
+//!
+//! - `latest`: the tab's geometry controller (the client that last claimed the
+//!   tab) sizes it; other viewers are cropped or padded. A federation mount's
+//!   size is exclusive for the terminals it drives.
+//! - `smallest`: the PTY area is the componentwise minimum of every viewer's
+//!   surface, so nothing is cropped and larger viewers see blank padding. A
+//!   mount's size is one more vote per terminal while host viewers are on the
+//!   tab, and applies unclamped once they leave.
+//!
+//! Everything here runs on events (connect, resize, navigation, layout and
+//! mount changes), never per frame. The PTY's own size is the per-tab cache and
+//! `TerminalRuntime::resize` deduplicates, so an unchanged minimum costs one
+//! layout and no `SIGWINCH`.
+
+use super::*;
+use crate::config::ClientSizePolicy;
+
+/// Viewer surfaces narrower than this do not vote under `smallest`. They are
+/// zero-size or minimized windows, and letting them vote would collapse the
+/// tab for every other viewer.
+pub(super) const MIN_SIZE_VOTE_COLS: u16 = 10;
+/// Viewer surfaces shorter than this do not vote under `smallest`.
+pub(super) const MIN_SIZE_VOTE_ROWS: u16 = 3;
+
+/// The componentwise minimum of the `(cols, rows)` votes that meet the floor,
+/// or `None` when no vote is valid.
+pub(super) fn smallest_valid_size(
+    votes: impl IntoIterator<Item = (u16, u16)>,
+) -> Option<(u16, u16)> {
+    votes
+        .into_iter()
+        .filter(|&(cols, rows)| cols >= MIN_SIZE_VOTE_COLS && rows >= MIN_SIZE_VOTE_ROWS)
+        .reduce(|(min_cols, min_rows), (cols, rows)| (min_cols.min(cols), min_rows.min(rows)))
+}
+
+/// The area a tab's panes are laid out in to size their PTYs, and the cell
+/// size used for the PTYs' pixel dimensions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TabSizeArea {
+    pub(super) area: Rect,
+    pub(super) cell_size: crate::kitty_graphics::HostCellSize,
+}
+
+impl HeadlessServer {
+    pub(super) fn client_size_policy(&self) -> ClientSizePolicy {
+        self.app.state.client_size_policy
+    }
+
+    /// Shell clients whose active surface currently shows `tab_id`, in id
+    /// order. The same set `reapply_controlled_shell_tab_geometry` groups by.
+    pub(super) fn shell_tab_viewers(&self, tab_id: &str) -> Vec<u64> {
+        let mut viewers = self
+            .clients
+            .iter()
+            .filter(|(_, client)| client.is_active_shell_client() && client.writer.is_some())
+            .filter(|(&client_id, _)| {
+                self.shell_tab_id_for_client(client_id).as_deref() == Some(tab_id)
+            })
+            .map(|(&client_id, _)| client_id)
+            .collect::<Vec<_>>();
+        viewers.sort_unstable();
+        viewers
+    }
+
+    /// The single resolver every tab-sizing path goes through.
+    ///
+    /// `controller_id` is the client sizing the tab: its cell size always sets
+    /// the PTYs' pixel dimensions, and under `latest` its surface is the area.
+    /// Under `smallest` the area is the minimum over the tab's viewers, falling
+    /// back to the controller's surface when no viewer has a valid size.
+    pub(super) fn tab_size_area(
+        &self,
+        controller_id: u64,
+        target: crate::ui::TabSurfaceTarget,
+    ) -> Option<TabSizeArea> {
+        let controller = self.clients.get(&controller_id)?;
+        let cell_size = if controller.cell_size.is_known() {
+            controller.cell_size
+        } else {
+            crate::kitty_graphics::HostCellSize::default()
+        };
+        let (cols, rows) = match self.client_size_policy() {
+            ClientSizePolicy::Latest => controller.terminal_size,
+            ClientSizePolicy::Smallest => self
+                .tab_id_for_target(target)
+                .and_then(|tab_id| {
+                    smallest_valid_size(
+                        self.shell_tab_viewers(&tab_id)
+                            .into_iter()
+                            .filter_map(|viewer| self.clients.get(&viewer))
+                            .map(|viewer| viewer.terminal_size),
+                    )
+                })
+                .unwrap_or(controller.terminal_size),
+        };
+        Some(TabSizeArea {
+            area: Rect::new(0, 0, cols, rows),
+            cell_size,
+        })
+    }
+
+    /// A shell client's surface size changed. Under `latest` only the tab's
+    /// controller resizes it; under `smallest` the client's tab is
+    /// re-arbitrated whoever controls it, so a smaller viewer shrinks the tab
+    /// without having to claim it first.
+    pub(super) fn resize_shell_tab_for_client_size(
+        &mut self,
+        client_id: u64,
+        start_pending_agent_resumes: bool,
+    ) -> bool {
+        if self.client_size_policy() == ClientSizePolicy::Latest {
+            return self.resize_shell_tab_if_controller(client_id, start_pending_agent_resumes);
+        }
+        if !self
+            .clients
+            .get(&client_id)
+            .is_some_and(|client| client.shell_surface_active)
+        {
+            return false;
+        }
+        let Some(target) = self.shell_target_for_client(client_id) else {
+            return false;
+        };
+        let Some(tab_id) = self.tab_id_for_target(target) else {
+            return false;
+        };
+        let controller_id = self
+            .tab_geometry_controllers
+            .get(&tab_id)
+            .copied()
+            .filter(|controller_id| self.clients.contains_key(controller_id))
+            .unwrap_or(client_id);
+        self.apply_shell_tab_geometry_to_target(controller_id, target, start_pending_agent_resumes)
+    }
+
+    /// Under `smallest`, re-arbitrates every viewed tab after a client joined,
+    /// left, or moved between tabs. Under `latest` the controller keeps its
+    /// size until the next claim, so this does nothing.
+    pub(super) fn rearbitrate_shell_tabs_after_viewer_change(
+        &mut self,
+        start_pending_agent_resumes: bool,
+    ) -> bool {
+        self.client_size_policy() == ClientSizePolicy::Smallest
+            && self.reapply_controlled_shell_tab_geometry(start_pending_agent_resumes)
+    }
+
+    fn has_sized_mount_votes(&self) -> bool {
+        self.app
+            .state
+            .federation_owned_terminal_sizes
+            .values()
+            .any(Option::is_some)
+    }
+
+    /// Under `smallest`, sizes every mount-voted terminal laid out in `target`
+    /// to the smaller of its pane here and the mount's vote.
+    ///
+    /// The generic tab resize skips these terminals (`host_owns_terminal_size`),
+    /// so this is the only host path that sizes them while host viewers are on
+    /// the tab. A vote of `None` stays mount-exclusive and is left alone.
+    pub(super) fn clamp_mount_size_votes_in_tab(
+        &self,
+        target: crate::ui::TabSurfaceTarget,
+        size: TabSizeArea,
+    ) {
+        if self.client_size_policy() != ClientSizePolicy::Smallest || !self.has_sized_mount_votes()
+        {
+            return;
+        }
+        let Some(tab) = self
+            .app
+            .state
+            .workspaces
+            .get(target.workspace_index)
+            .and_then(|workspace| workspace.tabs.get(target.tab_index))
+        else {
+            return;
+        };
+        let layout = crate::ui::compute_tab_surface_for(
+            &self.app.state,
+            &self.app.terminal_runtimes,
+            Some(target),
+            size.area,
+            false,
+            size.cell_size,
+        );
+        for pane in &layout.pane_infos {
+            let Some(terminal_id) = tab.terminal_id(pane.id) else {
+                continue;
+            };
+            let Some(Some((vote_cols, vote_rows))) = self
+                .app
+                .state
+                .federation_owned_terminal_sizes
+                .get(terminal_id)
+                .copied()
+            else {
+                continue;
+            };
+            let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                &self.app.terminal_runtimes,
+                target.workspace_index,
+                pane.id,
+            ) else {
+                continue;
+            };
+            runtime.resize(
+                pane.inner_rect.height.min(vote_rows),
+                pane.inner_rect.width.min(vote_cols),
+                size.cell_size.width_px,
+                size.cell_size.height_px,
+            );
+        }
+    }
+
+    /// Whether any host shell viewer currently shows the pane attached to
+    /// `terminal_id`, returning that pane's location either way.
+    fn host_shell_view_of_terminal(
+        &self,
+        terminal_id: &crate::terminal::TerminalId,
+    ) -> Option<(usize, crate::layout::PaneId, bool)> {
+        let (workspace_index, pane_id) = self.app.state.workspaces.iter().enumerate().find_map(
+            |(workspace_index, workspace)| {
+                workspace.tabs.iter().find_map(|tab| {
+                    tab.panes
+                        .iter()
+                        .find(|(_, pane)| pane.attached_terminal_id == *terminal_id)
+                        .map(|(&pane_id, _)| (workspace_index, pane_id))
+                })
+            },
+        )?;
+        let viewed = self.clients.iter().any(|(&client_id, client)| {
+            client.is_active_shell_client()
+                && client.writer.is_some()
+                && self.shell_client_views_pane(client_id, workspace_index, pane_id)
+        });
+        Some((workspace_index, pane_id, viewed))
+    }
+
+    /// Under `smallest`, hands every mount-voted terminal that no host viewer
+    /// shows its own vote size back. Runs at the end of each re-sizing pass, so
+    /// a terminal clamped for a host viewer grows back to the mount's size once
+    /// that viewer leaves the tab, detaches, or zooms another pane.
+    pub(super) fn settle_unviewed_mount_size_votes(&self) {
+        if self.client_size_policy() != ClientSizePolicy::Smallest || !self.has_sized_mount_votes()
+        {
+            return;
+        }
+        for (terminal_id, vote) in &self.app.state.federation_owned_terminal_sizes {
+            let Some((cols, rows)) = *vote else {
+                continue;
+            };
+            let Some((workspace_index, pane_id, viewed)) =
+                self.host_shell_view_of_terminal(terminal_id)
+            else {
+                continue;
+            };
+            if viewed {
+                continue;
+            }
+            if let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                &self.app.terminal_runtimes,
+                workspace_index,
+                pane_id,
+            ) {
+                runtime.resize(rows, cols, 0, 0);
+            }
+        }
+    }
+
+    /// Applies a change in the mount's size votes reported by federation
+    /// dispatch (only under `smallest`). Returns whether a host-viewed tab was
+    /// re-sized, which needs a render.
+    pub(super) fn apply_mount_size_vote_change(
+        &mut self,
+        change: crate::server::federation_actor::MountSizeVoteChange,
+    ) -> bool {
+        use crate::server::federation_actor::MountSizeVoteChange;
+
+        match change {
+            MountSizeVoteChange::Released => {
+                // The host owns those terminals again: size them from its viewers.
+                self.reapply_controlled_shell_tab_geometry(true)
+            }
+            MountSizeVoteChange::Resized(terminal_id) => {
+                let viewed_tab = self
+                    .shell_tab_target_for_terminal(terminal_id.as_str())
+                    .and_then(|target| {
+                        let tab_id = self.tab_id_for_target(target)?;
+                        let viewers = self.shell_tab_viewers(&tab_id);
+                        let controller_id = self
+                            .tab_geometry_controllers
+                            .get(&tab_id)
+                            .copied()
+                            .filter(|controller_id| viewers.contains(controller_id))
+                            .or_else(|| viewers.first().copied())?;
+                        Some((controller_id, target))
+                    });
+                // With host viewers the tab pass clamps the vote (and its
+                // settle pass covers a pane hidden by zoom); without them the
+                // vote applies unclamped, as it would under `latest`.
+                let rearbitrated = viewed_tab.is_some_and(|(controller_id, target)| {
+                    self.apply_shell_tab_geometry_to_target(controller_id, target, true)
+                });
+                let vote = self
+                    .app
+                    .state
+                    .federation_owned_terminal_sizes
+                    .get(&terminal_id)
+                    .copied()
+                    .flatten();
+                let Some(runtime) = self
+                    .app
+                    .terminal_runtime_for_terminal_id(terminal_id.as_str())
+                else {
+                    return rearbitrated;
+                };
+                if let (false, Some((cols, rows))) = (rearbitrated, vote) {
+                    runtime.resize(rows, cols, 0, 0);
+                }
+                // Unconditional, including when the resize deduped: the mount's
+                // mirror was freshly reflowed and needs a repaint, and an
+                // unchanged size sends no `SIGWINCH`.
+                crate::server::federation_actor::nudge_mounted_child_redraw(runtime);
+                rearbitrated
+            }
+        }
+    }
+
+    /// A config reload switched the policy: re-size every controlled tab under
+    /// the new rule. Switching to `latest` makes mount votes exclusive again,
+    /// so each voted terminal first gets the mount's size back.
+    pub(super) fn apply_reloaded_client_size_policy(&mut self) {
+        if self.client_size_policy() == ClientSizePolicy::Latest {
+            for (terminal_id, vote) in &self.app.state.federation_owned_terminal_sizes {
+                let Some((cols, rows)) = *vote else {
+                    continue;
+                };
+                if let Some(runtime) = self
+                    .app
+                    .terminal_runtime_for_terminal_id(terminal_id.as_str())
+                {
+                    runtime.resize(rows, cols, 0, 0);
+                }
+            }
+        }
+        info!(policy = ?self.client_size_policy(), "client size policy changed");
+        self.reapply_controlled_shell_tab_geometry(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smallest_valid_size_is_the_componentwise_minimum() {
+        assert_eq!(
+            smallest_valid_size([(100, 35), (68, 40), (120, 17)]),
+            Some((68, 17))
+        );
+        assert_eq!(smallest_valid_size([(80, 24)]), Some((80, 24)));
+    }
+
+    #[test]
+    fn smallest_valid_size_ignores_zero_and_below_floor_votes() {
+        assert_eq!(
+            smallest_valid_size([(0, 0), (100, 35), (9, 40), (80, 2), (68, 17)]),
+            Some((68, 17))
+        );
+        assert_eq!(
+            smallest_valid_size([(MIN_SIZE_VOTE_COLS, MIN_SIZE_VOTE_ROWS), (100, 35)]),
+            Some((MIN_SIZE_VOTE_COLS, MIN_SIZE_VOTE_ROWS))
+        );
+        assert_eq!(smallest_valid_size([(0, 0), (9, 50), (50, 2)]), None);
+        assert_eq!(smallest_valid_size(std::iter::empty()), None);
+    }
+
+    /// Deterministic xorshift, so the sweep below is reproducible without a
+    /// property-testing dependency.
+    struct Sweep(u64);
+
+    impl Sweep {
+        fn next(&mut self, below: u16) -> u16 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            u16::try_from(self.0 % u64::from(below)).unwrap_or(0)
+        }
+    }
+
+    /// Five panes: a horizontal split whose halves are split vertically, one
+    /// of them twice, with every split ratio drawn from the sweep.
+    fn nested_layout_state(sweep: &mut Sweep) -> crate::app::AppState {
+        use ratatui::layout::Direction;
+        let mut workspace = crate::workspace::Workspace::test_new("size-policy-layout");
+        let root = workspace.tabs[0].root_pane;
+        let right = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(root);
+        let lower_left = workspace.test_split(Direction::Vertical);
+        workspace.tabs[0].layout.focus_pane(lower_left);
+        workspace.test_split(Direction::Vertical);
+        workspace.tabs[0].layout.focus_pane(right);
+        workspace.test_split(Direction::Vertical);
+        for path in [
+            &[][..],
+            &[false][..],
+            &[true][..],
+            &[false, true][..],
+            &[true, false][..],
+        ] {
+            let ratio = 0.05 + f32::from(sweep.next(91)) / 100.0;
+            workspace.tabs[0].layout.set_ratio_at(path, ratio);
+        }
+        let mut state = crate::app::AppState::test_new();
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.selected = 0;
+        state
+    }
+
+    /// The `smallest` policy lays a tab out once, in the componentwise minimum
+    /// of its viewers' surfaces. That is only enough if no pane laid out in a
+    /// smaller area is larger than the same pane laid out in a larger one, for
+    /// every chrome setting, split ratio and zoom. This pins that assumption.
+    #[test]
+    fn a_smaller_area_never_lays_out_a_larger_pane() {
+        let registry = crate::terminal::TerminalRuntimeRegistry::new();
+        let mut sweep = Sweep(0x9e37_79b9_7f4a_7c15);
+        let (mut checked, mut degenerate) = (0_u32, 0_u32);
+        for _ in 0..60 {
+            let mut state = nested_layout_state(&mut sweep);
+            for borders in [
+                crate::config::PaneBordersConfig::Auto,
+                crate::config::PaneBordersConfig::Always,
+                crate::config::PaneBordersConfig::Off,
+            ] {
+                for (gaps, outer_borders, zoomed) in [
+                    (false, false, false),
+                    (true, false, false),
+                    (false, true, false),
+                    (true, true, false),
+                    (true, true, true),
+                    (false, false, true),
+                ] {
+                    state.pane_borders = borders;
+                    state.pane_gaps = gaps;
+                    state.pane_outer_borders = outer_borders;
+                    state.workspaces[0].tabs[0].zoomed = zoomed;
+                    let small = Rect::new(
+                        0,
+                        0,
+                        MIN_SIZE_VOTE_COLS + sweep.next(150),
+                        MIN_SIZE_VOTE_ROWS + sweep.next(60),
+                    );
+                    let large = Rect::new(
+                        0,
+                        0,
+                        small.width + sweep.next(80),
+                        small.height + sweep.next(30),
+                    );
+                    let layout = |area| {
+                        crate::ui::compute_tab_surface_for(
+                            &state,
+                            &registry,
+                            Some(crate::ui::TabSurfaceTarget {
+                                workspace_index: 0,
+                                tab_index: 0,
+                            }),
+                            area,
+                            false,
+                            crate::kitty_graphics::HostCellSize::default(),
+                        )
+                        .pane_infos
+                    };
+                    let large_panes = layout(large);
+                    let small_panes = layout(small);
+                    // A pane that collapses to zero cells is not detected as a
+                    // neighbor, so its sibling loses a border and gains a row
+                    // in the smaller area. That degenerate layout is outside
+                    // the assumption; every usable layout must satisfy it.
+                    if small_panes
+                        .iter()
+                        .any(|pane| pane.rect.width == 0 || pane.rect.height == 0)
+                    {
+                        degenerate += 1;
+                        continue;
+                    }
+                    checked += 1;
+                    for pane in small_panes {
+                        let Some(bigger) = large_panes.iter().find(|other| other.id == pane.id)
+                        else {
+                            panic!("pane {:?} missing from the larger layout", pane.id);
+                        };
+                        assert!(
+                            pane.inner_rect.width <= bigger.inner_rect.width
+                                && pane.inner_rect.height <= bigger.inner_rect.height,
+                            "{small:?} -> {:?} vs {large:?} -> {:?} \
+                             (borders {borders:?}, gaps {gaps}, outer {outer_borders}, \
+                             zoomed {zoomed})",
+                            pane.inner_rect,
+                            bigger.inner_rect,
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 10 * degenerate,
+            "the sweep must mostly check usable layouts ({checked} checked, {degenerate} skipped)"
+        );
+    }
+}
