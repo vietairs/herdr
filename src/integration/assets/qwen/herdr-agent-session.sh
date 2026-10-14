@@ -1,7 +1,7 @@
 #!/bin/sh
 # managed by herdr; reinstalling the integration replaces this file.
 # HERDR_INTEGRATION_ID=qwen
-# HERDR_INTEGRATION_VERSION=2
+# HERDR_INTEGRATION_VERSION=3
 
 case "${1:-}" in session|usage) ;; *) exit 0 ;; esac
 [ "${HERDR_ENV:-}" = "1" ] || exit 0

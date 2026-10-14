@@ -219,10 +219,10 @@ class CursorStatuslineTapTests(unittest.TestCase):
         self.assert_passthrough(result)
         self.assertEqual(requests, [])
 
-    def test_assets_carry_version_two(self):
+    def test_assets_carry_version_three(self):
         for asset in (TAP_ASSET, *HOOK_ASSETS):
             with self.subTest(asset=asset.name):
-                self.assertIn("HERDR_INTEGRATION_VERSION=2", asset.read_text("utf-8"))
+                self.assertIn("HERDR_INTEGRATION_VERSION=3", asset.read_text("utf-8"))
         self.assertIn("HERDR_INTEGRATION_ID=cursor", TAP_ASSET.read_text("utf-8"))
 
 

@@ -4,7 +4,7 @@
 # runs the statusline command it wraps, unchanged, and reports context usage
 # and prompt-cache expiry to herdr in the background.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=12
+# HERDR_INTEGRATION_VERSION=13
 #
 # usage: sh herdr-statusline-tap.sh ORIGINAL_COMMAND
 # no `set -e`: every failure path must still run the original command.

@@ -4,7 +4,7 @@
 # runs the statusline command it wraps, unchanged, and reports context usage
 # to herdr in the background.
 # HERDR_INTEGRATION_ID=antigravity_cli
-# HERDR_INTEGRATION_VERSION=4
+# HERDR_INTEGRATION_VERSION=5
 #
 # usage: sh herdr-statusline-tap.sh ORIGINAL_COMMAND
 # no `set -e`: every failure path must still run the original command.
