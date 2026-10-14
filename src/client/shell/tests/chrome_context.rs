@@ -478,13 +478,17 @@ fn new_tab_overlay_owns_text_cursor_and_submits_public_api_request() {
 }
 
 #[test]
-fn close_confirmation_error_becomes_client_owned_overlay_and_stable_group_close() {
+fn close_confirmation_error_becomes_client_owned_overlay_and_stable_workspace_close() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
     let mut close = ClientShellInput::default();
-    state.record_binding(
-        crate::input::KeybindMatch::Action(crate::input::KeybindAction::ClosePane),
+    // Exercise the server error fallback directly: last-pane keybindings now
+    // confirm locally before issuing a request.
+    state.push_endpoint_method(
+        crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
+            pane_id: "pane_1".into(),
+        }),
         &mut close,
     );
     let [ClientShellAction::Endpoint { request, .. }] = &close.actions[..] else {
@@ -524,7 +528,7 @@ fn close_confirmation_error_becomes_client_owned_overlay_and_stable_group_close(
     assert!(matches!(
         &request.method,
         crate::api::schema::Method::WorkspaceClose(params)
-            if params.workspace_id == "ws_1" && params.close_group
+            if params.workspace_id == "ws_1" && !params.close_group
     ));
 }
 
@@ -925,7 +929,8 @@ fn workspace_and_tab_menu_rows_are_pinned_for_every_shape() {
         ["Rename", "Close", "Delete worktree checkout..."]
     );
 
-    // Federated git-group workspace: non-linked worktree shared by multiple workspaces.
+    // Federated git-group workspace: a non-linked parent checkout with a linked
+    // worktree child sharing its key.
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     let mut snapshot_group = snapshot();
     let shared_worktree = ClientShellWorktree {
@@ -940,7 +945,10 @@ fn workspace_and_tab_menu_rows_are_pinned_for_every_shape() {
     ws2.active_tab_id = "tab_2".into();
     ws2.number = 2;
     ws2.focused = false;
-    ws2.worktree = Some(shared_worktree);
+    ws2.worktree = Some(ClientShellWorktree {
+        is_linked_worktree: true,
+        ..shared_worktree
+    });
     snapshot_group.workspaces.push(ws2);
     state.set_snapshot(Box::new(snapshot_group));
     state.open_workspace_context_menu("ws_1".into(), 0, 0);
