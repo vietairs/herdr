@@ -2396,6 +2396,7 @@ impl HeadlessServer {
                 }
                 client.request_repaint();
                 self.promote_client_to_foreground(client_id);
+                self.grow_sole_viewer_tab_at_once(client_id);
                 self.resize_shell_tab_for_client_size(client_id, true);
                 true
             }

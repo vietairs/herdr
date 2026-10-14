@@ -1097,9 +1097,10 @@ async fn smallest_shrinks_at_once_and_grows_at_most_one_debounce_late() {
     let mut server = smallest_server();
     let pane_id = install_shared_view_test_runtime(&mut server);
     let _large = connect_sized_shell(&mut server, 7, LARGE);
+    let _resizing = connect_sized_shell(&mut server, 8, LARGE);
     assert_eq!(shared_pty_size(&server, pane_id), LARGE_PTY);
 
-    resize_shell(&mut server, 7, SMALL);
+    resize_shell(&mut server, 8, SMALL);
     assert_eq!(
         shared_pty_size(&server, pane_id),
         SMALL_PTY,
@@ -1108,11 +1109,11 @@ async fn smallest_shrinks_at_once_and_grows_at_most_one_debounce_late() {
 
     // Growing in steps keeps the first deadline, so a drag lands on time.
     let debounce = crate::server::headless::client_size_policy::SIZE_GROWTH_DEBOUNCE;
-    resize_shell(&mut server, 7, (80, 25));
+    resize_shell(&mut server, 8, (80, 25));
     let due = server.next_tab_size_growth_due();
     assert!(due.is_some());
     advance_size_clock(&mut server, debounce / 2);
-    resize_shell(&mut server, 7, LARGE);
+    resize_shell(&mut server, 8, LARGE);
     assert_eq!(server.next_tab_size_growth_due(), due);
     assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
     assert!(!advance_size_clock(
@@ -1160,6 +1161,25 @@ async fn smallest_a_viewer_arriving_at_a_tab_nobody_viewed_takes_its_size_at_onc
     focus(&mut server, 8, &shared_tab_id);
 
     assert_eq!(shared_pty_size(&server, pane_id), LARGE_PTY);
+    assert_eq!(server.next_tab_size_growth_due(), None);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn smallest_the_only_viewer_growing_its_own_surface_grows_at_once() {
+    let mut server = smallest_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let _only = connect_sized_shell(&mut server, 7, LARGE);
+    resize_shell(&mut server, 7, SMALL);
+    assert_eq!(shared_pty_size(&server, pane_id), SMALL_PTY);
+
+    resize_shell(&mut server, 7, LARGE);
+
+    assert_eq!(
+        shared_pty_size(&server, pane_id),
+        LARGE_PTY,
+        "no other viewer to spare a reflow"
+    );
     assert_eq!(server.next_tab_size_growth_due(), None);
     shutdown_test_runtimes(&mut server);
 }

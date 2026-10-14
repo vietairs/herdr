@@ -119,6 +119,10 @@ impl TabSizeGrowthTracker {
         growth.applied
     }
 
+    fn forget(&mut self, tab_id: &str) {
+        self.tabs.remove(tab_id);
+    }
+
     fn retain_tabs(&mut self, mut keep: impl FnMut(&str) -> bool) {
         self.tabs.retain(|tab_id, _| keep(tab_id));
     }
@@ -249,6 +253,23 @@ impl HeadlessServer {
             .filter(|controller_id| self.clients.contains_key(controller_id))
             .unwrap_or(client_id);
         self.apply_shell_tab_geometry_to_target(controller_id, target, start_pending_agent_resumes)
+    }
+
+    /// A shell client resized its own surface. When it is the only viewer of
+    /// its tab there is no other viewer to spare a reflow, so the tab takes
+    /// the new size at once instead of after `SIZE_GROWTH_DEBOUNCE`. Growth
+    /// caused by another viewer leaving is still debounced, so a viewer that
+    /// reconnects costs no reflow.
+    pub(super) fn grow_sole_viewer_tab_at_once(&mut self, client_id: u64) {
+        if self.client_size_policy() != ClientSizePolicy::Smallest {
+            return;
+        }
+        let Some(tab_id) = self.shell_tab_id_for_client(client_id) else {
+            return;
+        };
+        if self.shell_tab_viewers(&tab_id) == [client_id] {
+            self.tab_size_growth.forget(&tab_id);
+        }
     }
 
     /// Drops the growth state of every tab `keep` rejects (see
