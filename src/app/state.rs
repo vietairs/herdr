@@ -861,13 +861,21 @@ pub struct AppState {
     /// never renders.
     ///
     /// The value is the mount's size vote as `(cols, rows)`. `None` means the
-    /// mount drives the terminal (it asked for a redraw) but has not sent a
-    /// size yet, so the terminal stays mount-exclusive until one arrives. Under
-    /// the `smallest` client size policy a `Some` vote is combined with the
-    /// host's own viewers instead of locking them out; under `latest` every
-    /// entry is exclusive, as the bare set used to be.
+    /// terminal is mount-exclusive: the mount drives it but either has not
+    /// sent a size yet (it only asked for a redraw), or its connection did not
+    /// agree `Capability::PTY_SIZE_NOTICE` and so could not follow a PTY this
+    /// host bounds (see `federation_mount_follows_pty_size`). Under the
+    /// `smallest` client size policy a `Some` vote is combined with the host's
+    /// own viewers instead of locking them out; under `latest` every entry is
+    /// exclusive, as the bare set used to be.
     pub federation_owned_terminal_sizes:
         std::collections::HashMap<crate::terminal::TerminalId, Option<(u16, u16)>>,
+    /// Whether the mounted controller's connection agreed
+    /// `Capability::PTY_SIZE_NOTICE`. Set when it mounts and cleared once no
+    /// controller is mounted, so it is `false` for a legacy mount and for no
+    /// mount at all: only a mount that said it applies the host's PTY size
+    /// may have its size shared with this host's viewers or be sent notices.
+    pub(crate) federation_mount_follows_pty_size: bool,
     /// The PTY size this host last published for each terminal a mount
     /// subscribed to, read by that mount's output pump (see
     /// `federation_actor::PtySizeNotice`).
@@ -1292,6 +1300,7 @@ impl AppState {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             federation_owned_terminal_sizes: std::collections::HashMap::new(),
+            federation_mount_follows_pty_size: false,
             federation_pty_size_notices: std::collections::HashMap::new(),
             client_size_policy: crate::config::ClientSizePolicy::default(),
             pane_id_aliases: std::collections::HashMap::new(),

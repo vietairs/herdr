@@ -25,7 +25,8 @@ use crate::remote::{
 /// Local-capability set advertised to the federation host. It is a strict
 /// superset of the one-shot `attempt_federation_mount` snapshot dial, which
 /// advertises only `SCROLLBACK_REPLAY` and `AGENT_STATUS`: a live mount also
-/// advertises `FILE_STAGING`, `WORKSPACE_TAB_CLOSE` and `PANE_NAME_SOURCE`.
+/// advertises `FILE_STAGING`, `WORKSPACE_TAB_CLOSE`, `PANE_NAME_SOURCE` and
+/// `PTY_SIZE_NOTICE`.
 /// A capability added here is therefore not automatically advertised by the
 /// snapshot dial — update both when a new one must apply to each.
 fn local_capabilities() -> std::collections::BTreeSet<Capability> {
@@ -54,6 +55,11 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
         // Advertised unconditionally: it describes what this build's own
         // `PaneInfo` carries, which no local platform fact can change.
         Capability::new(Capability::PANE_NAME_SOURCE),
+        // States that this build sizes a mounted pane's mirror to the host's
+        // `Resize` notice (`pane_source::RemotePtySize`), so the host may
+        // bound the PTY by its own viewers. Advertised unconditionally: the
+        // mirror code is the same on every platform.
+        Capability::new(Capability::PTY_SIZE_NOTICE),
     ]
     .into_iter()
     .collect()

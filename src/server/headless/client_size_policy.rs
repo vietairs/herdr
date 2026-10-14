@@ -12,7 +12,9 @@
 //!   mount's size is one more vote per terminal while host viewers are on the
 //!   tab, and applies unclamped once they leave. Every size given to a voted
 //!   terminal is published back to the mount (`PtySizeNotice`), so the mount
-//!   sizes its mirror to the PTY instead of to its larger pane.
+//!   sizes its mirror to the PTY instead of to its larger pane. Only a mount
+//!   that agreed `Capability::PTY_SIZE_NOTICE` votes; a legacy mount ignores
+//!   the notice, so its size stays exclusive, as under `latest`.
 //!
 //! Everything here runs on events (connect, resize, navigation, layout and
 //! mount changes), never per frame. The PTY's own size is the per-tab cache and

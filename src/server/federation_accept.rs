@@ -108,9 +108,23 @@ fn federation_capabilities() -> BTreeSet<Capability> {
         // absent rather than as the `Ordinal` its `serde` default would
         // otherwise manufacture; see the constant's doc comment.
         Capability::new(Capability::PANE_NAME_SOURCE),
+        // This host sends PTY size notices; only a mount that also advertises
+        // the name gets them, and only its sizes are shared votes (see the
+        // constant's doc comment and `mount_follows_pty_size_notices`).
+        Capability::new(Capability::PTY_SIZE_NOTICE),
     ]
     .into_iter()
     .collect()
+}
+
+/// Whether the mount on this connection applies the host's PTY size notices,
+/// which is what lets this host bound that mount's terminals by its own
+/// viewers. Read from the negotiated set only: a mount that did not agree the
+/// capability is a legacy mount, whose size stays exclusive.
+fn mount_follows_pty_size_notices(agreed: &AgreedCaps) -> bool {
+    agreed
+        .0
+        .contains(&Capability::new(Capability::PTY_SIZE_NOTICE))
 }
 
 /// The largest cap across every channel, bounding a read-side allocation before
@@ -317,7 +331,13 @@ fn drive_mount<S: FederationStream>(
     // before (or without) a handoff cannot pin the single-controller slot.
     let _release = LeaseReleaseGuard::new(epoch, connid, server_event_tx.clone());
 
-    let Some((snapshot, cursor)) = mount(epoch, connid, server_event_tx)? else {
+    let Some((snapshot, cursor)) = mount(
+        epoch,
+        connid,
+        mount_follows_pty_size_notices(agreed),
+        server_event_tx,
+    )?
+    else {
         debug!(connid, "federation mount refused (reservation superseded)");
         return Ok(());
     };
@@ -1197,8 +1217,10 @@ struct OutputPump {
 ///
 /// Each tick also forwards a changed PTY size notice as a host-to-mount
 /// `Resize`, ahead of that tick's bytes, so output the child drew for the new
-/// size reaches a mirror already resized to it. A mount that predates the
-/// notice ignores an inbound `Resize`, so no capability gates it.
+/// size reaches a mirror already resized to it. Only a mount that agreed
+/// `Capability::PTY_SIZE_NOTICE` is handed a notice anything publishes to
+/// (`federation_actor::subscribe_output`); any other mount's notice stays
+/// unpublished, so this pump never sends it a `Resize`.
 fn output_pump(
     terminal_id: String,
     subscription: OutputSubscription,
@@ -1870,9 +1892,11 @@ fn acquire_controller(
 
 /// Promote the reservation to `Mounted` and fetch the atomic (snapshot, cursor)
 /// via the actor. `None` if the reservation was superseded before the mount.
+/// `pty_size_notice` records whether this mount agreed `PTY_SIZE_NOTICE`.
 fn mount(
     epoch: AcceptEpoch,
     connid: ConnId,
+    pty_size_notice: bool,
     server_event_tx: &mpsc::Sender<ServerEvent>,
 ) -> io::Result<Option<(SessionSnapshot, EventCursor)>> {
     let (reply, rx) = oneshot::channel();
@@ -1880,6 +1904,7 @@ fn mount(
         .blocking_send(ServerEvent::Federation(FederationCommand::Mount {
             epoch,
             connid,
+            pty_size_notice,
             reply,
         }))
         .map_err(|_| io::Error::other("server event loop is gone"))?;
@@ -2679,6 +2704,35 @@ mod tests {
         out_rx: &std_mpsc::Receiver<FederationMessage>,
     ) -> Option<FederationMessage> {
         out_rx.recv_timeout(Duration::from_millis(500)).ok()
+    }
+
+    // Only a mount that advertised `pty_size_notice` follows the host's PTY
+    // size; a mount that predates the name negotiates it away and is legacy.
+    #[test]
+    fn only_a_mount_that_agreed_pty_size_notices_follows_the_host_pty_size() {
+        let host = Handshake {
+            federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+            capabilities: federation_capabilities(),
+            server_instance_id: ServerInstanceId("host".into()),
+        };
+        let mount = |capabilities: &[&str]| Handshake {
+            federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+            capabilities: capabilities
+                .iter()
+                .map(|name| Capability::new(*name))
+                .collect(),
+            server_instance_id: ServerInstanceId("mount".into()),
+        };
+        let agreed = |mount| negotiate(&host, &mount).expect("same protocol version");
+
+        assert!(mount_follows_pty_size_notices(&agreed(mount(&[
+            Capability::AGENT_STATUS,
+            Capability::PTY_SIZE_NOTICE,
+        ]))));
+        assert!(!mount_follows_pty_size_notices(&agreed(mount(&[
+            Capability::AGENT_STATUS,
+            Capability::PANE_NAME_SOURCE,
+        ]))));
     }
 
     // The pump forwards each new PTY size the server loop published as a

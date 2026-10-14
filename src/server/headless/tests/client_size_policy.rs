@@ -561,7 +561,18 @@ struct MountedTerminal {
 
 const MOUNT_CONNID: crate::server::federation_lease::ConnId = 1;
 
+/// Mounts the shared test terminal from a mount that agreed
+/// `Capability::PTY_SIZE_NOTICE`, as every current mount does.
 fn mount_shared_terminal(server: &mut HeadlessServer) -> MountedTerminal {
+    mount_shared_terminal_with(server, true)
+}
+
+/// Mounts the shared test terminal through the real `Mount` command, from a
+/// mount that agreed `PTY_SIZE_NOTICE` or, with `false`, a legacy mount.
+fn mount_shared_terminal_with(
+    server: &mut HeadlessServer,
+    pty_size_notice: bool,
+) -> MountedTerminal {
     let pane_id = install_shared_view_test_runtime(server);
     server.app.state.ensure_test_terminals();
     let terminal_id = server.app.state.workspaces[0]
@@ -573,7 +584,14 @@ fn mount_shared_terminal(server: &mut HeadlessServer) -> MountedTerminal {
         server.federation_lease.try_acquire(epoch, MOUNT_CONNID),
         crate::server::federation_lease::Admission::Accepted
     );
-    assert!(server.federation_lease.try_mount(epoch, MOUNT_CONNID));
+    let (reply, mut mounted) = tokio::sync::oneshot::channel();
+    server.handle_server_event(ServerEvent::Federation(FederationCommand::Mount {
+        epoch,
+        connid: MOUNT_CONNID,
+        pty_size_notice,
+        reply,
+    }));
+    assert!(mounted.try_recv().expect("mount reply").is_some());
     MountedTerminal {
         pane_id,
         terminal_id,
@@ -911,6 +929,89 @@ async fn reloading_into_latest_publishes_the_mounts_own_size_back() {
     // stay bounded by the stale notice when it grows.
     mount_resize(&mut server, &mounted, (130, 45));
     assert_eq!(notice.load(), Some((130, 45)));
+    shutdown_test_runtimes(&mut server);
+}
+
+// A legacy mount (one that never agreed `PTY_SIZE_NOTICE`) ignores the host's
+// size notice, so sharing its size would leave its mirror wider than the PTY.
+
+#[tokio::test]
+async fn smallest_a_legacy_mount_keeps_its_size_exclusive() {
+    let mut server = smallest_server();
+    let mounted = mount_shared_terminal_with(&mut server, false);
+    let _host = connect_sized_shell(&mut server, 7, SMALL);
+    assert_eq!(shared_pty_size(&server, mounted.pane_id), SMALL_PTY);
+
+    mount_resize(&mut server, &mounted, (120, 40));
+    assert_eq!(
+        shared_pty_size(&server, mounted.pane_id),
+        (40, 120),
+        "the legacy mount's size applies unbounded, as under latest"
+    );
+    assert!(server
+        .app
+        .state
+        .federation_owned_terminal_sizes
+        .values()
+        .all(Option::is_none));
+
+    server.claim_shell_tab_geometry(7, false);
+    resize_shell(&mut server, 7, (60, 15));
+    assert!(server.reapply_controlled_shell_tab_geometry(true));
+    assert_eq!(
+        shared_pty_size(&server, mounted.pane_id),
+        (40, 120),
+        "the host viewer cannot bound a legacy mount's terminal"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn smallest_a_legacy_mount_is_sent_no_pty_size() {
+    let mut server = smallest_server();
+    let mounted = mount_shared_terminal_with(&mut server, false);
+    let notice = subscribe_mounted_pty_size(&mut server, &mounted);
+    assert!(
+        server.app.state.federation_pty_size_notices.is_empty(),
+        "nothing can publish to a legacy mount's notice"
+    );
+    let _host = connect_sized_shell(&mut server, 7, SMALL);
+
+    mount_resize(&mut server, &mounted, (120, 40));
+    resize_shell(&mut server, 7, (60, 15));
+    server.app.state.client_size_policy = ClientSizePolicy::Latest;
+    server.apply_reloaded_client_size_policy();
+    mount_resize(&mut server, &mounted, (130, 45));
+
+    assert_eq!(notice.load(), None);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn a_mount_that_agreed_pty_size_notices_is_not_mistaken_for_a_legacy_one() {
+    let mut server = smallest_server();
+    let mounted = mount_shared_terminal(&mut server);
+    assert!(server.app.state.federation_mount_follows_pty_size);
+    mount_resize(&mut server, &mounted, (120, 40));
+    assert_eq!(
+        server
+            .app
+            .state
+            .federation_owned_terminal_sizes
+            .values()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![Some((120, 40))]
+    );
+
+    server.handle_server_event(ServerEvent::Federation(FederationCommand::Release {
+        epoch: mounted.epoch,
+        connid: MOUNT_CONNID,
+    }));
+    assert!(
+        !server.app.state.federation_mount_follows_pty_size,
+        "the capability belongs to the mount that ended"
+    );
     shutdown_test_runtimes(&mut server);
 }
 
