@@ -693,17 +693,15 @@ mod tests {
                     };
                     let large_panes = layout(large);
                     let small_panes = layout(small);
-                    // A pane that collapses to zero cells is not detected as a
-                    // neighbor, so its sibling loses a border and gains a row
-                    // in the smaller area. That degenerate layout is outside
-                    // the assumption; every usable layout must satisfy it.
-                    if small_panes
-                        .iter()
-                        .any(|pane| pane.rect.width == 0 || pane.rect.height == 0)
-                    {
-                        degenerate += 1;
-                        continue;
-                    }
+                    // A pane collapsed to zero cells in the smaller area must
+                    // not cost a sibling its border there: that sibling would
+                    // gain a row the larger viewer lacks, and the PTY sized
+                    // from the smaller area would crop that viewer.
+                    degenerate += u32::from(
+                        small_panes
+                            .iter()
+                            .any(|pane| pane.rect.width == 0 || pane.rect.height == 0),
+                    );
                     checked += 1;
                     for pane in small_panes {
                         let Some(bigger) = large_panes.iter().find(|other| other.id == pane.id)
@@ -724,8 +722,9 @@ mod tests {
             }
         }
         assert!(
-            checked > 10 * degenerate,
-            "the sweep must mostly check usable layouts ({checked} checked, {degenerate} skipped)"
+            degenerate > 0 && checked > degenerate,
+            "the sweep must cover collapsed panes as well as usable layouts \
+             ({checked} checked, {degenerate} with a collapsed pane)"
         );
     }
 }
