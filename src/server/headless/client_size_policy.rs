@@ -10,7 +10,9 @@
 //! - `smallest`: the PTY area is the componentwise minimum of every viewer's
 //!   surface, so nothing is cropped and larger viewers see blank padding. A
 //!   mount's size is one more vote per terminal while host viewers are on the
-//!   tab, and applies unclamped once they leave.
+//!   tab, and applies unclamped once they leave. Every size given to a voted
+//!   terminal is published back to the mount (`PtySizeNotice`), so the mount
+//!   sizes its mirror to the PTY instead of to its larger pane.
 //!
 //! Everything here runs on events (connect, resize, navigation, layout and
 //! mount changes), never per frame. The PTY's own size is the per-tab cache and
@@ -19,6 +21,7 @@
 
 use super::*;
 use crate::config::ClientSizePolicy;
+use crate::server::federation_actor::publish_mounted_pty_size;
 
 /// Viewer surfaces narrower than this do not vote under `smallest`. They are
 /// zero-size or minimized windows, and letting them vote would collapse the
@@ -215,6 +218,7 @@ impl HeadlessServer {
                 size.cell_size.width_px,
                 size.cell_size.height_px,
             );
+            publish_mounted_pty_size(&self.app, terminal_id);
         }
     }
 
@@ -270,6 +274,7 @@ impl HeadlessServer {
             ) {
                 runtime.resize(rows, cols, 0, 0);
             }
+            publish_mounted_pty_size(&self.app, terminal_id);
         }
     }
 
@@ -323,6 +328,7 @@ impl HeadlessServer {
                 if let (false, Some((cols, rows))) = (rearbitrated, vote) {
                     runtime.resize(rows, cols, 0, 0);
                 }
+                publish_mounted_pty_size(&self.app, &terminal_id);
                 // Unconditional, including when the resize deduped: the mount's
                 // mirror was freshly reflowed and needs a repaint, and an
                 // unchanged size sends no `SIGWINCH`.
@@ -347,6 +353,9 @@ impl HeadlessServer {
                 {
                     runtime.resize(rows, cols, 0, 0);
                 }
+                // The mount's mirror was bounded by the host PTY; it is the
+                // mount's own size again.
+                publish_mounted_pty_size(&self.app, terminal_id);
             }
         }
         info!(policy = ?self.client_size_policy(), "client size policy changed");

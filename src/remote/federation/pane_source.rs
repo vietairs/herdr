@@ -48,6 +48,77 @@ const INPUT_CHANNEL_CAPACITY: usize = 256;
 /// `terminal_responses` back to (see `RemoteTerminalSourceHandle::resize`).
 pub(crate) type RemoteOnRead = Box<dyn FnMut(&[u8]) + Send>;
 
+/// A mirrored pane's size facts, shared by the main loop (which lays the pane
+/// out) and the pane's byte-in task (which applies the serving host's size
+/// notices in wire order with its output).
+///
+/// The serving host may run its PTY smaller than this pane, because its own
+/// viewers bound the size too (`client_size_policy = "smallest"`). It then
+/// sends the PTY size back as an inbound `Resize`. The mirror emulator must be
+/// that size, or the program's line wrapping misdraws here; the size this pane
+/// votes to the host stays the pane's own, or the two would ratchet each other
+/// down. Without a notice the mirror is the pane's size, as before.
+#[derive(Debug, Default)]
+pub(crate) struct RemotePtySize {
+    sizes: std::sync::Mutex<RemotePtySizes>,
+    /// Set by the router when a notice arrives, cleared by the byte-in task
+    /// once it applied it, so the per-chunk check is one atomic swap.
+    host_changed: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RemotePtySizes {
+    /// `(rows, cols, cell_width_px, cell_height_px)` this pane's layout asked for.
+    requested: Option<(u16, u16, u32, u32)>,
+    /// `(cols, rows)` of the host PTY, from the latest notice.
+    host: Option<(u16, u16)>,
+}
+
+impl RemotePtySize {
+    fn lock(&self) -> std::sync::MutexGuard<'_, RemotePtySizes> {
+        match self.sizes.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Records the size this pane's layout asked for.
+    pub(crate) fn set_requested(
+        &self,
+        rows: u16,
+        cols: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) {
+        self.lock().requested = Some((rows, cols, cell_width_px, cell_height_px));
+    }
+
+    /// Records the host PTY size from an inbound `Resize` notice.
+    pub(crate) fn note_host_size(&self, cols: u16, rows: u16) {
+        self.lock().host = Some((cols, rows));
+        self.host_changed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether a notice arrived since the last call.
+    pub(crate) fn take_host_change(&self) -> bool {
+        self.host_changed
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// The mirror emulator's size `(rows, cols, cell_width_px,
+    /// cell_height_px)`: the requested size, bounded by the host PTY once a
+    /// notice arrived. `None` before the layout asked for any size.
+    pub(crate) fn mirror_size(&self) -> Option<(u16, u16, u32, u32)> {
+        let sizes = *self.lock();
+        let (rows, cols, cell_width_px, cell_height_px) = sizes.requested?;
+        let (rows, cols) = sizes.host.map_or((rows, cols), |(host_cols, host_rows)| {
+            (rows.min(host_rows), cols.min(host_cols))
+        });
+        Some((rows, cols, cell_width_px, cell_height_px))
+    }
+}
+
 /// Everything needed to wire one remote pane's byte-in/out plumbing onto a
 /// mount's shared federation link.
 pub(crate) struct RemoteTerminalSourceConfig {
@@ -74,6 +145,8 @@ pub(crate) struct RemoteTerminalSourceConfig {
     /// `PtyIoActorConfig`, there is nothing here that can ever produce a
     /// `PaneDied`.
     pub(crate) on_read: RemoteOnRead,
+    /// This pane's size facts; `on_read` applies host size notices from it.
+    pub(crate) pty_size: std::sync::Arc<RemotePtySize>,
 }
 
 /// Handle for one remote-backed pane's `TerminalSource`.
@@ -82,6 +155,7 @@ pub(crate) struct RemoteTerminalSourceHandle {
     mount_generation: u64,
     out_tx: mpsc::UnboundedSender<FederationMessage>,
     input_tx: mpsc::Sender<Bytes>,
+    pty_size: std::sync::Arc<RemotePtySize>,
     reader_task: JoinHandle<()>,
     forward_task: JoinHandle<()>,
 }
@@ -112,6 +186,12 @@ impl RemoteTerminalSourceHandle {
         self.input_tx.clone()
     }
 
+    /// This pane's size facts, which the mount's router feeds host size
+    /// notices into.
+    pub(crate) fn pty_size(&self) -> std::sync::Arc<RemotePtySize> {
+        self.pty_size.clone()
+    }
+
     /// Spawns the byte-in task (drains `output_rx`, calls `on_read`) and the
     /// input-forwarding task (drains a per-pane bounded queue onto the
     /// shared `out_tx`). Neither task touches a local child process or PTY
@@ -123,6 +203,7 @@ impl RemoteTerminalSourceHandle {
             out_tx,
             mut output_rx,
             mut on_read,
+            pty_size,
         } = config;
 
         // Byte-in task (requirement 2 + isolation requirement 6): isolated
@@ -163,6 +244,7 @@ impl RemoteTerminalSourceHandle {
             mount_generation,
             out_tx,
             input_tx,
+            pty_size,
             reader_task,
             forward_task,
         }
@@ -302,6 +384,7 @@ mod tests {
             out_tx,
             output_rx,
             on_read,
+            pty_size: Default::default(),
         });
         (handle, output_tx, out_rx, captured)
     }

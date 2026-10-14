@@ -802,6 +802,10 @@ impl App {
         if let Some(sender) = runtime.relayed_agent_status_sender() {
             router.register_agent_status_sender(raw_terminal_id.clone(), sender);
         }
+        // So the serving host's PTY size notices reach this pane's mirror.
+        if let Some(pty_size) = runtime.remote_pty_size() {
+            router.register_pty_size(raw_terminal_id.clone(), pty_size);
+        }
         router.register_local_terminal(raw_terminal_id, terminal_id.clone());
         let mut terminal = TerminalState::new(
             terminal_id.clone(),

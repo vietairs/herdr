@@ -868,6 +868,13 @@ pub struct AppState {
     /// entry is exclusive, as the bare set used to be.
     pub federation_owned_terminal_sizes:
         std::collections::HashMap<crate::terminal::TerminalId, Option<(u16, u16)>>,
+    /// The PTY size this host last published for each terminal a mount
+    /// subscribed to, read by that mount's output pump (see
+    /// `federation_actor::PtySizeNotice`).
+    pub(crate) federation_pty_size_notices: std::collections::HashMap<
+        crate::terminal::TerminalId,
+        std::sync::Arc<crate::server::federation_actor::PtySizeNotice>,
+    >,
     /// How a tab's PTY size is arbitrated between the clients viewing it.
     pub(crate) client_size_policy: crate::config::ClientSizePolicy,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
@@ -1285,6 +1292,7 @@ impl AppState {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             federation_owned_terminal_sizes: std::collections::HashMap::new(),
+            federation_pty_size_notices: std::collections::HashMap::new(),
             client_size_policy: crate::config::ClientSizePolicy::default(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
@@ -1913,6 +1921,7 @@ mod tests {
                 out_tx,
                 output_rx,
                 on_read: Box::new(|_bytes: &[u8]| {}),
+                pty_size: Default::default(),
             });
             (handle, out_rx)
         }

@@ -419,6 +419,14 @@ impl TerminalRuntime {
         self.0.relayed_agent_status_sender()
     }
 
+    /// A remote pane's size facts (delegates to `PaneRuntime::remote_pty_size`);
+    /// `None` for a locally-spawned pane.
+    pub(crate) fn remote_pty_size(
+        &self,
+    ) -> Option<std::sync::Arc<crate::remote::federation::pane_source::RemotePtySize>> {
+        self.0.remote_pty_size()
+    }
+
     /// This pane's raw remote terminal id (delegates to
     /// `PaneRuntime::remote_terminal_id`); `None` for a locally-spawned pane.
     pub(crate) fn remote_terminal_id(&self) -> Option<&str> {

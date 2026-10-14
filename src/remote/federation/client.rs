@@ -549,6 +549,9 @@ pub(crate) struct TerminalChannelRouter {
     /// `PaneUsage` facts reach that terminal wherever its pane now lives (a
     /// mirror pane can be moved out of its mounted workspace).
     local_terminal_ids: HashMap<String, crate::terminal::TerminalId>,
+    /// Each mirrored pane's size facts, keyed by raw `terminal_id`, which an
+    /// inbound host size notice (`Resize`) updates.
+    pty_sizes: HashMap<String, std::sync::Arc<super::pane_source::RemotePtySize>>,
 }
 
 impl TerminalChannelRouter {
@@ -566,6 +569,16 @@ impl TerminalChannelRouter {
         sender: mpsc::Sender<RelayedAgentStatus>,
     ) {
         self.agent_status_senders.insert(terminal_id, sender);
+    }
+
+    /// Registers `terminal_id`'s size facts (`PaneRuntime::remote_pty_size`)
+    /// so a host size notice for it reaches the pane's mirror.
+    pub(crate) fn register_pty_size(
+        &mut self,
+        terminal_id: String,
+        pty_size: std::sync::Arc<super::pane_source::RemotePtySize>,
+    ) {
+        self.pty_sizes.insert(terminal_id, pty_size);
     }
 
     /// Records the local terminal that mirrors raw `terminal_id`.
@@ -624,6 +637,7 @@ impl TerminalChannelRouter {
         self.output_senders.remove(terminal_id);
         self.agent_status_senders.remove(terminal_id);
         self.local_terminal_ids.remove(terminal_id);
+        self.pty_sizes.remove(terminal_id);
     }
 
     /// Routes one inbound `Terminal` message to the registered pane, if
@@ -653,10 +667,29 @@ impl TerminalChannelRouter {
             }
             TerminalChannelMessage::Close { terminal_id, .. } => {
                 self.output_senders.remove(&terminal_id);
+                self.pty_sizes.remove(&terminal_id);
             }
-            // Input/Resize are outbound-only from this client's perspective
-            // (sent by `RemoteTerminalSourceHandle`, never received back).
-            TerminalChannelMessage::Input { .. } | TerminalChannelMessage::Resize { .. } => {}
+            // Inbound, `Resize` is the host's PTY size notice: its viewers can
+            // bound the PTY below this pane's own size. The pane's byte-in
+            // task applies it in order with the output; the empty chunk wakes
+            // that task when no output follows. A full queue drops only the
+            // wake-up, and the next output chunk applies the notice.
+            TerminalChannelMessage::Resize {
+                terminal_id,
+                cols,
+                rows,
+                ..
+            } => {
+                if let Some(pty_size) = self.pty_sizes.get(&terminal_id) {
+                    pty_size.note_host_size(cols, rows);
+                    if let Some(tx) = self.output_senders.get(&terminal_id) {
+                        let _ = tx.try_send(Bytes::new());
+                    }
+                }
+            }
+            // Input is outbound-only from this client's perspective (sent by
+            // `RemoteTerminalSourceHandle`, never received back).
+            TerminalChannelMessage::Input { .. } => {}
         }
     }
 }
@@ -1286,6 +1319,9 @@ pub(crate) async fn drive_mount_channel<R: AsyncRead + Unpin>(
                                 router
                                     .register_agent_status_sender(new_terminal_id.clone(), sender);
                             }
+                            if let Some(pty_size) = runtime.remote_pty_size() {
+                                router.register_pty_size(new_terminal_id.clone(), pty_size);
+                            }
                             router.register_local_terminal(
                                 new_terminal_id.clone(),
                                 terminal_id.clone(),
@@ -1602,6 +1638,9 @@ async fn materialize_resync_pane(
         Ok(runtime) => {
             if let Some(sender) = runtime.relayed_agent_status_sender() {
                 router.register_agent_status_sender(raw_terminal_id.clone(), sender);
+            }
+            if let Some(pty_size) = runtime.remote_pty_size() {
+                router.register_pty_size(raw_terminal_id.clone(), pty_size);
             }
             router.register_local_terminal(raw_terminal_id, terminal_id.clone());
             let mut terminal = crate::terminal::TerminalState::new(
@@ -2063,6 +2102,52 @@ mod tests {
         assert_eq!(second, Bytes::from_static(b"live bytes after replay"));
 
         writer_task.abort();
+    }
+
+    // An inbound `Resize` is the host's PTY size notice: it reaches the
+    // registered pane's size facts, wakes the pane's byte-in task in order
+    // with its output, and is ignored for a pane that registered none.
+    #[tokio::test]
+    async fn an_inbound_resize_is_routed_to_the_panes_pty_size() {
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let mut router = TerminalChannelRouter::new();
+        let mut output_rx = router.open_terminal("term_1".to_string(), 1, &out_tx);
+        let mut unregistered_rx = router.open_terminal("term_2".to_string(), 1, &out_tx);
+        let pty_size = std::sync::Arc::new(super::super::pane_source::RemotePtySize::default());
+        pty_size.set_requested(40, 120, 0, 0);
+        router.register_pty_size("term_1".to_string(), pty_size.clone());
+
+        router.route_inbound(TerminalChannelMessage::Output {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 1,
+            bytes: b"before".to_vec(),
+        });
+        for terminal_id in ["term_1", "term_2"] {
+            router.route_inbound(TerminalChannelMessage::Resize {
+                terminal_id: terminal_id.to_string(),
+                mount_generation: 1,
+                cols: 67,
+                rows: 17,
+            });
+        }
+
+        assert!(pty_size.take_host_change());
+        assert_eq!(pty_size.mirror_size(), Some((17, 67, 0, 0)));
+        assert_eq!(output_rx.try_recv().unwrap(), Bytes::from_static(b"before"));
+        assert_eq!(output_rx.try_recv().unwrap(), Bytes::new(), "wake-up chunk");
+        assert!(unregistered_rx.try_recv().is_err());
+
+        router.route_inbound(TerminalChannelMessage::Close {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 1,
+        });
+        router.route_inbound(TerminalChannelMessage::Resize {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 1,
+            cols: 30,
+            rows: 10,
+        });
+        assert!(!pty_size.take_host_change(), "a closed pane gets no notice");
     }
 
     // Test 4 (S2.2 isolation, router half): routing inbound `Output` frames

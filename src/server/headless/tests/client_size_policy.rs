@@ -718,3 +718,78 @@ async fn latest_keeps_the_mount_exclusive() {
     );
     shutdown_test_runtimes(&mut server);
 }
+
+// Federation: the PTY size is published back to the mount, so its mirror
+// matches the PTY when this host's viewers bound it.
+
+fn subscribe_mounted_pty_size(
+    server: &mut HeadlessServer,
+    mounted: &MountedTerminal,
+) -> std::sync::Arc<crate::server::federation_actor::PtySizeNotice> {
+    let (reply, mut subscription) = tokio::sync::oneshot::channel();
+    server.handle_server_event(ServerEvent::Federation(FederationCommand::SubscribeOutput(
+        mounted.terminal_id.clone(),
+        reply,
+    )));
+    subscription
+        .try_recv()
+        .expect("subscription reply")
+        .expect("mounted terminal is known")
+        .pty_size
+}
+
+#[tokio::test]
+async fn smallest_publishes_the_host_bounded_pty_size_to_the_mount() {
+    let mut server = smallest_server();
+    let mounted = mount_shared_terminal(&mut server);
+    let notice = subscribe_mounted_pty_size(&mut server, &mounted);
+    let _host = connect_sized_shell(&mut server, 7, SMALL);
+    assert_eq!(notice.load(), None, "nothing is published before a vote");
+
+    mount_resize(&mut server, &mounted, (120, 40));
+    assert_eq!(notice.load(), Some((SMALL_PTY.1, SMALL_PTY.0)));
+
+    // A host resize that changes the bound is published too.
+    resize_shell(&mut server, 7, (60, 15));
+    let bounded = shared_pty_size(&server, mounted.pane_id);
+    assert_eq!(notice.load(), Some((bounded.1, bounded.0)));
+
+    assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 7 }));
+    assert_eq!(notice.load(), Some((120, 40)), "the vote applies unbounded");
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn latest_publishes_no_pty_size_to_the_mount() {
+    let mut server = test_headless_server();
+    let mounted = mount_shared_terminal(&mut server);
+    let notice = subscribe_mounted_pty_size(&mut server, &mounted);
+    let _host = connect_sized_shell(&mut server, 7, SMALL);
+
+    mount_resize(&mut server, &mounted, (120, 40));
+    resize_shell(&mut server, 7, (60, 15));
+
+    assert_eq!(shared_pty_size(&server, mounted.pane_id), (40, 120));
+    assert_eq!(notice.load(), None, "the PTY is the mount's own size");
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn reloading_into_latest_publishes_the_mounts_own_size_back() {
+    let mut server = smallest_server();
+    let mounted = mount_shared_terminal(&mut server);
+    let notice = subscribe_mounted_pty_size(&mut server, &mounted);
+    let _host = connect_sized_shell(&mut server, 7, SMALL);
+    mount_resize(&mut server, &mounted, (120, 40));
+    assert_eq!(notice.load(), Some((SMALL_PTY.1, SMALL_PTY.0)));
+
+    server.app.state.client_size_policy = ClientSizePolicy::Latest;
+    server.apply_reloaded_client_size_policy();
+    assert_eq!(notice.load(), Some((120, 40)));
+
+    // Once notified, the mount keeps being told its size, or its mirror would
+    // stay bounded by the stale notice when it grows.
+    mount_resize(&mut server, &mounted, (130, 45));
+    assert_eq!(notice.load(), Some((130, 45)));
+    shutdown_test_runtimes(&mut server);
+}

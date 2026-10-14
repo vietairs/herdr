@@ -95,9 +95,10 @@ pub(crate) enum FederationCommand {
     Snapshot(oneshot::Sender<(SessionSnapshot, EventCursor)>),
     /// Events strictly after the given sequence number.
     EventsAfter(u64, oneshot::Sender<Vec<(u64, EventKind)>>),
-    /// A subscription to one live terminal's raw output bytes, or `None` if the
-    /// terminal id is unknown. Dropping the receiver never affects the PTY.
-    SubscribeOutput(String, oneshot::Sender<Option<broadcast::Receiver<Bytes>>>),
+    /// A subscription to one live terminal's raw output bytes and PTY size
+    /// notices, or `None` if the terminal id is unknown. Dropping it never
+    /// affects the PTY.
+    SubscribeOutput(String, oneshot::Sender<Option<OutputSubscription>>),
     /// The scrollback history (ANSI) to seed a newly opened remote pane.
     ScrollbackReplay(String, oneshot::Sender<Vec<u8>>),
     /// Forward input bytes to a live terminal — dropped unless `(epoch, connid)`
@@ -375,6 +376,85 @@ pub(crate) fn nudge_mounted_child_redraw(runtime: &crate::terminal::TerminalRunt
     nudge_child_redraw(runtime);
 }
 
+/// What `SubscribeOutput` hands a federation connection for one terminal.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct OutputSubscription {
+    /// The terminal's raw output bytes.
+    pub(crate) bytes: broadcast::Receiver<Bytes>,
+    /// The PTY size this host last published for the terminal, which the
+    /// connection forwards to the mount so its mirror matches the PTY.
+    pub(crate) pty_size: std::sync::Arc<PtySizeNotice>,
+}
+
+/// The PTY size of a mounted terminal as this host last published it.
+///
+/// Under the `smallest` client size policy the PTY can be smaller than the
+/// mount's own vote, because this host's viewers bound it too. The mount must
+/// then size its mirror to the PTY rather than to its pane, or the program's
+/// line wrapping misdraws in the mirror. The server loop publishes here after
+/// sizing a voted terminal; the connection's output pump polls it and sends
+/// the change to the mount as a `TerminalChannelMessage::Resize`.
+///
+/// Packed into one atomic so a pump thread reads it without a lock; `0` means
+/// nothing was published yet, which a real size never packs to because both
+/// dimensions are at least 1.
+#[derive(Debug, Default)]
+pub(crate) struct PtySizeNotice(std::sync::atomic::AtomicU32);
+
+impl PtySizeNotice {
+    /// Publishes the PTY size `(rows, cols)`, as `TerminalRuntime::current_size`
+    /// reports it.
+    pub(crate) fn publish(&self, (rows, cols): (u16, u16)) {
+        let packed = (u32::from(cols.max(1)) << 16) | u32::from(rows.max(1));
+        self.0.store(packed, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The last published size as `(cols, rows)`, the wire order of `Resize`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn load(&self) -> Option<(u16, u16)> {
+        let packed = self.0.load(std::sync::atomic::Ordering::Acquire);
+        let cols = u16::try_from(packed >> 16).ok()?;
+        let rows = u16::try_from(packed & 0xffff).ok()?;
+        (packed != 0).then_some((cols, rows))
+    }
+
+    fn is_published(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+}
+
+/// Subscribes to `terminal_id`'s output and hands back its size notice,
+/// creating the notice on first use. Notices of terminals that no longer exist
+/// are dropped here, the one place new ones are added.
+fn subscribe_output(app: &mut App, terminal_id: &str) -> Option<OutputSubscription> {
+    let bytes = app
+        .terminal_runtime_for_terminal_id(terminal_id)?
+        .subscribe_output_bytes();
+    let pty_size = match resolve_owned_terminal_id(app, terminal_id) {
+        Some(resolved) => {
+            let terminals = &app.state.terminals;
+            let notices = &mut app.state.federation_pty_size_notices;
+            notices.retain(|id, _| terminals.contains_key(id));
+            notices.entry(resolved).or_default().clone()
+        }
+        // Nothing can publish to a notice no terminal id maps to, so the
+        // mount keeps sizing its mirror to its own pane.
+        None => std::sync::Arc::default(),
+    };
+    Some(OutputSubscription { bytes, pty_size })
+}
+
+/// Publishes `terminal_id`'s current PTY size to its mount, if a mount
+/// subscribed to it.
+pub(crate) fn publish_mounted_pty_size(app: &App, terminal_id: &crate::terminal::TerminalId) {
+    let Some(notice) = app.state.federation_pty_size_notices.get(terminal_id) else {
+        return;
+    };
+    if let Some(runtime) = app.terminal_runtime_for_terminal_id(terminal_id.as_str()) {
+        notice.publish(runtime.current_size());
+    }
+}
+
 /// Drop every federation size claim once no controller is mounted. Called
 /// after every lease mutation — dispatch here and the handoff revoke/reopen
 /// pair in `headless.rs` — so the lease stays the single source of truth and
@@ -488,6 +568,18 @@ fn dispatch_size_command(
                 // sends no `SIGWINCH` at all.
                 nudge_child_redraw(runtime);
             }
+            // Under `latest` the PTY is the mount's own size, so a mount needs
+            // no notice. It still gets one once it has had a notice (only after
+            // a reload from `smallest`), or its mirror would stay bounded by
+            // that stale notice.
+            if let Some(voted) = voted.filter(|voted| {
+                app.state
+                    .federation_pty_size_notices
+                    .get(voted)
+                    .is_some_and(|notice| notice.is_published())
+            }) {
+                publish_mounted_pty_size(app, &voted);
+            }
             None
         }
         FederationCommand::NudgeRedraw {
@@ -561,9 +653,7 @@ fn dispatch_session_command(
             let _ = reply.send(events);
         }
         FederationCommand::SubscribeOutput(terminal_id, reply) => {
-            let subscription = app
-                .terminal_runtime_for_terminal_id(&terminal_id)
-                .map(|runtime| runtime.subscribe_output_bytes());
+            let subscription = subscribe_output(app, &terminal_id);
             let _ = reply.send(subscription);
         }
         FederationCommand::ScrollbackReplay(terminal_id, reply) => {
