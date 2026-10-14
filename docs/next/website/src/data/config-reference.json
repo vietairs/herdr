@@ -38,7 +38,7 @@
           "key": "server.client_size_policy",
           "type": "enum",
           "default": "\"smallest\"",
-          "description": "How a tab's pane sizes are chosen when several clients, or a federation mount, view it. `smallest` sizes the tab to the smallest width and height among its viewers, so nothing is cropped and larger screens show blank padding; a tab shrinks at once but grows back 150 ms after the size that bounded it goes away; a mount's size counts as one more viewer while host clients are on the tab. `latest` lets the client that most recently focused, typed in, or resized the tab size it, cropping the others, and a mount keeps exclusive control of the terminals it shows. Reloadable live via the [server] section.",
+          "description": "How a tab's pane sizes are chosen when several clients, or a federation mount, view it. `smallest` sizes the tab to the smallest width and height among its viewers, so nothing is cropped and larger screens show blank padding; a tab shrinks at once but grows back 150 ms after the size that bounded it goes away; a tab's only viewer that enlarges its own window grows it at once; a federation mount on this version counts as one more viewer while host clients are on the tab, and an older mount keeps exclusive control of the terminals it shows. `latest` lets the client that most recently focused, selected, or interacted with the tab size it (resizing a window alone does not take the tab over), cropping or padding the others, and a mount keeps exclusive control of the terminals it shows. Reloadable live via the [server] section.",
           "values": [
             "smallest",
             "latest"

@@ -7592,11 +7592,6 @@ mod remote_spawn_tests {
         );
     }
 
-    // `remote_terminal_id`/`remote_out_tx` (P9 remote-split follow-up):
-    // `spawn_remote`-constructed runtimes expose their raw wire id and
-    // shared mount out-tx so `handle_pane_split` can address a
-    // `SplitPaneRequest` without a separate id-mapping registry; a local
-    // (non-remote) runtime must expose neither.
     /// The next `Resize` vote this pane sent to the host, as `(cols, rows)`.
     async fn next_resize_vote(
         out_rx: &mut mpsc::UnboundedReceiver<FederationMessage>,
@@ -7676,6 +7671,11 @@ mod remote_spawn_tests {
             .is_none());
     }
 
+    // `remote_terminal_id`/`remote_out_tx` (P9 remote-split follow-up):
+    // `spawn_remote`-constructed runtimes expose their raw wire id and
+    // shared mount out-tx so `handle_pane_split` can address a
+    // `SplitPaneRequest` without a separate id-mapping registry; a local
+    // (non-remote) runtime must expose neither.
     #[tokio::test]
     async fn remote_runtime_exposes_its_raw_terminal_id_and_out_tx() {
         let (remote_runtime, _output_tx, _out_rx, _events_rx) = spawn_test_remote_pane("term_1", 1);

@@ -62,7 +62,7 @@ headless_cols = 160
 headless_rows = 50
 ```
 
-With one attached client, all tabs follow its size. With multiple clients, each viewed tab follows the client that most recently focused, selected, or interacted with it. When all but one client detach, all tabs immediately return to the remaining client's size. When no clients remain, existing pane PTYs retain their last size and new headless layout uses the configured fallback.
+With one attached client, all tabs follow its size. With multiple clients, `client_size_policy` under `[server]` decides. Under the default `"smallest"`, each viewed tab is sized to the smallest width and height among the clients viewing it, so no client is cropped and larger screens show blank padding. A tab shrinks at once. When the client that bounded it detaches or switches away, the tab grows back after 150 ms, so a client that returns within that time costs the programs in it no redraw; a tab's only viewer that enlarges its own window grows it at once. A federation mount on this version counts as one more viewer of the terminals it shows; an older mount keeps sizing them on its own. With `client_size_policy = "latest"`, each viewed tab follows the client that most recently focused, selected, or interacted with it instead, and when all but one client detach, all tabs immediately return to the remaining client's size. When no clients remain, existing pane PTYs retain their last size and new headless layout uses the configured fallback.
 
 ## Terminal defaults
 
