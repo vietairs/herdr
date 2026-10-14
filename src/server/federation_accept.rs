@@ -32,10 +32,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use bytes::Bytes;
 use interprocess::local_socket::traits::{Listener as _, Stream as _};
 use interprocess::TryClone as _;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
 
 use crate::api::schema::common::AgentStatus;
@@ -57,7 +56,7 @@ use crate::remote::federation::protocol::{
 };
 use crate::remote::federation::tee;
 use crate::server::client_transport::ServerEvent;
-use crate::server::federation_actor::{FederatedAgentFacts, FederationCommand};
+use crate::server::federation_actor::{FederatedAgentFacts, FederationCommand, OutputSubscription};
 use crate::server::federation_fault::{FirstCauseCell, TunnelExit};
 use crate::server::federation_lease::{AcceptEpoch, Admission, ConnId};
 
@@ -109,9 +108,23 @@ fn federation_capabilities() -> BTreeSet<Capability> {
         // absent rather than as the `Ordinal` its `serde` default would
         // otherwise manufacture; see the constant's doc comment.
         Capability::new(Capability::PANE_NAME_SOURCE),
+        // This host sends PTY size notices; only a mount that also advertises
+        // the name gets them, and only its sizes are shared votes (see the
+        // constant's doc comment and `mount_follows_pty_size_notices`).
+        Capability::new(Capability::PTY_SIZE_NOTICE),
     ]
     .into_iter()
     .collect()
+}
+
+/// Whether the mount on this connection applies the host's PTY size notices,
+/// which is what lets this host bound that mount's terminals by its own
+/// viewers. Read from the negotiated set only: a mount that did not agree the
+/// capability is a legacy mount, whose size stays exclusive.
+fn mount_follows_pty_size_notices(agreed: &AgreedCaps) -> bool {
+    agreed
+        .0
+        .contains(&Capability::new(Capability::PTY_SIZE_NOTICE))
 }
 
 /// The largest cap across every channel, bounding a read-side allocation before
@@ -318,7 +331,13 @@ fn drive_mount<S: FederationStream>(
     // before (or without) a handoff cannot pin the single-controller slot.
     let _release = LeaseReleaseGuard::new(epoch, connid, server_event_tx.clone());
 
-    let Some((snapshot, cursor)) = mount(epoch, connid, server_event_tx)? else {
+    let Some((snapshot, cursor)) = mount(
+        epoch,
+        connid,
+        mount_follows_pty_size_notices(agreed),
+        server_event_tx,
+    )?
+    else {
         debug!(connid, "federation mount refused (reservation superseded)");
         return Ok(());
     };
@@ -1125,7 +1144,7 @@ fn open_terminal(
         return;
     }
 
-    let Some(rx) = request_subscribe_output(server_event_tx, &terminal_id) else {
+    let Some(subscription) = request_subscribe_output(server_event_tx, &terminal_id) else {
         debug!(%terminal_id, "federation open for an unknown terminal ignored");
         return;
     };
@@ -1157,7 +1176,7 @@ fn open_terminal(
         std::thread::spawn(move || {
             output_pump(
                 pump_terminal_id,
-                rx,
+                subscription,
                 pump_out_tx,
                 pump_stop,
                 pump_shutdown,
@@ -1195,17 +1214,46 @@ struct OutputPump {
 /// bytes (output is a byte stream; a dropped middle just shortens the tail, as
 /// in `serve.rs`). Exits on its own stop flag, a global shutdown, or a writer
 /// that has gone away.
+///
+/// Each tick also forwards a changed PTY size notice as a host-to-mount
+/// `Resize`, ahead of that tick's bytes, so output the child drew for the new
+/// size reaches a mirror already resized to it. Only a mount that agreed
+/// `Capability::PTY_SIZE_NOTICE` is handed a notice anything publishes to
+/// (`federation_actor::subscribe_output`); any other mount's notice stays
+/// unpublished, so this pump never sends it a `Resize`.
 fn output_pump(
     terminal_id: String,
-    mut rx: broadcast::Receiver<Bytes>,
+    subscription: OutputSubscription,
     out_tx: std_mpsc::SyncSender<FederationMessage>,
     stop: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     first_cause: Arc<FirstCauseCell>,
 ) {
+    let OutputSubscription {
+        bytes: mut rx,
+        pty_size,
+    } = subscription;
+    let mut sent_pty_size = None;
     loop {
         if stop.load(Ordering::SeqCst) || shutdown.load(Ordering::SeqCst) {
             return;
+        }
+        let published = pty_size.load();
+        if let Some((cols, rows)) = published.filter(|_| published != sent_pty_size) {
+            if !enqueue_outbound(
+                &out_tx,
+                FederationMessage::Terminal(TerminalChannelMessage::Resize {
+                    terminal_id: terminal_id.clone(),
+                    mount_generation: MOUNT_GENERATION,
+                    cols,
+                    rows,
+                }),
+                &first_cause,
+                &shutdown,
+            ) {
+                return;
+            }
+            sent_pty_size = published;
         }
         let (bytes, _lagged) = tee::drain_available(&mut rx);
         if !bytes.is_empty()
@@ -1782,7 +1830,7 @@ fn request_agent_statuses(
 fn request_subscribe_output(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     terminal_id: &str,
-) -> Option<broadcast::Receiver<Bytes>> {
+) -> Option<OutputSubscription> {
     let (reply, rx) = oneshot::channel();
     server_event_tx
         .blocking_send(ServerEvent::Federation(FederationCommand::SubscribeOutput(
@@ -1844,9 +1892,11 @@ fn acquire_controller(
 
 /// Promote the reservation to `Mounted` and fetch the atomic (snapshot, cursor)
 /// via the actor. `None` if the reservation was superseded before the mount.
+/// `pty_size_notice` records whether this mount agreed `PTY_SIZE_NOTICE`.
 fn mount(
     epoch: AcceptEpoch,
     connid: ConnId,
+    pty_size_notice: bool,
     server_event_tx: &mpsc::Sender<ServerEvent>,
 ) -> io::Result<Option<(SessionSnapshot, EventCursor)>> {
     let (reply, rx) = oneshot::channel();
@@ -1854,6 +1904,7 @@ fn mount(
         .blocking_send(ServerEvent::Federation(FederationCommand::Mount {
             epoch,
             connid,
+            pty_size_notice,
             reply,
         }))
         .map_err(|_| io::Error::other("server event loop is gone"))?;
@@ -1940,7 +1991,9 @@ fn drive_handshake<S: Read + Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use std::os::unix::net::UnixStream;
+    use tokio::sync::broadcast;
 
     // Exercise the bidirectional driver over a real socket pair: `UnixStream`
     // clones into independent handles exactly like the production `LocalStream`.
@@ -2646,6 +2699,101 @@ mod tests {
         assert!(!first_cause.is_set(), "clean teardown sets no first cause");
     }
 
+    /// The next frame the pump enqueued, or `None` if none arrives soon.
+    fn next_pump_frame(
+        out_rx: &std_mpsc::Receiver<FederationMessage>,
+    ) -> Option<FederationMessage> {
+        out_rx.recv_timeout(Duration::from_millis(500)).ok()
+    }
+
+    // Only a mount that advertised `pty_size_notice` follows the host's PTY
+    // size; a mount that predates the name negotiates it away and is legacy.
+    #[test]
+    fn only_a_mount_that_agreed_pty_size_notices_follows_the_host_pty_size() {
+        let host = Handshake {
+            federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+            capabilities: federation_capabilities(),
+            server_instance_id: ServerInstanceId("host".into()),
+        };
+        let mount = |capabilities: &[&str]| Handshake {
+            federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+            capabilities: capabilities
+                .iter()
+                .map(|name| Capability::new(*name))
+                .collect(),
+            server_instance_id: ServerInstanceId("mount".into()),
+        };
+        let agreed = |mount| negotiate(&host, &mount).expect("same protocol version");
+
+        assert!(mount_follows_pty_size_notices(&agreed(mount(&[
+            Capability::AGENT_STATUS,
+            Capability::PTY_SIZE_NOTICE,
+        ]))));
+        assert!(!mount_follows_pty_size_notices(&agreed(mount(&[
+            Capability::AGENT_STATUS,
+            Capability::PANE_NAME_SOURCE,
+        ]))));
+    }
+
+    // The pump forwards each new PTY size the server loop published as a
+    // host-to-mount `Resize`, once per change and ahead of that tick's output.
+    #[test]
+    fn output_pump_forwards_each_published_pty_size_once() {
+        let (bytes_tx, bytes_rx) = broadcast::channel::<Bytes>(16);
+        let pty_size = Arc::new(crate::server::federation_actor::PtySizeNotice::default());
+        pty_size.publish((17, 67));
+        bytes_tx.send(Bytes::from_static(b"redraw")).unwrap();
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let stop = Arc::new(AtomicBool::new(false));
+        let pump = {
+            let subscription = OutputSubscription {
+                bytes: bytes_rx,
+                pty_size: Arc::clone(&pty_size),
+            };
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                output_pump(
+                    "t1".to_string(),
+                    subscription,
+                    out_tx,
+                    stop,
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(FirstCauseCell::new()),
+                )
+            })
+        };
+        let resize = |cols, rows| {
+            FederationMessage::Terminal(TerminalChannelMessage::Resize {
+                terminal_id: "t1".to_string(),
+                mount_generation: MOUNT_GENERATION,
+                cols,
+                rows,
+            })
+        };
+
+        assert_eq!(next_pump_frame(&out_rx), Some(resize(67, 17)));
+        assert!(matches!(
+            next_pump_frame(&out_rx),
+            Some(FederationMessage::Terminal(
+                TerminalChannelMessage::Output { .. }
+            ))
+        ));
+        // Publishing the same size again sends nothing new.
+        pty_size.publish((17, 67));
+        bytes_tx.send(Bytes::from_static(b"more")).unwrap();
+        assert!(matches!(
+            next_pump_frame(&out_rx),
+            Some(FederationMessage::Terminal(
+                TerminalChannelMessage::Output { .. }
+            ))
+        ));
+        pty_size.publish((40, 120));
+        assert_eq!(next_pump_frame(&out_rx), Some(resize(120, 40)));
+
+        stop.store(true, Ordering::SeqCst);
+        pump.join().expect("pump exits on stop");
+    }
+
     #[test]
     fn open_terminal_emits_the_scrollback_replay_frame() {
         // A mock actor answers SubscribeOutput + ScrollbackReplay; open_terminal
@@ -2661,7 +2809,10 @@ mod tests {
                         FederationCommand::SubscribeOutput(_id, reply) => {
                             let (btx, brx) = broadcast::channel::<Bytes>(16);
                             keep_alive.push(btx);
-                            let _ = reply.send(Some(brx));
+                            let _ = reply.send(Some(OutputSubscription {
+                                bytes: brx,
+                                pty_size: Arc::default(),
+                            }));
                         }
                         FederationCommand::ScrollbackReplay(_id, reply) => {
                             let _ = reply.send(b"scrollback".to_vec());

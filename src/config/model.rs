@@ -1076,6 +1076,22 @@ pub struct ServerConfig {
     pub headless_cols: u16,
     /// Virtual terminal height used when no client is attached. Default: 40.
     pub headless_rows: u16,
+    /// How a tab's PTY size is chosen when several clients view it. Default: smallest.
+    pub client_size_policy: ClientSizePolicy,
+}
+
+/// Arbitration rule for a tab's PTY size when more than one client views it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientSizePolicy {
+    /// Every viewer's surface fits: the PTY takes the smallest width and the
+    /// smallest height among the clients viewing the tab, and larger clients
+    /// see blank padding instead of cropped content.
+    #[default]
+    Smallest,
+    /// The client that most recently claimed the tab sizes it; other viewers
+    /// are cropped or padded to that size.
+    Latest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1377,6 +1393,7 @@ impl Default for ServerConfig {
             allow_unelevated_clients: false,
             headless_cols: crate::config::DEFAULT_HEADLESS_COLS,
             headless_rows: crate::config::DEFAULT_HEADLESS_ROWS,
+            client_size_policy: ClientSizePolicy::default(),
         }
     }
 }
@@ -2168,6 +2185,37 @@ headless_rows = 50
                 crate::config::DEFAULT_HEADLESS_ROWS
             )
         );
+    }
+
+    #[test]
+    fn server_client_size_policy_defaults_to_smallest_and_parses() {
+        assert_eq!(
+            Config::default().server.client_size_policy,
+            ClientSizePolicy::Smallest
+        );
+        let latest: Config = toml::from_str(
+            r#"[server]
+client_size_policy = "latest"
+"#,
+        )
+        .unwrap();
+        assert_eq!(latest.server.client_size_policy, ClientSizePolicy::Latest);
+        let smallest: Config = toml::from_str(
+            r#"[server]
+client_size_policy = "smallest"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            smallest.server.client_size_policy,
+            ClientSizePolicy::Smallest
+        );
+        assert!(toml::from_str::<Config>(
+            r#"[server]
+client_size_policy = "largest"
+"#,
+        )
+        .is_err());
     }
 
     #[test]

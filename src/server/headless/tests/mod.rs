@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "client_size_policy.rs"]
+mod client_size_policy_tests;
 mod event_fairness;
 mod native_graphics;
 #[path = "pane_move.rs"]
@@ -71,6 +73,9 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     );
 
     app.state.default_shell = crate::app::exiting_test_command().into();
+    // Shared server tests pin the upstream "latest client wins" sizing rule;
+    // the `client_size_policy` tests opt into `smallest` explicitly.
+    app.state.client_size_policy = crate::config::ClientSizePolicy::Latest;
     let dir = std::env::temp_dir().join(format!(
         "hh-{}-{}",
         std::process::id(),
@@ -140,6 +145,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         next_client_id: 1,
         foreground_client_id: None,
         tab_geometry_controllers: HashMap::new(),
+        tab_size_growth: Default::default(),
         popup_owner_tab_id: None,
         client_shell_boot_id: "test-boot".into(),
         sent_window_title: None,
@@ -4480,7 +4486,7 @@ fn terminal_attach_does_not_resize_a_terminal_a_mount_owns() {
         .app
         .state
         .federation_owned_terminal_sizes
-        .insert(terminal_id.clone());
+        .insert(terminal_id.clone(), Some((150, 50)));
     let mount_size = server
         .app
         .terminal_runtimes
@@ -8720,7 +8726,7 @@ fn rollback_handoff_before_commit_releases_federation_owned_terminal_sizes() {
         .app
         .state
         .federation_owned_terminal_sizes
-        .insert(terminal_id);
+        .insert(terminal_id, None);
     server.federation_lease.begin_revocation();
 
     let handoff_socket = std::env::temp_dir().join(format!(

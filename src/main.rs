@@ -235,6 +235,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # allow_unelevated_clients = false
 # headless_cols = 120
 # headless_rows = 40
+# How a tab is sized when several clients view it: "smallest" fits every
+# viewer and pads larger screens; "latest" follows the client that last
+# focused, selected, or interacted with the tab and crops the others.
+# client_size_policy = "smallest"
 
 # [worktrees]
 # directory = "~/.herdr/worktrees"

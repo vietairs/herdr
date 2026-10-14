@@ -196,6 +196,26 @@ impl Capability {
     /// system, so it is never platform-gated.
     pub const PANE_NAME_SOURCE: &'static str = "pane_name_source";
 
+    /// States that this mount applies a host-to-mount
+    /// `TerminalChannelMessage::Resize`: the serving host's real PTY size,
+    /// which the mount sizes its mirror emulator to.
+    ///
+    /// It gates *behavior*, not a frame: every peer on this protocol version
+    /// decodes `Resize` in both directions, and a mount built before this name
+    /// existed silently drops an inbound one. That is exactly why it is
+    /// needed. Under the `smallest` client size policy a host may bound a
+    /// mounted terminal's PTY by its own smaller viewers; a mount that ignores
+    /// the notice keeps its mirror at its larger pane size while the program
+    /// wraps at the PTY width, and its screen misdraws. So the host treats a
+    /// mount's size as a shared vote, and sends it notices, only when this
+    /// capability was agreed. Without it the mount's size stays exclusive, as
+    /// under `latest`, and the host sends no notice. Absence means a legacy
+    /// mount, never "no notice needed".
+    ///
+    /// Advertised by every live mount through
+    /// `federation::session::local_capabilities`, and by the co-located host.
+    pub const PTY_SIZE_NOTICE: &'static str = "pty_size_notice";
+
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }

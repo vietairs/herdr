@@ -483,7 +483,7 @@ impl HeadlessServer {
 
         // Resize from the controlling client's geometry before drawing any observer.
         // Retained updates fall back here when a pane changes alternate screens.
-        for (client_id, (cols, rows), cell_size, _, _) in &render_targets {
+        for (client_id, _, cell_size, _, _) in &render_targets {
             let Some(client) = self.clients.get(client_id) else {
                 continue;
             };
@@ -520,7 +520,13 @@ impl HeadlessServer {
                 });
             if changed {
                 if let Some(target) = self.shell_target_for_client(*client_id) {
-                    let area = Rect::new(0, 0, *cols, *rows);
+                    // The same policy resolver as every other tab-sizing path, so
+                    // an alternate-screen switch cannot re-expand a `smallest`
+                    // tab to the controller's surface and crop smaller viewers.
+                    let Some(size) = self.tab_size_area(*client_id, target) else {
+                        continue;
+                    };
+                    let area = size.area;
                     let layout = crate::ui::compute_tab_surface_for(
                         &self.app.state,
                         &self.app.terminal_runtimes,
@@ -547,12 +553,9 @@ impl HeadlessServer {
                         target.workspace_index,
                         target.tab_index,
                         area,
-                        if cell_size.is_known() {
-                            *cell_size
-                        } else {
-                            crate::kitty_graphics::HostCellSize::default()
-                        },
+                        size.cell_size,
                     );
+                    self.clamp_mount_size_votes_in_tab(target, size);
                 }
             }
         }

@@ -24,7 +24,7 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::pty::actor::{PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 use crate::remote::federation::pane_source::{
-    RemoteTerminalSourceConfig, RemoteTerminalSourceHandle,
+    RemotePtySize, RemoteTerminalSourceConfig, RemoteTerminalSourceHandle,
 };
 use crate::remote::federation::protocol::{ClipboardMessage, FederationMessage};
 use crate::render_signal::RenderSignal;
@@ -1742,6 +1742,14 @@ impl PaneRuntimeIo {
         matches!(self, PaneRuntimeIo::Remote(_))
     }
 
+    /// A remote pane's shared size facts; `None` for a local pane.
+    fn remote_pty_size(&self) -> Option<Arc<RemotePtySize>> {
+        match self {
+            PaneRuntimeIo::Remote(remote) => Some(remote.pty_size()),
+            _ => None,
+        }
+    }
+
     fn shutdown(&self) {
         match self {
             // Non-`Actor` variants of `PaneRuntimeIo` (`Remote` and the
@@ -2466,6 +2474,33 @@ fn usable_reported_cwd(cwd: std::path::PathBuf) -> Option<std::path::PathBuf> {
     (cwd.is_absolute() && cwd.is_dir()).then_some(cwd)
 }
 
+/// Resizes a remote pane's mirror emulator to its size bounded by the host
+/// PTY's latest notice (`RemotePtySize::mirror_size`). Returns whether the
+/// emulator changed size.
+fn resize_remote_mirror_to_host(
+    terminal: &PaneTerminal,
+    pty_size: &RemotePtySize,
+    content_write_lock: &Mutex<()>,
+    content_seq: &AtomicU64,
+) -> bool {
+    let _content_write_guard = match content_write_lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some((rows, cols, cell_width_px, cell_height_px)) = pty_size.mirror_size() else {
+        return false;
+    };
+    if terminal.dimensions() == Some((cols, rows)) {
+        return false;
+    }
+    content_seq.fetch_add(1, Ordering::AcqRel);
+    // No responses can be written back: the host's own emulator answers its
+    // program (see `RemoteTerminalSourceHandle::resize`).
+    let _ = terminal.resize(rows, cols, cell_width_px, cell_height_px, true);
+    content_seq.fetch_add(1, Ordering::Release);
+    true
+}
+
 fn publish_terminal_bells(pane_id: PaneId, count: u16, events: &mpsc::Sender<AppEvent>) {
     if count == 0 {
         return;
@@ -2758,9 +2793,12 @@ impl PaneRuntime {
         // scrollback-compression upkeep as a locally-spawned pane.
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());
         let content_write_lock = Arc::new(Mutex::new(()));
+        let pty_size = Arc::new(RemotePtySize::default());
+        pty_size.set_requested(rows, cols, 0, 0);
 
         let io = {
             let terminal = terminal.clone();
+            let pty_size_for_read = pty_size.clone();
             let response_writer = response_tx.clone();
             let output_tee = output_tee.clone();
             let render_notify = render_notify.clone();
@@ -2773,6 +2811,26 @@ impl PaneRuntime {
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
             let on_read = Box::new(move |bytes: &[u8]| {
+                // A host size notice is applied here, before the bytes that
+                // followed it on the wire, so output drawn for the new PTY
+                // size lands on a mirror of that size. The router wakes this
+                // task with an empty chunk when a notice arrives alone.
+                if pty_size_for_read.take_host_change()
+                    && resize_remote_mirror_to_host(
+                        &terminal,
+                        &pty_size_for_read,
+                        &content_write_lock,
+                        &content_seq,
+                    )
+                {
+                    mark_detection_content_changed(&detection_content_seq);
+                    if render_dirty.request_pty(pane_id) {
+                        render_notify.notify_one();
+                    }
+                }
+                if bytes.is_empty() {
+                    return;
+                }
                 // Same write bracket as a local pane: the detection text cache
                 // trusts an even `content_seq` only when no writer overlaps it.
                 let content_write_guard = match content_write_lock.lock() {
@@ -2842,6 +2900,7 @@ impl PaneRuntime {
                     out_tx,
                     output_rx,
                     on_read,
+                    pty_size,
                 },
             ))
         };
@@ -3872,20 +3931,32 @@ impl PaneRuntime {
             return;
         }
         self.current_size.set(size);
+        // A remote pane votes its own size to the host (below), but its mirror
+        // emulator stays bounded by the host PTY's size once the host sent one.
+        let remote_pty_size = self.io.remote_pty_size();
+        if let Some(pty_size) = &remote_pty_size {
+            pty_size.set_requested(rows, cols, cell_width_px, cell_height_px);
+        }
         let _content_write_guard = match self.content_write_lock.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         self.content_seq.fetch_add(1, Ordering::AcqRel);
+        // Read under the write lock the byte-in task also takes to apply a
+        // notice, so whichever runs last sees both sizes.
+        let (mirror_rows, mirror_cols, mirror_cell_width_px, mirror_cell_height_px) =
+            remote_pty_size
+                .and_then(|pty_size| pty_size.mirror_size())
+                .unwrap_or(size);
         // Remote-backed panes: the authoritative repaint is an async round
         // trip over the federation link (pane_source.rs RT-F10), not a
         // same-machine SIGWINCH repaint, so the local replay-recovery
         // heuristic below must not run for them (see `PaneTerminal::resize`).
         let terminal_responses = self.terminal.resize(
-            rows,
-            cols,
-            cell_width_px,
-            cell_height_px,
+            mirror_rows,
+            mirror_cols,
+            mirror_cell_width_px,
+            mirror_cell_height_px,
             self.io.is_remote(),
         );
         self.content_seq.fetch_add(1, Ordering::Release);
@@ -4075,6 +4146,12 @@ impl PaneRuntime {
     /// apply_agent_status`'s companion status).
     pub(crate) fn relayed_agent_status_sender(&self) -> Option<mpsc::Sender<RelayedAgentStatus>> {
         self.relayed_agent_status_tx.clone()
+    }
+
+    /// This pane's size facts, if it is `spawn_remote`-constructed: the
+    /// mount's router feeds the serving host's PTY size notices into them.
+    pub(crate) fn remote_pty_size(&self) -> Option<Arc<RemotePtySize>> {
+        self.io.remote_pty_size()
     }
 
     /// This pane's raw (un-namespaced) remote terminal id, if it is
@@ -7513,6 +7590,85 @@ mod remote_spawn_tests {
             remote_runtime.visible_text(),
             local_reference.visible_text()
         );
+    }
+
+    /// The next `Resize` vote this pane sent to the host, as `(cols, rows)`.
+    async fn next_resize_vote(
+        out_rx: &mut mpsc::UnboundedReceiver<FederationMessage>,
+    ) -> (u16, u16) {
+        loop {
+            match out_rx.recv().await {
+                Some(FederationMessage::Terminal(
+                    crate::remote::federation::protocol::TerminalChannelMessage::Resize {
+                        cols,
+                        rows,
+                        ..
+                    },
+                )) => return (cols, rows),
+                Some(_) => continue,
+                None => panic!("the pane's outbound channel closed"),
+            }
+        }
+    }
+
+    /// Waits until the mirror emulator is `(cols, rows)`.
+    async fn wait_for_mirror_size(runtime: &PaneRuntime, expected: (u16, u16)) {
+        for _ in 0..200 {
+            if runtime.terminal.dimensions() == Some(expected) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!(
+            "mirror stayed {:?}, expected {expected:?}",
+            runtime.terminal.dimensions()
+        );
+    }
+
+    // A host whose own viewers bound the PTY below this pane sends the PTY
+    // size back. The mirror emulator follows it, while the pane keeps voting
+    // its own size, so the two never ratchet each other down.
+    #[tokio::test]
+    async fn a_host_size_notice_bounds_the_mirror_but_not_the_vote() {
+        let (runtime, output_tx, mut out_rx, _events_rx) = spawn_test_remote_pane("term_1", 1);
+        runtime.resize(40, 120, 0, 0);
+        assert_eq!(next_resize_vote(&mut out_rx).await, (120, 40));
+        assert_eq!(runtime.terminal.dimensions(), Some((120, 40)));
+
+        let pty_size = runtime.remote_pty_size().expect("remote pane size facts");
+        pty_size.note_host_size(67, 17);
+        output_tx.send(Bytes::new()).await.unwrap();
+        wait_for_mirror_size(&runtime, (67, 17)).await;
+
+        // The pane grows: it votes its new size, the mirror stays at the PTY.
+        runtime.resize(45, 130, 0, 0);
+        assert_eq!(next_resize_vote(&mut out_rx).await, (130, 45));
+        assert_eq!(runtime.terminal.dimensions(), Some((67, 17)));
+
+        // The pane shrinks below the PTY: the mirror follows the pane at once.
+        runtime.resize(10, 50, 0, 0);
+        assert_eq!(next_resize_vote(&mut out_rx).await, (50, 10));
+        assert_eq!(runtime.terminal.dimensions(), Some((50, 10)));
+
+        // The host viewer left, so the PTY took the vote: the mirror follows.
+        runtime.resize(45, 130, 0, 0);
+        pty_size.note_host_size(130, 45);
+        output_tx.send(Bytes::new()).await.unwrap();
+        wait_for_mirror_size(&runtime, (130, 45)).await;
+    }
+
+    // Without a notice from the host (one that predates notices, or runs the
+    // `latest` policy) the mirror is the pane's own size, as before.
+    #[tokio::test]
+    async fn without_a_host_size_notice_the_mirror_is_the_pane_size() {
+        let (runtime, _output_tx, mut out_rx, _events_rx) = spawn_test_remote_pane("term_1", 1);
+        runtime.resize(40, 120, 0, 0);
+        assert_eq!(next_resize_vote(&mut out_rx).await, (120, 40));
+        assert_eq!(runtime.terminal.dimensions(), Some((120, 40)));
+        assert!(PaneRuntime::test_with_channel(80, 24)
+            .0
+            .remote_pty_size()
+            .is_none());
     }
 
     // `remote_terminal_id`/`remote_out_tx` (P9 remote-split follow-up):

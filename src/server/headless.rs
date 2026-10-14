@@ -77,6 +77,7 @@ use crate::server::socket_paths::{
 use crate::server::terminal_attach::paste_payload_for_runtime;
 
 mod bootstrap;
+mod client_size_policy;
 mod client_views;
 mod endpoint_requests;
 mod lifecycle;
@@ -227,6 +228,8 @@ pub struct HeadlessServer {
     foreground_client_id: Option<u64>,
     /// Ephemeral shell connection controlling PTY geometry for each stable tab id.
     tab_geometry_controllers: HashMap<String, u64>,
+    /// Deferred growth of `smallest`-policy tabs, keyed by stable tab id.
+    tab_size_growth: client_size_policy::TabSizeGrowthTracker,
     /// Stable tab id whose viewers may see and interact with the one terminal popup.
     popup_owner_tab_id: Option<String>,
     /// Process-local identity used to reject shell replacements from an earlier server boot.
@@ -422,6 +425,7 @@ impl HeadlessServer {
             next_client_id: 1,
             foreground_client_id: None,
             tab_geometry_controllers: HashMap::new(),
+            tab_size_growth: Default::default(),
             popup_owner_tab_id: None,
             client_shell_boot_id: format!(
                 "{}-{}",
@@ -694,6 +698,7 @@ impl HeadlessServer {
                 .pending_alt_screen_reads
                 .iter()
                 .map(|pending| pending.next_deadline())
+                .chain(self.next_tab_size_growth_due())
                 .fold(next_deadline, |deadline, pending| {
                     Some(deadline.map_or(pending, |current| current.min(pending)))
                 });
@@ -818,7 +823,7 @@ impl HeadlessServer {
             return;
         };
         if matches!(client.mode, ClientConnectionMode::ClientShell) {
-            self.resize_shell_tab_if_controller(client_id, start_pending_agent_resumes);
+            self.resize_shell_tab_for_client_size(client_id, start_pending_agent_resumes);
             return;
         }
         let cell_size = client.cell_size;
@@ -942,6 +947,7 @@ impl HeadlessServer {
     fn reload_server_config(&mut self, notify_success: bool) -> crate::config::ConfigReloadReport {
         let server_keybindings = self.server_keybindings.clone();
         apply_keybindings(&mut self.app, &server_keybindings);
+        let size_policy_before = self.client_size_policy();
         let report = self.app.apply_config_from_disk(notify_success);
         self.app.take_config_reloaded_from_disk();
         self.server_keybindings = app_keybindings(&self.app);
@@ -952,6 +958,9 @@ impl HeadlessServer {
         self.server_config_diagnostic_without_keybindings =
             server_config_diagnostic_without_keybindings;
         self.sync_foreground_client_state();
+        if self.client_size_policy() != size_policy_before {
+            self.apply_reloaded_client_size_policy();
+        }
         report
     }
 
@@ -1109,7 +1118,7 @@ impl HeadlessServer {
         self.remove_client(client_id);
         if let Some((controller_id, target)) = restore_shell_controller {
             self.restore_shell_tab_geometry(controller_id, target);
-        } else {
+        } else if !self.rearbitrate_shell_tabs_after_viewer_change(true) {
             self.resize_tabs_for_only_shell_client(true);
         }
     }
@@ -1947,7 +1956,7 @@ impl HeadlessServer {
             .app
             .state
             .federation_owned_terminal_sizes
-            .contains(&real_terminal_id)
+            .contains_key(&real_terminal_id)
         {
             if let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) {
                 runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
@@ -2145,7 +2154,11 @@ impl HeadlessServer {
                     self.app.mark_git_status_refresh_due(Instant::now());
                 }
                 self.sync_foreground_client_state();
-                self.claim_unowned_shell_tab_geometry(client_id, true);
+                if !self.claim_unowned_shell_tab_geometry(client_id, true) {
+                    // Another client owns the tab; under `smallest` the new
+                    // viewer still bounds its size.
+                    self.resize_shell_tab_for_client_size(client_id, true);
+                }
                 self.nudge_handoff_panes_on_first_client_attach();
                 true
             }
@@ -2324,7 +2337,10 @@ impl HeadlessServer {
                     // reason the attach path does: it owns this terminal's size.
                     let federation_owned =
                         self.terminal_id_by_string(&terminal_id).is_some_and(|id| {
-                            self.app.state.federation_owned_terminal_sizes.contains(&id)
+                            self.app
+                                .state
+                                .federation_owned_terminal_sizes
+                                .contains_key(&id)
                         });
                     if !federation_owned {
                         if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
@@ -2380,7 +2396,8 @@ impl HeadlessServer {
                 }
                 client.request_repaint();
                 self.promote_client_to_foreground(client_id);
-                self.resize_shell_tab_if_controller(client_id, true);
+                self.grow_sole_viewer_tab_at_once(client_id);
+                self.resize_shell_tab_for_client_size(client_id, true);
                 true
             }
             ServerEvent::ClientShellHostTheme { client_id, update } => {
@@ -2751,8 +2768,9 @@ impl HeadlessServer {
                 }) && deferred_tab_id
                     .as_deref()
                     .is_some_and(|tab_id| self.focus_shell_client_on_tab(client_id, tab_id));
-                let geometry_changed =
-                    navigation_changed && self.claim_shell_tab_geometry(client_id, false);
+                let geometry_changed = navigation_changed
+                    && (self.claim_shell_tab_geometry(client_id, false)
+                        | self.rearbitrate_shell_tabs_after_viewer_change(false));
                 if navigation_changed {
                     self.reconcile_client_shell_locations();
                     let focus_after = self.shell_focus_target(client_id);
@@ -2805,12 +2823,16 @@ impl HeadlessServer {
                 // local events here — the loop's own event_rx arm owns the
                 // forwarding-aware drain — so no local render is needed (MIN10:
                 // these commands are render-causally inert).
+                //
+                // Under the `smallest` size policy a mount's size is a vote that
+                // must be combined with this host's own viewers, which can
+                // resize a host-viewed tab and so does need a render.
                 crate::server::federation_actor::dispatch(
                     &mut self.app,
                     &mut self.federation_lease,
                     command,
-                );
-                false
+                )
+                .is_some_and(|change| self.apply_mount_size_vote_change(change))
             }
         }
     }
@@ -3519,6 +3541,7 @@ impl HeadlessServer {
         }
 
         changed |= self.app.handle_tab_bar_status_tasks(now);
+        changed |= self.apply_due_tab_size_growth();
 
         if geometry_dirty {
             self.app.pending_agent_resume_deadline = None;

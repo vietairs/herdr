@@ -859,7 +859,32 @@ pub struct AppState {
     /// whole session, because the mounting client opens terminals lazily —
     /// session-wide ownership would also freeze every host terminal the mount
     /// never renders.
-    pub federation_owned_terminal_sizes: std::collections::HashSet<crate::terminal::TerminalId>,
+    ///
+    /// The value is the mount's size vote as `(cols, rows)`. `None` means the
+    /// terminal is mount-exclusive: the mount drives it but either has not
+    /// sent a size yet (it only asked for a redraw), or its connection did not
+    /// agree `Capability::PTY_SIZE_NOTICE` and so could not follow a PTY this
+    /// host bounds (see `federation_mount_follows_pty_size`). Under the
+    /// `smallest` client size policy a `Some` vote is combined with the host's
+    /// own viewers instead of locking them out; under `latest` every entry is
+    /// exclusive, as the bare set used to be.
+    pub federation_owned_terminal_sizes:
+        std::collections::HashMap<crate::terminal::TerminalId, Option<(u16, u16)>>,
+    /// Whether the mounted controller's connection agreed
+    /// `Capability::PTY_SIZE_NOTICE`. Set when it mounts and cleared once no
+    /// controller is mounted, so it is `false` for a legacy mount and for no
+    /// mount at all: only a mount that said it applies the host's PTY size
+    /// may have its size shared with this host's viewers or be sent notices.
+    pub(crate) federation_mount_follows_pty_size: bool,
+    /// The PTY size this host last published for each terminal a mount
+    /// subscribed to, read by that mount's output pump (see
+    /// `federation_actor::PtySizeNotice`).
+    pub(crate) federation_pty_size_notices: std::collections::HashMap<
+        crate::terminal::TerminalId,
+        std::sync::Arc<crate::server::federation_actor::PtySizeNotice>,
+    >,
+    /// How a tab's PTY size is arbitrated between the clients viewing it.
+    pub(crate) client_size_policy: crate::config::ClientSizePolicy,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -1274,7 +1299,10 @@ impl AppState {
         Self {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
-            federation_owned_terminal_sizes: std::collections::HashSet::new(),
+            federation_owned_terminal_sizes: std::collections::HashMap::new(),
+            federation_mount_follows_pty_size: false,
+            federation_pty_size_notices: std::collections::HashMap::new(),
+            client_size_policy: crate::config::ClientSizePolicy::default(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),
@@ -1902,6 +1930,7 @@ mod tests {
                 out_tx,
                 output_rx,
                 on_read: Box::new(|_bytes: &[u8]| {}),
+                pty_size: Default::default(),
             });
             (handle, out_rx)
         }

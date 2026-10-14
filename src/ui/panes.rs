@@ -187,6 +187,27 @@ fn pane_below<'a>(info: &PaneInfo, panes: &'a [PaneInfo]) -> Option<&'a PaneInfo
     })
 }
 
+fn pane_to_left<'a>(info: &PaneInfo, panes: &'a [PaneInfo]) -> Option<&'a PaneInfo> {
+    panes.iter().find(|other| {
+        other.id != info.id
+            && other.rect.x.saturating_add(other.rect.width) == info.rect.x
+            && ranges_overlap(
+                info.rect.y,
+                info.rect.height,
+                other.rect.y,
+                other.rect.height,
+            )
+    })
+}
+
+fn pane_above<'a>(info: &PaneInfo, panes: &'a [PaneInfo]) -> Option<&'a PaneInfo> {
+    panes.iter().find(|other| {
+        other.id != info.id
+            && other.rect.y.saturating_add(other.rect.height) == info.rect.y
+            && ranges_overlap(info.rect.x, info.rect.width, other.rect.x, other.rect.width)
+    })
+}
+
 fn shrink_for_one_cell_gap(size: u16) -> u16 {
     if size > 1 {
         size - 1
@@ -243,17 +264,27 @@ pub(crate) fn apply_pane_chrome(
                         borders.remove(Borders::BOTTOM);
                     }
                 }
+                // An edge with a neighbor is inner even when it lies on the
+                // panes' outer extent: a sibling collapsed to zero cells sits
+                // exactly there, and treating the edge as outer would drop a
+                // border the same pane keeps in any larger area. That would
+                // make the pane larger in a smaller area, so a PTY sized from
+                // the smallest viewer would crop the larger ones.
                 if !pane_outer_borders {
-                    if info.rect.x == outer_left {
+                    if info.rect.x == outer_left && pane_to_left(&info, &panes).is_none() {
                         borders.remove(Borders::LEFT);
                     }
-                    if info.rect.y == outer_top {
+                    if info.rect.y == outer_top && pane_above(&info, &panes).is_none() {
                         borders.remove(Borders::TOP);
                     }
-                    if info.rect.x.saturating_add(info.rect.width) == outer_right {
+                    if info.rect.x.saturating_add(info.rect.width) == outer_right
+                        && right_neighbor.is_none()
+                    {
                         borders.remove(Borders::RIGHT);
                     }
-                    if info.rect.y.saturating_add(info.rect.height) == outer_bottom {
+                    if info.rect.y.saturating_add(info.rect.height) == outer_bottom
+                        && below_neighbor.is_none()
+                    {
                         borders.remove(Borders::BOTTOM);
                     }
                 }
@@ -316,7 +347,8 @@ fn stable_scrollbar_gutter(
 /// behind either reverts their geometry within one frame, leaving every
 /// repaint laid out for the wrong width.
 fn host_owns_terminal_size(app: &AppState, terminal_id: &crate::terminal::TerminalId) -> bool {
-    !app.federation_owned_terminal_sizes.contains(terminal_id)
+    !app.federation_owned_terminal_sizes
+        .contains_key(terminal_id)
         && !app.direct_attach_resize_locks.contains(terminal_id)
 }
 
@@ -1104,6 +1136,54 @@ mod tests {
             .map(|x| buffer[(x, 0)].symbol().to_string())
             .collect();
         assert_eq!(title, " work ");
+    }
+
+    /// A pane next to a sibling collapsed to zero cells keeps the border that
+    /// edge has in any larger area, even though the edge is the outer extent.
+    #[test]
+    fn a_sibling_collapsed_to_zero_cells_keeps_the_edge_inner() {
+        let pane = |raw, x, y, width, height| PaneInfo {
+            id: crate::layout::PaneId::from_raw(raw),
+            rect: Rect::new(x, y, width, height),
+            inner_rect: Rect::default(),
+            scrollbar_rect: None,
+            borders: Borders::ALL,
+            is_focused: false,
+        };
+        // (kept pane, collapsed sibling, the border the kept pane must keep)
+        let cases = [
+            (
+                pane(1, 0, 0, 40, 10),
+                pane(2, 0, 10, 40, 0),
+                Borders::BOTTOM,
+            ),
+            (pane(1, 0, 0, 40, 10), pane(2, 40, 0, 0, 10), Borders::RIGHT),
+            (pane(1, 0, 0, 40, 10), pane(2, 0, 0, 40, 0), Borders::TOP),
+            (pane(1, 0, 0, 40, 10), pane(2, 0, 0, 0, 10), Borders::LEFT),
+        ];
+        for (kept, collapsed, border) in cases {
+            let infos = apply_pane_chrome(
+                vec![kept.clone(), collapsed],
+                PaneBordersConfig::Auto,
+                true,
+                false,
+            );
+            let kept = infos.iter().find(|info| info.id == kept.id).unwrap();
+            assert!(
+                kept.borders.contains(border),
+                "{border:?} dropped next to a collapsed sibling"
+            );
+        }
+        // Without a sibling there, the outer edge still drops its border.
+        let alone = apply_pane_chrome(
+            vec![pane(1, 0, 0, 40, 10), pane(2, 40, 0, 20, 10)],
+            PaneBordersConfig::Auto,
+            true,
+            false,
+        );
+        assert!(!alone[0].borders.contains(Borders::BOTTOM));
+        assert!(!alone[0].borders.contains(Borders::TOP));
+        assert!(!alone[0].borders.contains(Borders::LEFT));
     }
 
     #[test]

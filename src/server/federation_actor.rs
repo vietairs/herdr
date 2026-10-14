@@ -35,6 +35,7 @@ use crate::api::schema::events::EventKind;
 use crate::api::schema::session::SessionSnapshot;
 use crate::api::schema::{EmptyParams, Method, Request, ResponseResult, SuccessResponse};
 use crate::app::App;
+use crate::config::ClientSizePolicy;
 use crate::remote::federation::protocol::EventCursor;
 use crate::remote::federation::serve::empty_snapshot;
 use crate::server::federation_lease::{AcceptEpoch, Admission, ConnId, FederationLease};
@@ -77,9 +78,14 @@ pub(crate) enum FederationCommand {
     /// return the atomic (snapshot, cursor). Atomic for free here: the actor
     /// holds `&mut App` exclusively, so no event can slip between the snapshot
     /// and the cursor read. `None` if the reservation is stale or absent.
+    ///
+    /// `pty_size_notice` is whether the connection agreed
+    /// `Capability::PTY_SIZE_NOTICE`, kept for the mount's lifetime in
+    /// `AppState::federation_mount_follows_pty_size`.
     Mount {
         epoch: AcceptEpoch,
         connid: ConnId,
+        pty_size_notice: bool,
         reply: oneshot::Sender<Option<(SessionSnapshot, EventCursor)>>,
     },
     /// Release the lease on connection EOF (compare-and-clear; a late EOF from a
@@ -94,9 +100,10 @@ pub(crate) enum FederationCommand {
     Snapshot(oneshot::Sender<(SessionSnapshot, EventCursor)>),
     /// Events strictly after the given sequence number.
     EventsAfter(u64, oneshot::Sender<Vec<(u64, EventKind)>>),
-    /// A subscription to one live terminal's raw output bytes, or `None` if the
-    /// terminal id is unknown. Dropping the receiver never affects the PTY.
-    SubscribeOutput(String, oneshot::Sender<Option<broadcast::Receiver<Bytes>>>),
+    /// A subscription to one live terminal's raw output bytes and PTY size
+    /// notices, or `None` if the terminal id is unknown. Dropping it never
+    /// affects the PTY.
+    SubscribeOutput(String, oneshot::Sender<Option<OutputSubscription>>),
     /// The scrollback history (ANSI) to seed a newly opened remote pane.
     ScrollbackReplay(String, oneshot::Sender<Vec<u8>>),
     /// Forward input bytes to a live terminal — dropped unless `(epoch, connid)`
@@ -334,10 +341,135 @@ impl std::fmt::Debug for FederationCommand {
 /// `App` reads it gates are linearized with live-handoff revocation (which runs
 /// on the same loop). A dropped reply receiver (worker gone) is ignored — the
 /// `send` result is discarded.
+///
+/// Returns the change in the mount's terminal size votes that the caller must
+/// arbitrate against this host's own viewers. Only the `smallest` client size
+/// policy reports changes, and a size vote only from a mount that agreed
+/// `Capability::PTY_SIZE_NOTICE`; under `latest`, and for a legacy mount, a
+/// mount's size is applied here directly and stays exclusive.
 #[allow(dead_code)] // dormant until b0.4 wires the federation listener
-pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: FederationCommand) {
-    dispatch_command(app, lease, command);
+pub(crate) fn dispatch(
+    app: &mut App,
+    lease: &mut FederationLease,
+    command: FederationCommand,
+) -> Option<MountSizeVoteChange> {
+    let had_votes = !app.state.federation_owned_terminal_sizes.is_empty();
+    let change = dispatch_command(app, lease, command);
     sync_terminal_size_ownership(app, lease);
+    let all_released = had_votes && app.state.federation_owned_terminal_sizes.is_empty();
+    if app.state.client_size_policy != ClientSizePolicy::Smallest {
+        return None;
+    }
+    change.or(all_released.then_some(MountSizeVoteChange::Released))
+}
+
+/// A change in the mount's per-terminal size votes that the server loop must
+/// combine with this host's own viewers (see [`dispatch`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MountSizeVoteChange {
+    /// The mount sent a size for this terminal. The caller sizes the PTY
+    /// (clamped by any host viewer of its tab) and nudges the child to redraw.
+    Resized(crate::terminal::TerminalId),
+    /// The mount stopped voting for one or more terminals, so the host must
+    /// size them again from its own viewers.
+    Released,
+}
+
+/// Wakes `runtime`'s child so it repaints for a mount (see the private
+/// [`nudge_child_redraw`]); exposed for the server loop, which applies a
+/// mount's size vote after arbitrating it.
+pub(crate) fn nudge_mounted_child_redraw(runtime: &crate::terminal::TerminalRuntime) {
+    nudge_child_redraw(runtime);
+}
+
+/// What `SubscribeOutput` hands a federation connection for one terminal.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct OutputSubscription {
+    /// The terminal's raw output bytes.
+    pub(crate) bytes: broadcast::Receiver<Bytes>,
+    /// The PTY size this host last published for the terminal, which the
+    /// connection forwards to the mount so its mirror matches the PTY.
+    pub(crate) pty_size: std::sync::Arc<PtySizeNotice>,
+}
+
+/// The PTY size of a mounted terminal as this host last published it.
+///
+/// Under the `smallest` client size policy the PTY can be smaller than the
+/// mount's own vote, because this host's viewers bound it too. The mount must
+/// then size its mirror to the PTY rather than to its pane, or the program's
+/// line wrapping misdraws in the mirror. The server loop publishes here after
+/// sizing a voted terminal; the connection's output pump polls it and sends
+/// the change to the mount as a `TerminalChannelMessage::Resize`.
+///
+/// Packed into one atomic so a pump thread reads it without a lock; `0` means
+/// nothing was published yet, which a real size never packs to because both
+/// dimensions are at least 1.
+#[derive(Debug, Default)]
+pub(crate) struct PtySizeNotice(std::sync::atomic::AtomicU32);
+
+impl PtySizeNotice {
+    /// Publishes the PTY size `(rows, cols)`, as `TerminalRuntime::current_size`
+    /// reports it.
+    pub(crate) fn publish(&self, (rows, cols): (u16, u16)) {
+        let packed = (u32::from(cols.max(1)) << 16) | u32::from(rows.max(1));
+        self.0.store(packed, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The last published size as `(cols, rows)`, the wire order of `Resize`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn load(&self) -> Option<(u16, u16)> {
+        let packed = self.0.load(std::sync::atomic::Ordering::Acquire);
+        let cols = u16::try_from(packed >> 16).ok()?;
+        let rows = u16::try_from(packed & 0xffff).ok()?;
+        (packed != 0).then_some((cols, rows))
+    }
+
+    /// Back to unpublished: the mount no longer votes for this terminal, so
+    /// a later subscription must not replay a bound it no longer has.
+    fn reset(&self) {
+        self.0.store(0, std::sync::atomic::Ordering::Release);
+    }
+
+    fn is_published(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+}
+
+/// Subscribes to `terminal_id`'s output and hands back its size notice,
+/// creating the notice on first use. Notices of terminals that no longer exist
+/// are dropped here, the one place new ones are added.
+///
+/// A mount that did not agree `Capability::PTY_SIZE_NOTICE` gets a notice
+/// nothing publishes to, so its connection never sends it a `Resize`.
+fn subscribe_output(app: &mut App, terminal_id: &str) -> Option<OutputSubscription> {
+    let bytes = app
+        .terminal_runtime_for_terminal_id(terminal_id)?
+        .subscribe_output_bytes();
+    let resolved = resolve_owned_terminal_id(app, terminal_id)
+        .filter(|_| app.state.federation_mount_follows_pty_size);
+    let pty_size = match resolved {
+        Some(resolved) => {
+            let terminals = &app.state.terminals;
+            let notices = &mut app.state.federation_pty_size_notices;
+            notices.retain(|id, _| terminals.contains_key(id));
+            notices.entry(resolved).or_default().clone()
+        }
+        // Nothing can publish to a notice no terminal id maps to, so the
+        // mount keeps sizing its mirror to its own pane.
+        None => std::sync::Arc::default(),
+    };
+    Some(OutputSubscription { bytes, pty_size })
+}
+
+/// Publishes `terminal_id`'s current PTY size to its mount, if a mount
+/// subscribed to it.
+pub(crate) fn publish_mounted_pty_size(app: &App, terminal_id: &crate::terminal::TerminalId) {
+    let Some(notice) = app.state.federation_pty_size_notices.get(terminal_id) else {
+        return;
+    };
+    if let Some(runtime) = app.terminal_runtime_for_terminal_id(terminal_id.as_str()) {
+        notice.publish(runtime.current_size());
+    }
 }
 
 /// Drop every federation size claim once no controller is mounted. Called
@@ -347,6 +479,11 @@ pub(crate) fn dispatch(app: &mut App, lease: &mut FederationLease, command: Fede
 pub(crate) fn sync_terminal_size_ownership(app: &mut App, lease: &FederationLease) {
     if !lease.has_mounted_controller() {
         app.state.federation_owned_terminal_sizes.clear();
+        app.state.federation_mount_follows_pty_size = false;
+        // The next mount starts from its own size, not this one's bound.
+        for notice in app.state.federation_pty_size_notices.values() {
+            notice.reset();
+        }
     }
 }
 
@@ -356,18 +493,47 @@ pub(crate) fn sync_terminal_size_ownership(app: &mut App, lease: &FederationLeas
 /// Resolved through `resolve_terminal_target`, the same way the resize it
 /// accompanies is, so every target form that can be resized can also be
 /// claimed.
+///
+/// Claims without a size: the terminal stays mount-exclusive until a size vote
+/// arrives. A size the mount already sent is kept, never replaced by `None`.
 fn claim_terminal_size(app: &mut App, terminal_id: &str) {
     if let Some(claimed) = resolve_owned_terminal_id(app, terminal_id) {
-        app.state.federation_owned_terminal_sizes.insert(claimed);
+        app.state
+            .federation_owned_terminal_sizes
+            .entry(claimed)
+            .or_insert(None);
     }
 }
 
+/// Records the mount's size vote `(cols, rows)` for `terminal_id`, claiming
+/// it. Returns the resolved id so the caller can arbitrate the vote.
+fn vote_terminal_size(
+    app: &mut App,
+    terminal_id: &str,
+    cols: u16,
+    rows: u16,
+) -> Option<crate::terminal::TerminalId> {
+    let voted = resolve_owned_terminal_id(app, terminal_id)?;
+    app.state
+        .federation_owned_terminal_sizes
+        .insert(voted.clone(), Some((cols, rows)));
+    Some(voted)
+}
+
 /// Drops the mount's claim on `terminal_id` — it stopped driving that
-/// terminal, so the host may size it again. Reopening re-claims it.
-fn release_terminal_size(app: &mut App, terminal_id: &str) {
-    if let Some(released) = resolve_owned_terminal_id(app, terminal_id) {
-        app.state.federation_owned_terminal_sizes.remove(&released);
-    }
+/// terminal, so the host may size it again. Reopening re-claims it, and starts
+/// from no size notice: the host stops publishing once the vote is gone, so a
+/// kept notice would replay a stale bound to the reopened mirror.
+fn release_terminal_size(app: &mut App, terminal_id: &str) -> bool {
+    resolve_owned_terminal_id(app, terminal_id).is_some_and(|released| {
+        if let Some(notice) = app.state.federation_pty_size_notices.get(&released) {
+            notice.reset();
+        }
+        app.state
+            .federation_owned_terminal_sizes
+            .remove(&released)
+            .is_some()
+    })
 }
 
 fn resolve_owned_terminal_id(app: &App, terminal_id: &str) -> Option<crate::terminal::TerminalId> {
@@ -379,7 +545,113 @@ fn resolve_owned_terminal_id(app: &App, terminal_id: &str) -> Option<crate::term
         .cloned()
 }
 
-fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: FederationCommand) {
+fn dispatch_command(
+    app: &mut App,
+    lease: &mut FederationLease,
+    command: FederationCommand,
+) -> Option<MountSizeVoteChange> {
+    match command {
+        FederationCommand::Resize { .. }
+        | FederationCommand::NudgeRedraw { .. }
+        | FederationCommand::ReleaseTerminalSize { .. } => {
+            dispatch_size_command(app, lease, command)
+        }
+        command => {
+            dispatch_session_command(app, lease, command);
+            None
+        }
+    }
+}
+
+/// Services the commands through which a mount drives terminal sizes.
+fn dispatch_size_command(
+    app: &mut App,
+    lease: &FederationLease,
+    command: FederationCommand,
+) -> Option<MountSizeVoteChange> {
+    match command {
+        FederationCommand::Resize {
+            epoch,
+            connid,
+            terminal_id,
+            cols,
+            rows,
+        } => {
+            if !lease.is_mounted_controller(epoch, connid) {
+                return None;
+            }
+            app.terminal_runtime_for_terminal_id(&terminal_id)?;
+            // Only a mount that applies the host's PTY size notices may have
+            // its size shared: a legacy mount would keep its mirror at its own
+            // size while this host bounds the PTY, and misdraw. Its size stays
+            // exclusive, exactly as under `latest`.
+            let shared = app.state.federation_mount_follows_pty_size;
+            let voted = if shared {
+                vote_terminal_size(app, &terminal_id, cols, rows)
+            } else {
+                claim_terminal_size(app, &terminal_id);
+                None
+            };
+            if shared && app.state.client_size_policy == ClientSizePolicy::Smallest {
+                // The server loop combines the vote with this host's own
+                // viewers of the terminal's tab, then resizes and nudges.
+                return voted.map(MountSizeVoteChange::Resized);
+            }
+            if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
+                runtime.resize(rows, cols, 0, 0);
+                // Unconditional, including when `resize` deduped the call: a
+                // size that is already current here still leaves the mounted
+                // client's mirror freshly reflowed and unpainted, and that leg
+                // sends no `SIGWINCH` at all.
+                nudge_child_redraw(runtime);
+            }
+            // Under `latest` the PTY is the mount's own size, so a mount needs
+            // no notice. It still gets one once it has had a notice (only after
+            // a reload from `smallest`), or its mirror would stay bounded by
+            // that stale notice.
+            if let Some(voted) = voted.filter(|voted| {
+                app.state
+                    .federation_pty_size_notices
+                    .get(voted)
+                    .is_some_and(|notice| notice.is_published())
+            }) {
+                publish_mounted_pty_size(app, &voted);
+            }
+            None
+        }
+        FederationCommand::NudgeRedraw {
+            epoch,
+            connid,
+            terminal_id,
+        } => {
+            if !lease.is_mounted_controller(epoch, connid) {
+                return None;
+            }
+            if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
+                nudge_child_redraw(runtime);
+                claim_terminal_size(app, &terminal_id);
+            }
+            None
+        }
+        FederationCommand::ReleaseTerminalSize {
+            epoch,
+            connid,
+            terminal_id,
+        } => {
+            if !lease.is_mounted_controller(epoch, connid) {
+                return None;
+            }
+            release_terminal_size(app, &terminal_id).then_some(MountSizeVoteChange::Released)
+        }
+        _ => None,
+    }
+}
+
+fn dispatch_session_command(
+    app: &mut App,
+    lease: &mut FederationLease,
+    command: FederationCommand,
+) {
     match command {
         FederationCommand::AcquireController {
             epoch,
@@ -391,6 +663,7 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
         FederationCommand::Mount {
             epoch,
             connid,
+            pty_size_notice,
             reply,
         } => {
             // Promote the reservation first; only the current-epoch holder mounts.
@@ -399,6 +672,7 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                 let _ = reply.send(None);
                 return;
             }
+            app.state.federation_mount_follows_pty_size = pty_size_notice;
             let (snapshot, cursor) = current_snapshot(app);
             let _ = reply.send(Some((snapshot, cursor)));
         }
@@ -418,9 +692,7 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
             let _ = reply.send(events);
         }
         FederationCommand::SubscribeOutput(terminal_id, reply) => {
-            let subscription = app
-                .terminal_runtime_for_terminal_id(&terminal_id)
-                .map(|runtime| runtime.subscribe_output_bytes());
+            let subscription = subscribe_output(app, &terminal_id);
             let _ = reply.send(subscription);
         }
         FederationCommand::ScrollbackReplay(terminal_id, reply) => {
@@ -442,48 +714,10 @@ fn dispatch_command(app: &mut App, lease: &mut FederationLease, command: Federat
                 let _ = runtime.try_send_bytes(Bytes::copy_from_slice(&bytes));
             }
         }
-        FederationCommand::Resize {
-            epoch,
-            connid,
-            terminal_id,
-            cols,
-            rows,
-        } => {
-            if !lease.is_mounted_controller(epoch, connid) {
-                return;
-            }
-            if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
-                runtime.resize(rows, cols, 0, 0);
-                // Unconditional, including when `resize` deduped the call: a
-                // size that is already current here still leaves the mounted
-                // client's mirror freshly reflowed and unpainted, and that leg
-                // sends no `SIGWINCH` at all.
-                nudge_child_redraw(runtime);
-                claim_terminal_size(app, &terminal_id);
-            }
-        }
-        FederationCommand::NudgeRedraw {
-            epoch,
-            connid,
-            terminal_id,
-        } => {
-            if !lease.is_mounted_controller(epoch, connid) {
-                return;
-            }
-            if let Some(runtime) = app.terminal_runtime_for_terminal_id(&terminal_id) {
-                nudge_child_redraw(runtime);
-                claim_terminal_size(app, &terminal_id);
-            }
-        }
-        FederationCommand::ReleaseTerminalSize {
-            epoch,
-            connid,
-            terminal_id,
-        } => {
-            if !lease.is_mounted_controller(epoch, connid) {
-                return;
-            }
-            release_terminal_size(app, &terminal_id);
+        FederationCommand::Resize { .. }
+        | FederationCommand::NudgeRedraw { .. }
+        | FederationCommand::ReleaseTerminalSize { .. } => {
+            // `dispatch_command` routes these to `dispatch_size_command`.
         }
         FederationCommand::AgentStatuses(reply) => {
             let response = app.handle_api_request_after_internal_events_drained(Request {
@@ -1013,6 +1247,7 @@ mod tests {
             FederationCommand::Mount {
                 epoch,
                 connid,
+                pty_size_notice: true,
                 reply: mtx,
             },
         );
@@ -1087,6 +1322,7 @@ mod tests {
             FederationCommand::Mount {
                 epoch,
                 connid: 1,
+                pty_size_notice: true,
                 reply: mtx,
             },
         );
@@ -1253,7 +1489,7 @@ mod tests {
         assert!(
             app.state
                 .federation_owned_terminal_sizes
-                .iter()
+                .keys()
                 .any(|id| id.to_string() == terminal_id),
             "a federated resize claims the terminal's size"
         );
@@ -1287,11 +1523,11 @@ mod tests {
 
         let owned = &app.state.federation_owned_terminal_sizes;
         assert!(
-            owned.iter().any(|id| id.to_string() == terminals[0]),
+            owned.keys().any(|id| id.to_string() == terminals[0]),
             "the driven terminal is owned by the mount"
         );
         assert!(
-            !owned.iter().any(|id| id.to_string() == terminals[1]),
+            !owned.keys().any(|id| id.to_string() == terminals[1]),
             "a terminal the mount never opened stays host owned"
         );
     }
