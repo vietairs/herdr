@@ -330,6 +330,17 @@ pub(super) fn agent_row(
             used_tokens: usage.used_tokens,
             window_tokens: usage.window_tokens,
         });
+    // A federated mount lives in the endpoint that mounted it, so the
+    // endpoint label alone would call a remote agent "Local". The server
+    // sets `federation_origin` from the workspace id, so prefer it as the
+    // machine; a single-machine view (`machine == None`) still hides the
+    // token.
+    let machine = machine.map(|endpoint_label| {
+        workspace
+            .federation_origin
+            .as_deref()
+            .unwrap_or(endpoint_label)
+    });
     let rows = crate::ui::sidebar_agent_rows(
         &config.agents,
         crate::ui::AgentTokenContext {
