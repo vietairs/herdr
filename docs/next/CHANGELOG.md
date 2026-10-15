@@ -9,10 +9,10 @@
 - The sidebar can hide itself. Turn on `ui.sidebar_auto_hide` (or **Settings → Sidebar**) and the sidebar stays collapsed while you work, opens over the panes when the pointer reaches the left edge or in navigate mode, and hides again when you move away. `toggle_sidebar` docks it open. New `keys.grow_sidebar` and `keys.shrink_sidebar` actions (unbound by default) change the sidebar width from the keyboard.
 - Agent rows can show a prompt-cache countdown. The new `prompt_cache` sidebar token, now in the default agent layout, shows how long the agent's prompt cache stays warm (for example `5m 4:12`) and turns to `cold` when it expires. Integrations report it with `herdr pane report-prompt-cache` or the `pane.report_prompt_cache` API method.
 - Agent rows can show context-window use. The new `context` sidebar token, on its own row in the default agent layout, shows tokens used against the agent's exact context window (for example `ctx 84k/200k 42%`), coloured as the context fills; with no known window it shows only the tokens. Integrations report it with `herdr pane report-context-usage` or the `pane.report_context_usage` API method. Mounted remote panes show both the countdown and context use.
-- Integrations report the new facts: Claude Code v12 (prompt-cache and context hooks; on macOS and Linux it also wraps your existing statusline, keeping its output unchanged, to read the exact window; without a statusline, and on Windows, it reports tokens only), Codex v10, Qwen Code v2, Pi v10, OMP v11, OpenCode v14, Kilo Code CLI v5, Hermes Agent v6 (tokens only), Antigravity CLI v4, GitHub Copilot CLI v4 and Cursor Agent CLI v2 (these three on macOS and Linux, when you have a custom statusline; Copilot and Cursor are unverified until tested against a live session). Grok CLI does not report usage yet (known gap). Run `herdr integration install <agent>` to update. Clients and servers must be upgraded together: the client protocol moved to version 25. Both ends of a federation mount must be upgraded together: the federation protocol moved to version 8.
+- Integrations report the new facts: Claude Code v13 (prompt-cache and context hooks; on macOS and Linux it also wraps your existing statusline, keeping its output unchanged, to read the exact window; without a statusline, and on Windows, it reports tokens only), Codex v11, Qwen Code v3, Pi v10, OMP v11, OpenCode v14, Kilo Code CLI v5, Hermes Agent v6 (tokens only), Antigravity CLI v5, GitHub Copilot CLI v5 and Cursor Agent CLI v3 (these three on macOS and Linux, when you have a custom statusline; Copilot and Cursor are unverified until tested against a live session). Grok CLI does not report usage yet (known gap). Run `herdr integration install <agent>` to update. Clients and servers must be upgraded together: the client protocol moved to version 25. Both ends of a federation mount must be upgraded together: the federation protocol moved to version 8.
 
 ### Fixed
-- The Claude Code prompt-cache countdown in the sidebar now counts from the end of Claude's last response instead of from when the request was sent, so it matches statusline tools that do the same and no longer runs behind them by the response time. Claude Code integration v12 includes the change; run `herdr integration install claude` to update.
+- The Claude Code prompt-cache countdown in the sidebar now counts from the end of Claude's last response instead of from when the request was sent, so it matches statusline tools that do the same and no longer runs behind them by the response time. Claude Code integration v13 includes the change; run `herdr integration install claude` to update.
 - A termination signal now exits the client even while its event loop is waiting on a timer. `SIGINT`, `SIGTERM`, and `SIGHUP` wake the loop directly instead of being noticed only on its next pass, so `kill` and a terminal hangup shut the client down promptly and still run the normal detach and terminal-restore path.
 - The mount button in the "mount remote workspace" dialog works again. The dialog was rebuilt onto
   the client-shell command lane, but `workspace.mount_remote` was never added to the list of
@@ -48,6 +48,18 @@
   installed CLI speak the same protocol; until then CLI commands report a client/server version
   mismatch. The federation protocol version is unchanged at 7, so mounts to hosts running 0.9.0
   keep working.
+
+## [0.9.5] - 2026-10-14
+
+This is a hotfix release for v0.9.4. See the v0.9.4 notes for the full feature release: https://github.com/herdrdev/herdr/releases/tag/v0.9.4
+
+### Fixed
+- Prefix shortcuts work again when the terminal sends the next key as plain text. This affected Tern, Chinese, Japanese and Korean input methods on macOS, and Ghostty `text:` keybinds that send the prefix and a key together. Workspace navigation had the same problem. (#5255)
+- Codex sessions no longer start with a "clamping Interrupt hook timeout" warning. Herdr no longer installs Codex turn hooks, and Codex status comes from screen detection again. Run `herdr integration install codex` to update. (#5246, #5278)
+- Claude Code questions show as blocked in named sessions. (#4573, #5192)
+- On Windows, plugin panes start even when a folder on `PATH` has the same name as the plugin's program. (#5267, #5269, thanks @JJLiebig)
+- On Windows, Claude Code session tracking works when the user folder name contains non-ASCII characters, such as Korean. (#5253, #5270, thanks @JJLiebig)
+- Adding a Windows machine no longer prints raw PowerShell progress output. (#4639, #5282, thanks @JJLiebig)
 
 ## [0.9.4] - 2026-10-13
 

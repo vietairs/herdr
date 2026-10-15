@@ -313,19 +313,21 @@ class CodexUsageHookTests(unittest.TestCase):
         )
         self.assertEqual(requests, [])
 
-    def test_idle_action_on_the_shared_stop_hook_reports_state_not_usage(self):
+    def test_removed_turn_status_actions_report_nothing(self):
+        # Codex turn state comes from screen detection; hooks left behind by an
+        # older integration must not report working or idle.
         lines = [token_count(BASE_MS)]
 
-        requests, _ = run_hook(stop_payload(), lines, action="idle")
+        for action, payload in (
+            ("idle", stop_payload()),
+            ("working", {**stop_payload(), "hook_event_name": "UserPromptSubmit"}),
+        ):
+            requests, _ = run_hook(payload, lines, action=action)
+            self.assertEqual(requests, [], action)
 
-        self.assertEqual(len(requests), 1, requests)
-        self.assertEqual(requests[0]["method"], "pane.report_agent")
-        self.assertEqual(requests[0]["params"]["state"], "idle")
-        self.assertEqual(requests[0]["params"]["agent_session_id"], "codex-session")
-
-    def test_assets_carry_version_ten(self):
+    def test_assets_carry_version_eleven(self):
         for asset in (ASSET, POWERSHELL_ASSET):
-            self.assertIn("# HERDR_INTEGRATION_VERSION=10", asset.read_text("utf-8"))
+            self.assertIn("# HERDR_INTEGRATION_VERSION=11", asset.read_text("utf-8"))
 
     def test_powershell_asset_reports_through_the_cli(self):
         text = POWERSHELL_ASSET.read_text("utf-8")

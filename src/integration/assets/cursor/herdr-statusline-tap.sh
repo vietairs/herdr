@@ -6,7 +6,7 @@
 # by a changelog entry and a forum post, so a missing or implausible field
 # reports nothing.
 # HERDR_INTEGRATION_ID=cursor
-# HERDR_INTEGRATION_VERSION=2
+# HERDR_INTEGRATION_VERSION=3
 #
 # usage: sh herdr-statusline-tap.sh ORIGINAL_COMMAND
 # no `set -e`: every failure path must still run the original command.

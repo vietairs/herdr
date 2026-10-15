@@ -533,9 +533,9 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
         self.assertNotIn('$candidate.type -cne "user"', text)
         self.assertNotIn("$earlier", text)
 
-    def test_assets_carry_version_twelve(self):
+    def test_assets_carry_version_thirteen(self):
         for asset in (ASSET, POWERSHELL_ASSET):
-            self.assertIn("# HERDR_INTEGRATION_VERSION=12", asset.read_text("utf-8"))
+            self.assertIn("# HERDR_INTEGRATION_VERSION=13", asset.read_text("utf-8"))
 
 
 @unittest.skipIf(os.name == "nt", "runs the POSIX shell asset against a Unix-socket fake server")
@@ -872,8 +872,8 @@ class ClaudeStatuslineTapTests(unittest.TestCase):
             self.assertEqual(os.listdir(tmpdir), [])
             self.assertEqual(process.returncode, 143)
 
-    def test_tap_asset_carries_version_twelve(self):
-        self.assertIn("# HERDR_INTEGRATION_VERSION=12", TAP_ASSET.read_text("utf-8"))
+    def test_tap_asset_carries_version_thirteen(self):
+        self.assertIn("# HERDR_INTEGRATION_VERSION=13", TAP_ASSET.read_text("utf-8"))
 
 
 if __name__ == "__main__":

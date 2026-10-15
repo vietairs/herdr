@@ -159,7 +159,7 @@ class QwenAssetVersionTests(unittest.TestCase):
         for asset in (ASSET, POWERSHELL_ASSET):
             text = asset.read_text(encoding="utf-8")
             self.assertIn("HERDR_INTEGRATION_ID=qwen", text, asset.name)
-            self.assertIn("HERDR_INTEGRATION_VERSION=2", text, asset.name)
+            self.assertIn("HERDR_INTEGRATION_VERSION=3", text, asset.name)
 
 
 if __name__ == "__main__":

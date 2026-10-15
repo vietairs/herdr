@@ -255,10 +255,10 @@ class CopilotStatuslineTapTests(unittest.TestCase):
         self.assert_passthrough(result)
         self.assertEqual(len(requests), 1, requests)
 
-    def test_assets_carry_version_four(self):
+    def test_assets_carry_version_five(self):
         for asset in (TAP_ASSET, *HOOK_ASSETS):
             with self.subTest(asset=asset.name):
-                self.assertIn("HERDR_INTEGRATION_VERSION=4", asset.read_text("utf-8"))
+                self.assertIn("HERDR_INTEGRATION_VERSION=5", asset.read_text("utf-8"))
         self.assertIn("HERDR_INTEGRATION_ID=copilot", TAP_ASSET.read_text("utf-8"))
 
 
