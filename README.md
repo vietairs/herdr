@@ -101,6 +101,45 @@ anyway). the `Unblock-File` above clears the mark-of-the-web on the archive.
 what works and what doesn't on windows is upstream's
 [windows support page](https://herdr.dev/docs/windows-beta/) — the fork changes nothing there.
 
+#### use it
+
+run `herdr` from Windows Terminal or PowerShell. the first run starts a local server and opens your
+workspace. panes are native ConPTY terminals; split them and run your agents the same way as on linux
+and macos.
+
+- **detach:** `ctrl+b q`. panes keep running when you close the window or log out of an ssh session.
+  run `herdr` again to reattach.
+- **paste:** `ctrl+shift+v` in Windows Terminal. shift + right-click uses the terminal's own paste.
+- **copy:** drag-select text inside a pane.
+
+#### connect to a remote machine
+
+the same `--remote` commands work from Windows Terminal, using the Windows OpenSSH client and your
+`~/.ssh/config`:
+
+```powershell
+herdr --remote workbox                                  # thin attach, one host
+herdr --remote workbox --remote-workspace               # mount it as a sidebar workspace
+```
+
+key auth through the Windows `ssh-agent` avoids repeated password prompts. the remote can run
+linux, macos or windows. see the [federation](#federation-same-build-on-both-ends) notes: both ends
+need the same fork release.
+
+**windows remote hosts need the fork zip.** when `herdr machine add` or `--remote` installs herdr on a
+windows host, it downloads upstream's package unless `HERDR_REMOTE_BINARY` points at a package. to
+install this fork's build, fetch the zip and point the variable at it before adding the machine:
+
+```powershell
+$zip = "$env:USERPROFILE\Downloads\herdr-windows-x86_64.zip"
+Invoke-WebRequest -Uri "https://github.com/vietairs/herdr/releases/latest/download/herdr-windows-x86_64.zip" -OutFile $zip
+$env:HERDR_REMOTE_BINARY = $zip
+herdr machine add you@windows-host                      # asks before installing
+```
+
+the variable lasts for that PowerShell session only. set it again, or add it to your profile, before
+the next `machine add`.
+
 ### federation: same build on both ends
 
 remote workspace federation speaks a fork-local protocol, and the version guard refuses a mount
