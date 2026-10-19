@@ -255,6 +255,37 @@ impl KittyKeyboardTracker {
         }
     }
 
+    /// Returns [`Self::replay_ansi`] when the tracker agrees with libghostty:
+    /// same active screen and same current flags. When they disagree (a mode
+    /// the tracker does not follow, such as an XTRESTORE of 1049, or a
+    /// malformed `CSI u` the tracker reads differently), the stacks cannot be
+    /// trusted, so only libghostty's current flags are set, with no screen
+    /// switches: the copy may lose stack depth but never lands on the wrong
+    /// screen or with the wrong flags.
+    #[cfg(unix)]
+    pub(crate) fn replay_ansi_on_screen(
+        &self,
+        alternate_screen: bool,
+        current_flags: u16,
+    ) -> Option<String> {
+        let active = if self.alternate_active {
+            &self.alternate
+        } else {
+            &self.primary
+        };
+        if self.alternate_active == alternate_screen && active.flags == current_flags {
+            return self.replay_ansi();
+        }
+        let mut ansi = String::new();
+        if current_flags != 0 {
+            ansi.push_str(&format!("\x1b[={current_flags}u"));
+        }
+        if self.modify_other_keys_level > 0 {
+            ansi.push_str(&format!("\x1b[>4;{}m", self.modify_other_keys_level));
+        }
+        (!ansi.is_empty()).then_some(ansi)
+    }
+
     /// Bytes that rebuild both screens' stacks and modifyOtherKeys on a
     /// target that already parsed the `InputState` restore bytes, so it is on
     /// the source's active screen with both stacks disabled and a fresh
@@ -270,30 +301,6 @@ impl KittyKeyboardTracker {
     /// stack. 1049 matches the restore bytes' own `?1049h`, so the mode bits
     /// end as the restore left them; the cursor it saves and restores is the
     /// target's own, and the alternate screen it erases is still blank.
-    /// [`Self::replay_ansi`] when the tracker's screen matches libghostty's
-    /// active screen. When they disagree (a mode the tracker does not follow,
-    /// such as an XTRESTORE of 1049), the stacks cannot be trusted, so only
-    /// libghostty's current flags are set, with no screen switches: the copy
-    /// may lose stack depth but never lands on the wrong screen.
-    #[cfg(unix)]
-    pub(crate) fn replay_ansi_on_screen(
-        &self,
-        alternate_screen: bool,
-        current_flags: u16,
-    ) -> Option<String> {
-        if self.alternate_active == alternate_screen {
-            return self.replay_ansi();
-        }
-        let mut ansi = String::new();
-        if current_flags != 0 {
-            ansi.push_str(&format!("\x1b[={current_flags}u"));
-        }
-        if self.modify_other_keys_level > 0 {
-            ansi.push_str(&format!("\x1b[>4;{}m", self.modify_other_keys_level));
-        }
-        (!ansi.is_empty()).then_some(ansi)
-    }
-
     #[cfg(unix)]
     pub(crate) fn replay_ansi(&self) -> Option<String> {
         let mut ansi = String::new();

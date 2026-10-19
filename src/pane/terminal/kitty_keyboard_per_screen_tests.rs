@@ -448,6 +448,19 @@ fn copy_stays_on_the_source_screen_when_the_tracker_loses_track() {
 }
 
 #[test]
+fn copy_keeps_the_source_flags_when_a_malformed_csi_u_misleads_the_tracker() {
+    // libghostty saturates a parameter above 65535 and then ignores the
+    // out-of-range flags; the tracker cannot parse it and reads 0.
+    for bytes in [&b"\x1b[>1u\x1b[>70000u"[..], &b"\x1b[>1u\x1b[=70000u"[..]] {
+        let source = source_from(bytes);
+        assert_eq!(kitty_flags(&source.0), 1, "source flags");
+        for (label, copy) in copies_of(&source.0) {
+            assert_eq!(kitty_flags(&copy.0), 1, "{label} flags");
+        }
+    }
+}
+
+#[test]
 fn csi_cut_short_by_esc_does_not_hide_the_next_screen_switch() {
     for split in [None, Some(13)] {
         let bytes: &[u8] = b"\x1b[>1u\x1b[?1049h\x1b[1\x1b[?1049l";
