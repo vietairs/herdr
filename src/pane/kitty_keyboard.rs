@@ -17,8 +17,13 @@ pub(crate) struct KittyKeyboardTracker {
     modify_other_keys_level: u8,
 }
 
+/// Entries libghostty keeps per screen, counting the current flags. A push
+/// onto a full stack overwrites the oldest entry, so the replay never grows
+/// past this depth however many pushes an app leaks.
+const KITTY_FLAG_STACK_DEPTH: usize = 8;
+
 /// One screen's Kitty keyboard flags: the current value and the pushed
-/// values underneath it.
+/// values underneath it, at most `KITTY_FLAG_STACK_DEPTH - 1` of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct KittyFlagStack {
     stack: Vec<u16>,
@@ -188,6 +193,9 @@ impl KittyKeyboardTracker {
         match kind {
             b'>' => {
                 let flags = parse_kitty_keyboard_flags(rest);
+                if screen.stack.len() + 1 >= KITTY_FLAG_STACK_DEPTH {
+                    screen.stack.remove(0);
+                }
                 screen.stack.push(screen.flags);
                 screen.flags = flags;
             }
@@ -271,6 +279,23 @@ mod tests {
         assert_eq!(tracker.modify_other_keys_level(), 1);
         tracker.observe(b"\x1b[>04n");
         assert_eq!(tracker.modify_other_keys_level(), 0);
+    }
+
+    #[test]
+    fn push_onto_a_full_stack_drops_the_oldest_entry() {
+        let mut tracker = KittyKeyboardTracker::default();
+        for flags in 1..=20 {
+            tracker.observe(format!("\x1b[>{flags}u").as_bytes());
+        }
+
+        assert_eq!(tracker.primary.flags, 20);
+        assert_eq!(tracker.primary.stack, (13..=19).collect::<Vec<_>>());
+        tracker.observe(b"\x1b[<7u");
+        assert_eq!(tracker.primary.flags, 13);
+        tracker.observe(b"\x1b[<u");
+        assert!(tracker.primary.is_default());
+        #[cfg(unix)]
+        assert_eq!(tracker.replay_ansi(), None);
     }
 
     #[test]

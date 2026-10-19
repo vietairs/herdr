@@ -845,10 +845,11 @@ impl Channel {
             // An `Open` frame carries one terminal's ANSI scrollback replay,
             // which the sender bounds with `MAX_REPLAY_BYTES_PER_PANE`
             // (`PaneRuntime::handoff_history_ansi`). Bytes encode as a JSON
-            // number array, so an `Open` stays in the tens of KiB, and its
-            // `input_modes` add well under 1 KiB. The 8 MiB value is headroom
-            // for the channel's other frames, chiefly live `Output` frames
-            // that the output pump coalesces.
+            // number array, so an `Open` stays in the tens of KiB. Its
+            // `input_modes` stay small because each screen's Kitty flag stack
+            // is capped at libghostty's depth (`KittyKeyboardTracker`). The
+            // 8 MiB value is headroom for the channel's other frames, chiefly
+            // live `Output` frames that the output pump coalesces.
             Channel::Terminal => 8 * 1024 * 1024,
             Channel::AgentStatus => 64 * 1024,
             Channel::Clipboard => 16 * 1024 * 1024,
