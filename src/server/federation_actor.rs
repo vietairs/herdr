@@ -55,6 +55,25 @@ pub(crate) struct FederatedAgentFacts {
     pub(crate) context_usage: Option<crate::api::schema::ContextUsageInfo>,
 }
 
+/// What a newly opened mirror is primed with: the pane's history and its input
+/// modes. They are not one atomic snapshot. Each is a separate terminal-lock
+/// read, and the PTY reader parses on its own task, so it can run between
+/// them. The connection subscribes to live output before asking for this, so
+/// any byte parsed after the subscribe also reaches the mirror live, and the
+/// mirror catches up. A byte parsed between the subscribe and these reads is
+/// applied twice. For most modes that is harmless, but a kitty keyboard push
+/// leaves the mirror's stack one level deeper than the host's, and a second
+/// `?1049h` clears the mirror's alternate grid. That window is milliseconds
+/// wide, and the cost is accepted.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+// Only the Unix federation accept path reads these fields; the actor that
+// builds them compiles on every target.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct TerminalOpenState {
+    pub(crate) replay: Vec<u8>,
+    pub(crate) input_modes: Vec<u8>,
+}
+
 /// A request from a co-located federation connection to be serviced against the
 /// live `App` (and the single-controller [`FederationLease`]) on the server
 /// event loop. Read-only queries and the two remote-input forwards
@@ -104,8 +123,15 @@ pub(crate) enum FederationCommand {
     /// notices, or `None` if the terminal id is unknown. Dropping it never
     /// affects the PTY.
     SubscribeOutput(String, oneshot::Sender<Option<OutputSubscription>>),
-    /// The scrollback history (ANSI) to seed a newly opened remote pane.
-    ScrollbackReplay(String, oneshot::Sender<Vec<u8>>),
+    /// What to prime a newly opened remote pane with: its scrollback history
+    /// and, when `with_input_modes` is set, its input modes. A mount that did
+    /// not agree `TERMINAL_INPUT_STATE` asks without them, so its Open does
+    /// not pay for a read it would throw away.
+    TerminalOpenState {
+        terminal_id: String,
+        with_input_modes: bool,
+        reply: oneshot::Sender<TerminalOpenState>,
+    },
     /// Forward input bytes to a live terminal — dropped unless `(epoch, connid)`
     /// is the mounted controller. Fire-and-forget.
     SendInput {
@@ -291,7 +317,11 @@ impl std::fmt::Debug for FederationCommand {
             FederationCommand::Snapshot(_) => f.write_str("Snapshot"),
             FederationCommand::EventsAfter(since, _) => write!(f, "EventsAfter({since})"),
             FederationCommand::SubscribeOutput(id, _) => write!(f, "SubscribeOutput({id})"),
-            FederationCommand::ScrollbackReplay(id, _) => write!(f, "ScrollbackReplay({id})"),
+            FederationCommand::TerminalOpenState {
+                terminal_id,
+                with_input_modes,
+                ..
+            } => write!(f, "TerminalOpenState({terminal_id}, {with_input_modes})"),
             FederationCommand::SendInput {
                 terminal_id, bytes, ..
             } => {
@@ -695,9 +725,13 @@ fn dispatch_session_command(
             let subscription = subscribe_output(app, &terminal_id);
             let _ = reply.send(subscription);
         }
-        FederationCommand::ScrollbackReplay(terminal_id, reply) => {
-            let replay = scrollback_replay(app, &terminal_id);
-            let _ = reply.send(replay);
+        FederationCommand::TerminalOpenState {
+            terminal_id,
+            with_input_modes,
+            reply,
+        } => {
+            let state = terminal_open_state(app, &terminal_id, with_input_modes);
+            let _ = reply.send(state);
         }
         FederationCommand::SendInput {
             epoch,
@@ -1179,24 +1213,34 @@ fn current_snapshot(app: &mut App) -> (SessionSnapshot, EventCursor) {
     (snapshot, cursor)
 }
 
-/// The ANSI scrollback for one live terminal, empty if unknown. Unix-only:
-/// `handoff_history_ansi` is the same seam `AppFederationHost::scrollback_replay`
-/// uses, and is not compiled on non-unix.
-#[allow(dead_code)] // dormant until b0.4 wires the federation listener
-fn scrollback_replay(app: &App, terminal_id: &str) -> Vec<u8> {
+/// The scrollback history and, when `with_input_modes` is set, the input modes
+/// for one live terminal; both empty if the terminal is unknown. Unix-only:
+/// `handoff_history_ansi` and `input_modes_ansi` are not compiled on non-unix,
+/// where this is `Default`. The two are separate terminal reads (see
+/// [`TerminalOpenState`] for what that costs a mirror).
+fn terminal_open_state(app: &App, terminal_id: &str, with_input_modes: bool) -> TerminalOpenState {
     let Some(_runtime) = app.terminal_runtime_for_terminal_id(terminal_id) else {
-        return Vec::new();
+        return TerminalOpenState::default();
     };
     #[cfg(unix)]
     {
-        _runtime
-            .handoff_history_ansi()
-            .map(String::into_bytes)
-            .unwrap_or_default()
+        TerminalOpenState {
+            replay: _runtime
+                .handoff_history_ansi()
+                .map(String::into_bytes)
+                .unwrap_or_default(),
+            input_modes: if with_input_modes {
+                _runtime.input_modes_ansi()
+            } else {
+                Vec::new()
+            },
+        }
     }
     #[cfg(not(unix))]
     {
-        Vec::new()
+        // No input modes to read off unix; the flag only selects a unix read.
+        let _ = with_input_modes;
+        TerminalOpenState::default()
     }
 }
 
@@ -1445,6 +1489,13 @@ mod tests {
     /// An `App` with one real workspace, terminal and runtime — enough for
     /// `dispatch` to resolve a federated command all the way to the runtime.
     fn test_app_with_live_terminal() -> (App, String) {
+        test_app_with_live_terminal_bytes(b"")
+    }
+
+    /// `test_app_with_live_terminal`, with `bytes` already fed to the
+    /// terminal's emulator, so a test can start from a real app state such as
+    /// an alternate-screen app with mouse reporting on.
+    fn test_app_with_live_terminal_bytes(bytes: &[u8]) -> (App, String) {
         let mut app = test_app();
         let workspace = crate::workspace::Workspace::test_new("test");
         let pane_id = workspace.tabs[0].root_pane;
@@ -1455,10 +1506,56 @@ mod tests {
         app.state.selected = 0;
         app.terminal_runtimes.insert(
             terminal_id.clone(),
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, bytes),
         );
         let id_string = terminal_id.to_string();
         (app, id_string)
+    }
+
+    // One server-loop turn answers both halves of what a new mirror is primed
+    // with, read from a real runtime: an alternate-screen app has no history to
+    // replay, but its input modes must still reach the mount.
+    #[cfg(unix)]
+    #[test]
+    fn terminal_open_state_reads_history_and_input_modes_together() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+        let (mut app, terminal_id) =
+            test_app_with_live_terminal_bytes(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h");
+        let mut lease = FederationLease::new();
+
+        let mut open_state = |with_input_modes| {
+            let (tx, mut rx) = oneshot::channel();
+            dispatch(
+                &mut app,
+                &mut lease,
+                FederationCommand::TerminalOpenState {
+                    terminal_id: terminal_id.clone(),
+                    with_input_modes,
+                    reply: tx,
+                },
+            );
+            rx.try_recv().expect("reply delivered")
+        };
+
+        let state = open_state(true);
+        assert!(
+            state.replay.is_empty(),
+            "an alternate-screen app has no handoff history"
+        );
+        let modes = String::from_utf8_lossy(&state.input_modes).into_owned();
+        for mode in ["?1049h", "?1003h", "?1006h"] {
+            assert!(modes.contains(mode), "{mode} missing from {modes:?}");
+        }
+
+        // A request without the modes skips that read and leaves the history
+        // as it is.
+        let without = open_state(false);
+        assert!(without.input_modes.is_empty(), "{without:?}");
+        assert_eq!(without.replay, state.replay);
     }
 
     // The claim must be taken by the real command path, not just by the helper:

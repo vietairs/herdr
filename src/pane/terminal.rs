@@ -15,6 +15,12 @@ use unicode_width::UnicodeWidthStr;
 use crate::layout::PaneId;
 use crate::protocol::CellData;
 
+#[cfg(any(unix, test))]
+mod input_state_restore_ansi;
+#[cfg(unix)]
+pub(crate) use input_state_restore_ansi::input_state_restore_ansi;
+#[cfg(all(test, unix))]
+mod kitty_keyboard_per_screen_tests;
 #[cfg(test)]
 mod migration_tests;
 #[cfg(windows)]
@@ -435,9 +441,16 @@ impl PaneTerminal {
         Some((RetainedTextBuffer::new_search(cols, rows, 0), active_screen))
     }
 
-    #[cfg(any(unix, test))]
+    #[cfg(test)]
     pub fn input_state(&self) -> Option<InputState> {
         self.ghostty.input_state()
+    }
+
+    #[cfg(unix)]
+    pub fn input_modes_snapshot(&self) -> Option<(InputState, Option<String>)> {
+        self.ghostty
+            .input_modes_snapshot()
+            .map(|(state, kitty)| (state, kitty.filter(|ansi| !ansi.is_empty())))
     }
 
     pub fn bracketed_paste_enabled(&self) -> bool {
@@ -1613,58 +1626,9 @@ impl GhosttyPaneTerminal {
             return;
         };
 
-        if input_state.alternate_screen {
-            core.terminal.write(b"\x1b[?1049h");
-        }
-        let _ = core.terminal.mode_set(
-            crate::ghostty::MODE_APPLICATION_CURSOR_KEYS,
-            input_state.application_cursor,
-        );
-        let _ = core.terminal.mode_set(
-            crate::ghostty::MODE_BRACKETED_PASTE,
-            input_state.bracketed_paste,
-        );
-        let _ = core.terminal.mode_set(
-            crate::ghostty::MODE_FOCUS_EVENT,
-            input_state.focus_reporting,
-        );
-        let _ = core.terminal.mode_set(
-            crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL,
-            input_state.mouse_alternate_scroll,
-        );
-        let _ = core.terminal.mode_set(
-            crate::ghostty::MODE_COLOR_SCHEME_REPORT,
-            input_state.color_scheme_reporting,
-        );
-
-        core.terminal
-            .write(b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l");
-        let mouse_mode_ansi: Option<&[u8]> = match input_state.mouse_protocol_mode {
-            crate::input::MouseProtocolMode::None => None,
-            crate::input::MouseProtocolMode::Press => Some(b"\x1b[?9h"),
-            crate::input::MouseProtocolMode::PressRelease => Some(b"\x1b[?1000h"),
-            crate::input::MouseProtocolMode::ButtonMotion => Some(b"\x1b[?1002h"),
-            crate::input::MouseProtocolMode::AnyMotion => Some(b"\x1b[?1003h"),
-        };
-        if let Some(ansi) = mouse_mode_ansi {
-            core.terminal.write(ansi);
-        }
-
-        core.terminal.write(b"\x1b[?1005l\x1b[?1006l\x1b[?1016l");
-        let mouse_encoding_ansi: Option<&[u8]> = match input_state.mouse_protocol_encoding {
-            crate::input::MouseProtocolEncoding::Default => None,
-            crate::input::MouseProtocolEncoding::Utf8 => Some(b"\x1b[?1005h"),
-            crate::input::MouseProtocolEncoding::Sgr => Some(b"\x1b[?1006h"),
-            crate::input::MouseProtocolEncoding::SgrPixels => Some(b"\x1b[?1016h"),
-        };
-        if let Some(ansi) = mouse_encoding_ansi {
-            core.terminal.write(ansi);
-        }
-
-        if input_state.modify_other_keys {
-            core.kitty_keyboard.observe(b"\x1b[>4;2m");
-            core.terminal.write(b"\x1b[>4;2m");
-        }
+        let bytes = input_state_restore_ansi(input_state);
+        core.kitty_keyboard.observe(&bytes);
+        core.terminal.write(&bytes);
 
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             configure_key_encoder(&mut key_encoder, &core.terminal);
@@ -1869,7 +1833,9 @@ impl GhosttyPaneTerminal {
     #[cfg(unix)]
     pub fn kitty_keyboard_state_ansi(&self) -> Option<String> {
         let core = self.core.lock().ok()?;
-        core.kitty_keyboard.replay_ansi()
+        let alternate_screen =
+            core.terminal.active_screen().ok()? == crate::ghostty::ActiveScreen::Alternate;
+        ghostty_kitty_keyboard_replay(&core, alternate_screen)
     }
 
     pub fn bracketed_paste_enabled(&self) -> bool {
@@ -1930,77 +1896,21 @@ impl GhosttyPaneTerminal {
         })
     }
 
-    // This aggregate snapshot performs multiple terminal queries. Pane-scaled
-    // callers should add a narrow accessor instead.
-    #[cfg(any(unix, test))]
+    #[cfg(test)]
     pub fn input_state(&self) -> Option<InputState> {
-        let Ok(core) = self.core.lock() else {
-            return None;
-        };
-        let alternate_screen =
-            core.terminal.active_screen().ok()? == crate::ghostty::ActiveScreen::Alternate;
-        let application_cursor = core
-            .terminal
-            .mode_get(crate::ghostty::MODE_APPLICATION_CURSOR_KEYS)
-            .ok()?;
-        let bracketed_paste = core
-            .terminal
-            .mode_get(crate::ghostty::MODE_BRACKETED_PASTE)
-            .ok()?;
-        let focus_reporting = core
-            .terminal
-            .mode_get(crate::ghostty::MODE_FOCUS_EVENT)
-            .ok()?;
-        let mouse_sgr = core
-            .terminal
-            .mode_get(crate::ghostty::MODE_MOUSE_SGR)
-            .ok()?;
-        let mouse_utf8 = core
-            .terminal
-            .mode_get(crate::ghostty::MODE_MOUSE_UTF8)
-            .ok()?;
-        let mouse_sgr_pixels = core
-            .terminal
-            .mode_get(crate::ghostty::MODE_MOUSE_SGR_PIXELS)
-            .ok()?;
-        let mouse_alternate_scroll = core
-            .terminal
-            .mode_get(crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL)
-            .ok()?;
-        let mouse_protocol_mode = if core.terminal.mode_get(MODE_MOUSE_ANY_MOTION).ok()? {
-            crate::input::MouseProtocolMode::AnyMotion
-        } else if core.terminal.mode_get(MODE_MOUSE_BUTTON_MOTION).ok()? {
-            crate::input::MouseProtocolMode::ButtonMotion
-        } else if core.terminal.mode_get(MODE_MOUSE_PRESS_RELEASE).ok()? {
-            crate::input::MouseProtocolMode::PressRelease
-        } else if core.terminal.mode_get(MODE_MOUSE_X10).ok()? {
-            crate::input::MouseProtocolMode::Press
-        } else {
-            crate::input::MouseProtocolMode::None
-        };
-        let mouse_protocol_encoding = if mouse_sgr_pixels {
-            crate::input::MouseProtocolEncoding::SgrPixels
-        } else if mouse_sgr {
-            crate::input::MouseProtocolEncoding::Sgr
-        } else if mouse_utf8 {
-            crate::input::MouseProtocolEncoding::Utf8
-        } else {
-            crate::input::MouseProtocolEncoding::Default
-        };
-        Some(InputState {
-            alternate_screen,
-            application_cursor,
-            bracketed_paste,
-            focus_reporting,
-            mouse_protocol_mode,
-            mouse_protocol_encoding,
-            mouse_alternate_scroll,
-            modify_other_keys: core.terminal.modify_other_keys_enabled().ok()?,
-            color_scheme_reporting: core
-                .terminal
-                .mode_get(crate::ghostty::MODE_COLOR_SCHEME_REPORT)
-                .ok()?,
-        })
+        let core = self.core.lock().ok()?;
+        ghostty_input_state(&core)
+    }
+
+    /// The input state and the kitty keyboard replay read under one core
+    /// lock, so the replay's screen switches agree with the restore bytes'
+    /// `?1049h` even while output keeps arriving.
+    #[cfg(unix)]
+    pub fn input_modes_snapshot(&self) -> Option<(InputState, Option<String>)> {
+        let core = self.core.lock().ok()?;
+        let state = ghostty_input_state(&core)?;
+        let kitty = ghostty_kitty_keyboard_replay(&core, state.alternate_screen);
+        Some((state, kitty))
     }
 
     pub fn wheel_routing(&self) -> Option<crate::pane::WheelRouting> {
@@ -3801,6 +3711,86 @@ pub(crate) fn test_encode_key_for_app(
     let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).expect("pane terminal");
     pane.process_pty_bytes(PaneId::from_raw(1), 0, app_output, &tx);
     pane.encode_terminal_key_once(key)
+}
+
+// This aggregate snapshot performs multiple terminal queries. Pane-scaled
+// callers should add a narrow accessor instead.
+#[cfg(any(unix, test))]
+fn ghostty_input_state(core: &GhosttyPaneCore) -> Option<InputState> {
+    let alternate_screen =
+        core.terminal.active_screen().ok()? == crate::ghostty::ActiveScreen::Alternate;
+    let application_cursor = core
+        .terminal
+        .mode_get(crate::ghostty::MODE_APPLICATION_CURSOR_KEYS)
+        .ok()?;
+    let bracketed_paste = core
+        .terminal
+        .mode_get(crate::ghostty::MODE_BRACKETED_PASTE)
+        .ok()?;
+    let focus_reporting = core
+        .terminal
+        .mode_get(crate::ghostty::MODE_FOCUS_EVENT)
+        .ok()?;
+    let mouse_sgr = core
+        .terminal
+        .mode_get(crate::ghostty::MODE_MOUSE_SGR)
+        .ok()?;
+    let mouse_utf8 = core
+        .terminal
+        .mode_get(crate::ghostty::MODE_MOUSE_UTF8)
+        .ok()?;
+    let mouse_sgr_pixels = core
+        .terminal
+        .mode_get(crate::ghostty::MODE_MOUSE_SGR_PIXELS)
+        .ok()?;
+    let mouse_alternate_scroll = core
+        .terminal
+        .mode_get(crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL)
+        .ok()?;
+    let mouse_protocol_mode = if core.terminal.mode_get(MODE_MOUSE_ANY_MOTION).ok()? {
+        crate::input::MouseProtocolMode::AnyMotion
+    } else if core.terminal.mode_get(MODE_MOUSE_BUTTON_MOTION).ok()? {
+        crate::input::MouseProtocolMode::ButtonMotion
+    } else if core.terminal.mode_get(MODE_MOUSE_PRESS_RELEASE).ok()? {
+        crate::input::MouseProtocolMode::PressRelease
+    } else if core.terminal.mode_get(MODE_MOUSE_X10).ok()? {
+        crate::input::MouseProtocolMode::Press
+    } else {
+        crate::input::MouseProtocolMode::None
+    };
+    let mouse_protocol_encoding = if mouse_sgr_pixels {
+        crate::input::MouseProtocolEncoding::SgrPixels
+    } else if mouse_sgr {
+        crate::input::MouseProtocolEncoding::Sgr
+    } else if mouse_utf8 {
+        crate::input::MouseProtocolEncoding::Utf8
+    } else {
+        crate::input::MouseProtocolEncoding::Default
+    };
+    Some(InputState {
+        alternate_screen,
+        application_cursor,
+        bracketed_paste,
+        focus_reporting,
+        mouse_protocol_mode,
+        mouse_protocol_encoding,
+        mouse_alternate_scroll,
+        modify_other_keys: core.terminal.modify_other_keys_enabled().ok()?,
+        color_scheme_reporting: core
+            .terminal
+            .mode_get(crate::ghostty::MODE_COLOR_SCHEME_REPORT)
+            .ok()?,
+    })
+}
+
+/// The kitty keyboard replay for a copy that the restore bytes put on
+/// `alternate_screen`: the tracker's full stacks when its screen agrees with
+/// libghostty's, else only libghostty's current flags with no screen switch.
+#[cfg(unix)]
+fn ghostty_kitty_keyboard_replay(core: &GhosttyPaneCore, alternate_screen: bool) -> Option<String> {
+    let current_flags = core.terminal.kitty_keyboard_flags().map_or(0, u16::from);
+    core.kitty_keyboard
+        .replay_ansi_on_screen(alternate_screen, current_flags)
 }
 
 #[cfg(test)]

@@ -216,6 +216,18 @@ impl Capability {
     /// `federation::session::local_capabilities`, and by the co-located host.
     pub const PTY_SIZE_NOTICE: &'static str = "pty_size_notice";
 
+    /// States that this mount applies a host's terminal input modes carried in
+    /// `TerminalChannelMessage::Open::input_modes` (alternate screen, mouse
+    /// protocol mode + encoding, bracketed paste, focus/color-scheme reporting,
+    /// application cursor, alternate scroll, modifyOtherKeys, kitty keyboard
+    /// stack). Gates behaviour, not a frame: every peer on this protocol version
+    /// decodes `Open` with or without the field. A host sends non-empty
+    /// `input_modes` only when this was agreed; absence means a legacy mount,
+    /// which gets today's frame byte-for-byte. Advertised by every mount through
+    /// `federation::session::local_capabilities` and by both hosts.
+    /// Not platform-gated on the mount: applying is the ordinary byte path.
+    pub const TERMINAL_INPUT_STATE: &'static str = "terminal_input_state";
+
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
@@ -327,6 +339,12 @@ pub enum TerminalChannelMessage {
         terminal_id: String,
         mount_generation: u64,
         replay: ScrollbackReplay,
+        /// DECSET/DECRST bytes the mirror parses after `replay`; see
+        /// `Capability::TERMINAL_INPUT_STATE`. Bytes rather than typed enums so a
+        /// future mode is an ignored escape sequence, never a decode failure that
+        /// tears down the mount.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        input_modes: Vec<u8>,
     },
     Output {
         terminal_id: String,
@@ -824,15 +842,14 @@ impl Channel {
             Channel::Handshake => 64 * 1024,
             Channel::Mount => 8 * 1024 * 1024,
             Channel::Event => 256 * 1024,
-            // A single `Open` frame carries the whole ANSI scrollback replay
-            // for one terminal (`AppFederationHost::scrollback_replay`),
-            // unbounded and unchunked at the sender. Real panes with a full
-            // scrollback and heavy styling have been observed producing
-            // frames of 2.2-2.7 MiB against the old 2 MiB cap, tearing down
-            // the whole mount on every occurrence. Matches `Channel::Mount`'s
-            // cap for headroom well above the observed maximum. Note this is
-            // headroom, not a bound: the sender still has no cap of its own,
-            // so a large enough scrollback can outgrow this too.
+            // An `Open` frame carries one terminal's ANSI scrollback replay,
+            // which the sender bounds with `MAX_REPLAY_BYTES_PER_PANE`
+            // (`PaneRuntime::handoff_history_ansi`). Bytes encode as a JSON
+            // number array, so an `Open` stays in the tens of KiB. Its
+            // `input_modes` stay small because each screen's Kitty flag stack
+            // is capped at libghostty's depth (`KittyKeyboardTracker`). The
+            // 8 MiB value is headroom for the channel's other frames, chiefly
+            // live `Output` frames that the output pump coalesces.
             Channel::Terminal => 8 * 1024 * 1024,
             Channel::AgentStatus => 64 * 1024,
             Channel::Clipboard => 16 * 1024 * 1024,

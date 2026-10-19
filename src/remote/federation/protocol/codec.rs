@@ -193,6 +193,7 @@ mod tests {
                 replay: ScrollbackReplay {
                     bytes: vec![1, 2, 3],
                 },
+                input_modes: b"\x1b[?1049h\x1b[?1003h\x1b[?1006h".to_vec(),
             }),
             FederationMessage::Terminal(TerminalChannelMessage::Output {
                 terminal_id: "term_1".to_string(),
@@ -343,6 +344,7 @@ mod tests {
                 replay: ScrollbackReplay {
                     bytes: vec![0x41u8; 1000],
                 },
+                input_modes: Vec::new(),
             });
             let probe_frame = encode(&probe).expect("encode should succeed");
             let inflation_ratio = (probe_frame.len() - FRAME_HEADER_LEN) as f64 / 1000.0;
@@ -355,6 +357,7 @@ mod tests {
             replay: ScrollbackReplay {
                 bytes: vec![0x41u8; raw_len],
             },
+            input_modes: Vec::new(),
         });
         let frame = encode(&msg).expect("encode should succeed");
         let wire_frame_bytes = frame.len() - FRAME_HEADER_LEN;
@@ -473,6 +476,142 @@ mod tests {
                 assert_eq!(msg.host_now_ms, 0, "an absent clock reads as none");
             }
             other => panic!("expected PaneUsage, got {other:?}"),
+        }
+    }
+
+    /// An `Open` payload exactly as a peer that predates
+    /// `TerminalChannelMessage::Open::input_modes` serialises it. Written as
+    /// a raw string so the key order matches the struct's field order (the
+    /// `json!` macro sorts keys), which the byte-equality test relies on.
+    const LEGACY_OPEN_JSON: &str = r#"{"Terminal":{"Open":{"terminal_id":"term_1","mount_generation":3,"replay":{"bytes":[1,2,3]}}}}"#;
+
+    fn frame_payload(payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
+        frame.extend_from_slice(&FEDERATION_PROTOCOL_VERSION.to_le_bytes());
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    #[test]
+    fn open_without_input_modes_field_decodes_as_empty() {
+        let frame = frame_payload(LEGACY_OPEN_JSON.as_bytes());
+
+        let (decoded, consumed): (FederationMessage, usize) =
+            decode(&frame, Channel::Terminal.max_len())
+                .expect("a legacy Open without input_modes must decode");
+
+        assert_eq!(consumed, frame.len());
+        match decoded {
+            FederationMessage::Terminal(TerminalChannelMessage::Open {
+                terminal_id,
+                mount_generation,
+                replay,
+                input_modes,
+            }) => {
+                assert_eq!(terminal_id, "term_1");
+                assert_eq!(mount_generation, 3);
+                assert_eq!(replay.bytes, vec![1, 2, 3]);
+                assert!(
+                    input_modes.is_empty(),
+                    "an absent input_modes key must read as no modes"
+                );
+            }
+            other => panic!("expected Terminal Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_with_empty_input_modes_serialises_exactly_like_the_legacy_frame() {
+        let msg = FederationMessage::Terminal(TerminalChannelMessage::Open {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 3,
+            replay: ScrollbackReplay {
+                bytes: vec![1, 2, 3],
+            },
+            input_modes: Vec::new(),
+        });
+        let frame = encode(&msg).expect("encode should succeed");
+        let payload = &frame[FRAME_HEADER_LEN..];
+        let payload_text = std::str::from_utf8(payload).expect("json payload is utf-8");
+
+        assert!(
+            !payload_text.contains("\"input_modes\""),
+            "empty input_modes must not be serialised: {payload_text}"
+        );
+        assert_eq!(
+            payload_text, LEGACY_OPEN_JSON,
+            "an Open without modes must be byte-identical to the legacy frame"
+        );
+        assert_eq!(frame, frame_payload(LEGACY_OPEN_JSON.as_bytes()));
+    }
+
+    #[test]
+    fn open_with_input_modes_decodes_on_a_legacy_shaped_peer() {
+        // Mirrors the message shape of a peer built before `input_modes`
+        // existed. Neither enum denies unknown fields, so the extra key must
+        // be ignored rather than failing the frame.
+        #[derive(Debug, serde::Deserialize)]
+        enum LegacyTerminalChannelMessage {
+            Open {
+                terminal_id: String,
+                mount_generation: u64,
+                replay: ScrollbackReplay,
+            },
+        }
+        #[derive(Debug, serde::Deserialize)]
+        enum LegacyFederationMessage {
+            Terminal(LegacyTerminalChannelMessage),
+        }
+
+        let msg = FederationMessage::Terminal(TerminalChannelMessage::Open {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 3,
+            replay: ScrollbackReplay {
+                bytes: vec![1, 2, 3],
+            },
+            input_modes: b"\x1b[?1003h".to_vec(),
+        });
+        let frame = encode(&msg).expect("encode should succeed");
+
+        let (decoded, consumed): (LegacyFederationMessage, usize) =
+            decode(&frame, Channel::Terminal.max_len())
+                .expect("a legacy-shaped peer must decode an Open carrying input_modes");
+
+        assert_eq!(consumed, frame.len());
+        let LegacyFederationMessage::Terminal(LegacyTerminalChannelMessage::Open {
+            terminal_id,
+            mount_generation,
+            replay,
+        }) = decoded;
+        assert_eq!(terminal_id, "term_1");
+        assert_eq!(mount_generation, 3);
+        assert_eq!(replay.bytes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn open_input_modes_roundtrip() {
+        let modes = b"\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[>5u".to_vec();
+        let msg = FederationMessage::Terminal(TerminalChannelMessage::Open {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 3,
+            replay: ScrollbackReplay {
+                bytes: vec![1, 2, 3],
+            },
+            input_modes: modes.clone(),
+        });
+        let frame = encode(&msg).expect("encode should succeed");
+
+        let (decoded, consumed): (FederationMessage, usize) =
+            decode(&frame, Channel::Terminal.max_len()).expect("decode should succeed");
+
+        assert_eq!(consumed, frame.len());
+        assert_eq!(decoded, msg);
+        match decoded {
+            FederationMessage::Terminal(TerminalChannelMessage::Open { input_modes, .. }) => {
+                assert_eq!(input_modes, modes);
+            }
+            other => panic!("expected Terminal Open, got {other:?}"),
         }
     }
 

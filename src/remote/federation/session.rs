@@ -25,11 +25,11 @@ use crate::remote::{
 /// Local-capability set advertised to the federation host. It is a strict
 /// superset of the one-shot `attempt_federation_mount` snapshot dial, which
 /// advertises only `SCROLLBACK_REPLAY` and `AGENT_STATUS`: a live mount also
-/// advertises `FILE_STAGING`, `WORKSPACE_TAB_CLOSE`, `PANE_NAME_SOURCE` and
-/// `PTY_SIZE_NOTICE`.
+/// advertises `FILE_STAGING`, `WORKSPACE_TAB_CLOSE`, `PANE_NAME_SOURCE`,
+/// `PTY_SIZE_NOTICE` and `TERMINAL_INPUT_STATE`.
 /// A capability added here is therefore not automatically advertised by the
 /// snapshot dial — update both when a new one must apply to each.
-fn local_capabilities() -> std::collections::BTreeSet<Capability> {
+pub(super) fn local_capabilities() -> std::collections::BTreeSet<Capability> {
     [
         Capability::new(Capability::SCROLLBACK_REPLAY),
         Capability::new(Capability::AGENT_STATUS),
@@ -60,6 +60,11 @@ fn local_capabilities() -> std::collections::BTreeSet<Capability> {
         // bound the PTY by its own viewers. Advertised unconditionally: the
         // mirror code is the same on every platform.
         Capability::new(Capability::PTY_SIZE_NOTICE),
+        // Lets the host prime a freshly opened mirror with the source pane's
+        // input modes. Advertised unconditionally: applying them is the
+        // ordinary byte path (`output_senders` -> `process_pty_bytes`), the
+        // same on every platform, Windows included.
+        Capability::new(Capability::TERMINAL_INPUT_STATE),
     ]
     .into_iter()
     .collect()
@@ -140,4 +145,16 @@ pub(crate) async fn dial_and_mount(
         tunnel_reader: mounted.reader,
         tunnel_writer: mounted.writer,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The host sends input modes only when the mount advertised it, so a
+    // missing advert silently disables the feature.
+    #[test]
+    fn the_mount_advertises_terminal_input_state() {
+        assert!(local_capabilities().contains(&Capability::new(Capability::TERMINAL_INPUT_STATE)));
+    }
 }

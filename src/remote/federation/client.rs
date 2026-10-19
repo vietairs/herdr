@@ -626,6 +626,7 @@ impl TerminalChannelRouter {
             terminal_id,
             mount_generation,
             replay: ScrollbackReplay { bytes: Vec::new() },
+            input_modes: Vec::new(),
         }));
         rx
     }
@@ -650,11 +651,17 @@ impl TerminalChannelRouter {
             TerminalChannelMessage::Open {
                 terminal_id,
                 replay,
+                input_modes,
                 ..
             } => {
                 if let Some(tx) = self.output_senders.get(&terminal_id) {
-                    if !replay.bytes.is_empty() {
-                        let _ = tx.try_send(Bytes::from(replay.bytes));
+                    // One chunk: replay strictly before the modes, and the pair
+                    // can never be split by a full queue (the channel is empty
+                    // at Open).
+                    let mut primed = replay.bytes;
+                    primed.extend_from_slice(&input_modes);
+                    if !primed.is_empty() {
+                        let _ = tx.try_send(Bytes::from(primed));
                     }
                 }
             }
@@ -2020,13 +2027,29 @@ mod tests {
         tokio::io::ReadHalf<tokio::io::DuplexStream>,
         tokio::io::WriteHalf<tokio::io::DuplexStream>,
     ) {
+        open_mount_with_capabilities(
+            host,
+            [Capability::new(Capability::SCROLLBACK_REPLAY)].into(),
+        )
+        .await
+    }
+
+    /// `open_mount` with the mount's advertised capability set chosen by the
+    /// caller, so a test can handshake with the production advert.
+    async fn open_mount_with_capabilities(
+        host: Arc<FixtureHost>,
+        capabilities: std::collections::BTreeSet<Capability>,
+    ) -> (
+        tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    ) {
         let (duplex, _server) = LoopbackFederationServer::spawn(host);
         let (mut reader, mut writer) = tokio::io::split(duplex);
         write_frame(
             &mut writer,
             &FederationMessage::Handshake(Handshake {
                 federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
-                capabilities: [Capability::new(Capability::SCROLLBACK_REPLAY)].into(),
+                capabilities,
                 server_instance_id: ServerInstanceId("client-test".to_string()),
             }),
         )
@@ -2102,6 +2125,107 @@ mod tests {
         assert_eq!(second, Bytes::from_static(b"live bytes after replay"));
 
         writer_task.abort();
+    }
+
+    /// Routes one server-built `Open` for `term_1` through a fresh router and
+    /// returns every chunk the terminal's output channel received.
+    fn chunks_after_open(replay: &[u8], input_modes: &[u8]) -> Vec<Bytes> {
+        let (out_tx, _out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+        let mut router = TerminalChannelRouter::new();
+        let mut output_rx = router.open_terminal("term_1".to_string(), 1, &out_tx);
+        router.route_inbound(TerminalChannelMessage::Open {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 1,
+            replay: ScrollbackReplay {
+                bytes: replay.to_vec(),
+            },
+            input_modes: input_modes.to_vec(),
+        });
+        let mut chunks = Vec::new();
+        while let Ok(chunk) = output_rx.try_recv() {
+            chunks.push(chunk);
+        }
+        chunks
+    }
+
+    // The mirror must see the replay first and the host's input modes after
+    // it, in one chunk, so a full queue can never split the pair.
+    #[test]
+    fn open_delivers_replay_then_input_modes_as_one_chunk() {
+        assert_eq!(
+            chunks_after_open(b"hist", b"\x1b[?1003h"),
+            vec![Bytes::from_static(b"hist\x1b[?1003h")]
+        );
+    }
+
+    // An alt-screen host sends no replay; the modes alone must still prime
+    // the mirror.
+    #[test]
+    fn open_with_only_input_modes_still_primes_the_mirror() {
+        assert_eq!(
+            chunks_after_open(b"", b"\x1b[?1049h\x1b[?1003h"),
+            vec![Bytes::from_static(b"\x1b[?1049h\x1b[?1003h")]
+        );
+    }
+
+    // A legacy Open with neither replay nor modes sends nothing, as today.
+    #[test]
+    fn open_with_neither_sends_nothing() {
+        assert!(chunks_after_open(b"", b"").is_empty());
+    }
+
+    // End to end through the real host loop and the real router: a mount
+    // advertising the production capability set receives the host's input
+    // modes right after the replay; a mount without the capability receives
+    // the replay alone.
+    #[tokio::test]
+    async fn a_mounted_terminal_receives_the_hosts_input_modes_through_the_real_router() {
+        async fn first_chunk(capabilities: std::collections::BTreeSet<Capability>) -> Bytes {
+            let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+            let host = Arc::new(
+                FixtureHost::new()
+                    .with_terminal("term_1", runtime, b"earlier history".to_vec())
+                    .with_input_modes("term_1", b"\x1b[?1049h\x1b[?1003h".to_vec())
+                    .with_capability(Capability::TERMINAL_INPUT_STATE),
+            );
+            let (mut reader, writer) = open_mount_with_capabilities(host, capabilities).await;
+            let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FederationMessage>();
+            let writer_task = tokio::spawn(async move {
+                let mut writer = writer;
+                while let Some(msg) = out_rx.recv().await {
+                    if write_frame(&mut writer, &msg).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let mut router = TerminalChannelRouter::new();
+            let mut output_rx = router.open_terminal("term_1".to_string(), 1, &out_tx);
+            let Some(FederationMessage::Terminal(open_ack)) =
+                read_frame(&mut reader).await.unwrap()
+            else {
+                panic!("expected the server's Open acknowledgement");
+            };
+            router.route_inbound(open_ack);
+
+            let first = tokio::time::timeout(Duration::from_millis(200), output_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            writer_task.abort();
+            first
+        }
+
+        assert_eq!(
+            first_chunk(crate::remote::federation::session::local_capabilities()).await,
+            Bytes::from_static(b"earlier history\x1b[?1049h\x1b[?1003h"),
+            "the production mount advert must agree the capability and apply the modes"
+        );
+        assert_eq!(
+            first_chunk([Capability::new(Capability::SCROLLBACK_REPLAY)].into()).await,
+            Bytes::from_static(b"earlier history"),
+            "a mount without the capability must get the replay alone"
+        );
     }
 
     // An inbound `Resize` is the host's PTY size notice: it reaches the
