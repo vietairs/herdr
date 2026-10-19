@@ -60,6 +60,11 @@ impl TerminalRuntime {
     }
 
     #[cfg(unix)]
+    pub fn input_modes_ansi(&self) -> Vec<u8> {
+        self.0.input_modes_ansi()
+    }
+
+    #[cfg(unix)]
     pub fn from_handoff_fd(
         import: crate::handoff_runtime::ImportedHandoffRuntime,
         scrollback_limit_bytes: usize,

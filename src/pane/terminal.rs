@@ -15,6 +15,12 @@ use unicode_width::UnicodeWidthStr;
 use crate::layout::PaneId;
 use crate::protocol::CellData;
 
+#[cfg(any(unix, test))]
+mod input_state_restore_ansi;
+#[cfg(unix)]
+pub(crate) use input_state_restore_ansi::input_state_restore_ansi;
+#[cfg(all(test, unix))]
+mod kitty_keyboard_per_screen_tests;
 #[cfg(test)]
 mod migration_tests;
 #[cfg(windows)]
@@ -1613,58 +1619,9 @@ impl GhosttyPaneTerminal {
             return;
         };
 
-        if input_state.alternate_screen {
-            core.terminal.write(b"\x1b[?1049h");
-        }
-        let _ = core.terminal.mode_set(
-            crate::ghostty::MODE_APPLICATION_CURSOR_KEYS,
-            input_state.application_cursor,
-        );
-        let _ = core.terminal.mode_set(
-            crate::ghostty::MODE_BRACKETED_PASTE,
-            input_state.bracketed_paste,
-        );
-        let _ = core.terminal.mode_set(
-            crate::ghostty::MODE_FOCUS_EVENT,
-            input_state.focus_reporting,
-        );
-        let _ = core.terminal.mode_set(
-            crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL,
-            input_state.mouse_alternate_scroll,
-        );
-        let _ = core.terminal.mode_set(
-            crate::ghostty::MODE_COLOR_SCHEME_REPORT,
-            input_state.color_scheme_reporting,
-        );
-
-        core.terminal
-            .write(b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l");
-        let mouse_mode_ansi: Option<&[u8]> = match input_state.mouse_protocol_mode {
-            crate::input::MouseProtocolMode::None => None,
-            crate::input::MouseProtocolMode::Press => Some(b"\x1b[?9h"),
-            crate::input::MouseProtocolMode::PressRelease => Some(b"\x1b[?1000h"),
-            crate::input::MouseProtocolMode::ButtonMotion => Some(b"\x1b[?1002h"),
-            crate::input::MouseProtocolMode::AnyMotion => Some(b"\x1b[?1003h"),
-        };
-        if let Some(ansi) = mouse_mode_ansi {
-            core.terminal.write(ansi);
-        }
-
-        core.terminal.write(b"\x1b[?1005l\x1b[?1006l\x1b[?1016l");
-        let mouse_encoding_ansi: Option<&[u8]> = match input_state.mouse_protocol_encoding {
-            crate::input::MouseProtocolEncoding::Default => None,
-            crate::input::MouseProtocolEncoding::Utf8 => Some(b"\x1b[?1005h"),
-            crate::input::MouseProtocolEncoding::Sgr => Some(b"\x1b[?1006h"),
-            crate::input::MouseProtocolEncoding::SgrPixels => Some(b"\x1b[?1016h"),
-        };
-        if let Some(ansi) = mouse_encoding_ansi {
-            core.terminal.write(ansi);
-        }
-
-        if input_state.modify_other_keys {
-            core.kitty_keyboard.observe(b"\x1b[>4;2m");
-            core.terminal.write(b"\x1b[>4;2m");
-        }
+        let bytes = input_state_restore_ansi(input_state);
+        core.kitty_keyboard.observe(&bytes);
+        core.terminal.write(&bytes);
 
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             configure_key_encoder(&mut key_encoder, &core.terminal);

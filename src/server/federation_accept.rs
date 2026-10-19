@@ -56,7 +56,9 @@ use crate::remote::federation::protocol::{
 };
 use crate::remote::federation::tee;
 use crate::server::client_transport::ServerEvent;
-use crate::server::federation_actor::{FederatedAgentFacts, FederationCommand, OutputSubscription};
+use crate::server::federation_actor::{
+    FederatedAgentFacts, FederationCommand, OutputSubscription, TerminalOpenState,
+};
 use crate::server::federation_fault::{FirstCauseCell, TunnelExit};
 use crate::server::federation_lease::{AcceptEpoch, Admission, ConnId};
 
@@ -89,9 +91,9 @@ const AGENT_STATUS_POLL_DIVISOR: u32 = 4;
 /// a stuck peer pin unbounded memory.
 const EGRESS_QUEUE_CAP: usize = 1024;
 
-/// The capabilities the co-located federation host advertises. Mirrors
-/// `AppFederationHost::capabilities` (`remote::federation::serve`); becomes the
-/// sole definition once sub-brick 4 deletes that duplicate host.
+/// The capabilities the co-located federation host advertises. This is the
+/// production advert: the async `remote::federation::serve` host is a
+/// test-only fixture host, and its capability set is its own.
 fn federation_capabilities() -> BTreeSet<Capability> {
     [
         Capability::new(Capability::SCROLLBACK_REPLAY),
@@ -112,6 +114,9 @@ fn federation_capabilities() -> BTreeSet<Capability> {
         // the name gets them, and only its sizes are shared votes (see the
         // constant's doc comment and `mount_follows_pty_size_notices`).
         Capability::new(Capability::PTY_SIZE_NOTICE),
+        // An Open carries the pane's input modes to a mount that agreed this
+        // (see `mount_applies_terminal_input_state`); others get today's frame.
+        Capability::new(Capability::TERMINAL_INPUT_STATE),
     ]
     .into_iter()
     .collect()
@@ -125,6 +130,14 @@ fn mount_follows_pty_size_notices(agreed: &AgreedCaps) -> bool {
     agreed
         .0
         .contains(&Capability::new(Capability::PTY_SIZE_NOTICE))
+}
+
+/// Whether this mount applies the input modes an `Open` carries. Negotiated
+/// set only: absence means a legacy mount, which keeps today's frame.
+fn mount_applies_terminal_input_state(agreed: &AgreedCaps) -> bool {
+    agreed
+        .0
+        .contains(&Capability::new(Capability::TERMINAL_INPUT_STATE))
 }
 
 /// The largest cap across every channel, bounding a read-side allocation before
@@ -473,6 +486,7 @@ fn run_connection<S: FederationStream>(
         server_event_tx,
         &mut pumps,
         staging.as_ref().map(|(channel, _out)| channel),
+        mount_applies_terminal_input_state(agreed),
     );
 
     // Teardown in an order that cannot deadlock the writer:
@@ -542,6 +556,7 @@ fn reader_loop<S: Read>(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     pumps: &mut HashMap<String, OutputPump>,
     staging: Option<&StagingChannel>,
+    terminal_input_state: bool,
 ) -> io::Result<()> {
     loop {
         match read_frame_blocking(reader) {
@@ -559,6 +574,7 @@ fn reader_loop<S: Read>(
                     first_cause,
                     server_event_tx,
                     pumps,
+                    terminal_input_state,
                 )?;
             }
             Ok(Some(FederationMessage::Fault(fault))) => {
@@ -1057,6 +1073,7 @@ fn handle_terminal_inbound(
     first_cause: &Arc<FirstCauseCell>,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     pumps: &mut HashMap<String, OutputPump>,
+    terminal_input_state: bool,
 ) -> io::Result<()> {
     match message {
         TerminalChannelMessage::Input {
@@ -1095,6 +1112,7 @@ fn handle_terminal_inbound(
                 first_cause,
                 server_event_tx,
                 pumps,
+                terminal_input_state,
             );
             Ok(())
         }
@@ -1120,15 +1138,17 @@ fn handle_terminal_inbound(
     }
 }
 
-/// Subscribe to a terminal's live output, emit the `Open{replay}` frame
-/// carrying its scrollback, then spawn the pump that streams live bytes. A
-/// terminal the App does not know is silently skipped (no frame, no pump),
-/// matching `serve::handle_inbound`; a duplicate Open is a no-op.
+/// Subscribe to a terminal's live output, emit the `Open` frame carrying its
+/// scrollback (`replay`) and, when the mount agreed `TERMINAL_INPUT_STATE`
+/// (`terminal_input_state`), its input modes, then spawn the pump that streams
+/// live bytes. A terminal the App does not know is silently skipped (no frame,
+/// no pump), matching `serve::handle_inbound`; a duplicate Open is a no-op.
 ///
-/// Once the pump is live, ask the child to repaint. `Open{replay}` carries
+/// Once the pump is live, ask the child to repaint. `replay` carries
 /// `handoff_history_ansi`, which is empty for an alternate-screen app, so an
 /// agent pane would otherwise mirror as a blank grid until the agent happened
-/// to write something on its own.
+/// to write something on its own. The input modes do not draw anything, so the
+/// repaint is still what paints an alt-screen app's visuals.
 #[allow(clippy::too_many_arguments)]
 fn open_terminal(
     terminal_id: String,
@@ -1139,6 +1159,7 @@ fn open_terminal(
     first_cause: &Arc<FirstCauseCell>,
     server_event_tx: &mpsc::Sender<ServerEvent>,
     pumps: &mut HashMap<String, OutputPump>,
+    terminal_input_state: bool,
 ) {
     if pumps.contains_key(&terminal_id) {
         return;
@@ -1148,7 +1169,17 @@ fn open_terminal(
         debug!(%terminal_id, "federation open for an unknown terminal ignored");
         return;
     };
-    let replay = request_scrollback_replay(server_event_tx, &terminal_id);
+    let TerminalOpenState {
+        replay,
+        input_modes,
+    } = request_terminal_open_state(server_event_tx, &terminal_id, terminal_input_state);
+    // The actor already skips the read for a legacy mount; dropping anything it
+    // returned anyway keeps that mount's frame free of the key either way.
+    let input_modes = if terminal_input_state {
+        input_modes
+    } else {
+        Vec::new()
+    };
 
     // The Open frame (with scrollback) must precede any live Output, so it is
     // enqueued before the pump starts producing. A full queue here is already an
@@ -1159,6 +1190,7 @@ fn open_terminal(
             terminal_id: terminal_id.clone(),
             mount_generation: MOUNT_GENERATION,
             replay: ScrollbackReplay { bytes: replay },
+            input_modes,
         }),
         first_cause,
         shutdown,
@@ -1841,20 +1873,27 @@ fn request_subscribe_output(
     rx.blocking_recv().ok().flatten()
 }
 
-/// Blocking actor round-trip: a terminal's scrollback. Empty if the terminal is
-/// unknown or the event loop is gone (an empty replay is a valid Open payload).
-fn request_scrollback_replay(
+/// Blocking actor round-trip: a terminal's scrollback and, when
+/// `with_input_modes` is set, its input modes. Empty if the terminal is unknown
+/// or the event loop is gone (an empty replay and empty modes are a valid Open
+/// payload).
+fn request_terminal_open_state(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     terminal_id: &str,
-) -> Vec<u8> {
+    with_input_modes: bool,
+) -> TerminalOpenState {
     let (reply, rx) = oneshot::channel();
     if server_event_tx
         .blocking_send(ServerEvent::Federation(
-            FederationCommand::ScrollbackReplay(terminal_id.to_string(), reply),
+            FederationCommand::TerminalOpenState {
+                terminal_id: terminal_id.to_string(),
+                with_input_modes,
+                reply,
+            },
         ))
         .is_err()
     {
-        return Vec::new();
+        return TerminalOpenState::default();
     }
     rx.blocking_recv().unwrap_or_default()
 }
@@ -1991,6 +2030,7 @@ fn drive_handshake<S: Read + Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::federation_actor::TerminalOpenState;
     use bytes::Bytes;
     use std::os::unix::net::UnixStream;
     use tokio::sync::broadcast;
@@ -2205,6 +2245,7 @@ mod tests {
             &tx,
             &mut pumps,
             None,
+            false,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -2271,6 +2312,7 @@ mod tests {
             &tx,
             &mut pumps,
             None,
+            false,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -2345,6 +2387,7 @@ mod tests {
             &tx,
             &mut pumps,
             None,
+            false,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -2432,6 +2475,7 @@ mod tests {
             &tx,
             &mut pumps,
             None,
+            false,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -2503,6 +2547,7 @@ mod tests {
             &tx,
             &mut pumps,
             None,
+            false,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -2572,6 +2617,7 @@ mod tests {
             &tx,
             &mut pumps,
             None,
+            false,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -2631,6 +2677,7 @@ mod tests {
             &tx,
             &mut pumps,
             None,
+            false,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -2796,7 +2843,7 @@ mod tests {
 
     #[test]
     fn open_terminal_emits_the_scrollback_replay_frame() {
-        // A mock actor answers SubscribeOutput + ScrollbackReplay; open_terminal
+        // A mock actor answers SubscribeOutput + TerminalOpenState; open_terminal
         // must emit an Open frame carrying that scrollback before any live byte.
         let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
         let loop_handle = std::thread::spawn(move || {
@@ -2814,8 +2861,11 @@ mod tests {
                                 pty_size: Arc::default(),
                             }));
                         }
-                        FederationCommand::ScrollbackReplay(_id, reply) => {
-                            let _ = reply.send(b"scrollback".to_vec());
+                        FederationCommand::TerminalOpenState { reply, .. } => {
+                            let _ = reply.send(TerminalOpenState {
+                                replay: b"scrollback".to_vec(),
+                                input_modes: Vec::new(),
+                            });
                         }
                         _ => {}
                     }
@@ -2837,6 +2887,7 @@ mod tests {
             &first_cause,
             &tx,
             &mut pumps,
+            false,
         );
 
         let frame = out_rx.recv().expect("open frame emitted");
@@ -2845,6 +2896,7 @@ mod tests {
                 terminal_id,
                 mount_generation,
                 replay,
+                ..
             }) => {
                 assert_eq!(terminal_id, "t1");
                 assert_eq!(mount_generation, MOUNT_GENERATION);
@@ -2863,6 +2915,127 @@ mod tests {
         drop(out_tx);
         drop(tx);
         loop_handle.join().expect("mock loop joins");
+    }
+
+    /// The Open frame `open_terminal` emits against a mock actor that answers
+    /// `TerminalOpenState` with `state`, for a mount that did or did not agree
+    /// the terminal input state capability.
+    fn open_frame_against_mock_actor(
+        state: TerminalOpenState,
+        terminal_input_state: bool,
+    ) -> FederationMessage {
+        let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
+        let loop_handle = std::thread::spawn(move || {
+            let mut keep_alive: Vec<broadcast::Sender<Bytes>> = Vec::new();
+            while let Some(ev) = rx.blocking_recv() {
+                if let ServerEvent::Federation(cmd) = ev {
+                    match cmd {
+                        FederationCommand::SubscribeOutput(_id, reply) => {
+                            let (btx, brx) = broadcast::channel::<Bytes>(16);
+                            keep_alive.push(btx);
+                            let _ = reply.send(Some(OutputSubscription {
+                                bytes: brx,
+                                pty_size: Arc::default(),
+                            }));
+                        }
+                        FederationCommand::TerminalOpenState { reply, .. } => {
+                            let _ = reply.send(state.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        let (out_tx, out_rx) = std_mpsc::sync_channel::<FederationMessage>(EGRESS_QUEUE_CAP);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first_cause = Arc::new(FirstCauseCell::new());
+        let mut pumps: HashMap<String, OutputPump> = HashMap::new();
+
+        open_terminal(
+            "t1".to_string(),
+            1,
+            1,
+            &out_tx,
+            &shutdown,
+            &first_cause,
+            &tx,
+            &mut pumps,
+            terminal_input_state,
+        );
+        let frame = out_rx.recv().expect("open frame emitted");
+
+        shutdown.store(true, Ordering::SeqCst);
+        for (_id, pump) in pumps.drain() {
+            pump.stop.store(true, Ordering::SeqCst);
+            let _ = pump.handle.join();
+        }
+        drop(out_tx);
+        drop(tx);
+        loop_handle.join().expect("mock loop joins");
+        frame
+    }
+
+    // A legacy mount must keep today's Open: the modes the actor read are
+    // dropped unless the mount agreed the capability, and the replay is the
+    // same either way.
+    #[test]
+    fn open_terminal_carries_input_modes_only_when_the_mount_agreed() {
+        let state = TerminalOpenState {
+            replay: b"h".to_vec(),
+            input_modes: b"\x1b[?1003h".to_vec(),
+        };
+        for agreed in [true, false] {
+            match open_frame_against_mock_actor(state.clone(), agreed) {
+                FederationMessage::Terminal(TerminalChannelMessage::Open {
+                    replay,
+                    input_modes,
+                    ..
+                }) => {
+                    assert_eq!(replay.bytes, b"h".to_vec(), "agreed={agreed}");
+                    let expected: &[u8] = if agreed { b"\x1b[?1003h" } else { b"" };
+                    assert_eq!(input_modes, expected, "agreed={agreed}");
+                }
+                other => panic!("expected Open, got {other:?}"),
+            }
+        }
+    }
+
+    // Only a mount that advertised `terminal_input_state` is primed with the
+    // host pane's input modes; a mount that predates the name negotiates it
+    // away and gets today's frame.
+    #[test]
+    fn only_a_mount_that_agreed_terminal_input_state_receives_input_modes() {
+        let host = Handshake {
+            federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+            capabilities: federation_capabilities(),
+            server_instance_id: ServerInstanceId("host".into()),
+        };
+        let mount = |capabilities: &[&str]| Handshake {
+            federation_protocol_version: FEDERATION_PROTOCOL_VERSION,
+            capabilities: capabilities
+                .iter()
+                .map(|name| Capability::new(*name))
+                .collect(),
+            server_instance_id: ServerInstanceId("mount".into()),
+        };
+        let agreed = |mount| negotiate(&host, &mount).expect("same protocol version");
+
+        assert!(mount_applies_terminal_input_state(&agreed(mount(&[
+            Capability::SCROLLBACK_REPLAY,
+            Capability::TERMINAL_INPUT_STATE,
+        ]))));
+        assert!(!mount_applies_terminal_input_state(&agreed(mount(&[
+            Capability::SCROLLBACK_REPLAY,
+            Capability::PTY_SIZE_NOTICE,
+        ]))));
+    }
+
+    #[test]
+    fn the_host_advertises_terminal_input_state() {
+        assert!(
+            federation_capabilities().contains(&Capability::new(Capability::TERMINAL_INPUT_STATE))
+        );
     }
 
     #[test]
@@ -2929,9 +3102,16 @@ mod tests {
         })
     }
 
+    /// The input modes the harness's mock actor reports for every terminal.
+    const HARNESS_INPUT_MODES: &[u8] = b"\x1b[?1003h";
+
     /// One live `run_connection` over a socket pair, plus a mock server event
     /// loop that reports the terminal ids whose input actually reached it —
     /// which is how these tests observe that the reader kept servicing panes.
+    /// The mock also opens any terminal: it answers `SubscribeOutput` with a
+    /// live subscription and `TerminalOpenState` with `HARNESS_INPUT_MODES`,
+    /// whatever the request asked for, so only the connection's own gate
+    /// decides what an Open carries.
     struct ConnectionHarness {
         client: UnixStream,
         inputs: std_mpsc::Receiver<String>,
@@ -2945,13 +3125,30 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<ServerEvent>(64);
             let (input_tx, inputs) = std_mpsc::channel::<String>();
             let mock = std::thread::spawn(move || {
+                let mut keep_alive: Vec<broadcast::Sender<Bytes>> = Vec::new();
                 while let Some(ev) = rx.blocking_recv() {
-                    if let ServerEvent::Federation(FederationCommand::SendInput {
-                        terminal_id,
-                        ..
-                    }) = ev
-                    {
-                        let _ = input_tx.send(terminal_id);
+                    let ServerEvent::Federation(cmd) = ev else {
+                        continue;
+                    };
+                    match cmd {
+                        FederationCommand::SendInput { terminal_id, .. } => {
+                            let _ = input_tx.send(terminal_id);
+                        }
+                        FederationCommand::SubscribeOutput(_id, reply) => {
+                            let (btx, brx) = broadcast::channel::<Bytes>(16);
+                            keep_alive.push(btx);
+                            let _ = reply.send(Some(OutputSubscription {
+                                bytes: brx,
+                                pty_size: Arc::default(),
+                            }));
+                        }
+                        FederationCommand::TerminalOpenState { reply, .. } => {
+                            let _ = reply.send(TerminalOpenState {
+                                replay: b"history".to_vec(),
+                                input_modes: HARNESS_INPUT_MODES.to_vec(),
+                            });
+                        }
+                        _ => {}
                     }
                 }
             });
@@ -3025,6 +3222,39 @@ mod tests {
                 .expect("clear client read timeout");
         }
 
+        /// The raw JSON payload of the next `Terminal::Open` the connection
+        /// writes, skipping unrelated outbound traffic. Raw, so a test can see
+        /// whether a key is on the wire at all rather than only what serde
+        /// defaulted it to. `None` once the read window elapses.
+        fn next_open_payload(&mut self) -> Option<Vec<u8>> {
+            self.client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("client read timeout");
+            let payload = loop {
+                let mut header = [0u8; 8];
+                if self.client.read_exact(&mut header).is_err() {
+                    break None;
+                }
+                let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+                let mut payload = vec![0u8; len as usize];
+                if self.client.read_exact(&mut payload).is_err() {
+                    break None;
+                }
+                if matches!(
+                    serde_json::from_slice::<FederationMessage>(&payload),
+                    Ok(FederationMessage::Terminal(
+                        TerminalChannelMessage::Open { .. }
+                    ))
+                ) {
+                    break Some(payload);
+                }
+            };
+            self.client
+                .set_read_timeout(None)
+                .expect("clear client read timeout");
+            payload
+        }
+
         fn expect_input(&self, terminal_id: &str) {
             let got = self
                 .inputs
@@ -3044,6 +3274,60 @@ mod tests {
                 .expect("connection thread joins");
             let _ = self.mock.take().expect("mock thread").join();
             result
+        }
+    }
+
+    // The connection decides from the negotiated set whether an Open carries
+    // the pane's input modes: a mount that agreed `terminal_input_state` is
+    // primed with them, and a legacy mount gets today's frame, with no
+    // `input_modes` key on the wire at all.
+    #[test]
+    fn a_connection_primes_an_open_with_input_modes_only_for_a_mount_that_agreed() {
+        for mount_agreed in [true, false] {
+            let mut agreed = caps(false);
+            if mount_agreed {
+                agreed
+                    .0
+                    .insert(Capability::new(Capability::TERMINAL_INPUT_STATE));
+            }
+            let unused_op: StagingOp =
+                Arc::new(|_name: &str, _bytes: &[u8]| Err(ClipboardStageFailure::WriteFailed));
+            let mut harness = ConnectionHarness::spawn(agreed, unused_op);
+            harness.send(&FederationMessage::Terminal(TerminalChannelMessage::Open {
+                terminal_id: "t1".to_string(),
+                mount_generation: MOUNT_GENERATION,
+                replay: ScrollbackReplay { bytes: Vec::new() },
+                input_modes: Vec::new(),
+            }));
+
+            let payload = harness
+                .next_open_payload()
+                .unwrap_or_else(|| panic!("no Open frame, mount_agreed={mount_agreed}"));
+            let Ok(FederationMessage::Terminal(TerminalChannelMessage::Open {
+                replay,
+                input_modes,
+                ..
+            })) = serde_json::from_slice::<FederationMessage>(&payload)
+            else {
+                panic!("the Open payload no longer decodes, mount_agreed={mount_agreed}");
+            };
+            assert_eq!(
+                replay.bytes,
+                b"history".to_vec(),
+                "mount_agreed={mount_agreed}"
+            );
+            let has_key = String::from_utf8_lossy(&payload).contains("input_modes");
+            if mount_agreed {
+                assert_eq!(input_modes, HARNESS_INPUT_MODES);
+                assert!(has_key, "an agreed mount's Open must carry the key");
+            } else {
+                assert!(input_modes.is_empty());
+                assert!(
+                    !has_key,
+                    "a legacy mount's Open must not carry the key at all"
+                );
+            }
+            harness.finish().expect("the connection ends cleanly");
         }
     }
 
@@ -3120,6 +3404,7 @@ mod tests {
             &tx,
             &mut pumps,
             Some(&staging),
+            false,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -3558,6 +3843,7 @@ mod tests {
             &tx,
             &mut pumps,
             None,
+            false,
         )
         .expect("reader loop drains to EOF");
         drop(tx);
@@ -3647,6 +3933,7 @@ mod tests {
             &tx,
             &mut pumps,
             None,
+            false,
         )
         .expect("reader loop drains to EOF");
         drop(tx);

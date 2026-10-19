@@ -44,6 +44,9 @@ pub(crate) struct FixtureHost {
     agent_statuses: Mutex<HashMap<String, AgentStatus>>,
     sent_input: Mutex<Vec<(String, Vec<u8>)>>,
     resizes: Mutex<Vec<(String, u16, u16)>>,
+    // Per-terminal input-mode bytes an `Open` carries to a mount that agreed
+    // `Capability::TERMINAL_INPUT_STATE`. Absent means none.
+    input_modes: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl FixtureHost {
@@ -65,7 +68,29 @@ impl FixtureHost {
             agent_statuses: Mutex::new(HashMap::new()),
             sent_input: Mutex::new(Vec::new()),
             resizes: Mutex::new(Vec::new()),
+            input_modes: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Advertise one more capability than the default set. The default stays
+    /// legacy-shaped so tests that do not opt in see today's frames.
+    pub(crate) fn with_capability(mut self, name: &str) -> Self {
+        self.capabilities.insert(Capability::new(name));
+        self
+    }
+
+    /// Set the input-mode bytes this host reports for `terminal_id` when a
+    /// channel opens.
+    pub(crate) fn with_input_modes(
+        self,
+        terminal_id: impl Into<String>,
+        input_modes: Vec<u8>,
+    ) -> Self {
+        self.input_modes
+            .lock()
+            .unwrap()
+            .insert(terminal_id.into(), input_modes);
+        self
     }
 
     pub(crate) fn with_terminal(
@@ -179,6 +204,15 @@ impl FederationHost for FixtureHost {
             .unwrap()
             .get(terminal_id)
             .map(|terminal| terminal.scrollback.clone())
+            .unwrap_or_default()
+    }
+
+    fn terminal_input_modes(&self, terminal_id: &str) -> Vec<u8> {
+        self.input_modes
+            .lock()
+            .unwrap()
+            .get(terminal_id)
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -413,6 +447,7 @@ mod tests {
                 terminal_id: "term_1".to_string(),
                 mount_generation: 1,
                 replay: ScrollbackReplay { bytes: Vec::new() },
+                input_modes: Vec::new(),
             }),
         )
         .await
@@ -461,6 +496,7 @@ mod tests {
                 terminal_id: "term_1".to_string(),
                 mount_generation: 1,
                 replay: ScrollbackReplay { bytes: Vec::new() },
+                input_modes: Vec::new(),
             }),
         )
         .await
@@ -498,6 +534,7 @@ mod tests {
                 terminal_id: "term_1".to_string(),
                 mount_generation: 1,
                 replay: ScrollbackReplay { bytes: Vec::new() },
+                input_modes: Vec::new(),
             }),
         )
         .await
@@ -580,6 +617,7 @@ mod tests {
                 terminal_id: "term_1".to_string(),
                 mount_generation: 1,
                 replay: ScrollbackReplay { bytes: Vec::new() },
+                input_modes: Vec::new(),
             }),
         )
         .await
@@ -970,6 +1008,7 @@ mod tests {
                 terminal_id: "term_1".to_string(),
                 mount_generation: 1,
                 replay: ScrollbackReplay { bytes: Vec::new() },
+                input_modes: Vec::new(),
             }),
         )
         .await
@@ -1035,5 +1074,116 @@ mod tests {
         drop(writer);
         drop(reader);
         let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+    }
+
+    /// The next frame's raw JSON payload, so a test can see whether a key is
+    /// on the wire at all rather than only what serde defaulted it to.
+    async fn read_raw_payload(
+        reader: &mut tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    ) -> Vec<u8> {
+        use tokio::io::AsyncReadExt as _;
+        let mut header = [0u8; 8];
+        reader.read_exact(&mut header).await.expect("frame header");
+        let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        let mut payload = vec![0u8; len];
+        reader
+            .read_exact(&mut payload)
+            .await
+            .expect("frame payload");
+        payload
+    }
+
+    // The host primes a mirror's input modes only on a link where both sides
+    // agreed the capability; a mount that never advertised it gets today's
+    // Open frame, with no `input_modes` key on the wire.
+    #[tokio::test]
+    async fn loopback_open_carries_input_modes_only_with_the_capability_on_both_sides() {
+        let modes = b"\x1b[?1049h\x1b[?1003h\x1b[?1006h".to_vec();
+
+        for mount_agrees in [true, false] {
+            let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+            let host = Arc::new(
+                FixtureHost::new()
+                    .with_capability(Capability::TERMINAL_INPUT_STATE)
+                    .with_terminal("term_1", runtime, b"history".to_vec())
+                    .with_input_modes("term_1", modes.clone()),
+            );
+            let (client, server_handle) = LoopbackFederationServer::spawn(host);
+            let (mut reader, mut writer) = tokio::io::split(client);
+
+            let mount_caps: &[&str] = if mount_agrees {
+                &[
+                    Capability::SCROLLBACK_REPLAY,
+                    Capability::TERMINAL_INPUT_STATE,
+                ]
+            } else {
+                &[Capability::SCROLLBACK_REPLAY]
+            };
+            serve::write_frame(
+                &mut writer,
+                &FederationMessage::Handshake(handshake(mount_caps)),
+            )
+            .await
+            .unwrap();
+            let Some(FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+                agreed_capabilities,
+            })) = serve::read_frame(&mut reader).await.unwrap()
+            else {
+                panic!("expected HandshakeResponse::Accept");
+            };
+            assert_eq!(
+                agreed_capabilities.contains(&Capability::new(Capability::TERMINAL_INPUT_STATE)),
+                mount_agrees,
+                "the agreed set is the intersection of both adverts"
+            );
+            let Some(FederationMessage::MountSnapshot(_)) =
+                serve::read_frame(&mut reader).await.unwrap()
+            else {
+                panic!("expected MountSnapshot");
+            };
+
+            serve::write_frame(
+                &mut writer,
+                &FederationMessage::Terminal(TerminalChannelMessage::Open {
+                    terminal_id: "term_1".to_string(),
+                    mount_generation: 1,
+                    replay: ScrollbackReplay { bytes: Vec::new() },
+                    input_modes: Vec::new(),
+                }),
+            )
+            .await
+            .unwrap();
+
+            let payload = read_raw_payload(&mut reader).await;
+            let message: FederationMessage =
+                serde_json::from_slice(&payload).expect("Open frame decodes");
+            let FederationMessage::Terminal(TerminalChannelMessage::Open {
+                replay,
+                input_modes,
+                ..
+            }) = message
+            else {
+                panic!("expected the server's Open, got {message:?}");
+            };
+            assert_eq!(replay.bytes, b"history".to_vec(), "replay is unchanged");
+            let has_key = String::from_utf8_lossy(&payload).contains("input_modes");
+            if mount_agrees {
+                assert_eq!(
+                    input_modes, modes,
+                    "an agreed mount is primed with the modes"
+                );
+                assert!(has_key);
+            } else {
+                assert!(input_modes.is_empty());
+                assert!(
+                    !has_key,
+                    "a legacy mount's Open must not carry the key at all"
+                );
+            }
+
+            drop(writer);
+            drop(reader);
+            let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+        }
     }
 }

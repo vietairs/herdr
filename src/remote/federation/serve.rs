@@ -92,6 +92,12 @@ pub(crate) trait FederationHost: 'static {
     /// unavailable.
     fn scrollback_replay(&self, terminal_id: &str) -> Vec<u8>;
 
+    /// Input-mode bytes for a channel being opened; see
+    /// `Capability::TERMINAL_INPUT_STATE`. Default: none (legacy host behaviour).
+    fn terminal_input_modes(&self, _terminal_id: &str) -> Vec<u8> {
+        Vec::new()
+    }
+
     fn send_input(&self, terminal_id: &str, bytes: &[u8]);
     fn resize(&self, terminal_id: &str, cols: u16, rows: u16);
 
@@ -430,10 +436,6 @@ fn poll_agent_statuses<H: FederationHost>(
 /// `#[allow(dead_code)]`: only reachable through `run()`, kept for
 /// `loopback.rs`'s tests (see `run`'s doc comment).
 #[allow(dead_code)]
-// The only reader of `agreed_capabilities` is the staging arm, and staging is
-// Unix-only, so on other targets the parameter is legitimately unread rather
-// than forgotten.
-#[cfg_attr(not(unix), allow(unused_variables))]
 fn handle_inbound<H: FederationHost>(
     host: &Arc<H>,
     msg: FederationMessage,
@@ -549,10 +551,20 @@ fn handle_inbound<H: FederationHost>(
                 return;
             };
             let replay = host.scrollback_replay(&terminal_id);
+            // Same rule as the production host: only a mount that agreed the
+            // capability is primed, so a legacy mount keeps today's frame.
+            let input_modes = if agreed_capabilities
+                .contains(&Capability::new(Capability::TERMINAL_INPUT_STATE))
+            {
+                host.terminal_input_modes(&terminal_id)
+            } else {
+                Vec::new()
+            };
             let _ = out_tx.send(FederationMessage::Terminal(TerminalChannelMessage::Open {
                 terminal_id: terminal_id.clone(),
                 mount_generation: MOUNT_GENERATION,
                 replay: ScrollbackReplay { bytes: replay },
+                input_modes,
             }));
             let handle = spawn_terminal_forward_task(terminal_id.clone(), rx, out_tx.clone());
             open_terminals.insert(terminal_id, handle);

@@ -4075,6 +4075,24 @@ impl PaneRuntime {
         self.terminal.input_state()
     }
 
+    /// The pane's current input modes as bytes a mirror can parse: the
+    /// `InputState` restore bytes followed by the kitty keyboard stack replay.
+    /// Empty when the terminal state cannot be read. When modifyOtherKeys is
+    /// on, `\x1b[>4;2m` appears twice (builder, then kitty replay); that is
+    /// harmless. Called once per federation Open, never per render, so it is
+    /// not on a multiplicative path.
+    #[cfg(unix)]
+    pub fn input_modes_ansi(&self) -> Vec<u8> {
+        let Some(state) = self.terminal.input_state() else {
+            return Vec::new();
+        };
+        let mut bytes = terminal::input_state_restore_ansi(state);
+        if let Some(kitty) = self.terminal.kitty_keyboard_state_ansi() {
+            bytes.extend_from_slice(kitty.as_bytes());
+        }
+        bytes
+    }
+
     pub fn bracketed_paste_enabled(&self) -> bool {
         self.terminal.bracketed_paste_enabled()
     }
@@ -5921,6 +5939,62 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn input_modes_ansi_carries_kitty_flags_after_the_alt_screen_switch() {
+        // Drive the modes through the parser path rather than the fixture's
+        // pre-construction write, so the kitty stack tracker observes them.
+        let source = PaneRuntime::test_with_scrollback_bytes(40, 5, 4096, b"");
+        source.test_process_pty_bytes(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[>5u\x1b[>4;2m");
+
+        let bytes = source.input_modes_ansi();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+
+        let alt_screen_at = text
+            .find("\x1b[?1049h")
+            .unwrap_or_else(|| panic!("no alt-screen switch in {text:?}"));
+        let kitty_at = text
+            .find("\x1b[>5u")
+            .unwrap_or_else(|| panic!("no kitty stack replay in {text:?}"));
+        assert!(
+            alt_screen_at < kitty_at,
+            "kitty flags must follow the alt-screen switch: {text:?}"
+        );
+        assert_eq!(
+            text.matches("\x1b[>4;2m").count(),
+            2,
+            "modifyOtherKeys comes once from the builder and once from the kitty replay: {text:?}"
+        );
+
+        let (fresh, _rx) = PaneRuntime::test_with_channel(40, 5);
+        fresh.test_process_pty_bytes(&bytes);
+        let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
+        assert_eq!(fresh.encode_terminal_key(key), b"\x1b[13;2u");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_modes_ansi_keeps_alt_screen_kitty_flags_off_the_primary_screen() {
+        // A fullscreen app pushes kitty flags on the alternate screen and
+        // exits it without popping; the shell's primary screen stays legacy.
+        let source = PaneRuntime::test_with_scrollback_bytes(40, 5, 4096, b"");
+        source.test_process_pty_bytes(b"\x1b[?1049h\x1b[>5u\x1b[?1049l");
+        let shift_enter = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
+        assert_eq!(source.encode_terminal_key(shift_enter.clone()), b"\r");
+
+        let bytes = source.input_modes_ansi();
+        let (mirror, _rx) = PaneRuntime::test_with_channel(40, 5);
+        mirror.test_process_pty_bytes(&bytes);
+
+        assert!(!mirror.alternate_screen_active());
+        assert_eq!(
+            mirror.encode_terminal_key(shift_enter),
+            b"\r",
+            "mirror primary screen must stay legacy; replay {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn ended_handoff_keeps_persistence_cwd_when_pid_is_reused() {
         let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
         assert!(runtime.child_wait_completed.is_none());
@@ -7590,6 +7664,47 @@ mod remote_spawn_tests {
             remote_runtime.visible_text(),
             local_reference.visible_text()
         );
+    }
+
+    // A mirror opened after the host app switched on its input modes gets
+    // them as bytes on the output channel; parsing them must leave the mirror
+    // in the host's input state without echoing anything back upstream.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_mirror_applies_input_modes_pushed_on_the_output_channel() {
+        let source = PaneRuntime::test_with_scrollback_bytes(80, 24, 4096, b"");
+        source.test_process_pty_bytes(
+            b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h",
+        );
+        let modes = source.input_modes_ansi();
+        assert!(!modes.is_empty(), "source produced no input-mode bytes");
+
+        let (mirror, output_tx, mut out_rx, _events_rx) = spawn_test_remote_pane("term_1", 1);
+        output_tx.send(Bytes::from(modes)).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while mirror.input_state() != source.input_state() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "mirror input state {:?} never reached the source's {:?}",
+                mirror.input_state(),
+                source.input_state()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        assert!(mirror.mouse_reporting_enabled());
+        assert_eq!(mirror.input_state(), source.input_state());
+        while let Ok(message) = out_rx.try_recv() {
+            assert!(
+                !matches!(
+                    message,
+                    FederationMessage::Terminal(
+                        crate::remote::federation::protocol::TerminalChannelMessage::Input { .. }
+                    )
+                ),
+                "the mirror sent input upstream while applying modes: {message:?}"
+            );
+        }
     }
 
     /// The next `Resize` vote this pane sent to the host, as `(cols, rows)`.
