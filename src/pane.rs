@@ -2604,6 +2604,10 @@ impl PaneRuntime {
     ) -> crate::handoff_runtime::HandoffRuntimeState {
         let child_pid = self.child_pid.load(Ordering::Acquire);
         let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
+        let (input_state, keyboard_protocol_ansi) = match self.terminal.input_modes_snapshot() {
+            Some((state, kitty)) => (Some(state), kitty),
+            None => (None, self.terminal.kitty_keyboard_state_ansi()),
+        };
         crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
             child_pid,
@@ -2615,8 +2619,8 @@ impl PaneRuntime {
                 crate::input::KeyboardProtocol::Legacy => 0,
                 crate::input::KeyboardProtocol::Kitty { flags } => flags,
             },
-            keyboard_protocol_ansi: self.terminal.kitty_keyboard_state_ansi(),
-            input_state: self.input_state(),
+            keyboard_protocol_ansi,
+            input_state,
             terminal_title: self.terminal_title(),
             initial_history_ansi: None,
             agent_state: None,
@@ -4070,24 +4074,25 @@ impl PaneRuntime {
         result
     }
 
-    #[cfg(unix)]
+    #[cfg(all(test, unix))]
     pub fn input_state(&self) -> Option<InputState> {
         self.terminal.input_state()
     }
 
     /// The pane's current input modes as bytes a mirror can parse: the
-    /// `InputState` restore bytes followed by the kitty keyboard stack replay.
-    /// Empty when the terminal state cannot be read. When modifyOtherKeys is
-    /// on, `\x1b[>4;2m` appears twice (builder, then kitty replay); that is
-    /// harmless. Called once per federation Open, never per render, so it is
-    /// not on a multiplicative path.
+    /// `InputState` restore bytes followed by the kitty keyboard stack replay,
+    /// both read under one terminal lock. Empty when the terminal state cannot
+    /// be read. When modifyOtherKeys is on, `\x1b[>4;2m` appears twice
+    /// (builder, then kitty replay); that is harmless. Called once per
+    /// federation Open, never per render, so it is not on a multiplicative
+    /// path.
     #[cfg(unix)]
     pub fn input_modes_ansi(&self) -> Vec<u8> {
-        let Some(state) = self.terminal.input_state() else {
+        let Some((state, kitty)) = self.terminal.input_modes_snapshot() else {
             return Vec::new();
         };
         let mut bytes = terminal::input_state_restore_ansi(state);
-        if let Some(kitty) = self.terminal.kitty_keyboard_state_ansi() {
+        if let Some(kitty) = kitty {
             bytes.extend_from_slice(kitty.as_bytes());
         }
         bytes

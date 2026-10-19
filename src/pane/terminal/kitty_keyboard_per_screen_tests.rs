@@ -37,9 +37,9 @@ fn kitty_flags(pane: &GhosttyPaneTerminal) -> u16 {
 /// The bytes a federation mirror parses: `InputState` restore bytes first,
 /// then the kitty keyboard replay (same composition as the pane runtime).
 fn mirror_bytes(source: &GhosttyPaneTerminal) -> Vec<u8> {
-    let state = source.input_state().expect("source input state");
+    let (state, kitty) = source.input_modes_snapshot().expect("source input state");
     let mut bytes = input_state_restore_ansi(state);
-    if let Some(kitty) = source.kitty_keyboard_state_ansi() {
+    if let Some(kitty) = kitty {
         bytes.extend_from_slice(kitty.as_bytes());
     }
     bytes
@@ -284,6 +284,187 @@ fn screen_switches_split_across_chunks_are_tracked() {
                 expected,
                 "{label} diverged at split {split}; replay {replay:?}"
             );
+        }
+    }
+}
+
+/// Pushes past libghostty's stack depth, then pops one at a time and in
+/// batches: every copy must report the source's flags after each pop, which
+/// ties the tracker's depth to the vendored emulator.
+#[test]
+fn copies_match_the_source_on_every_pop_past_the_stack_depth() {
+    // (case name, source bytes, pops applied to the source and every copy)
+    type Case = (String, Vec<u8>, Vec<&'static [u8]>);
+    let mut cases: Vec<Case> = Vec::new();
+    for pushes in [6usize, 7, 8, 9, 12, 20] {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\x1b[=3u");
+        for f in 1..=pushes {
+            bytes.extend_from_slice(format!("\x1b[>{}u", f).as_bytes());
+        }
+        cases.push((
+            format!("primary {pushes}"),
+            bytes.clone(),
+            vec![b"\x1b[<u"; 10],
+        ));
+        cases.push((
+            format!("primary {pushes} pop3"),
+            bytes.clone(),
+            vec![b"\x1b[<3u", b"\x1b[<3u", b"\x1b[<3u", b"\x1b[<u"],
+        ));
+        cases.push((
+            format!("primary {pushes} pop7"),
+            bytes.clone(),
+            vec![b"\x1b[<7u", b"\x1b[<u", b"\x1b[<u"],
+        ));
+        let mut alt = b"\x1b[>1u\x1b[?1049h".to_vec();
+        alt.extend_from_slice(&bytes);
+        cases.push((format!("alt {pushes}"), alt, vec![b"\x1b[<u"; 10]));
+    }
+    for (case, bytes, pops) in cases {
+        let source = source_from(&bytes);
+        let copies = copies_of(&source.0);
+        let mut expected = vec![kitty_flags(&source.0)];
+        for pop in &pops {
+            feed(&source, pop);
+            expected.push(kitty_flags(&source.0));
+        }
+        for (label, copy) in copies {
+            let mut got = vec![kitty_flags(&copy.0)];
+            for pop in &pops {
+                feed(&copy, pop);
+                got.push(kitty_flags(&copy.0));
+            }
+            assert_eq!(
+                got,
+                expected,
+                "{label} diverged for {case}; replay {:?}",
+                String::from_utf8_lossy(&mirror_bytes(&source.0))
+            );
+        }
+    }
+}
+
+#[test]
+fn copies_match_the_source_after_popping_past_the_stack_depth() {
+    for (pushes, pops) in [
+        (20usize, 8usize),
+        (20, 9),
+        (12, 9),
+        (9, 8),
+        (8, 8),
+        (8, 7),
+        (30, 3),
+    ] {
+        for alt in [false, true] {
+            let mut bytes: Vec<u8> = if alt {
+                b"\x1b[>1u\x1b[?1049h".to_vec()
+            } else {
+                Vec::new()
+            };
+            bytes.extend_from_slice(b"\x1b[=3u");
+            for f in 1..=pushes {
+                bytes.extend_from_slice(format!("\x1b[>{}u", f).as_bytes());
+            }
+            for _ in 0..pops {
+                bytes.extend_from_slice(b"\x1b[<u");
+            }
+            let case = format!("pushes {pushes} pops {pops} alt {alt}");
+            let source = source_from(&bytes);
+            let replay = String::from_utf8_lossy(&mirror_bytes(&source.0)).into_owned();
+            let copies = copies_of(&source.0);
+            let mut expected = vec![kitty_flags(&source.0)];
+            for _ in 0..10 {
+                feed(&source, b"\x1b[<u");
+                expected.push(kitty_flags(&source.0));
+            }
+            for (label, copy) in copies {
+                let mut got = vec![kitty_flags(&copy.0)];
+                for _ in 0..10 {
+                    feed(&copy, b"\x1b[<u");
+                    got.push(kitty_flags(&copy.0));
+                }
+                assert_eq!(
+                    got, expected,
+                    "{label} diverged for {case}; replay {replay:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn out_of_range_kitty_flags_never_reach_the_copy() {
+    for (case, bytes) in [
+        (
+            "valid then 6 invalid",
+            b"\x1b[>1u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u".as_slice(),
+        ),
+        (
+            "valid then 7 invalid",
+            b"\x1b[>1u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u".as_slice(),
+        ),
+        (
+            "valid then 8 invalid",
+            b"\x1b[>1u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u\x1b[>33u"
+                .as_slice(),
+        ),
+        ("set invalid", b"\x1b[>1u\x1b[=64u".as_slice()),
+        (
+            "set modes",
+            b"\x1b[=1u\x1b[=4;2u\x1b[=1;3u\x1b[>2u\x1b[=8;2u".as_slice(),
+        ),
+    ] {
+        let source = source_from(bytes);
+        let replay = String::from_utf8_lossy(&mirror_bytes(&source.0)).into_owned();
+        for (label, copy) in copies_of(&source.0) {
+            assert_eq!(
+                kitty_flags(&copy.0),
+                kitty_flags(&source.0),
+                "{label} diverged for {case}; replay {replay:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn copy_stays_on_the_source_screen_when_the_tracker_loses_track() {
+    // XTSAVE/XTRESTORE of 1049 switches libghostty's screen without the
+    // tracker seeing a 1049 set or reset.
+    let source = source_from(b"\x1b[>1u\x1b[?1049h\x1b[>5u\x1b[?1049s\x1b[?1049l\x1b[?1049r");
+    let alternate = source.0.input_state().unwrap().alternate_screen;
+    for (label, copy) in copies_of(&source.0) {
+        assert_eq!(
+            copy.0.input_state().unwrap().alternate_screen,
+            alternate,
+            "{label} switched screens"
+        );
+        assert_eq!(
+            kitty_flags(&copy.0),
+            kitty_flags(&source.0),
+            "{label} flags"
+        );
+    }
+}
+
+#[test]
+fn csi_cut_short_by_esc_does_not_hide_the_next_screen_switch() {
+    for split in [None, Some(13)] {
+        let bytes: &[u8] = b"\x1b[>1u\x1b[?1049h\x1b[1\x1b[?1049l";
+        let source = fresh_pane();
+        match split {
+            Some(at) => {
+                feed(&source, &bytes[..at]);
+                feed(&source, &bytes[at..]);
+            }
+            None => feed(&source, bytes),
+        }
+        for (label, copy) in copies_of(&source.0) {
+            assert!(
+                !copy.0.input_state().unwrap().alternate_screen,
+                "{label} landed on the alternate screen (split {split:?})"
+            );
+            assert_eq!(kitty_flags(&copy.0), 1, "{label} flags (split {split:?})");
         }
     }
 }

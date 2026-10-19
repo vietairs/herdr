@@ -22,6 +22,9 @@ pub(crate) struct KittyKeyboardTracker {
 /// past this depth however many pushes an app leaks.
 const KITTY_FLAG_STACK_DEPTH: usize = 8;
 
+/// Kitty keyboard flags are 5 bits; libghostty ignores a push or set above.
+const KITTY_FLAGS_MAX: u16 = 0x1f;
+
 /// One screen's Kitty keyboard flags: the current value and the pushed
 /// values underneath it, at most `KITTY_FLAG_STACK_DEPTH - 1` of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -92,12 +95,25 @@ impl KittyKeyboardTracker {
             }
 
             let mut end = index + 2;
-            while end < bytes.len() && !(0x40..=0x7e).contains(&bytes[end]) {
+            while end < bytes.len()
+                && !(0x40..=0x7e).contains(&bytes[end])
+                && !matches!(bytes[end], 0x1b | 0x18 | 0x1a)
+            {
                 end += 1;
             }
             if end >= bytes.len() {
                 self.store_pending(&bytes[index..]);
                 break;
+            }
+            // A VT parser drops a CSI cut short by ESC (which starts the next
+            // sequence) or by CAN/SUB, so the tracker must not read past it.
+            if bytes[end] == 0x1b {
+                index = end;
+                continue;
+            }
+            if matches!(bytes[end], 0x18 | 0x1a) {
+                index = end + 1;
+                continue;
             }
 
             match bytes[end] {
@@ -138,20 +154,22 @@ impl KittyKeyboardTracker {
         let Some(params) = params.strip_prefix(b"?") else {
             return;
         };
-        if !params
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || *byte == b';')
-        {
-            return;
+        // One pass with no allocation or string parsing: this runs for every
+        // DECSET/DECRST in every pane's output.
+        let mut switches_screen = false;
+        let mut mode: u32 = 0;
+        for &byte in params.iter().chain([b';'].iter()) {
+            match byte {
+                b'0'..=b'9' => {
+                    mode = (mode * 10 + u32::from(byte - b'0')).min(u32::from(u16::MAX) + 1);
+                }
+                b';' => {
+                    switches_screen |= matches!(mode, 47 | 1047 | 1049);
+                    mode = 0;
+                }
+                _ => return,
+            }
         }
-        let switches_screen = params.split(|byte| *byte == b';').any(|mode| {
-            matches!(
-                std::str::from_utf8(mode)
-                    .ok()
-                    .and_then(|mode| mode.parse::<u16>().ok()),
-                Some(47 | 1047 | 1049)
-            )
-        });
         if switches_screen {
             self.alternate_active = enabled;
         }
@@ -192,7 +210,11 @@ impl KittyKeyboardTracker {
         let screen = self.active_stack();
         match kind {
             b'>' => {
+                // libghostty drops a push whose flags do not fit in 5 bits.
                 let flags = parse_kitty_keyboard_flags(rest);
+                if flags > KITTY_FLAGS_MAX {
+                    return;
+                }
                 if screen.stack.len() + 1 >= KITTY_FLAG_STACK_DEPTH {
                     screen.stack.remove(0);
                 }
@@ -200,12 +222,33 @@ impl KittyKeyboardTracker {
                 screen.flags = flags;
             }
             b'=' => {
-                screen.flags = parse_kitty_keyboard_flags(rest);
+                let mut params = rest.split(|byte| *byte == b';');
+                let flags = parse_kitty_keyboard_flags(params.next().unwrap_or_default());
+                if flags > KITTY_FLAGS_MAX {
+                    return;
+                }
+                match params.next().map(parse_kitty_keyboard_flags).unwrap_or(1) {
+                    1 => screen.flags = flags,
+                    2 => screen.flags |= flags,
+                    3 => screen.flags &= !flags,
+                    _ => {}
+                }
             }
             b'<' => {
-                let count = parse_kitty_keyboard_flags(rest).max(1);
-                for _ in 0..count {
-                    screen.flags = screen.stack.pop().unwrap_or(0);
+                // No parameter pops one entry; an explicit 0 pops none. Popping
+                // the whole stack or more always ends disabled, so libghostty
+                // resets in one step and so does the tracker.
+                let count = if rest.is_empty() {
+                    1
+                } else {
+                    usize::from(parse_kitty_keyboard_flags(rest))
+                };
+                if count >= KITTY_FLAG_STACK_DEPTH {
+                    *screen = KittyFlagStack::default();
+                } else {
+                    for _ in 0..count {
+                        screen.flags = screen.stack.pop().unwrap_or(0);
+                    }
                 }
             }
             _ => {}
@@ -227,6 +270,30 @@ impl KittyKeyboardTracker {
     /// stack. 1049 matches the restore bytes' own `?1049h`, so the mode bits
     /// end as the restore left them; the cursor it saves and restores is the
     /// target's own, and the alternate screen it erases is still blank.
+    /// [`Self::replay_ansi`] when the tracker's screen matches libghostty's
+    /// active screen. When they disagree (a mode the tracker does not follow,
+    /// such as an XTRESTORE of 1049), the stacks cannot be trusted, so only
+    /// libghostty's current flags are set, with no screen switches: the copy
+    /// may lose stack depth but never lands on the wrong screen.
+    #[cfg(unix)]
+    pub(crate) fn replay_ansi_on_screen(
+        &self,
+        alternate_screen: bool,
+        current_flags: u16,
+    ) -> Option<String> {
+        if self.alternate_active == alternate_screen {
+            return self.replay_ansi();
+        }
+        let mut ansi = String::new();
+        if current_flags != 0 {
+            ansi.push_str(&format!("\x1b[={current_flags}u"));
+        }
+        if self.modify_other_keys_level > 0 {
+            ansi.push_str(&format!("\x1b[>4;{}m", self.modify_other_keys_level));
+        }
+        (!ansi.is_empty()).then_some(ansi)
+    }
+
     #[cfg(unix)]
     pub(crate) fn replay_ansi(&self) -> Option<String> {
         let mut ansi = String::new();
@@ -296,6 +363,50 @@ mod tests {
         assert!(tracker.primary.is_default());
         #[cfg(unix)]
         assert_eq!(tracker.replay_ansi(), None);
+    }
+
+    #[test]
+    fn csi_cut_short_by_esc_can_or_sub_is_dropped() {
+        for cut in [b"\x1b".as_slice(), b"\x18", b"\x1a"] {
+            let mut bytes = b"\x1b[>1u\x1b[?1049h\x1b[1".to_vec();
+            bytes.extend_from_slice(cut);
+            if cut != b"\x1b" {
+                bytes.push(0x1b);
+            }
+            bytes.extend_from_slice(b"[?1049l");
+            for split in 0..=bytes.len() {
+                let mut tracker = KittyKeyboardTracker::default();
+                tracker.observe(&bytes[..split]);
+                tracker.observe(&bytes[split..]);
+                assert!(!tracker.alternate_active, "cut {cut:?}, split {split}");
+                assert_eq!(tracker.primary.flags, 1, "cut {cut:?}, split {split}");
+            }
+        }
+    }
+
+    #[test]
+    fn pop_counts_follow_libghostty() {
+        let mut tracker = KittyKeyboardTracker::default();
+        tracker.observe(b"\x1b[>1u\x1b[>2u\x1b[<0u");
+        assert_eq!(tracker.primary.flags, 2, "an explicit 0 pops nothing");
+        tracker.observe(b"\x1b[<u");
+        assert_eq!(tracker.primary.flags, 1, "no parameter pops one");
+        tracker.observe(b"\x1b[>2u\x1b[<65535u");
+        assert!(tracker.primary.is_default(), "a huge pop resets the stack");
+    }
+
+    #[test]
+    fn set_honours_the_mode_parameter_and_ignores_out_of_range_flags() {
+        let mut tracker = KittyKeyboardTracker::default();
+        tracker.observe(b"\x1b[=1u\x1b[=4;2u");
+        assert_eq!(tracker.primary.flags, 5);
+        tracker.observe(b"\x1b[=1;3u");
+        assert_eq!(tracker.primary.flags, 4);
+        tracker.observe(b"\x1b[=64u\x1b[>33u");
+        assert_eq!(tracker.primary.flags, 4);
+        assert!(tracker.primary.stack.is_empty());
+        tracker.observe(b"\x1b[=3;1u");
+        assert_eq!(tracker.primary.flags, 3);
     }
 
     #[test]
