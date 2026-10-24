@@ -3,7 +3,7 @@ import SiteLayout from '../components/SiteLayout.astro';
 import fixture from '../data/plugins-fixture.json';
 const snapshotUrl = 'https://assets.herdr.dev/plugins/index.json';
 
-// Seed the page server-side from the public R2 snapshot so `bun run dev` and
+// Seed the page server-side from the public R2 snapshot so `pnpm run dev` and
 // the production build both render real data immediately. If the live fetch
 // fails, dev falls back to a local fixture for offline design; production seeds
 // empty and lets the client fetch fill it (never fake data).
