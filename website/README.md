@@ -3,10 +3,10 @@
 The homepage is `index.html`. Astro Starlight renders the documentation.
 
 ```bash
-bun install
-bun run dev          # render the unpublished docs/next draft locally
-bun run build        # render only published stable and preview snapshots
-bun run build:draft  # validate the unpublished draft
+pnpm install
+pnpm run dev          # render the unpublished docs/next draft locally
+pnpm run build        # render only published stable and preview snapshots
+pnpm run build:draft  # validate the unpublished draft
 ```
 
 The build output is `dist/`. Configure Cloudflare Pages to use `website` as the project root and publish `dist`.

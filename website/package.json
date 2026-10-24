@@ -1,14 +1,15 @@
 {
   "name": "herdr-website",
   "private": true,
+  "packageManager": "pnpm@11.17.0",
   "type": "module",
   "scripts": {
     "prepare-docs": "node scripts/prepare-docs.mjs",
     "prepare-llms": "node scripts/patch-starlight-llms.mjs",
-    "dev": "bun run prepare-llms && node scripts/prepare-docs.mjs --draft && astro dev",
+    "dev": "pnpm run prepare-llms && node scripts/prepare-docs.mjs --draft && astro dev",
     "test": "bun test",
-    "build": "bun run test && bun run prepare-llms && node scripts/prepare-docs.mjs && astro build && node scripts/check-built-docs.mjs",
-    "build:draft": "bun run prepare-llms && node scripts/prepare-docs.mjs --draft && astro build && node scripts/check-built-docs.mjs",
+    "build": "pnpm run test && pnpm run prepare-llms && node scripts/prepare-docs.mjs && astro build && node scripts/check-built-docs.mjs",
+    "build:draft": "pnpm run prepare-llms && node scripts/prepare-docs.mjs --draft && astro build && node scripts/check-built-docs.mjs",
     "preview": "astro preview"
   },
   "dependencies": {

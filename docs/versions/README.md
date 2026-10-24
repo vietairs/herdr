@@ -8,7 +8,7 @@ Validate the manifest and build every published version with:
 
 ```bash
 node website/scripts/docs-versions.mjs check
-cd website && bun run build
+cd website && pnpm run build
 ```
 
 `website/scripts/prepare-docs.mjs` renders each maintained version at `/docs/<version>/` and uses the version selected by `manifest.json` for `/docs/`. Generated files under `website/src/content/docs/` are not editable sources. `/docs/preview/` comes only from the active preview release snapshot in `docs/preview/`, never directly from `docs/next/`.
