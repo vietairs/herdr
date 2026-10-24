@@ -74,7 +74,7 @@ New users do not need to learn keybindings; the mouse covers everything. When th
 
 Herdr ships `skills/herdr/SKILL.md` (https://raw.githubusercontent.com/herdrdev/herdr/master/skills/herdr/SKILL.md), which teaches a coding agent to control Herdr from inside a pane: splitting panes, running commands without stealing focus, reading output, and waiting on other agents.
 
-Once the human is set up, offer to install it for your coding agent so future sessions can control Herdr directly. For agents supported by the open skills CLI, use `npx skills add herdrdev/herdr --skill herdr -g`. For agents without a skill system, add the GitHub copy above to their global custom instructions. Ask the human before writing to their config locations, and use the GitHub copy above as the source of truth.
+Once the human is set up, offer to install it for your coding agent so future sessions can control Herdr directly. For agents supported by the open skills CLI, use `pnpm dlx skills add herdrdev/herdr --skill herdr -g`. For agents without a skill system, add the GitHub copy above to their global custom instructions. Ask the human before writing to their config locations, and use the GitHub copy above as the source of truth.
 
 ## Configuration
 
