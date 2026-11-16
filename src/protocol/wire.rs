@@ -1810,6 +1810,17 @@ impl From<io::Error> for FramingError {
     }
 }
 
+/// Converts a payload length to its `u32` frame prefix, refusing lengths the
+/// prefix cannot represent rather than truncating them.
+fn frame_length_prefix(len: usize) -> Result<u32, FramingError> {
+    u32::try_from(len).map_err(|_| {
+        FramingError::Bincode(format!(
+            "payload length {len} exceeds u32::MAX ({}), would be truncated by length prefix",
+            u32::MAX
+        ))
+    })
+}
+
 /// Serializes a message and writes it as a length-prefixed frame:
 /// `[u32LE length][bincode payload]`.
 ///
@@ -1824,15 +1835,9 @@ pub fn write_message<W: Write, M: Serialize>(writer: &mut W, msg: &M) -> Result<
     let payload = bincode::serde::encode_to_vec(msg, bincode::config::standard())
         .map_err(|e| FramingError::Bincode(e.to_string()))?;
 
-    let len = payload.len();
-    if len > u32::MAX as usize {
-        return Err(FramingError::Bincode(format!(
-            "payload length {len} exceeds u32::MAX ({}), would be truncated by length prefix",
-            u32::MAX
-        )));
-    }
+    let prefix = frame_length_prefix(payload.len())?;
 
-    writer.write_all(&(len as u32).to_le_bytes())?;
+    writer.write_all(&prefix.to_le_bytes())?;
     writer.write_all(&payload)?;
     writer.flush()?;
     Ok(())
@@ -3682,29 +3687,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn prepersistence_version_zero_welcome_has_error() {
-        // Simulating what the server would send to a v0 client.
-        let check = check_client_version(0);
-        let response = match check {
-            VersionCheck::Compatible => ServerMessage::Welcome {
-                version: PROTOCOL_VERSION,
-                encoding: RenderEncoding::SemanticFrame,
-                error: None,
-            },
-            VersionCheck::Incompatible(reason) => ServerMessage::Welcome {
-                version: PROTOCOL_VERSION,
-                encoding: RenderEncoding::SemanticFrame,
-                error: Some(reason),
-            },
-        };
-
-        match response {
-            ServerMessage::Welcome { error: Some(_), .. } => {}
-            other => panic!("expected Welcome with error, got: {other:?}"),
-        }
-    }
-
     // ---- Malformed/oversized input ----
 
     #[test]
@@ -3952,13 +3934,33 @@ mod tests {
     }
 
     #[test]
-    fn write_message_rejects_oversized_payload() {
-        // We can't easily create a message that exceeds u32::MAX in a test,
-        // but we can verify the check exists by testing that normal messages
-        // have lengths well within the limit and the function doesn't fail.
-        let msg = ClientMessage::Detach;
+    fn write_message_prefixes_frame_with_payload_length() {
         let mut buf = Vec::new();
-        assert!(write_message(&mut buf, &msg).is_ok());
+        write_message(&mut buf, &ClientMessage::Detach).expect("write detach");
+
+        let (prefix, payload) = buf.split_at(4);
+        let declared = u32::from_le_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]);
+        assert_eq!(declared as usize, payload.len());
+        assert!(!payload.is_empty());
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn frame_length_prefix_rejects_payload_beyond_u32() {
+        let limit = u32::MAX as usize;
+        assert_eq!(frame_length_prefix(0).expect("empty payload"), 0);
+        assert_eq!(
+            frame_length_prefix(limit).expect("largest representable payload"),
+            u32::MAX
+        );
+        assert!(matches!(
+            frame_length_prefix(limit + 1),
+            Err(FramingError::Bincode(_))
+        ));
+        assert!(matches!(
+            frame_length_prefix(usize::MAX),
+            Err(FramingError::Bincode(_))
+        ));
     }
 
     // ---- Unix socketpair integration test ----

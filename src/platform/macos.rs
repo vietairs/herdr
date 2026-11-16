@@ -1448,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_notifier_command_includes_icon_and_activation() {
+    fn terminal_notifier_command_includes_title_message_and_activation() {
         let mut cmd = Command::new("terminal-notifier");
         build_terminal_notifier_command(
             &mut cmd,

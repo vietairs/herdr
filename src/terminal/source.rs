@@ -115,61 +115,10 @@ impl TerminalLifecyclePolicy for LocalChild {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
-    #[derive(Default)]
-    struct RecordedCalls {
-        try_write_user_input: Vec<Bytes>,
-        resize: Vec<(u16, u16, u32, u32, Vec<Bytes>)>,
-        shutdown_count: u32,
-    }
-
-    /// Mock `TerminalSource` used to assert that calls through the trait
-    /// forward arguments verbatim (no reordering/truncation/defaulting).
-    #[derive(Clone)]
-    struct MockSource(Arc<Mutex<RecordedCalls>>);
-
-    impl MockSource {
-        fn new() -> Self {
-            Self(Arc::new(Mutex::new(RecordedCalls::default())))
-        }
-    }
-
-    impl TerminalSource for MockSource {
-        fn try_write_user_input(
-            &self,
-            bytes: Bytes,
-        ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-            self.0.lock().unwrap().try_write_user_input.push(bytes);
-            Ok(())
-        }
-
-        fn resize(
-            &self,
-            rows: u16,
-            cols: u16,
-            cell_width_px: u32,
-            cell_height_px: u32,
-            terminal_responses: Vec<Bytes>,
-        ) {
-            self.0.lock().unwrap().resize.push((
-                rows,
-                cols,
-                cell_width_px,
-                cell_height_px,
-                terminal_responses,
-            ));
-        }
-
-        fn shutdown(&self) {
-            self.0.lock().unwrap().shutdown_count += 1;
-        }
-    }
-
-    /// Generic caller shaped like how `PaneRuntimeIo::Actor` delegates to a
-    /// `TerminalSource` — exercises the trait object boundary, not a
-    /// concrete type.
-    async fn delegate_through_trait<S: TerminalSource>(
+    /// Drives a source only through the `TerminalSource` surface, the way
+    /// `PaneRuntimeIo` delegates to it.
+    fn drive_through_trait<S: TerminalSource>(
         source: &S,
         input: Bytes,
         resize_args: (u16, u16, u32, u32, Vec<Bytes>),
@@ -186,17 +135,72 @@ mod tests {
         source.shutdown();
     }
 
+    // Runs the production remote source (a real `TerminalSource` impl) and
+    // checks the frames it puts on the mount's outbound channel: the input
+    // bytes, the resize dimensions in the right fields, and the close, all
+    // tagged with the terminal id and mount generation the source was built
+    // with. Terminal responses queued against a resize are not sent.
     #[tokio::test]
-    async fn terminal_source_delegation_forwards_args_verbatim() {
-        let mock = MockSource::new();
+    async fn terminal_source_trait_sends_input_resize_close_and_drops_responses() {
+        use crate::remote::federation::pane_source::{
+            RemoteTerminalSourceConfig, RemoteTerminalSourceHandle,
+        };
+        use crate::remote::federation::protocol::{FederationMessage, TerminalChannelMessage};
+
+        let terminal_id = "term_7";
+        let mount_generation = 42_u64;
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = mpsc::channel::<Bytes>(1);
+        let handle = RemoteTerminalSourceHandle::spawn(RemoteTerminalSourceConfig {
+            terminal_id: terminal_id.to_string(),
+            mount_generation,
+            out_tx,
+            output_rx,
+            on_read: Box::new(|_: &[u8]| {}),
+            pty_size: Default::default(),
+        });
+
+        let (rows, cols) = (24_u16, 80_u16);
         let input = Bytes::from_static(b"hello");
         let responses = vec![Bytes::from_static(b"\x1b[1;1R")];
-        delegate_through_trait(&mock, input.clone(), (24, 80, 1600, 960, responses.clone())).await;
 
-        let recorded = mock.0.lock().unwrap();
-        assert_eq!(recorded.try_write_user_input, vec![input]);
-        assert_eq!(recorded.resize, vec![(24, 80, 1600, 960, responses)]);
-        assert_eq!(recorded.shutdown_count, 1);
+        drive_through_trait(&handle, input.clone(), (rows, cols, 1600, 960, responses));
+
+        // Input goes through a forwarding task while resize and close are
+        // sent inline, so only the relative order of those two is fixed.
+        let mut frames = Vec::new();
+        while frames.len() < 3 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+                .await
+                .expect("frame arrives")
+                .expect("outbound channel open");
+            frames.push(frame);
+        }
+
+        let input_frame = FederationMessage::Terminal(TerminalChannelMessage::Input {
+            terminal_id: terminal_id.to_string(),
+            mount_generation,
+            bytes: input.to_vec(),
+        });
+        let resize_frame = FederationMessage::Terminal(TerminalChannelMessage::Resize {
+            terminal_id: terminal_id.to_string(),
+            mount_generation,
+            cols,
+            rows,
+        });
+        let close_frame = FederationMessage::Terminal(TerminalChannelMessage::Close {
+            terminal_id: terminal_id.to_string(),
+            mount_generation,
+        });
+        let position = |wanted: &FederationMessage| frames.iter().position(|f| f == wanted);
+        let resize_at = position(&resize_frame).expect("resize frame sent");
+        let close_at = position(&close_frame).expect("close frame sent");
+        assert!(position(&input_frame).is_some(), "input frame sent");
+        assert!(resize_at < close_at, "resize precedes close");
+        assert!(
+            out_rx.try_recv().is_err(),
+            "terminal responses must not be forwarded as frames"
+        );
     }
 
     #[test]
@@ -225,20 +229,5 @@ mod tests {
         });
 
         assert!(!handle.emits_pane_died_on_reader_exit());
-    }
-
-    // Handoff-exclusion (type-level): `TerminalSource` has no
-    // `begin_handoff`/`duplicate_for_handoff`/`foreground_process_group_id`/
-    // `rollback_handoff`/`release_after_commit`/
-    // `nudge_child_redraw_after_handoff` methods, so no caller holding only
-    // `&dyn TerminalSource`/`&impl TerminalSource` can invoke them — this
-    // would fail to compile if any handoff op were added to the trait. The
-    // trait definition above (5 methods, all transport-general) is itself
-    // the enforcement; this test documents and pins that shape.
-    #[test]
-    fn terminal_source_trait_has_no_handoff_methods() {
-        fn assert_trait_is_send<T: TerminalSource>() {}
-        assert_trait_is_send::<PtyIoActorHandle>();
-        assert_trait_is_send::<MockSource>();
     }
 }

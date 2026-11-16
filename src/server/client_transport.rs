@@ -2005,6 +2005,108 @@ mod tests {
     }
 
     #[test]
+    fn handshake_rejects_incompatible_version_with_error_welcome() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-handshake-version-zero");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 45, &server_event_tx, &handshake_quit)
+        });
+
+        // Version 0 predates session persistence and is below the supported range.
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::TerminalHello {
+                version: 0,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                pixel_mouse: false,
+            },
+        )
+        .expect("write hello");
+
+        let welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        match welcome {
+            ServerMessage::Welcome { version, error, .. } => {
+                assert_eq!(version, PROTOCOL_VERSION);
+                assert!(error.is_some(), "rejection must carry an error");
+            }
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
+        // The rejected client is never registered with the server.
+        assert!(
+            server_event_rx.try_recv().is_err(),
+            "rejected client must not produce a connect event"
+        );
+    }
+
+    #[test]
+    fn handshake_clamps_zero_terminal_size_to_minimum() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("client-handshake-zero");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 44, &server_event_tx, &handshake_quit)
+        });
+
+        protocol::write_message(
+            &mut client_stream,
+            &ClientMessage::TerminalHello {
+                version: PROTOCOL_VERSION,
+                cols: 0,
+                rows: 0,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                pixel_mouse: false,
+            },
+        )
+        .expect("write hello");
+
+        let welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        match welcome {
+            ServerMessage::Welcome { error, .. } => assert_eq!(error, None),
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+
+        match server_event_rx
+            .blocking_recv()
+            .expect("client connected event")
+        {
+            ServerEvent::ClientConnected {
+                client_id,
+                cols,
+                rows,
+                writer,
+                ..
+            } => {
+                assert_eq!(client_id, 44);
+                assert_eq!((cols, rows), (MIN_CLIENT_COLS, MIN_CLIENT_ROWS));
+                drop(writer);
+            }
+            other => panic!("expected ClientConnected, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
+    }
+
+    #[test]
     fn dedicated_client_shell_handshake_uses_surface_viewport() {
         let (mut client_stream, server_stream, _path) = local_stream_pair("client-shell-handshake");
         let (server_event_tx, mut server_event_rx) = mpsc::channel(4);

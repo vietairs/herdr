@@ -16,6 +16,17 @@ pub(crate) fn is_presentation_effect(message: &ServerMessage) -> bool {
     )
 }
 
+/// Whether `message` must be discarded because presentation is frozen on the source frame while
+/// it arrives on the activation lane of a target endpoint. Only presentation effects are dropped;
+/// metadata and surface traffic still flow so the activation can complete.
+pub(crate) fn drops_frozen_activation_effect(
+    presentation_frozen: bool,
+    activation_message: bool,
+    message: &ServerMessage,
+) -> bool {
+    presentation_frozen && activation_message && is_presentation_effect(message)
+}
+
 pub(crate) fn accepts_endpoint_message(
     endpoint_active: bool,
     activation_message: bool,
@@ -79,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_handoffs_drop_target_effects_until_the_post_commit_resync() {
+    fn presentation_effect_classifier_covers_host_lease_effects_only() {
         assert!(is_presentation_effect(&ServerMessage::MouseCapture {
             enabled: true,
             sgr_pixels: false,
@@ -97,6 +108,27 @@ mod tests {
             kind: "shell.snapshot.v1".into(),
             data: "{}".into(),
         }));
+    }
+
+    #[test]
+    fn frozen_handoffs_drop_target_effects_until_the_post_commit_resync() {
+        let effect = ServerMessage::MouseCapture {
+            enabled: true,
+            sgr_pixels: false,
+        };
+        let metadata = ServerMessage::EndpointControl {
+            kind: "shell.snapshot.v1".into(),
+            data: "{}".into(),
+        };
+
+        // Frozen source frame, message on the target's activation lane: the effect is dropped.
+        assert!(drops_frozen_activation_effect(true, true, &effect));
+        // The same effect is kept once presentation is no longer frozen (post-commit replay).
+        assert!(!drops_frozen_activation_effect(false, true, &effect));
+        // Traffic that is not on the activation lane is never dropped by the freeze gate.
+        assert!(!drops_frozen_activation_effect(true, false, &effect));
+        // Non-effect messages still flow during a frozen handoff so the activation completes.
+        assert!(!drops_frozen_activation_effect(true, true, &metadata));
     }
 
     #[test]

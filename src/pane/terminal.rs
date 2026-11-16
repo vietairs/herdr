@@ -1699,10 +1699,11 @@ impl GhosttyPaneTerminal {
             let resize_recovery_probe_lines = usize::from(rows)
                 .saturating_mul(8)
                 .max(DEFAULT_DETECTION_ROWS);
-            let replay_ansi = if !is_remote_backed
-                && core.terminal.active_screen().ok() == Some(crate::ghostty::ActiveScreen::Primary)
-                && bottom_before_resize
-            {
+            let replay_ansi = if resize_replay_recovery_applies(
+                is_remote_backed,
+                core.terminal.active_screen().ok(),
+                bottom_before_resize,
+            ) {
                 ghostty_recent_ansi(&mut core, resize_recovery_probe_lines, true)
                     .ok()
                     .filter(|ansi| !ansi.trim().is_empty())
@@ -2777,6 +2778,20 @@ fn ghostty_visible_ansi(core: &GhosttyPaneCore) -> Result<String, crate::ghostty
         (cols.saturating_sub(1), u32::from(rows.saturating_sub(1))),
         false,
     )
+}
+
+/// Whether `resize` should capture recent ANSI to replay if the bottom of the
+/// screen turns blank after the resize. Only a locally backed pane on the
+/// primary screen that showed content before the resize qualifies; a
+/// remote-backed pane waits for the remote host's own repaint instead.
+fn resize_replay_recovery_applies(
+    is_remote_backed: bool,
+    active_screen: Option<crate::ghostty::ActiveScreen>,
+    bottom_had_content_before_resize: bool,
+) -> bool {
+    !is_remote_backed
+        && active_screen == Some(crate::ghostty::ActiveScreen::Primary)
+        && bottom_had_content_before_resize
 }
 
 fn ghostty_detection_text(core: &mut GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
@@ -6324,26 +6339,44 @@ mod tests {
     }
 
     #[test]
-    fn resize_recovery_skips_replay_for_remote_backed_pane() {
+    fn resize_replay_recovery_condition_excludes_remote_backed_panes() {
+        // Checks the condition `resize()` consults, not the call site itself.
         // A remote-backed pane's authoritative repaint is an async round
         // trip over the federation link, not a same-machine SIGWINCH
         // repaint, so the local replay-recovery heuristic must not paper
         // over a transient blank bottom with stale pre-resize content.
+        use crate::ghostty::ActiveScreen;
+
+        // A local pane on the primary screen that had content is eligible...
+        assert!(resize_replay_recovery_applies(
+            false,
+            Some(ActiveScreen::Primary),
+            true
+        ));
+        // ...and the same state on a remote-backed pane is not.
+        assert!(!resize_replay_recovery_applies(
+            true,
+            Some(ActiveScreen::Primary),
+            true
+        ));
+        // The other preconditions still gate a local pane.
+        assert!(!resize_replay_recovery_applies(
+            false,
+            Some(ActiveScreen::Alternate),
+            true
+        ));
+        assert!(!resize_replay_recovery_applies(
+            false,
+            Some(ActiveScreen::Primary),
+            false
+        ));
+
+        // The remote-backed resize path itself still applies the new size.
         let (tx, _rx) = mpsc::channel(4);
         let mut terminal = crate::ghostty::Terminal::new(20, 3, 10_000).unwrap();
         write_numbered_lines(&mut terminal, 20);
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
-
-        assert!(!pane.detection_text().trim().is_empty());
-
-        // Same resize that would otherwise trigger the replay-recovery
-        // block for a local pane (see `resize_reflow_keeps_scrolled_viewport_and_bottom_detection_sane`),
-        // but gated off here via `is_remote_backed = true`.
         pane.resize(3, 9, 0, 0, true);
-
-        // No assertion on stale content resurrection: the point is that the
-        // replay path taken for local panes is not exercised for remote
-        // ones. Confirm resize still applied by checking viewport rows.
         let metrics = pane.scroll_metrics().expect("scroll metrics after resize");
         assert_eq!(metrics.viewport_rows, 3);
     }

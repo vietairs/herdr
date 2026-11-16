@@ -109,7 +109,7 @@ use terminal_setup::{
 };
 
 #[cfg(unix)]
-use attach::direct_attach_pixel_mouse;
+use attach::attach_pixel_mouse_messages;
 use attach::AttachEscapeState;
 #[cfg(unix)]
 use attach::{write_attach_semantic_action, AttachInputAction};
@@ -1202,30 +1202,14 @@ async fn run_client_loop(
                     }
                     continue;
                 }
+                let mouse_scroll_lines = state.mouse_scroll_lines;
                 if let Some(attach_escape) = state.attach_escape.as_mut() {
-                    if let Some(prefix) = attach_escape.take_pending_prefix() {
-                        if let Err(err) = write_to_server(
-                            &mut write_stream,
-                            &ClientMessage::Input { data: prefix },
-                        ) {
-                            return Err(ClientError::ConnectionLost(err));
-                        }
-                    }
-                    if let Some((kind, position, modifiers)) =
-                        direct_attach_pixel_mouse(&data, geometry)
-                    {
-                        let message = ClientMessage::AttachMouse {
-                            kind,
-                            position,
-                            geometry: Some(crate::protocol::ClientMouseGeometry {
-                                cols: geometry.cols,
-                                rows: geometry.rows,
-                                width_px: geometry.width_px,
-                                height_px: geometry.height_px,
-                            }),
-                            modifiers,
-                            lines: state.mouse_scroll_lines.max(1).min(u16::MAX as usize) as u16,
-                        };
+                    for message in attach_pixel_mouse_messages(
+                        attach_escape,
+                        &data,
+                        geometry,
+                        mouse_scroll_lines,
+                    ) {
                         if let Err(err) = write_to_server(&mut write_stream, &message) {
                             return Err(ClientError::ConnectionLost(err));
                         }
@@ -1590,10 +1574,11 @@ async fn run_client_loop(
                 // Target presentation effects may arrive as soon as surface.set(true) is
                 // acknowledged. They cannot be applied while the source frame is frozen; the
                 // target receives one explicit replay after the coherent commit instead.
-                if state.presentation_frozen
-                    && activation_message
-                    && endpoint::is_presentation_effect(message.as_ref())
-                {
+                if endpoint::drops_frozen_activation_effect(
+                    state.presentation_frozen,
+                    activation_message,
+                    message.as_ref(),
+                ) {
                     continue;
                 }
                 match *message {
