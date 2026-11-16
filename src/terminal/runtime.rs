@@ -798,7 +798,7 @@ mod tests {
     async fn spawn_remote_wrapper_delegates_to_the_pane_runtime() {
         let (events_tx, _events_rx) = mpsc::channel::<AppEvent>(4);
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let (_output_tx, output_rx) = mpsc::channel::<Bytes>(4);
+        let (output_tx, output_rx) = mpsc::channel::<Bytes>(4);
         let (clipboard_tx, _clipboard_rx) = mpsc::unbounded_channel();
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(RenderSignal::new());
@@ -819,6 +819,24 @@ mod tests {
             render_notify,
             render_dirty,
         );
-        assert!(runtime.is_ok());
+        let runtime = runtime.expect("remote runtime construction succeeds");
+
+        // Bytes pushed on the channel handed to the wrapper must reach the
+        // pane's terminal, which proves the wrapper wires `output_rx` through
+        // to the pane runtime it delegates to.
+        output_tx
+            .send(Bytes::from_static(b"hello wrapper\r\nsecond line"))
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !runtime.visible_text().contains("second line") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "bytes sent on the remote output channel never rendered: {:?}",
+                runtime.visible_text()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(runtime.visible_text().contains("hello wrapper"));
     }
 }

@@ -381,10 +381,7 @@ mod tests {
             panic!("expected accept");
         };
         // The client advertised nothing, so the agreed set (an intersection)
-        // is empty — capability presence is asserted via the *local*
-        // handshake the server would have built from `host.capabilities()`,
-        // proven indirectly by the mount round trip below carrying a
-        // non-empty `server_instance_id`.
+        // is empty.
         assert!(agreed_capabilities.is_empty());
         let Some(FederationMessage::MountSnapshot(mount_a)) =
             serve::read_frame(&mut reader_a).await.unwrap()
@@ -407,6 +404,30 @@ mod tests {
         };
 
         assert_ne!(mount_a.server_instance_id, mount_b.server_instance_id);
+
+        // A client that advertises scrollback replay gets it back only
+        // because the host advertises it too: the agreed set is the
+        // intersection of both adverts, so a host that advertised nothing
+        // could not produce it.
+        let host_c = Arc::new(FixtureHost::new());
+        let (client_c, _server_c) = LoopbackFederationServer::spawn(host_c);
+        let (mut reader_c, mut writer_c) = tokio::io::split(client_c);
+        serve::write_frame(
+            &mut writer_c,
+            &FederationMessage::Handshake(handshake(&[Capability::SCROLLBACK_REPLAY])),
+        )
+        .await
+        .unwrap();
+        let Some(FederationMessage::HandshakeResponse(HandshakeResponse::Accept {
+            agreed_capabilities,
+        })) = serve::read_frame(&mut reader_c).await.unwrap()
+        else {
+            panic!("expected accept");
+        };
+        assert!(
+            agreed_capabilities.contains(&Capability::new(Capability::SCROLLBACK_REPLAY)),
+            "the host must advertise the capability the client asked for"
+        );
     }
 
     #[tokio::test]

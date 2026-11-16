@@ -131,7 +131,13 @@ fn delete_session_distinguishes_case_sensitive_siblings() {
     let config = SessionConfig::new();
     let upper = config.create_session("Foo");
     if config.session_dir("foo").exists() {
-        return; // This filesystem cannot store both spellings independently.
+        // This filesystem cannot store both spellings independently.
+        eprintln!(
+            "skipping case-sensitive sibling check: {} and {} collide on this filesystem",
+            upper.display(),
+            config.session_dir("foo").display()
+        );
+        return;
     }
     let lower = config.create_session("foo");
 

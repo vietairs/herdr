@@ -1714,6 +1714,15 @@ mod tests {
         );
         // Should contain the changed cell content.
         assert!(output_str.contains('X'), "should contain changed cell 'X'");
+        // Unchanged cells must not be rewritten.
+        assert!(
+            !output_str.contains('i'),
+            "should not rewrite unchanged cell 'i'"
+        );
+        assert!(
+            !output_str.contains('!'),
+            "should not rewrite unchanged cell '!'"
+        );
     }
 
     #[test]
@@ -2051,13 +2060,15 @@ mod tests {
 
     #[test]
     fn blit_frame_positions_cursor() {
+        // Cell painting only emits row-start positions (column 1), so a
+        // position at column 3 can only come from cursor placement.
         let frame = FrameData {
-            cells: vec![make_cell("A", 0, 0, 0)],
-            width: 1,
-            height: 1,
+            cells: vec![make_cell("A", 0, 0, 0); 9],
+            width: 3,
+            height: 3,
             cursor: Some(CursorState {
-                x: 0,
-                y: 0,
+                x: 2,
+                y: 1,
                 visible: true,
                 shape: 0,
             }),
@@ -2069,9 +2080,14 @@ mod tests {
         blit_frame_to(&mut output, &frame, None);
 
         let output_str = String::from_utf8(output).unwrap();
+        // Check inside the synchronized frame: on some platforms the IME anchor
+        // repeats the cursor position after the sync block ends.
+        let sync_end = output_str
+            .find("\x1b[?2026l")
+            .expect("frame should end synchronized output");
         assert!(
-            output_str.contains("\x1b[1;1H"),
-            "should position cursor at (1,1)"
+            output_str[..sync_end].contains("\x1b[2;3H\x1b[?25h"),
+            "should position cursor at row 2, column 3 and then show it"
         );
     }
 
@@ -2099,6 +2115,10 @@ mod tests {
             output_str.contains("\x1b[?25l"),
             "should hide cursor when invisible"
         );
+        assert!(
+            !output_str.contains("\x1b[?25h"),
+            "an invisible cursor must never be shown"
+        );
     }
 
     #[test]
@@ -2119,6 +2139,10 @@ mod tests {
         assert!(
             output_str.contains("\x1b[?25l"),
             "should hide cursor when no cursor state"
+        );
+        assert!(
+            !output_str.contains("\x1b[?25h"),
+            "a frame without cursor state must never show the host cursor"
         );
     }
 
@@ -2326,9 +2350,18 @@ mod tests {
         let mut output = Vec::new();
         blit_frame_to(&mut output, &curr, Some(&prev));
 
+        let output_str = String::from_utf8(output).unwrap();
         assert!(
-            String::from_utf8(output).unwrap().contains("\x1b[?25l"),
+            output_str.contains("\x1b[?25l"),
             "diff redraw should hide a previously visible cursor when the next frame has none"
+        );
+        assert!(
+            !output_str.contains("\x1b[?25h"),
+            "the cursor must stay hidden after the frame ends"
+        );
+        assert!(
+            output_str.contains("\x1b[1;1H\x1b[?25l"),
+            "the hidden cursor should be parked before the frame ends"
         );
     }
 

@@ -512,13 +512,17 @@ mod tests {
     // `emits_pane_died_on_reader_exit` is pinned to `false`.
     #[tokio::test]
     async fn closing_the_channel_emits_no_pane_died_and_the_policy_is_pinned_false() {
-        let (handle, output_tx, _out_rx, _captured) = spawn_capturing("term_1", 1);
+        let (handle, output_tx, mut out_rx, _captured) = spawn_capturing("term_1", 1);
         assert!(!handle.emits_pane_died_on_reader_exit());
         drop(output_tx);
         // The reader task must exit cleanly (no panic) once the channel
         // closes; nothing in this module can send a `PaneDied`-shaped event
         // because no such event type is even reachable from here.
         tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            out_rx.try_recv().is_err(),
+            "closing the byte-in channel must not emit any federation message"
+        );
     }
 
     // Test 7 (S8.3 paste atomicity): a bracketed paste handed in as one

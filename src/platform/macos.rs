@@ -1543,6 +1543,7 @@ printf '%s\n' "$@" > "$HERDR_NOTIFY_ARGS"
         assert_eq!(argv[0], "/bin/sh");
         assert_eq!(argv[1], "-c");
         assert!(argv[2].contains("EDITOR:-vi"));
-        assert!(argv[2].contains("/tmp/herdr scrollback.txt"));
+        // The path contains a space, so it must be assigned as one quoted word.
+        assert!(argv[2].contains("scrollback_file='/tmp/herdr scrollback.txt';"));
     }
 }

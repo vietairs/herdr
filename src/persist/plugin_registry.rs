@@ -200,7 +200,11 @@ mod tests {
     #[test]
     fn save_and_load_roundtrip() {
         let path = temp_registry_path("roundtrip");
-        let plugins = vec![sample_plugin("example.a"), sample_plugin("example.b")];
+        let mut second = sample_plugin("example.b");
+        second.enabled = false;
+        second.version = "2.3.4".to_string();
+        second.description = Some("second plugin".to_string());
+        let plugins = vec![sample_plugin("example.a"), second];
 
         save_to_path(&path, &plugins).unwrap();
 
@@ -209,6 +213,7 @@ mod tests {
         let ids: Vec<_> = loaded.iter().map(|p| p.plugin_id.as_str()).collect();
         assert!(ids.contains(&"example.a"));
         assert!(ids.contains(&"example.b"));
+        assert_eq!(loaded, plugins);
     }
 
     #[test]

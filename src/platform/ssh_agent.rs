@@ -402,6 +402,9 @@ mod tests {
     fn failed_publication_is_retried_by_remaining_leases() {
         use std::os::unix::fs::PermissionsExt;
         if unsafe { libc::geteuid() } == 0 {
+            eprintln!(
+                "skipping failed_publication_is_retried_by_remaining_leases: root ignores directory permissions"
+            );
             return;
         }
         let directory =

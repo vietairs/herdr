@@ -713,15 +713,32 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn git_branch_reads_symbolic_head_from_reftable_repo() {
-        let root = temp_test_dir("reftable-branch");
+    /// Initializes a reftable-backed repo at `root` on branch `main`. Returns
+    /// false (after logging) only when this git lacks reftable support; any
+    /// other init failure fails the test.
+    fn init_reftable_repo(root: &Path) -> bool {
         let root_arg = root.to_string_lossy().to_string();
         let output = std::process::Command::new("git")
             .args(["init", "--ref-format=reftable", "-b", "main", &root_arg])
             .output()
             .unwrap();
-        if !output.status.success() {
+        if output.status.success() {
+            return true;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let lowered = stderr.to_lowercase();
+        assert!(
+            lowered.contains("ref-format") || lowered.contains("reftable"),
+            "git init failed for a reason other than missing reftable support: {stderr}"
+        );
+        eprintln!("skipping: git does not support reftable ref storage: {stderr}");
+        false
+    }
+
+    #[test]
+    fn git_branch_reads_symbolic_head_from_reftable_repo() {
+        let root = temp_test_dir("reftable-branch");
+        if !init_reftable_repo(&root) {
             std::fs::remove_dir_all(root).unwrap();
             return;
         }
@@ -901,12 +918,7 @@ mod tests {
     #[test]
     fn git_rev_parse_verify_reads_reftable_refs() {
         let root = temp_test_dir("reftable-ref-oid");
-        let root_arg = root.to_string_lossy().to_string();
-        let output = std::process::Command::new("git")
-            .args(["init", "--ref-format=reftable", "-b", "main", &root_arg])
-            .output()
-            .unwrap();
-        if !output.status.success() {
+        if !init_reftable_repo(&root) {
             std::fs::remove_dir_all(root).unwrap();
             return;
         }

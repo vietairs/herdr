@@ -2994,21 +2994,35 @@ min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[startup]]
-command = ["sh", "-c", "printf '%s:%s' \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_EVENT\" > {}"]
+command = ["sh", "-c", "printf '%s:%s\\n' \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_EVENT\" >> {}"]
 "#,
                 capture.display()
             ),
         );
         link_manifest(&mut app, &root);
+        let logs_before = app.state.plugin_command_logs.len();
 
         app.run_plugin_startup_hooks();
 
+        read_capture_when_ready(&capture, || {
+            app.drain_all_internal_events();
+        });
+        // Let every started command finish so a duplicated run would have
+        // appended its line before the capture is read.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.state.plugin_commands_in_flight > 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "plugin startup commands did not finish within deadline"
+            );
+            app.drain_all_internal_events();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert_eq!(
-            read_capture_when_ready(&capture, || {
-                app.drain_all_internal_events();
-            }),
-            "example.startup:startup"
+            std::fs::read_to_string(&capture).unwrap(),
+            "example.startup:startup\n"
         );
+        assert_eq!(app.state.plugin_command_logs.len(), logs_before + 1);
         let plugin = app.state.installed_plugins.get("example.startup").unwrap();
         assert_eq!(plugin.startup.len(), 1);
         let _ = std::fs::remove_dir_all(root);

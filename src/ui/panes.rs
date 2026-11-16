@@ -1735,10 +1735,9 @@ mod tests {
             },
         );
 
-        let Color::Rgb(r, g, b) = bg else {
-            panic!("selection background should resolve to rgb");
-        };
-        assert!(relative_luminance((r, g, b)) > relative_luminance((12, 14, 16)));
+        // A dark host background blends 28% of the way toward white, rounded per
+        // channel: 12 + 243 * 0.28, 14 + 241 * 0.28 and 16 + 239 * 0.28.
+        assert_eq!(bg, Color::Rgb(80, 81, 83));
     }
 
     #[test]

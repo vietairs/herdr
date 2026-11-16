@@ -67,9 +67,15 @@ mod tests {
             data: Arc::clone(&data),
         });
         output.extend(GraphicsOutput::from_bytes(b"after".to_vec()));
-        let mut expected = b"before".to_vec();
-        super::super::encode_kitty_data(&mut expected, control, &data);
-        expected.extend_from_slice(b"after");
+        // The upload is split into one full chunk flagged "more follows" and a
+        // final one-byte chunk. 0x2a encodes to "Kg==" in base64.
+        let first_chunk = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            vec![42u8; super::super::KITTY_CHUNK_BYTES],
+        );
+        let expected =
+            format!("before\x1b_G{control},m=1;{first_chunk}\x1b\\\x1b_Gm=0;Kg==\x1b\\after")
+                .into_bytes();
         assert_eq!(output.into_inline_bytes(), expected);
     }
 

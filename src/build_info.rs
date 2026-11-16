@@ -39,6 +39,6 @@ fn non_empty(value: Option<&'static str>) -> Option<&'static str> {
 mod tests {
     #[test]
     fn stable_version_defaults_to_cargo_version() {
-        assert!(!super::version().is_empty());
+        assert_eq!(super::version(), env!("CARGO_PKG_VERSION"));
     }
 }

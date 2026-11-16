@@ -536,6 +536,19 @@ fn stale_response_boot_is_not_consumed() {
         ),
         SurfaceActivationProgress::Stale
     );
+    // The stale response carried projection revision 2; consuming it would
+    // have replaced the acknowledged revision of 1 the machine started with.
+    match &activation.phase {
+        ActivationPhase::ActivatingTarget {
+            acknowledged_revision,
+            ..
+        } => assert_eq!(
+            *acknowledged_revision,
+            Some(1),
+            "a stale-boot response must not advance the acknowledged revision"
+        ),
+        _ => panic!("a stale-boot response must not change the activation phase"),
+    }
 }
 
 #[test]

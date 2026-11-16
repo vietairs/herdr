@@ -416,34 +416,58 @@ mod tests {
     #[test]
     fn boolean_filter_and_custom_sort_define_canonical_entries() {
         let mut state = state_with_agents();
+        let second_workspace_id = state.workspaces[1].id.clone();
+        let working_and_not_in_workspace = |excluded: &str| AgentViewFilter::All {
+            filters: vec![
+                AgentViewFilter::Eq {
+                    field: AgentViewField::Builtin(AgentViewBuiltinField::Status),
+                    value: AgentViewValue::String("working".to_string()),
+                },
+                AgentViewFilter::Not {
+                    filter: Box::new(AgentViewFilter::Eq {
+                        field: AgentViewField::Builtin(AgentViewBuiltinField::WorkspaceId),
+                        value: AgentViewValue::String(excluded.to_string()),
+                    }),
+                },
+            ],
+        };
+        let view = |filter: AgentViewFilter, sort: Vec<AgentViewSort>| AgentViewSetParams {
+            source: "example.views".to_string(),
+            label: None,
+            filter: Some(filter),
+            sort,
+        };
+
+        // Only the second workspace is working, so the status clause must drop
+        // the idle first workspace while the negated clause keeps the rest.
+        state.agent_view_override = Some(view(working_and_not_in_workspace("missing"), Vec::new()));
+        let entries = projected_entries(&state);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].ws_idx, 1);
+
+        // With both workspaces working, the negated clause is the only one that
+        // can exclude the second workspace.
         let first_pane = state.workspaces[0].tabs[0].root_pane;
         let first_terminal = state.workspaces[0].tabs[0].panes[&first_pane]
             .attached_terminal_id
             .clone();
         state.terminals.get_mut(&first_terminal).unwrap().state = AgentState::Working;
-        state.agent_view_override = Some(AgentViewSetParams {
-            source: "example.views".to_string(),
-            label: None,
-            filter: Some(AgentViewFilter::All {
-                filters: vec![
-                    AgentViewFilter::Eq {
-                        field: AgentViewField::Builtin(AgentViewBuiltinField::Status),
-                        value: AgentViewValue::String("working".to_string()),
-                    },
-                    AgentViewFilter::Not {
-                        filter: Box::new(AgentViewFilter::Eq {
-                            field: AgentViewField::Builtin(AgentViewBuiltinField::WorkspaceId),
-                            value: AgentViewValue::String("missing".to_string()),
-                        }),
-                    },
-                ],
-            }),
-            sort: vec![AgentViewSort {
+        state.agent_view_override = Some(view(
+            working_and_not_in_workspace(&second_workspace_id),
+            Vec::new(),
+        ));
+        let entries = projected_entries(&state);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].ws_idx, 0);
+
+        // A descending workspace-order sort puts the later workspace first.
+        state.agent_view_override = Some(view(
+            working_and_not_in_workspace("missing"),
+            vec![AgentViewSort {
                 field: AgentViewSortField::Builtin(AgentViewBuiltinSortField::WorkspaceOrder),
                 order: AgentViewSortOrder::Desc,
             }],
-        });
-
+        ));
         let entries = projected_entries(&state);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].ws_idx, 1);

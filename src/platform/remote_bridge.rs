@@ -123,9 +123,11 @@ mod tests {
         assert!(!idle_expired(&last, after_read, IDLE_TIMEOUT));
         assert_eq!(reader.read(&mut [0; 1]).unwrap(), 0);
         assert_eq!(last.load(Ordering::Relaxed), after_read);
+        // Reset the clock so only the write can move it off zero.
+        last.store(0, Ordering::Relaxed);
         let mut writer = TrackedIo::new(Vec::new(), Some(activity));
         writer.write_all(b"ping").unwrap();
-        assert!(last.load(Ordering::Relaxed) >= after_read);
+        assert!(last.load(Ordering::Relaxed) > 0);
         assert!(idle_expired(
             &last,
             last.load(Ordering::Relaxed) + 120_000_000_000,

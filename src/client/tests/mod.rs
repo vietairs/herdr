@@ -432,13 +432,15 @@ fn write_host_terminal_appearance_query_emits_mode_2031_query() {
 fn write_host_terminal_theme_query_emits_osc_queries() {
     let mut output = Vec::new();
     write_host_terminal_theme_query(&mut output).unwrap();
-    assert_eq!(
-        output,
-        crate::terminal_theme::host_terminal_theme_query_sequence(
-            crate::platform::should_query_host_terminal_palette(),
-        )
-        .as_bytes()
-    );
+    // OSC 10 (foreground) and OSC 11 (background) queries, optionally followed
+    // by an OSC 4 query for each of the 256 palette indexes.
+    let mut expected = String::from("\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
+    if crate::platform::should_query_host_terminal_palette() {
+        for index in 0..=255u16 {
+            expected.push_str(&format!("\x1b]4;{index};?\x1b\\"));
+        }
+    }
+    assert_eq!(output, expected.as_bytes());
     assert!(
         !output
             .windows(crate::terminal_theme::HOST_COLOR_SCHEME_QUERY_SEQUENCE.len())

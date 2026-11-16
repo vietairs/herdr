@@ -6693,41 +6693,123 @@ async fn client_shell_requests_host_pixels_for_an_unfocused_pixel_pane() {
 
 #[test]
 fn client_shell_mouse_capture_combines_local_preference_with_endpoint_demand() {
-    let mut server = test_headless_server();
-    let (writer, control_rx, _render_rx) = test_client_writer();
-    server.clients.insert(
-        1,
-        ClientConnection::new(
-            (80, 24),
-            crate::kitty_graphics::HostCellSize::default(),
+    with_terminal_session_test_server(|server, _other_terminal_id, terminal_id, _pane_id| {
+        server.app.state.active = Some(0);
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
             1,
-            RenderEncoding::SemanticFrame,
-            Some(writer),
-        ),
-    );
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            ),
+        );
+        let next_mode = |server: &mut HeadlessServer| {
+            server.stream_host_mouse_capture_mode();
+            // The client writer forwards through a drain thread, so wait for delivery.
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("mouse mode change"),
+            )
+        };
 
-    server.stream_host_mouse_capture_mode();
-    assert!(matches!(
-        read_server_message(control_rx.recv().expect("initial mouse mode")),
-        ServerMessage::MouseCapture {
-            enabled: false,
-            sgr_pixels: false
-        }
-    ));
-    assert!(
-        server.handle_server_event(ServerEvent::ClientShellMouseCapture {
-            client_id: 1,
-            enabled: true,
-        })
-    );
-    server.stream_host_mouse_capture_mode();
-    assert!(matches!(
-        read_server_message(control_rx.recv().expect("preferred mouse mode")),
-        ServerMessage::MouseCapture {
-            enabled: true,
-            sgr_pixels: false
-        }
-    ));
+        // Neither the local preference nor the endpoint asks for mouse reports.
+        assert!(matches!(
+            next_mode(server),
+            ServerMessage::MouseCapture {
+                enabled: false,
+                sgr_pixels: false
+            }
+        ));
+
+        // The local preference alone enables host capture.
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellMouseCapture {
+                client_id: 1,
+                enabled: true,
+            })
+        );
+        assert!(matches!(
+            next_mode(server),
+            ServerMessage::MouseCapture {
+                enabled: true,
+                sgr_pixels: false
+            }
+        ));
+
+        // Turning the preference off with no endpoint demand disables it again.
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellMouseCapture {
+                client_id: 1,
+                enabled: false,
+            })
+        );
+        assert!(matches!(
+            next_mode(server),
+            ServerMessage::MouseCapture {
+                enabled: false,
+                sgr_pixels: false
+            }
+        ));
+
+        // The focused endpoint requesting mouse reporting enables capture on its own.
+        server
+            .runtime_for_terminal_id_string(&terminal_id)
+            .expect("focused runtime")
+            .test_process_pty_bytes(b"\x1b[?1000h");
+        assert!(matches!(
+            next_mode(server),
+            ServerMessage::MouseCapture {
+                enabled: true,
+                sgr_pixels: false
+            }
+        ));
+
+        // With both asking, and then only the preference left, capture stays on:
+        // the two sources are combined, not either one overriding the other.
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellMouseCapture {
+                client_id: 1,
+                enabled: true,
+            })
+        );
+        // Changing the preference re-announces the (still enabled) mode.
+        assert!(matches!(
+            next_mode(server),
+            ServerMessage::MouseCapture {
+                enabled: true,
+                sgr_pixels: false
+            }
+        ));
+        server
+            .runtime_for_terminal_id_string(&terminal_id)
+            .expect("focused runtime")
+            .test_process_pty_bytes(b"\x1b[?1000l");
+        server.stream_host_mouse_capture_mode();
+        assert_eq!(
+            server.clients[&1].host_mouse_capture_active,
+            Some(true),
+            "capture should stay enabled while the preference is on"
+        );
+
+        // Once the preference is off too, nothing keeps capture enabled.
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellMouseCapture {
+                client_id: 1,
+                enabled: false,
+            })
+        );
+        assert!(matches!(
+            next_mode(server),
+            ServerMessage::MouseCapture {
+                enabled: false,
+                sgr_pixels: false
+            }
+        ));
+    });
 }
 
 #[test]

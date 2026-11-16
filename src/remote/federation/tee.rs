@@ -45,8 +45,9 @@ pub(crate) fn drain_available(rx: &mut broadcast::Receiver<Bytes>) -> (Vec<u8>, 
 mod tests {
     use super::*;
 
-    #[test]
-    fn broadcast_tee_delivers_identical_bytes_to_every_subscriber_without_blocking_the_sender() {
+    #[tokio::test]
+    async fn broadcast_tee_delivers_identical_bytes_to_every_subscriber_without_blocking_the_sender(
+    ) {
         let (tx, mut render_rx) = broadcast::channel::<Bytes>(CAPACITY);
         let mut federation_rx = tx.subscribe();
 
@@ -66,6 +67,19 @@ mod tests {
             federation_rx.try_recv().unwrap(),
             Bytes::from_static(b" world")
         );
+
+        // The same guarantee through the runtime's own subscription API: two
+        // subscribers on one runtime each independently receive every teed
+        // chunk, in order, with neither having read before the sends.
+        let (runtime, _pty_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let mut first = runtime.subscribe_output_bytes();
+        let mut second = runtime.subscribe_output_bytes();
+        runtime.test_process_pty_bytes_and_tee(b"hello");
+        runtime.test_process_pty_bytes_and_tee(b" world");
+        for rx in [&mut first, &mut second] {
+            assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"hello"));
+            assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b" world"));
+        }
     }
 
     #[test]

@@ -1376,32 +1376,48 @@ mod tests {
 
     #[test]
     fn input_and_resize_are_dropped_unless_the_caller_is_the_mounted_controller() {
-        let mut app = test_app();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+        let (mut app, terminal_id) = test_app_with_live_terminal();
         let mut lease = FederationLease::new();
         let epoch = acquire_and_mount(&mut app, &mut lease, 1);
-        // The mounted controller's forwards run (no terminal → silent no-op, but
-        // no panic and the authorization gate passes).
+        assert!(
+            app.state.federation_owned_terminal_sizes.is_empty(),
+            "no command has driven the terminal yet"
+        );
+
+        // The mounted controller's input forward passes the gate. The PTY write
+        // is not observable on a test runtime, so only the absence of a panic
+        // is checked here.
         dispatch(
             &mut app,
             &mut lease,
             FederationCommand::SendInput {
                 epoch,
                 connid: 1,
-                terminal_id: "no-such-terminal".to_string(),
+                terminal_id: terminal_id.clone(),
                 bytes: b"hi".to_vec(),
             },
         );
-        // A non-controller connection's forwards are dropped before the PTY.
+        // A non-controller connection's forwards are dropped before the PTY, so
+        // they never claim the terminal's size.
         dispatch(
             &mut app,
             &mut lease,
             FederationCommand::Resize {
                 epoch,
                 connid: 999,
-                terminal_id: "no-such-terminal".to_string(),
+                terminal_id: terminal_id.clone(),
                 cols: 80,
                 rows: 24,
             },
+        );
+        assert!(
+            app.state.federation_owned_terminal_sizes.is_empty(),
+            "a non-controller resize must not claim the terminal"
         );
         // Same gate for the repaint nudge: it drives a real ioctl on this
         // host's PTY, so a non-controller must not reach it either.
@@ -1411,8 +1427,33 @@ mod tests {
             FederationCommand::NudgeRedraw {
                 epoch,
                 connid: 999,
-                terminal_id: "no-such-terminal".to_string(),
+                terminal_id: terminal_id.clone(),
             },
+        );
+        assert!(
+            app.state.federation_owned_terminal_sizes.is_empty(),
+            "a non-controller repaint nudge must not claim the terminal"
+        );
+
+        // The same resize from the mounted controller does run, so the empty
+        // claims above come from the gate and not from an unresolvable target.
+        dispatch(
+            &mut app,
+            &mut lease,
+            FederationCommand::Resize {
+                epoch,
+                connid: 1,
+                terminal_id: terminal_id.clone(),
+                cols: 80,
+                rows: 24,
+            },
+        );
+        assert!(
+            app.state
+                .federation_owned_terminal_sizes
+                .keys()
+                .any(|id| id.to_string() == terminal_id),
+            "the mounted controller's resize claims the terminal"
         );
     }
 
@@ -1683,9 +1724,15 @@ mod tests {
     fn snapshot_produces_a_fresh_snapshot_and_cursor_without_touching_the_lease() {
         let mut app = test_app();
         let mut lease = FederationLease::new();
+        seed_terminals(&mut app, 1);
         let (tx, mut rx) = oneshot::channel();
         dispatch(&mut app, &mut lease, FederationCommand::Snapshot(tx));
-        let (_snapshot, cursor) = rx.try_recv().expect("reply delivered");
+        let (snapshot, cursor) = rx.try_recv().expect("reply delivered");
+        assert_eq!(
+            snapshot.workspaces.len(),
+            1,
+            "the snapshot reflects the app's live workspace"
+        );
         assert_eq!(cursor.0, app.event_hub.current_sequence());
         assert!(
             !lease.is_mounted_controller(0, 1),
@@ -1719,12 +1766,18 @@ mod tests {
             })
             .expect("a seeded App has one focused pane");
 
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes.len(),
+            1,
+            "the seeded workspace starts with one pane"
+        );
+
         let (tx, mut rx) = oneshot::channel();
         dispatch(
             &mut app,
             &mut lease,
             FederationCommand::SplitPane {
-                target_pane_id,
+                target_pane_id: target_pane_id.clone(),
                 direction: crate::remote::federation::protocol::SplitDirection::Right,
                 ratio: None,
                 focus: false,
@@ -1735,6 +1788,15 @@ mod tests {
         let (new_pane_id, new_terminal_id) = outcome.expect("split against a known pane succeeds");
         assert!(!new_pane_id.is_empty());
         assert!(!new_terminal_id.is_empty());
+        assert_ne!(new_pane_id, target_pane_id, "the split adds a new pane");
+        let panes = &app.state.workspaces[0].tabs[0].panes;
+        assert_eq!(panes.len(), 2, "the split added exactly one pane");
+        assert!(
+            panes
+                .values()
+                .any(|pane| pane.attached_terminal_id.to_string() == new_terminal_id),
+            "the replied terminal id belongs to a pane in the workspace"
+        );
     }
 
     /// `CreateWorkspace` performs a real create against the live `App` (via

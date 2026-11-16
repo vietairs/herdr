@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn recognized_image_drop_location_rejects_outside_temp_dir() {
+    fn recognized_image_drop_location_rejects_a_nonexistent_path() {
         assert!(
             recognized_image_drop_location(Path::new("/nonexistent/not-a-real-path.png")).is_none()
         );

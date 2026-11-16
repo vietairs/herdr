@@ -748,8 +748,11 @@ rows = [[{ token = "$status", rules = [{ contains = "error", bold = true }] }]]
     #[test]
     fn rejects_unknown_bare_and_malformed_custom_tokens() {
         for token in ["summary", "$", "$bad.name"] {
-            let input = format!("[ui.sidebar.agents]\\nrows = [[\"{token}\"]]\\n");
-            assert!(toml::from_str::<crate::config::Config>(&input).is_err());
+            let input = format!("[ui.sidebar.agents]\nrows = [[\"{token}\"]]\n");
+            assert!(
+                toml::from_str::<crate::config::Config>(&input).is_err(),
+                "accepted {token}"
+            );
         }
     }
 

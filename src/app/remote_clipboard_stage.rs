@@ -2695,14 +2695,11 @@ mod tests {
         let mut app = test_app();
         let (pane_id, _out_rx) = attach_mount(&mut app, true);
 
-        let kept = app.intercept_remote_image_paste_events(
-            0,
-            pane_id,
-            vec![crate::protocol::ClientPaneInputEvent::Paste(
-                "cargo nextest run".to_string(),
-            )],
-        );
-        assert_eq!(kept.len(), 1);
+        let events = vec![crate::protocol::ClientPaneInputEvent::Paste(
+            "cargo nextest run".to_string(),
+        )];
+        let kept = app.intercept_remote_image_paste_events(0, pane_id, events.clone());
+        assert_eq!(kept, events);
         assert_eq!(clipboard_reads_started(&mut app).await, 0);
     }
 

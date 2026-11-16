@@ -345,6 +345,62 @@ mod known_event_name_tests {
             from_kind, known,
             "known_event_names() out of sync with EventKind"
         );
+
+        // The match below is exhaustive, so adding an EventKind variant fails
+        // to compile until it is given a slot here; the list must then cover
+        // every slot exactly once.
+        fn variant_slot(kind: EventKind) -> usize {
+            match kind {
+                EventKind::WorkspaceCreated => 0,
+                EventKind::WorkspaceUpdated => 1,
+                EventKind::WorkspaceMetadataUpdated => 2,
+                EventKind::WorkspaceClosed => 3,
+                EventKind::WorkspaceRenamed => 4,
+                EventKind::WorkspaceMoved => 5,
+                EventKind::WorkspaceReordered => 6,
+                EventKind::WorkspaceFocused => 7,
+                EventKind::WorktreeCreated => 8,
+                EventKind::WorktreeOpened => 9,
+                EventKind::WorktreeRemoved => 10,
+                EventKind::TabCreated => 11,
+                EventKind::TabClosed => 12,
+                EventKind::TabRenamed => 13,
+                EventKind::TabMoved => 14,
+                EventKind::TabFocused => 15,
+                EventKind::PaneCreated => 16,
+                EventKind::PaneClosed => 17,
+                EventKind::PaneUpdated => 18,
+                EventKind::PaneFocused => 19,
+                EventKind::PaneMoved => 20,
+                EventKind::PaneOutputChanged => 21,
+                EventKind::PaneExited => 22,
+                EventKind::PaneAgentDetected => 23,
+                EventKind::PaneAgentStatusChanged => 24,
+                EventKind::LayoutUpdated => 25,
+            }
+        }
+        const EVENT_KIND_VARIANT_COUNT: usize = 26;
+
+        let mut slots = KNOWN_EVENT_KINDS
+            .iter()
+            .copied()
+            .map(variant_slot)
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        assert_eq!(
+            slots,
+            (0..EVENT_KIND_VARIANT_COUNT).collect::<Vec<_>>(),
+            "KNOWN_EVENT_KINDS must list every EventKind variant exactly once"
+        );
+
+        let mut unique_names = known_event_names();
+        unique_names.sort_unstable();
+        unique_names.dedup();
+        assert_eq!(
+            unique_names.len(),
+            EVENT_KIND_VARIANT_COUNT,
+            "every EventKind variant needs its own dot name"
+        );
     }
 
     #[test]

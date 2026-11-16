@@ -2204,7 +2204,7 @@ mod tests {
     }
 
     #[test]
-    fn app_state_default_has_auto_resize_splits_off() {
+    fn test_new_fixture_starts_with_auto_resize_splits_off() {
         let state = AppState::test_new();
         assert!(!state.auto_resize_splits);
     }

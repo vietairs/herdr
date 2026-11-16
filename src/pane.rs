@@ -7223,15 +7223,6 @@ mod tests {
     }
 
     #[test]
-    fn release_expiry_can_force_reacquire_probe_by_resetting_probe_state() {
-        assert!(should_probe_foreground_job(ProcessProbeInput {
-            current_agent: None,
-            has_process_probe: false,
-            ..process_probe_input()
-        }));
-    }
-
-    #[test]
     fn identified_agent_uses_shorter_safety_process_probe() {
         assert!(!should_probe_foreground_job(ProcessProbeInput {
             current_agent: Some(Agent::Codex),
