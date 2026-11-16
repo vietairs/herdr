@@ -881,7 +881,16 @@ mod tests {
         app.sync_pending_agent_resume_deadline(std::time::Instant::now());
         assert!(app.pending_agent_resume_deadline.is_some());
         assert!(app.start_pending_agent_resumes(Instant::now(), false));
-        assert!(app.terminal_runtimes.get(&previous_terminal).is_some());
+        // The background pane is sized from the current 80x24 terminal area (a
+        // lone pane has no borders under the default auto setting), not from the
+        // stale 100x30 pane infos; the launch reserves one column of that width.
+        assert_eq!(
+            app.terminal_runtimes
+                .get(&previous_terminal)
+                .expect("background pending resume should launch")
+                .current_size(),
+            (24, 79)
+        );
         assert!(
             app.state
                 .terminals

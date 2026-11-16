@@ -283,6 +283,20 @@ mod tests {
         assert!(links
             .iter()
             .any(|(_, symbol, link)| { symbol == "L" && link == uri }));
-        assert!(tab_surface_cursor(&app, &TerminalRuntimeRegistry::new(), surface_view,).is_some());
+
+        // The split focuses the new right pane, so the cursor must come from the
+        // right pane's runtime, offset by that pane's inner rect in the explicit
+        // surface layout (not by the stale app view). "RIGHT" leaves the VT
+        // cursor at column 5, row 0.
+        let focused = surface
+            .pane_infos
+            .iter()
+            .find(|info| info.is_focused)
+            .expect("one pane should be focused");
+        assert_eq!(focused.id, right);
+        let cursor = tab_surface_cursor(&app, &TerminalRuntimeRegistry::new(), surface_view)
+            .expect("focused pane should expose a cursor");
+        assert_eq!(cursor.x, focused.inner_rect.x + 5);
+        assert_eq!(cursor.y, focused.inner_rect.y);
     }
 }

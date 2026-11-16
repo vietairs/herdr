@@ -638,16 +638,4 @@ mod tests {
         assert_eq!(row, 8);
         assert_eq!(col, 15);
     }
-
-    #[test]
-    fn anchor_screen_pos_same_cell_as_mouse_with_offset() {
-        // When the pane has a non-zero origin, anchor and mouse on the same
-        // screen cell must compare equal — no false drag detection.
-        let pane_inner = Rect::new(10, 5, 80, 24);
-        // Mouse clicked at screen (15, 8) → anchor stored as (viewport_row=3, col=5)
-        let sel = Selection::anchor(PaneId::from_raw(0), 3, 5, None);
-        let (ar, ac) = sel.anchor_screen_pos(pane_inner, None);
-        // Screen position of the anchor must match the mouse position
-        assert_eq!((ar, ac), (8, 15));
-    }
 }

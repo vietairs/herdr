@@ -1419,8 +1419,8 @@ mod tests {
         let config: Config =
             toml::from_str("[keys]\ngrow_sidebar = \"prefix+]\"\nshrink_sidebar = \"prefix+[\"\n")
                 .unwrap();
-        assert_ne!(config.keys.grow_sidebar, BindingConfig::empty());
-        assert_ne!(config.keys.shrink_sidebar, BindingConfig::empty());
+        assert_eq!(config.keys.grow_sidebar, BindingConfig::one("prefix+]"));
+        assert_eq!(config.keys.shrink_sidebar, BindingConfig::one("prefix+["));
     }
 
     #[test]

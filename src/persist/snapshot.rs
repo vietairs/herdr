@@ -754,6 +754,12 @@ mod tests {
         let json = serde_json::to_string(&layout).unwrap();
         let restored: LayoutSnapshot = serde_json::from_str(&json).unwrap();
 
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            serde_json::to_value(&layout).unwrap(),
+            "the whole restored layout tree must equal the original"
+        );
+
         match restored {
             LayoutSnapshot::Split { ratio, .. } => assert!((ratio - 0.6).abs() < 0.01),
             _ => panic!("expected split"),

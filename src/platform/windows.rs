@@ -4422,6 +4422,18 @@ mod tests {
             !command_line.is_empty(),
             "command line for the test process must not be empty"
         );
+        // The handle is the test process itself, so its command line names the
+        // test executable (matched by stem, as the extension may be omitted).
+        let exe_stem = std::env::current_exe()
+            .expect("current exe")
+            .file_stem()
+            .expect("exe stem")
+            .to_string_lossy()
+            .to_lowercase();
+        assert!(
+            command_line.to_lowercase().contains(&exe_stem),
+            "command line {command_line:?} must name the test executable {exe_stem:?}"
+        );
     }
 
     #[test]

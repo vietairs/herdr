@@ -155,7 +155,7 @@ class QwenSessionActionTests(unittest.TestCase):
 
 
 class QwenAssetVersionTests(unittest.TestCase):
-    def test_assets_carry_version_two(self):
+    def test_assets_declare_current_qwen_integration_version(self):
         for asset in (ASSET, POWERSHELL_ASSET):
             text = asset.read_text(encoding="utf-8")
             self.assertIn("HERDR_INTEGRATION_ID=qwen", text, asset.name)

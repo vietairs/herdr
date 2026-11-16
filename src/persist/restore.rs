@@ -1078,6 +1078,34 @@ mod tests {
         assert_eq!(ids.len(), 3);
         let unique: std::collections::HashSet<u32> = ids.iter().map(|id| id.raw()).collect();
         assert_eq!(unique.len(), 3);
+
+        // The restored tree keeps the original shape, directions, ratios and
+        // leaf order, with each leaf mapped from its old pane id.
+        let Node::Split {
+            direction: outer_direction,
+            ratio: outer_ratio,
+            first: outer_first,
+            second: outer_second,
+        } = &restored
+        else {
+            panic!("restored root should be a split");
+        };
+        assert_eq!(*outer_direction, Direction::Horizontal);
+        assert_eq!(*outer_ratio, 0.5);
+        assert!(matches!(**outer_first, Node::Pane(id) if id == id_map[&0]));
+        let Node::Split {
+            direction: inner_direction,
+            ratio: inner_ratio,
+            first: inner_first,
+            second: inner_second,
+        } = &**outer_second
+        else {
+            panic!("restored second child should be a split");
+        };
+        assert_eq!(*inner_direction, Direction::Vertical);
+        assert_eq!(*inner_ratio, 0.3);
+        assert!(matches!(**inner_first, Node::Pane(id) if id == id_map[&1]));
+        assert!(matches!(**inner_second, Node::Pane(id) if id == id_map[&2]));
     }
 
     #[test]
@@ -1710,6 +1738,18 @@ mod tests {
         let mut public_numbers: Vec<_> = workspace.public_pane_numbers.values().copied().collect();
         public_numbers.sort_unstable();
         assert_eq!(public_numbers, vec![1, 3]);
+        // Layout order is first = saved pane 10, second = saved pane 20, so each
+        // restored pane must carry the public number saved for its old id.
+        let restored_panes = workspace.tabs[0].layout.pane_ids();
+        assert_eq!(restored_panes.len(), 2);
+        assert_eq!(
+            workspace.public_pane_numbers.get(&restored_panes[0]),
+            Some(&1)
+        );
+        assert_eq!(
+            workspace.public_pane_numbers.get(&restored_panes[1]),
+            Some(&3)
+        );
         assert_eq!(workspace.next_public_pane_number, 4);
         assert_eq!(workspace.tabs[0].number, 5);
         assert_eq!(workspace.next_public_tab_number, 6);

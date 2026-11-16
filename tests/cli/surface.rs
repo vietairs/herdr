@@ -583,6 +583,14 @@ fn api_schema_output_writes_bundled_schema_to_file() {
         .and_then(serde_json::Value::as_u64)
         .is_some_and(|protocol| protocol > 0));
 
+    let stdout_output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["api", "schema", "--json"])
+        .output()
+        .unwrap();
+    assert!(stdout_output.status.success());
+    let bundled_schema: serde_json::Value = serde_json::from_slice(&stdout_output.stdout).unwrap();
+    assert_eq!(schema, bundled_schema);
+
     cleanup_test_base(&base);
 }
 

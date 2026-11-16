@@ -434,6 +434,21 @@ mod tests {
         let server = running_server(Some("test"), None);
         let value = serde_json::to_value(server_status_json(&server)).unwrap();
         assert_eq!(value["capabilities"]["ssh_agent_registration"], false);
+
+        let server = ServerRuntimeStatus::Running {
+            version: Some("test".to_owned()),
+            protocol: Some(crate::protocol::PROTOCOL_VERSION),
+            capabilities: Some(crate::api::schema::ServerCapabilities {
+                live_handoff: true,
+                detached_server_daemon: true,
+                endpoint_protocol_generation: None,
+                surface_interest: true,
+                health_check: true,
+                ssh_agent_registration: true,
+            }),
+        };
+        let value = serde_json::to_value(server_status_json(&server)).unwrap();
+        assert_eq!(value["capabilities"]["ssh_agent_registration"], true);
     }
 
     #[test]

@@ -138,13 +138,24 @@ fn claude_hook_ignores_subagent_completion_reports() {
 }
 
 #[test]
-fn claude_hook_keeps_parent_agent_type_only_blocked() {
+fn claude_hook_keeps_parent_agent_type_only_reports() {
     let request = run_claude_hook(
         "blocked",
         r#"{"hook_event_name":"PermissionRequest","agent_type":"Explore"}"#,
     );
 
+    // The hook no longer forwards blocked state at all.
     assert!(request.is_none());
+
+    // A parent payload that carries only `agent_type` (no `agent_id`) is not a
+    // subagent, so its report is kept rather than dropped.
+    let session = run_claude_hook(
+        "session",
+        r#"{"hook_event_name":"SessionStart","session_id":"parent-session","agent_type":"Explore"}"#,
+    )
+    .expect("a parent payload with only agent_type should still report");
+    assert_eq!(session["method"], "pane.report_agent_session");
+    assert_eq!(session["params"]["agent_session_id"], "parent-session");
 }
 
 #[test]

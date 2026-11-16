@@ -5,6 +5,7 @@ import io
 import json
 import os
 import struct
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -218,6 +219,11 @@ class WindowsConptyPackageTests(unittest.TestCase):
             except OSError:
                 if os.name != "nt":
                     raise
+                print(
+                    "symlink creation is not permitted on this host; "
+                    "skipping the dangling symlink rejection check",
+                    file=sys.stderr,
+                )
             else:
                 with self.assertRaisesRegex(ValueError, "differs from the pinned version"):
                     package.install_local_bundle(metadata_path, "x86_64", nupkg, local_exe)
@@ -232,6 +238,11 @@ class WindowsConptyPackageTests(unittest.TestCase):
             except OSError:
                 if os.name != "nt":
                     raise
+                print(
+                    "symlink creation is not permitted on this host; "
+                    "skipping the dangling conpty directory rejection check",
+                    file=sys.stderr,
+                )
             else:
                 with self.assertRaisesRegex(ValueError, "differs from the pinned version"):
                     package.install_local_bundle(metadata_path, "x86_64", nupkg, dangling_exe)

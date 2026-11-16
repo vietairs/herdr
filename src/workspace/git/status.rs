@@ -626,10 +626,11 @@ mod tests {
         std::fs::write(git_dir_one.join("HEAD"), "ref: refs/heads/one\n").unwrap();
         std::fs::write(git_dir_two.join("HEAD"), "ref: refs/heads/two\n").unwrap();
 
-        assert_ne!(
-            git_status_cache_key(&worktree_one),
-            git_status_cache_key(&worktree_two)
-        );
+        let key_one =
+            git_status_cache_key(&worktree_one).expect("first linked checkout should be keyed");
+        let key_two =
+            git_status_cache_key(&worktree_two).expect("second linked checkout should be keyed");
+        assert_ne!(key_one, key_two);
 
         std::fs::remove_dir_all(base).unwrap();
     }
@@ -643,6 +644,15 @@ mod tests {
             .output()
             .unwrap();
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            // Only a git build that lacks reftable support may skip this test.
+            let reftable_unsupported = stderr.contains("unknown ref storage format")
+                || (stderr.contains("unknown option") && stderr.contains("ref-format"));
+            assert!(
+                reftable_unsupported,
+                "git init with reftable failed unexpectedly: {stderr}"
+            );
+            eprintln!("skipping reftable fingerprint test: git lacks reftable support: {stderr}");
             std::fs::remove_dir_all(root).unwrap();
             return;
         }

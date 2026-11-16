@@ -504,6 +504,16 @@ fn processes_survive_during_and_after_detach() {
         "detached client connection should close"
     );
 
+    // The pane's shell must still be running and executing commands while no
+    // client is attached.
+    pane_send_text(&api_socket, &pane_id, "echo ALIVE_WHILE_DETACHED\n");
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(50), || {
+            pane_read_recent_text(&api_socket, &pane_id).contains("ALIVE_WHILE_DETACHED")
+        }),
+        "pane process should keep running while detached"
+    );
+
     // Reattach — verify we can connect and receive a frame.
     let mut stream_b = UnixStream::connect(&client_socket).expect("should reattach");
     let (version, error) = client_shell_handshake(&mut stream_b, CURRENT_PROTOCOL, 80, 24)
@@ -514,6 +524,15 @@ fn processes_survive_during_and_after_detach() {
     // Verify the reattached client receives a frame.
     support::wait_for_client_shell_bootstrap(&mut stream_b, Duration::from_secs(5))
         .expect("client shell bootstrap");
+
+    // The same pane process is still alive after reattach.
+    pane_send_text(&api_socket, &pane_id, "echo ALIVE_AFTER_REATTACH\n");
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(50), || {
+            pane_read_recent_text(&api_socket, &pane_id).contains("ALIVE_AFTER_REATTACH")
+        }),
+        "pane process should keep running after reattach"
+    );
 
     cleanup_spawned_herdr(spawned, base);
 }
@@ -696,10 +715,14 @@ fn detached_output_preserves_last_attached_pty_size() {
     wait_for_socket(&client_socket, Duration::from_secs(10));
 
     let mut stream = UnixStream::connect(&client_socket).expect("client should connect");
-    let (version, error) = client_shell_handshake(&mut stream, CURRENT_PROTOCOL, 120, 40)
+    // The attached size differs from the headless default so the pane geometry
+    // can only come from the attached client.
+    let (version, error) = client_shell_handshake(&mut stream, CURRENT_PROTOCOL, 100, 30)
         .expect("handshake should succeed");
     assert_eq!(version, CURRENT_PROTOCOL);
     assert!(error.is_none(), "{:?}", error);
+    support::wait_for_client_shell_bootstrap(&mut stream, Duration::from_secs(5))
+        .expect("client shell bootstrap");
     drain_messages(&mut stream);
 
     let create = workspace_create(&api_socket, "detached-size");
@@ -714,6 +737,10 @@ fn detached_output_preserves_last_attached_pty_size() {
         "SIZE_BEFORE_DETACH",
         Duration::from_secs(5),
     );
+    // Pane geometry comes from the attached 100x30 client, not from the 132x41
+    // headless default. A lone pane has no borders and the layout reserves one
+    // column, so the PTY is 30 rows by 99 columns.
+    assert_eq!(before, (30, 99), "pane should use the attached client size");
 
     send_detach(&mut stream).expect("send detach");
     drop(stream);
@@ -831,6 +858,12 @@ fn output_accumulated_while_detached_visible_on_reattach() {
     // Client B should receive a frame with the current state.
     support::wait_for_client_shell_bootstrap(&mut stream_b, Duration::from_secs(5))
         .expect("client shell bootstrap");
+
+    // The output produced while detached is still in the pane after reattach.
+    assert!(
+        pane_read_recent_text(&api_socket, &pane_id).contains("DURING_DETACH"),
+        "pane should still contain output produced while detached after reattach"
+    );
 
     cleanup_spawned_herdr(spawned, base);
 }

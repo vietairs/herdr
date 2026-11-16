@@ -561,7 +561,17 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
     let bin_dir = base.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let fake_pi = bin_dir.join("pi");
-    fs::write(&fake_pi, "#!/bin/sh\nprintf 'Working...\\n'\nsleep 8\n").unwrap();
+    // The fake agent records its own pid so the test can check the process
+    // itself (not only the reported status) is still alive after reattach.
+    let pid_file = base.join("fake-pi.pid");
+    fs::write(
+        &fake_pi,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nprintf 'Working...\\n'\nsleep 20\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -638,6 +648,29 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
     let mut client_b = UnixStream::connect(&client_socket).expect("client B should connect");
     client_shell_handshake(&mut client_b, CURRENT_PROTOCOL, 80, 24).expect("shell handshake");
     assert!(wait_for_frame(&mut client_b, Duration::from_secs(5)));
+
+    // The agent process must have survived the detach/reattach cycle.
+    // Detection can see the `pi` process before its first script line runs,
+    // so wait for the pid file instead of reading it once.
+    let agent_pid = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match fs::read_to_string(&pid_file) {
+                Ok(pid) if !pid.trim().is_empty() => break pid.trim().to_string(),
+                _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+                other => panic!("fake pi should have recorded its pid: {other:?}"),
+            }
+        }
+    };
+    let agent_alive = std::process::Command::new("kill")
+        .args(["-0", &agent_pid])
+        .status()
+        .expect("kill -0 should run")
+        .success();
+    assert!(
+        agent_alive,
+        "agent process {agent_pid} should still be running after detach and reattach"
+    );
 
     // Transition to blocked and verify API + client surfaces both observe it.
     // The fake process remains visibly working, so blocked is the deterministic

@@ -3952,23 +3952,6 @@ mod tests {
     }
 
     #[test]
-    fn read_message_accepts_exact_payload() {
-        // A normally-framed message should decode without error.
-        let msg = ClientMessage::TerminalHello {
-            version: PROTOCOL_VERSION,
-            cols: 80,
-            rows: 24,
-            cell_width_px: 8,
-            cell_height_px: 16,
-            pixel_mouse: false,
-        };
-        let mut buf = Vec::new();
-        write_message(&mut buf, &msg).unwrap();
-        let decoded: ClientMessage = read_message(&mut buf.as_slice(), MAX_FRAME_SIZE).unwrap();
-        assert_eq!(msg, decoded);
-    }
-
-    #[test]
     fn write_message_rejects_oversized_payload() {
         // We can't easily create a message that exceeds u32::MAX in a test,
         // but we can verify the check exists by testing that normal messages

@@ -406,7 +406,11 @@ class ClaudeIntegrationAssetTests(unittest.TestCase):
 
     def test_prompt_cache_time_ignores_user_lines_entirely(self):
         entry_ms = BASE_MS + 7_000
-        lines = [assistant(entry_ms, input_tokens=1, creation=10, read=20, ephemeral_5m=10)]
+        lines = [
+            user(entry_ms - 3_000),
+            assistant(entry_ms, input_tokens=1, creation=10, read=20, ephemeral_5m=10),
+            user(entry_ms + 4_000),
+        ]
 
         requests = run_hook("cache", stop_payload(), lines)
 

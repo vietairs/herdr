@@ -377,7 +377,7 @@ fn auto_detect_server_running_attaches_directly() {
     assert!(process_exists(server_pid), "server should be running");
 
     // Run `herdr` (no subcommand) — should detect the running server and attach.
-    let client = spawn_herdr_auto(&config_home, &runtime_dir, &api_socket, &client_socket);
+    let mut client = spawn_herdr_auto(&config_home, &runtime_dir, &api_socket, &client_socket);
 
     // Wait a moment for the client to attach.
     thread::sleep(Duration::from_millis(500));
@@ -388,11 +388,39 @@ fn auto_detect_server_running_attaches_directly() {
         process_exists(client_pid),
         "client process should be running"
     );
+    // `kill(pid, 0)` also succeeds for an exited-but-unreaped child, so ask the
+    // child handle whether the client has actually exited.
+    assert!(
+        matches!(client.child.try_wait(), Ok(None)),
+        "client should still be attached, not exited"
+    );
 
     // Verify the server is still the same one (no second server spawned).
     assert!(
         process_exists(server_pid),
         "original server should still be running"
+    );
+
+    // Only the explicitly started server may have logged a server startup;
+    // attaching to a running server must not launch a second one.
+    let app_dir_name = if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    };
+    let server_log = config_home.join(app_dir_name).join("herdr-server.log");
+    wait_for_log_contains(
+        &server_log,
+        "event=\"app.startup\" subsystem=\"server\"",
+        Duration::from_secs(10),
+    );
+    let server_log_content = fs::read_to_string(&server_log).unwrap_or_default();
+    assert_eq!(
+        server_log_content
+            .matches("event=\"app.startup\" subsystem=\"server\"")
+            .count(),
+        1,
+        "attaching to a running server must not start a second server: {server_log_content}"
     );
 
     // Verify API still responds.

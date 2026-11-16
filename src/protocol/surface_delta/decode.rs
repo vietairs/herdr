@@ -552,6 +552,31 @@ mod tests {
         };
         let bytes = encoded(&delta);
         assert!(decode_bytes_with_data_len(&bytes, Some((1, 1)), MAX_FRAME_SIZE + 1).is_ok());
+
+        // The ordinary cap applies to the base64 data string, not to the decoded
+        // byte length. Pad an ordinary delta so its raw bytes fit the cap while
+        // its base64 encoding does not.
+        let padded_delta = |padding: usize| {
+            let mut padded = surface(1, 1);
+            padded.boot_id = "b".repeat(padding);
+            encoded(&SurfaceDelta {
+                base_projection_revision: 1,
+                base_surface_revision: 1,
+                surface: padded,
+                rows: Vec::<PaneSurfacePatchRow>::new(),
+                popup_cells: None::<GridUpdate>,
+            })
+        };
+        let over_in_base64 = padded_delta(MAX_FRAME_SIZE / 8 * 7);
+        assert!(over_in_base64.len() <= MAX_FRAME_SIZE);
+        let over_data = base64::Engine::encode(&STANDARD_NO_PAD, &over_in_base64);
+        assert!(over_data.len() > MAX_FRAME_SIZE);
+        assert!(decode(&over_data, Some((1, 1))).is_err());
+
+        let within_cap = padded_delta(MAX_FRAME_SIZE / 2);
+        let within_data = base64::Engine::encode(&STANDARD_NO_PAD, &within_cap);
+        assert!(within_data.len() <= MAX_FRAME_SIZE);
+        assert!(decode(&within_data, Some((1, 1))).is_ok());
     }
 
     #[test]

@@ -2609,6 +2609,21 @@ mod tests {
             let target = terminal.viewport_link_target(col, 1).unwrap().unwrap();
             assert_eq!(url_from_link_target(target).as_deref(), Some(url));
         }
+
+        // At width 21 the first wide character no longer fits after the
+        // 20-cell prefix, so row 0 ends in a padding cell and the wide
+        // characters wrap to row 1. The padding must not split or alter the
+        // URL: clicks on either side of the wrap resolve the full URL.
+        let mut terminal = crate::ghostty::Terminal::new(21, 3, 1024).unwrap();
+        terminal.write(url.as_bytes());
+        for (col, row) in [(0, 0), (19, 0), (0, 1), (1, 1), (2, 1), (3, 1)] {
+            let target = terminal.viewport_link_target(col, row).unwrap().unwrap();
+            assert_eq!(
+                url_from_link_target(target).as_deref(),
+                Some(url),
+                "click at column {col}, row {row}"
+            );
+        }
     }
 
     #[test]

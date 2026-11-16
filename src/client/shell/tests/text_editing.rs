@@ -397,10 +397,23 @@ fn every_field_renders_long_unicode_across_resize_without_mutation() {
             press(&mut state, position, KeyModifiers::NONE);
             for (width, height) in [(120, 40), (60, 20), (12, 6), (1, 1), (120, 40)] {
                 let before = editor(&mut state).clone();
-                if let Some(frame) = state.compose(width, height) {
-                    if let Some(cursor) = frame.cursor.as_ref().filter(|cursor| cursor.visible) {
-                        assert!(cursor.x < width && cursor.y < height, "field {field}");
-                    }
+                let frame = state.compose(width, height);
+                // A terminal too small to fit an overlay popup draws no frame, and the
+                // minimum differs per field. Widths of 60 and up are a conservative roomy
+                // size, not the exact minimum: there, including after shrinking and growing
+                // back, every field must render.
+                if width >= 60 {
+                    assert!(
+                        frame.is_some(),
+                        "field {field} composes at {width}x{height}"
+                    );
+                }
+                if let Some(cursor) = frame
+                    .as_ref()
+                    .and_then(|frame| frame.cursor.as_ref())
+                    .filter(|cursor| cursor.visible)
+                {
+                    assert!(cursor.x < width && cursor.y < height, "field {field}");
                 }
                 assert_eq!(editor(&mut state), &before);
             }

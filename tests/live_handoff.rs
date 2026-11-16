@@ -1567,6 +1567,35 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     drop(spawned);
     wait_for_api(&api_socket, Duration::from_secs(10));
 
+    // Across the handoff the name must still resolve to the agent bound to the
+    // saved session, before any new session is reported.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let kept = loop {
+        let response = request(
+            &api_socket,
+            serde_json::json!({
+                "id": "test:agent:get-kept-name",
+                "method": "agent.get",
+                "params": {"target": "reviewer"}
+            }),
+        );
+        if response.get("result").is_some() {
+            break response;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "agent name was not kept across handoff: {response}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(kept["result"]["agent"]["name"], "reviewer");
+    assert_eq!(kept["result"]["agent"]["agent_session"]["kind"], "path");
+    assert_eq!(
+        kept["result"]["agent"]["agent_session"]["value"],
+        old_session.display().to_string(),
+        "kept agent must stay bound to the saved session"
+    );
+
     assert_ok(request(
         &api_socket,
         serde_json::json!({

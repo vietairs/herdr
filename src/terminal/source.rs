@@ -199,25 +199,32 @@ mod tests {
         assert_eq!(recorded.shutdown_count, 1);
     }
 
-    // Test-only stand-in for a future `Remote`-shaped lifecycle policy: same
-    // trait, opposite reader-exit contract. Locks the P5 contract at the
-    // seam without depending on any not-yet-built remote transport code.
-    struct RemoteShapedStub;
-
-    impl TerminalLifecyclePolicy for RemoteShapedStub {
-        fn emits_pane_died_on_reader_exit(&self) -> bool {
-            false
-        }
-    }
-
     #[test]
     fn local_child_policy_emits_pane_died_on_reader_exit() {
         assert!(LocalChild.emits_pane_died_on_reader_exit());
     }
 
-    #[test]
-    fn remote_shaped_policy_does_not_emit_pane_died_on_reader_exit() {
-        assert!(!RemoteShapedStub.emits_pane_died_on_reader_exit());
+    // A remote-backed source losing its relay means "disconnected", not "the
+    // remote process exited", so its reader-exit path must never report a
+    // local pane death. Checked against the production remote policy type.
+    #[tokio::test]
+    async fn remote_shaped_policy_does_not_emit_pane_died_on_reader_exit() {
+        use crate::remote::federation::pane_source::{
+            RemoteTerminalSourceConfig, RemoteTerminalSourceHandle,
+        };
+
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let (_output_tx, output_rx) = mpsc::channel::<Bytes>(1);
+        let handle = RemoteTerminalSourceHandle::spawn(RemoteTerminalSourceConfig {
+            terminal_id: "term_1".to_string(),
+            mount_generation: 1,
+            out_tx,
+            output_rx,
+            on_read: Box::new(|_: &[u8]| {}),
+            pty_size: Default::default(),
+        });
+
+        assert!(!handle.emits_pane_died_on_reader_exit());
     }
 
     // Handoff-exclusion (type-level): `TerminalSource` has no

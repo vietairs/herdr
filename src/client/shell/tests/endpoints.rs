@@ -1425,6 +1425,21 @@ fn active_workspace_is_the_only_highlight_when_machine_is_expanded() {
         buffer[(workspace.x + 2, workspace.y)].bg,
         state.config.palette.active_row_bg
     );
+    // The local endpoint's workspace is also marked focused by its own snapshot,
+    // but only the active endpoint's workspace may be highlighted.
+    let other_workspaces = state
+        .hits
+        .workspaces
+        .iter()
+        .filter(|hit| hit.endpoint_id != endpoint_id)
+        .collect::<Vec<_>>();
+    assert!(!other_workspaces.is_empty());
+    for hit in other_workspaces {
+        assert_ne!(
+            buffer[(hit.rect.x + 2, hit.rect.y)].bg,
+            state.config.palette.active_row_bg
+        );
+    }
 
     state.collapsed_endpoints.insert(endpoint_id.clone());
     let frame = state.compose(100, 28).expect("collapsed endpoint frame");

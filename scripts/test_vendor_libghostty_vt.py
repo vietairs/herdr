@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import tarfile
 import tempfile
@@ -91,10 +92,14 @@ class VendorLibghosttyVtTests(unittest.TestCase):
         project_root = Path(__file__).resolve().parent.parent
         metadata = project_root / "vendor" / "libghostty-vt.vendor.json"
         self.assertTrue(metadata.exists())
-        text = metadata.read_text()
-        self.assertIn('"source_commit"', text)
-        self.assertIn('"dist_archive"', text)
-        self.assertIn('"extracted_dir"', text)
+        data = json.loads(metadata.read_text())
+        self.assertRegex(data["source_commit"], r"^[0-9a-f]{40}$")
+        # The dist archive is named libghostty-vt-<version>+<first 9 commit chars>.tar.gz.
+        self.assertRegex(
+            data["dist_archive"],
+            rf"^libghostty-vt-.+\+{data['source_commit'][:9]}\.tar\.gz$",
+        )
+        self.assertTrue(data["extracted_dir"].startswith("libghostty-vt"))
 
     def test_local_vendor_patches_are_listed_in_patch_index(self) -> None:
         project_root = Path(__file__).resolve().parent.parent

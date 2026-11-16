@@ -298,6 +298,10 @@ fn server_cleans_up_stale_client_socket() {
         "API should respond to ping: {response}"
     );
 
+    // The client socket must be a live listener again: connecting to a
+    // leftover file with no listener would be refused.
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
     cleanup_spawned_herdr(spawned, base);
 }
 

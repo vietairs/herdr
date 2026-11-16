@@ -176,7 +176,43 @@ fn bundled_protocol_schema_refs_resolve_inside_bundle() {
         }
     }
 
-    assert_no_standalone_refs(&protocol_schema_document());
+    // Every `$ref` must be a JSON pointer that lands on a node inside the
+    // bundled document, not merely avoid the standalone-schema prefix.
+    fn assert_refs_resolve(
+        root: &serde_json::Value,
+        value: &serde_json::Value,
+        resolved: &mut usize,
+    ) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(serde_json::Value::String(reference)) = object.get("$ref") {
+                    let pointer = reference
+                        .strip_prefix('#')
+                        .unwrap_or_else(|| panic!("ref {reference} points outside the bundle"));
+                    assert!(
+                        root.pointer(pointer).is_some(),
+                        "schema bundle ref {reference} does not resolve inside the bundle"
+                    );
+                    *resolved += 1;
+                }
+                for child in object.values() {
+                    assert_refs_resolve(root, child, resolved);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    assert_refs_resolve(root, item, resolved);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let document = protocol_schema_document();
+    assert_no_standalone_refs(&document);
+    let mut resolved = 0;
+    assert_refs_resolve(&document, &document, &mut resolved);
+    assert!(resolved > 0, "the bundle should contain schema refs");
 }
 
 #[test]
