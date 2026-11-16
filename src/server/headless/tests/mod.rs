@@ -5214,7 +5214,7 @@ fn windows_shutdown_probe_preserves_panes_and_agent_sessions() {
                         method: api::schema::Method::WorkspaceRename(
                             api::schema::WorkspaceRenameParams {
                                 workspace_id: server.app.public_workspace_id(0),
-                                label: "must-not-be-saved".into(),
+                                label: Some("must-not-be-saved".into()),
                             },
                         ),
                     },

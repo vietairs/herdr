@@ -2063,6 +2063,74 @@ fn live_handoff_bad_expected_protocol_rolls_back_old_server() {
     cleanup_test_base(&base);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn live_handoff_import_server_removes_sockets_when_stopped_before_event_loop() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    // The delay is inherited by the import server, holding it after it owns
+    // the public sockets and before its event loop runs.
+    let spawned = spawn_server_with_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &[("HERDR_TEST_STARTUP_DELAY_MS", "3000")],
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let old_pid = spawned.child.process_id().expect("old server pid");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, old_pid, Duration::from_secs(10));
+
+    // The old server exits only after the import server reports ownership,
+    // so from here the import server owns both sockets and sits in its
+    // startup delay, before its event loop.
+    let mut spawned = spawned;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while spawned.child.try_wait().expect("poll old server").is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "old server {old_pid} did not exit after the handoff"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        client_socket.exists(),
+        "import server must own the client socket"
+    );
+    assert!(api_socket.exists(), "import server must own the api socket");
+
+    assert_eq!(
+        unsafe { libc::kill(replacement_pid as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    // Socket removal is the observable effect; it does not depend on the
+    // orphaned import process being reaped.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while client_socket.exists() || api_socket.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "socket files must be removed when the import server exits \
+             (client: {}, api: {})",
+            client_socket.exists(),
+            api_socket.exists()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    drop(spawned);
+    cleanup_test_base(&base);
+}
+
 fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
     let _lock = test_lock();
     let base = unique_test_dir();
