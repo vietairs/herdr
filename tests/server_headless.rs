@@ -102,7 +102,23 @@ fn spawn_server(
     config_home: &Path,
     runtime_dir: &Path,
     api_socket_path: &Path,
+    client_socket_path: &Path,
+) -> SpawnedHerdr {
+    spawn_server_with_env(
+        config_home,
+        runtime_dir,
+        api_socket_path,
+        client_socket_path,
+        &[],
+    )
+}
+
+fn spawn_server_with_env(
+    config_home: &Path,
+    runtime_dir: &Path,
+    api_socket_path: &Path,
     _client_socket_path: &Path,
+    extra_env: &[(&str, &str)],
 ) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
@@ -131,6 +147,9 @@ fn spawn_server(
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
@@ -245,26 +264,35 @@ fn server_removes_client_socket_on_exit() {
     let api_socket = runtime_dir.join("herdr.sock");
     let client_socket = runtime_dir.join("herdr-client.sock");
 
-    let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    // The delay holds the server between publishing the client socket and
+    // starting its event loop, so the stop signal below lands in that window.
+    let mut spawned = spawn_server_with_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        &[("HERDR_TEST_STARTUP_DELAY_MS", "1500")],
+    );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
-    // Stop the server.
+    // Stop the server and wait for the process itself to exit; cleanup runs
+    // before exit, so no settling delay is needed afterwards.
     support::stop_spawned_herdr(&mut *spawned.child);
     spawned.close_master();
-    let _ = spawned.child.wait();
-
-    // Give it a moment to clean up.
-    thread::sleep(Duration::from_millis(300));
-
-    // The client socket should be removed (best-effort by Drop).
-    // If it still exists, it should be stale (not connectable).
-    if client_socket.exists() {
-        assert!(
-            UnixStream::connect(&client_socket).is_err(),
-            "stale client socket should not accept connections"
-        );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match spawned.child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            other => panic!("server did not exit after SIGTERM: {other:?}"),
+        }
     }
+
+    assert!(
+        !client_socket.exists(),
+        "client socket file must be removed when the server exits"
+    );
 
     drop(spawned);
     cleanup_test_base(&base);

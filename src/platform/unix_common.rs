@@ -342,6 +342,28 @@ pub(crate) fn spawn_server_signal_monitor(
     use tokio::signal::unix::{signal, SignalKind};
     use tracing::{info, warn};
 
+    spawn_server_stop_signal_recorder(on_quit);
+    match signal(SignalKind::hangup()) {
+        Ok(mut stream) => {
+            tokio::spawn(async move {
+                while stream.recv().await.is_some() {
+                    info!("ignoring SIGHUP; server keeps running");
+                }
+            });
+        }
+        Err(err) => warn!(%err, "failed to install SIGHUP handler"),
+    }
+}
+
+/// Routes SIGINT and SIGTERM to `on_quit`. Unlike `spawn_server_signal_monitor`
+/// it leaves SIGHUP alone, so it can run alongside that monitor without
+/// logging each hangup twice.
+pub(crate) fn spawn_server_stop_signal_recorder(
+    on_quit: impl Fn(super::ServerQuitSignal) + Send + Sync + 'static,
+) {
+    use tokio::signal::unix::{signal, SignalKind};
+    use tracing::warn;
+
     let on_quit = std::sync::Arc::new(on_quit);
     for (kind, quit_signal) in [
         (SignalKind::interrupt(), super::ServerQuitSignal::Interrupt),
@@ -358,16 +380,6 @@ pub(crate) fn spawn_server_signal_monitor(
             }
             Err(err) => warn!(%err, signal = %quit_signal, "failed to install server stop handler"),
         }
-    }
-    match signal(SignalKind::hangup()) {
-        Ok(mut stream) => {
-            tokio::spawn(async move {
-                while stream.recv().await.is_some() {
-                    info!("ignoring SIGHUP; server keeps running");
-                }
-            });
-        }
-        Err(err) => warn!(%err, "failed to install SIGHUP handler"),
     }
 }
 

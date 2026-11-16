@@ -35,6 +35,17 @@ pub fn run_server() -> io::Result<()> {
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
     let server_stop = crate::server::shutdown::ServerStop::default();
+    let startup_stop = server_stop.clone();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(io::Error::other)?;
+
+    // Stop signals must be handled before any socket file is published: the
+    // default disposition would end the process without running socket cleanup.
+    #[cfg(unix)]
+    record_stop_signals_until_event_loop_runs(&rt, &server_stop);
 
     // Start the JSON API socket server.
     let _api_server = match api::start_server_with_stop_control(
@@ -50,11 +61,6 @@ pub fn run_server() -> io::Result<()> {
         }
         Err(err) => return Err(err),
     };
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(io::Error::other)?;
 
     let result = rt.block_on(async {
         // Create the App (with AppState, event channels, etc.).
@@ -83,6 +89,7 @@ pub fn run_server() -> io::Result<()> {
             }
             Err(err) => return Err(err),
         };
+        delay_startup_for_tests();
 
         info!(
             api_socket = %api::socket_path().display(),
@@ -90,7 +97,11 @@ pub fn run_server() -> io::Result<()> {
             "herdr server started"
         );
         print_ready_message(&api::socket_path(), &client_socket_path());
-        server.app.run_plugin_startup_hooks();
+        // A stop recorded during startup ends the server on the loop's first
+        // tick; starting plugin processes first would only orphan them.
+        if !startup_stop.is_requested() {
+            server.app.run_plugin_startup_hooks();
+        }
 
         server.run().await
     });
@@ -98,6 +109,36 @@ pub fn run_server() -> io::Result<()> {
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("server");
     result
+}
+
+/// Records SIGINT/SIGTERM in `server_stop` from process start. The event loop
+/// installs its own monitor that also wakes it; this one covers the startup
+/// window before that, and the loop observes the recorded stop on its first
+/// tick, so startup finishes and the normal shutdown path removes the sockets.
+/// A stop signal therefore no longer interrupts a startup step in progress.
+#[cfg(unix)]
+fn record_stop_signals_until_event_loop_runs(
+    rt: &tokio::runtime::Runtime,
+    server_stop: &crate::server::shutdown::ServerStop,
+) {
+    let _guard = rt.enter();
+    let server_stop = server_stop.clone();
+    crate::platform::spawn_server_stop_signal_recorder(move |signal| {
+        server_stop.request(crate::server::shutdown::ShutdownReason::Signal(signal));
+    });
+}
+
+/// Widens the window between publishing the client socket and starting the
+/// event loop, so integration tests can deliver a stop signal inside it.
+/// Debug builds only; release builds never read the variable.
+fn delay_startup_for_tests() {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("HERDR_TEST_STARTUP_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
 }
 
 fn seed_startup_workspace_if_empty(app: &mut app::App) {
