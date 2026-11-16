@@ -47,6 +47,42 @@ def libc_path() -> Path:
     return path.resolve()
 
 
+def link_macos_host_libraries(libc_file: Path) -> None:
+    """Let Zig link native build helpers on a macOS host.
+
+    `zig build --libc` applies the Windows libc file to every compile step,
+    including the native helper programs libghostty-vt builds and runs. On
+    macOS those helpers link libSystem, which Zig looks for under
+    `<sys_include_dir>/../../usr/lib`. Point that at the macOS SDK.
+    """
+    if sys.platform != "darwin":
+        return
+    sys_include = next(
+        (
+            line.split("=", 1)[1].strip()
+            for line in libc_file.read_text().splitlines()
+            if line.startswith("sys_include_dir=")
+        ),
+        "",
+    )
+    if not sys_include:
+        return
+    link = Path(sys_include).parent.parent / "usr/lib"
+    if link.exists():
+        return
+    if link.is_symlink():
+        # The SDK it pointed at moved (Xcode removed or xcode-select switched).
+        link.unlink()
+    sdk = subprocess.run(
+        ["xcrun", "--show-sdk-path"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    target = Path(sdk) / "usr/lib"
+    if not (target / "libSystem.tbd").is_file():
+        raise ValueError(f"macOS SDK has no libSystem.tbd under {target}")
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target, target_is_directory=True)
+
+
 def setup(accept_license: bool) -> None:
     if not shutil.which("xwin"):
         raise ValueError("Install xwin first: cargo install xwin --locked")
@@ -66,11 +102,17 @@ def setup(accept_license: bool) -> None:
         [os.environ.get("ZIG", "zig"), "libc", "-target", "x86_64-windows-msvc", str(config)],
         check=True,
     )
+    link_macos_host_libraries(config)
     print(f"Windows SDK configured at {config}. Run `just windows-lint` or `just check`.")
 
 
 def lint() -> None:
-    env = {**os.environ, LIBC_ENV: str(libc_path()), "LIBGHOSTTY_VT_SIMD": "false"}
+    libc_file = libc_path()
+    # Also covers SDKs set up before setup created the link. A user's own
+    # libc configuration is left untouched.
+    if libc_file.is_relative_to(SDK_ROOT.resolve()):
+        link_macos_host_libraries(libc_file)
+    env = {**os.environ, LIBC_ENV: str(libc_file), "LIBGHOSTTY_VT_SIMD": "false"}
     subprocess.run(["rustup", "target", "add", TARGET], check=True)
     subprocess.run(
         # --tests also checks Windows-only test code, which Unix builds never compile.
