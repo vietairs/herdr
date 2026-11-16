@@ -180,6 +180,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
     let server_stop = crate::server::shutdown::ServerStop::default();
+    let startup_stop = server_stop.clone();
 
     let mut imports = HashMap::new();
     for (pane, fd) in received.manifest.panes.into_iter().zip(received.fds) {
@@ -197,6 +198,10 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         .enable_all()
         .build()
         .map_err(io::Error::other)?;
+
+    // This server publishes the public sockets before its event loop runs,
+    // so stop signals need the same early handling as a fresh start.
+    record_stop_signals_until_event_loop_runs(&rt, &server_stop);
 
     let result = rt.block_on(async {
         let app = app::App::new_from_handoff(
@@ -242,9 +247,12 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         if let Err(err) = crate::server::handoff::report_owned(&mut received.stream) {
             warn!(err = %err, "failed to report handoff ownership; continuing as owner");
         }
+        delay_startup_for_tests();
         info!("handoff import server started");
         print_ready_message(&api::socket_path(), &client_socket_path());
-        server.app.run_plugin_startup_hooks();
+        if !startup_stop.is_requested() {
+            server.app.run_plugin_startup_hooks();
+        }
         server.run().await
     });
 
