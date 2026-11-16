@@ -189,10 +189,51 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    const FEDERATION_PROBE_ENV: &str = "HERDR_TEST_FEDERATION_SOCKET_PROBE";
+    const FEDERATION_PROBE_MARKER: &str = "federation-socket-probe=";
+    const FEDERATION_PROBE_CLASSIC_SOCKET: &str = "/run/user/1000/herdr/session-client.sock";
+
+    /// Child half of the cross-process determinism check. In a normal run the
+    /// probe variable is absent and this does nothing; the parent test re-runs
+    /// this test binary with the variable set and reads the derived path.
+    #[test]
+    fn federation_socket_derivation_probe_for_child_process() {
+        if std::env::var_os(FEDERATION_PROBE_ENV).is_none() {
+            return;
+        }
+        let derived = federation_socket_path(Path::new(FEDERATION_PROBE_CLASSIC_SOCKET));
+        println!("{FEDERATION_PROBE_MARKER}{}", derived.display());
+    }
+
+    // The server that binds the federation socket and the proxy that connects
+    // to it are separate processes, so the derived path must agree between
+    // processes, not merely between two calls in one process.
     #[test]
     fn federation_socket_derivation_is_deterministic() {
-        let p = Path::new("/run/user/1000/herdr/session-client.sock");
-        assert_eq!(federation_socket_path(p), federation_socket_path(p));
+        let classic = Path::new(FEDERATION_PROBE_CLASSIC_SOCKET);
+        let here = federation_socket_path(classic);
+
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+            .args([
+                "server::socket_paths::tests::federation_socket_derivation_probe_for_child_process",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(FEDERATION_PROBE_ENV, "1")
+            .output()
+            .expect("run the test binary as a child process");
+        assert!(output.status.success(), "probe child process failed");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (_, after_marker) = stdout
+            .split_once(FEDERATION_PROBE_MARKER)
+            .expect("the child printed its derived path");
+        let child_path = after_marker
+            .lines()
+            .next()
+            .expect("a path follows the marker");
+        assert_eq!(PathBuf::from(child_path), here);
     }
 
     #[test]

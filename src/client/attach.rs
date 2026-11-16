@@ -187,6 +187,37 @@ pub(super) fn direct_attach_pixel_mouse(
     ))
 }
 
+/// The messages a pixel mouse report produces in direct attach mode, in send order: first the
+/// pending attach prefix byte (so it reaches the pane before the pointer event), then the
+/// pixel-positioned mouse message when the report parses and lands inside the host geometry.
+#[cfg(unix)]
+pub(super) fn attach_pixel_mouse_messages(
+    escape: &mut AttachEscapeState,
+    data: &[u8],
+    geometry: crate::input::mouse::HostGeometry,
+    mouse_scroll_lines: usize,
+) -> Vec<ClientMessage> {
+    let mut messages = Vec::new();
+    if let Some(prefix) = escape.take_pending_prefix() {
+        messages.push(ClientMessage::Input { data: prefix });
+    }
+    if let Some((kind, position, modifiers)) = direct_attach_pixel_mouse(data, geometry) {
+        messages.push(ClientMessage::AttachMouse {
+            kind,
+            position,
+            geometry: Some(crate::protocol::ClientMouseGeometry {
+                cols: geometry.cols,
+                rows: geometry.rows,
+                width_px: geometry.width_px,
+                height_px: geometry.height_px,
+            }),
+            modifiers,
+            lines: mouse_scroll_lines.max(1).min(u16::MAX as usize) as u16,
+        });
+    }
+    messages
+}
+
 #[cfg(unix)]
 fn attach_scroll_action(
     data: &[u8],
@@ -514,14 +545,46 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pixel_mouse_flushes_pending_attach_prefix() {
+        let geometry = crate::input::mouse::HostGeometry::new(80, 24, 800, 480).unwrap();
         let mut escape = AttachEscapeState::default();
         assert!(matches!(
             escape.filter_input(vec![0x02], 24, 3),
             AttachInputAction::None
         ));
 
-        assert_eq!(escape.take_pending_prefix(), Some(vec![0x02]));
-        assert_eq!(escape.take_pending_prefix(), None);
+        let messages = attach_pixel_mouse_messages(&mut escape, b"\x1b[<0;21;22M", geometry, 5);
+
+        // The held prefix byte is sent first, then the pixel mouse message built from the report.
+        assert_eq!(
+            messages,
+            vec![
+                ClientMessage::Input { data: vec![0x02] },
+                ClientMessage::AttachMouse {
+                    kind: crate::protocol::ClientMouseKind::Down(
+                        crate::protocol::ClientMouseButton::Left
+                    ),
+                    position: crate::protocol::ClientMousePosition::Pixels {
+                        x: 21,
+                        y: 22,
+                        column: 2,
+                        row: 1,
+                    },
+                    geometry: Some(crate::protocol::ClientMouseGeometry {
+                        cols: 80,
+                        rows: 24,
+                        width_px: 800,
+                        height_px: 480,
+                    }),
+                    modifiers: 0,
+                    lines: 5,
+                },
+            ]
+        );
+
+        // The prefix was consumed: a second report carries no prefix flush.
+        let again = attach_pixel_mouse_messages(&mut escape, b"\x1b[<0;21;22M", geometry, 5);
+        assert_eq!(again.len(), 1);
+        assert!(matches!(again[0], ClientMessage::AttachMouse { .. }));
     }
 
     #[cfg(unix)]

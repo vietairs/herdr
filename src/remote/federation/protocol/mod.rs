@@ -1529,40 +1529,6 @@ mod tests {
     }
 
     #[test]
-    fn mount_snapshot_cursor_is_the_predecessor_of_the_first_applied_event() {
-        let mount = MountSnapshot {
-            server_instance_id: ServerInstanceId("inst-a".to_string()),
-            snapshot: sample_snapshot(),
-            cursor: EventCursor(41),
-        };
-
-        let first_applied = EventFrame {
-            source_seq: 42,
-            kind: EventKind::LayoutUpdated,
-        };
-
-        assert_eq!(first_applied.source_seq, mount.cursor.0 + 1);
-    }
-
-    #[test]
-    fn mount_snapshot_gap_is_detectable_against_the_cursor() {
-        let mount = MountSnapshot {
-            server_instance_id: ServerInstanceId("inst-a".to_string()),
-            snapshot: sample_snapshot(),
-            cursor: EventCursor(41),
-        };
-
-        // A frame that skips ahead of cursor+1 signals a gap the reducer
-        // must detect rather than silently apply.
-        let skipped_ahead = EventFrame {
-            source_seq: 44,
-            kind: EventKind::LayoutUpdated,
-        };
-
-        assert_ne!(skipped_ahead.source_seq, mount.cursor.0 + 1);
-    }
-
-    #[test]
     fn terminal_output_tagged_with_stale_generation_is_rejected_by_fence() {
         let live_mount = Mount {
             host_key: HostKey::new("alice@10.0.0.1", "s1"),

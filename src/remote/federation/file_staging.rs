@@ -136,6 +136,32 @@ fn stage_into_with(
     candidate_ok: &dyn Fn(&str) -> bool,
     file_write: &FileWrite<'_>,
 ) -> Result<PathBuf, ClipboardStageFailure> {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    stage_into_with_unique(
+        dir,
+        original_filename,
+        bytes,
+        candidate_ok,
+        file_write,
+        unique,
+    )
+}
+
+/// [`stage_into_with`] with the uniqueness token supplied by the caller. The
+/// token is a parameter so a test can make two stagings propose the same
+/// candidate name and observe that creation is exclusive; production always
+/// passes the current time in nanoseconds.
+fn stage_into_with_unique(
+    dir: &Path,
+    original_filename: &str,
+    bytes: &[u8],
+    candidate_ok: &dyn Fn(&str) -> bool,
+    file_write: &FileWrite<'_>,
+    unique: u128,
+) -> Result<PathBuf, ClipboardStageFailure> {
     // Defence in depth: the sending side also pre-checks the payload size.
     if bytes.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
         return Err(ClipboardStageFailure::PayloadTooLarge);
@@ -158,11 +184,6 @@ fn stage_into_with(
     }
 
     let name = sanitize_original_filename(original_filename)?;
-
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0);
 
     for attempt in 0..CREATE_ATTEMPTS {
         let path = dir.join(format!(
@@ -755,6 +776,36 @@ mod tests {
             .mode();
         assert_eq!(dir_mode & 0o777, 0o700, "staging dir mode {dir_mode:o}");
         fs::remove_file(&staged).expect("clean up");
+
+        // Exclusivity: two stagings that propose the same candidate name must
+        // not share a file. The second must skip the occupied name, leave the
+        // first image's bytes intact, and write to a different path.
+        let dir = TestDir::new("exclusive");
+        let first_bytes = b"first image bytes".as_slice();
+        let second_bytes = b"second image bytes".as_slice();
+        let stage_with_fixed_token = |bytes: &[u8]| {
+            stage_into_with_unique(
+                &dir.path,
+                "perms.png",
+                bytes,
+                &is_injection_safe_path,
+                &FileWrite::production(),
+                7,
+            )
+            .expect("stages")
+        };
+        let first = stage_with_fixed_token(first_bytes);
+        let second = stage_with_fixed_token(second_bytes);
+        assert_ne!(first, second, "a colliding name was reused");
+        assert_eq!(fs::read(&first).expect("read first"), first_bytes);
+        assert_eq!(fs::read(&second).expect("read second"), second_bytes);
+        for path in [&first, &second] {
+            let mode = fs::metadata(path)
+                .expect("file metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "staged file mode {mode:o}");
+        }
     }
 
     #[test]

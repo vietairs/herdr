@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn session_snapshot_bootstraps_runtime_resources() {
+    fn session_snapshot_reports_workspaces_tabs_panes_layouts_and_focus() {
         let mut app = app_with_two_tabs();
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req_snapshot".into(),
@@ -127,5 +127,24 @@ mod tests {
             snapshot.focused_pane_id.as_deref(),
             Some(snapshot.panes[0].pane_id.as_str())
         );
+
+        // Every tab, pane and layout is attributed to the one workspace, and
+        // the focused pane sits in the focused tab.
+        let workspace_id = snapshot.workspaces[0].workspace_id.as_str();
+        assert!(snapshot
+            .tabs
+            .iter()
+            .all(|tab| tab.workspace_id == workspace_id));
+        assert!(snapshot
+            .panes
+            .iter()
+            .all(|pane| pane.workspace_id == workspace_id));
+        assert!(snapshot
+            .layouts
+            .iter()
+            .all(|layout| layout.workspace_id == workspace_id));
+        assert_eq!(snapshot.panes[0].tab_id, snapshot.tabs[0].tab_id);
+        assert_ne!(snapshot.tabs[0].tab_id, snapshot.tabs[1].tab_id);
+        assert_ne!(snapshot.panes[0].pane_id, snapshot.panes[1].pane_id);
     }
 }

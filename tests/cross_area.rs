@@ -460,6 +460,85 @@ fn wait_for_frame(stream: &mut UnixStream, timeout: Duration) -> bool {
     false
 }
 
+/// Reads one whole server frame and returns its variant plus the bytes after the
+/// variant tag. The payload read gets its own generous timeout so a short
+/// poll slice cannot split a frame and desync the stream.
+fn read_server_frame(stream: &mut UnixStream, timeout: Duration) -> io::Result<(u32, Vec<u8>)> {
+    stream.set_read_timeout(Some(timeout))?;
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len == 0 || len > 16 * 1024 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unusable frame length {len}"),
+        ));
+    }
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload)?;
+    let (variant, consumed) = decode_varint_u32(&payload, 0)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok((variant, payload[consumed..].to_vec()))
+}
+
+fn decode_wire_string(payload: &[u8], offset: &mut usize) -> Result<String, String> {
+    let (len, consumed) = decode_varint_u32(payload, *offset)?;
+    *offset += consumed;
+    let end = offset
+        .checked_add(len as usize)
+        .filter(|end| *end <= payload.len())
+        .ok_or_else(|| "payload too short for string content".to_string())?;
+    let value = String::from_utf8(payload[*offset..end].to_vec()).map_err(|e| e.to_string())?;
+    *offset = end;
+    Ok(value)
+}
+
+/// Waits for a shell snapshot the client receives that lists a workspace with
+/// `label`, and returns that workspace's id as the client sees it.
+fn wait_for_client_snapshot_workspace_id(
+    stream: &mut UnixStream,
+    label: &str,
+    timeout: Duration,
+) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let slice = deadline.saturating_duration_since(Instant::now());
+        let (variant, payload) = match read_server_frame(stream, slice) {
+            Ok(frame) => frame,
+            Err(err) if is_timeout(&err) => continue,
+            Err(_) => return None,
+        };
+        if variant != SERVER_MESSAGE_ENDPOINT_CONTROL {
+            continue;
+        }
+        let mut offset = 0;
+        let Ok(kind) = decode_wire_string(&payload, &mut offset) else {
+            continue;
+        };
+        if kind != "shell.snapshot.v1" {
+            continue;
+        }
+        let Ok(data) = decode_wire_string(&payload, &mut offset) else {
+            continue;
+        };
+        let Ok(snapshot) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        let found = snapshot["workspaces"].as_array().and_then(|workspaces| {
+            workspaces
+                .iter()
+                .find(|workspace| workspace["label"] == label)
+                .and_then(|workspace| workspace["workspace_id"].as_str())
+                .map(str::to_owned)
+        });
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
 fn drain_server_messages(stream: &mut UnixStream, max_drain: Duration) {
     let deadline = Instant::now() + max_drain;
     while Instant::now() < deadline {
@@ -713,8 +792,13 @@ fn cross_area_client_and_api_workspace_views_are_consistent() {
         .expect("workspace.create should return workspace_id")
         .to_string();
 
-    // ClientShell state is asserted through the authoritative API projection below;
-    // do not decode client-composed UI to duplicate that assertion.
+    // The attached client must receive a shell snapshot that lists the new
+    // workspace under the same id the API reports.
+    let client_workspace_id = wait_for_client_snapshot_workspace_id(
+        &mut client,
+        "api-visible-workspace",
+        Duration::from_secs(5),
+    );
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut count_reached = false;
@@ -734,7 +818,12 @@ fn cross_area_client_and_api_workspace_views_are_consistent() {
     let listed_workspace_id = workspace_id_by_label(&listed, "api-visible-workspace");
     assert_eq!(
         listed_workspace_id, created_workspace_id,
-        "API and client-side state should reference the same created workspace"
+        "workspace.list and workspace.create should reference the same workspace"
+    );
+    assert_eq!(
+        client_workspace_id.as_deref(),
+        Some(created_workspace_id.as_str()),
+        "the attached client's shell snapshot should show the API-created workspace with the same id"
     );
 
     cleanup_spawned_herdr(server, base);

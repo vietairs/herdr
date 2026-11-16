@@ -21,6 +21,71 @@ fn next_remote_workspace_create_request_id() -> u64 {
     NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Runs one federation dial+mount as its own tokio task and reports the
+/// outcome on `event_tx`. The dial is both called and awaited inside the
+/// spawned task, so a panic in it fails only that task's `JoinHandle` and
+/// never unwinds into the caller (the `App` event loop). `dial` is a
+/// parameter so tests can substitute a panicking dial; production passes
+/// `prepare_and_mount_federation_target`.
+fn spawn_federation_mount_dial<D, Fut>(
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    target: String,
+    session_name: String,
+    dial: D,
+) -> tokio::task::JoinHandle<()>
+where
+    D: FnOnce(String, String) -> Fut + Send + 'static,
+    Fut: std::future::Future<
+            Output = std::io::Result<crate::remote::federation::session::DialAndMountOutcome>,
+        > + Send
+        + 'static,
+{
+    tokio::spawn(async move {
+        let result = dial(target.clone(), session_name).await;
+        let event = match result {
+            Ok(outcome) => crate::events::AppEvent::FederationMountReady(Box::new(
+                crate::events::FederationMountReady {
+                    target,
+                    mirror: outcome.mirror,
+                    generation: outcome.generation,
+                    tunnel_guard: outcome.tunnel_guard,
+                    tunnel_reader: outcome.tunnel_reader,
+                    tunnel_writer: outcome.tunnel_writer,
+                },
+            )),
+            Err(err) => crate::events::AppEvent::FederationMountFailed {
+                target,
+                reason: err.to_string(),
+            },
+        };
+        let _ = event_tx.send(event).await;
+    })
+}
+
+/// Delivers a mount-failure notice through the configured out-of-app
+/// channel. `Terminal` and `System` deliveries notify only when local
+/// terminal notifications are enabled; `Herdr` and `Off` never reach a
+/// notifier here (the in-app toast is set by the caller). The notifiers are
+/// parameters so tests can record calls; production passes the real
+/// terminal and desktop notifiers.
+fn deliver_mount_failure_notification(
+    delivery: crate::config::ToastDelivery,
+    local_terminal_notifications: bool,
+    title: &str,
+    body: &str,
+    terminal_notify: impl FnOnce(&str, Option<&str>) -> std::io::Result<bool>,
+    system_notify: impl FnOnce(&str, Option<&str>) -> std::io::Result<bool>,
+) {
+    if !local_terminal_notifications {
+        return;
+    }
+    let _ = match delivery {
+        crate::config::ToastDelivery::Terminal => terminal_notify(title, Some(body)),
+        crate::config::ToastDelivery::System => system_notify(title, Some(body)),
+        crate::config::ToastDelivery::Herdr | crate::config::ToastDelivery::Off => return,
+    };
+}
+
 impl App {
     /// REVISED Phase A (multi-remote federated workspace launch): mounts a
     /// federation target as server-daemon-owned state, spawned inside this
@@ -130,33 +195,12 @@ impl App {
                 continue;
             }
 
-            let event_tx = self.event_tx.clone();
-            let task_target = target.clone();
-            let task_session_name = session_name.clone();
-            tokio::spawn(async move {
-                let result = crate::remote::prepare_and_mount_federation_target(
-                    task_target.clone(),
-                    task_session_name,
-                )
-                .await;
-                let event = match result {
-                    Ok(outcome) => crate::events::AppEvent::FederationMountReady(Box::new(
-                        crate::events::FederationMountReady {
-                            target: task_target,
-                            mirror: outcome.mirror,
-                            generation: outcome.generation,
-                            tunnel_guard: outcome.tunnel_guard,
-                            tunnel_reader: outcome.tunnel_reader,
-                            tunnel_writer: outcome.tunnel_writer,
-                        },
-                    )),
-                    Err(err) => crate::events::AppEvent::FederationMountFailed {
-                        target: task_target,
-                        reason: err.to_string(),
-                    },
-                };
-                let _ = event_tx.send(event).await;
-            });
+            spawn_federation_mount_dial(
+                self.event_tx.clone(),
+                target.clone(),
+                session_name.clone(),
+                crate::remote::prepare_and_mount_federation_target,
+            );
         }
 
         encode_success(
@@ -417,23 +461,15 @@ impl App {
                     target: None,
                 });
             }
-            crate::config::ToastDelivery::Terminal | crate::config::ToastDelivery::System
-                if self.local_terminal_notifications =>
-            {
-                let notify = match self.state.toast_config.delivery {
-                    crate::config::ToastDelivery::Terminal => {
-                        crate::terminal_notify::show_notification
-                    }
-                    crate::config::ToastDelivery::System => {
-                        crate::platform::show_desktop_notification
-                    }
-                    _ => unreachable!("toast delivery was matched above"),
-                };
-                let _ = notify(
-                    &format!("federated mount to {target} failed"),
-                    Some(&reason),
-                );
-            }
+            delivery @ (crate::config::ToastDelivery::Terminal
+            | crate::config::ToastDelivery::System) => deliver_mount_failure_notification(
+                delivery,
+                self.local_terminal_notifications,
+                &format!("federated mount to {target} failed"),
+                &reason,
+                crate::terminal_notify::show_notification,
+                crate::platform::show_desktop_notification,
+            ),
             _ => {}
         }
         self.render_dirty.request_generic();
@@ -2740,40 +2776,97 @@ mod tests {
             .contains("remote-host"));
     }
 
-    // Terminal/System delivery must never populate `state.toast` (that
-    // field drives the Herdr in-app toast only) — it goes out through
-    // `terminal_notify`/`platform::show_desktop_notification` instead, same
-    // as every other Terminal/System notification.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn mount_failure_terminal_delivery_calls_local_notify_when_enabled() {
-        let event_hub = crate::api::EventHub::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &Config::default(),
-            crate::app::AppPolicy::TEST,
-            None,
-            api_rx,
-            event_hub.clone(),
-        );
-        app.state.workspaces = vec![Workspace::test_new("local")];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
-        assert!(app.local_terminal_notifications);
+    /// Records every notifier call as `(channel, title, body)`.
+    type NotifyCalls = std::cell::RefCell<Vec<(&'static str, String, Option<String>)>>;
 
-        app.handle_federation_mount_failed(
-            "remote-host".to_string(),
-            "federation dial failed: connection refused".to_string(),
-        );
-
-        assert_eq!(app.state.workspaces.len(), 1);
-        assert!(app.state.toast.is_none());
+    fn recording_notifier<'a>(
+        channel: &'static str,
+        calls: &'a NotifyCalls,
+    ) -> impl FnOnce(&str, Option<&str>) -> std::io::Result<bool> + 'a {
+        move |title, body| {
+            calls
+                .borrow_mut()
+                .push((channel, title.to_string(), body.map(str::to_string)));
+            Ok(true)
+        }
     }
 
+    // Terminal delivery goes out through the terminal notifier -- never the
+    // desktop one -- carrying the failed target and the failure reason.
+    #[test]
+    fn deliver_mount_failure_notification_terminal_calls_local_notify_when_enabled() {
+        let calls = NotifyCalls::default();
+
+        deliver_mount_failure_notification(
+            crate::config::ToastDelivery::Terminal,
+            true,
+            "federated mount to remote-host failed",
+            "federation dial failed: connection refused",
+            recording_notifier("terminal", &calls),
+            recording_notifier("system", &calls),
+        );
+
+        assert_eq!(
+            *calls.borrow(),
+            vec![(
+                "terminal",
+                "federated mount to remote-host failed".to_string(),
+                Some("federation dial failed: connection refused".to_string()),
+            )]
+        );
+    }
+
+    // System delivery goes out through the desktop notifier only.
+    #[test]
+    fn deliver_mount_failure_notification_system_calls_desktop_notify_when_enabled() {
+        let calls = NotifyCalls::default();
+
+        deliver_mount_failure_notification(
+            crate::config::ToastDelivery::System,
+            true,
+            "federated mount to remote-host failed",
+            "federation dial failed: connection refused",
+            recording_notifier("terminal", &calls),
+            recording_notifier("system", &calls),
+        );
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "system");
+    }
+
+    // With local terminal notifications off, neither out-of-app channel
+    // fires for either delivery mode.
+    #[test]
+    fn deliver_mount_failure_notification_system_is_noop_when_disabled() {
+        for delivery in [
+            crate::config::ToastDelivery::System,
+            crate::config::ToastDelivery::Terminal,
+        ] {
+            let calls = NotifyCalls::default();
+
+            deliver_mount_failure_notification(
+                delivery,
+                false,
+                "federated mount to remote-host failed",
+                "federation dial failed: connection refused",
+                recording_notifier("terminal", &calls),
+                recording_notifier("system", &calls),
+            );
+
+            assert!(
+                calls.borrow().is_empty(),
+                "{delivery:?} delivery must not notify when local notifications are disabled"
+            );
+        }
+    }
+
+    // Terminal/System delivery never populates `state.toast` (that field
+    // drives the in-app Herdr toast only), and a failed mount leaves the
+    // local workspaces alone.
     #[cfg(unix)]
     #[tokio::test]
-    async fn mount_failure_system_delivery_is_noop_when_local_notifications_disabled() {
+    async fn mount_failure_with_system_delivery_leaves_in_app_toast_unset() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -2798,19 +2891,6 @@ mod tests {
         assert!(app.state.toast.is_none());
     }
 
-    // Phase-a TDD test 6: a mount task that produced an `Err` (the async
-    // catch-unwind-free failure path `handle_workspace_mount_remote`
-    // already routes through `AppEvent::FederationMountFailed`) never
-    // reaches `handle_federation_mount_ready`/panics the process — asserted
-    // at the type level: the spawned task's `match result` in
-    // `handle_workspace_mount_remote` is exhaustive over `Result`, so a
-    // `dial_and_mount` panic inside the spawned `tokio::task` is caught by
-    // Tokio's own task boundary (a panicking task fails its `JoinHandle`,
-    // it does not unwind into `App::run`) — the same isolation
-    // `run_federated_session`'s drive-task `select!` arm already relies on
-    // (session.rs's `Err(join_err) => ... "drive task aborted/panicked"`).
-    // No separate `catch_unwind` wrapper is needed for a `tokio::spawn`ed
-    // future; this test documents the isolation this relies on.
     // Phase B test 6/8: a duplicate `HostKey` target in the same
     // `workspace.mount_remote` request is rejected immediately (no SSH dial
     // spawned) with a per-host `FederationMountFailed` naming the host,
@@ -3039,18 +3119,46 @@ mod tests {
         assert_eq!(app.state.remote_mirrors.len(), 1);
     }
 
-    #[test]
-    fn coexistence_mount_panic_isolated_by_tokio_task_boundary() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let outcome: Result<(), _> = rt.block_on(async {
-            tokio::spawn(async { panic!("simulated dial+mount panic") })
-                .await
-                .map(|_: ()| ())
-        });
-        assert!(
-            outcome.is_err(),
-            "a panicking tokio::spawn task must fail its JoinHandle, not unwind the caller"
+    // A dial that panics -- whether while being called or while being
+    // polled -- fails only its own task: `spawn_federation_mount_dial`
+    // returns to the caller normally and the panic surfaces on the task's
+    // `JoinHandle`.
+    #[tokio::test]
+    async fn coexistence_mount_panic_isolated_by_tokio_task_boundary() {
+        use crate::remote::federation::session::DialAndMountOutcome;
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+
+        let poll_time_panic = spawn_federation_mount_dial(
+            event_tx.clone(),
+            "remote-host".to_string(),
+            "session".to_string(),
+            |_target: String, _session: String| async {
+                if true {
+                    panic!("simulated panic while the dial runs");
+                }
+                Err::<DialAndMountOutcome, _>(std::io::Error::other("unreachable"))
+            },
         );
+        let join_err = poll_time_panic
+            .await
+            .expect_err("a panicking dial must fail its task");
+        assert!(join_err.is_panic());
+
+        let call_time_panic = spawn_federation_mount_dial(
+            event_tx,
+            "remote-host".to_string(),
+            "session".to_string(),
+            |_target: String,
+             _session: String|
+             -> std::future::Ready<std::io::Result<DialAndMountOutcome>> {
+                panic!("simulated panic while the dial is started")
+            },
+        );
+        let join_err = call_time_panic
+            .await
+            .expect_err("a dial that panics when called must fail its task");
+        assert!(join_err.is_panic());
     }
 
     // A mount's own drive task, not just an external caller, sends

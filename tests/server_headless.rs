@@ -477,7 +477,7 @@ fn client_handshake_rejects_incompatible_version() {
 }
 
 #[test]
-fn client_handshake_clamps_small_terminal_size() {
+fn client_handshake_accepts_zero_terminal_size() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -489,17 +489,21 @@ fn client_handshake_clamps_small_terminal_size() {
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
-    // Send Hello with 0x0 terminal size — should be clamped.
+    // A degenerate 0x0 size is not a reason to refuse the client; the server
+    // normalizes it (see the handshake unit test for the resulting size).
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
 
     let (version, error) = client_handshake(&mut stream, CURRENT_PROTOCOL, 0, 0)
-        .expect("handshake with 0x0 should succeed (server clamps)");
+        .expect("handshake with 0x0 should succeed");
 
     assert_eq!(version, CURRENT_PROTOCOL);
+    assert!(error.is_none(), "0x0 size should be accepted: {:?}", error);
+
+    // The connected client must not have broken the server.
+    let response = ping_socket(&api_socket);
     assert!(
-        error.is_none(),
-        "0x0 size should be accepted (clamped): {:?}",
-        error
+        response.contains("pong"),
+        "server should keep serving after a 0x0 client attaches: {response}"
     );
 
     cleanup_spawned_herdr(spawned, base);
