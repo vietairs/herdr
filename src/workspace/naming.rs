@@ -171,8 +171,9 @@ pub struct ResolvedName<'a> {
 /// supplies the scope's own literal fallback (`"workspace"`, `"popup"`,
 /// etc.), which this module does not know.
 pub fn resolve_name<'a>(scope: NameScope, sources: NameSources<'a>) -> Option<ResolvedName<'a>> {
-    // R1/R2: `inherited_override` and `derived` are legal inputs only at
-    // certain scopes (Pane-only, and Workspace/Tab-only respectively). A
+    // R1/R2: `inherited_override`, `derived` and `ordinal` are legal inputs
+    // only at certain scopes (Pane-only, Workspace/Tab-only, and
+    // Workspace/Tab-only respectively). A
     // real caller never populates an illegal-scope field — every caller
     // of this module only ever constructs the fields legal for its own
     // scope — but this ladder still treats an illegal-scope
@@ -213,11 +214,13 @@ pub fn resolve_name<'a>(scope: NameScope, sources: NameSources<'a>) -> Option<Re
             });
         }
     }
-    if let Some(number) = sources.ordinal {
-        return Some(ResolvedName {
-            text: Cow::Owned(number.to_string()),
-            source: NameSource::Ordinal,
-        });
+    if scope != NameScope::Pane {
+        if let Some(number) = sources.ordinal {
+            return Some(ResolvedName {
+                text: Cow::Owned(number.to_string()),
+                source: NameSource::Ordinal,
+            });
+        }
     }
     None
 }
@@ -354,18 +357,17 @@ mod tests {
 
     #[test]
     fn pane_scope_rejects_an_ordinal_input() {
-        // R2 has no explicit ordinal-legality assert (a pane's fallback is
-        // a caller-supplied literal, not an ordinal), but nothing in the
-        // ladder reads `ordinal` differently by scope — this pins that an
-        // ordinal supplied at pane scope still resolves (there is nothing
-        // to reject at the resolver level; the caller simply never
-        // populates it for a pane). Documents the actual contract rather
-        // than asserting a rejection that doesn't exist.
+        // A pane has no ordinal rung: its fallback is the caller's own
+        // literal. An ordinal supplied at pane scope is not consulted, so
+        // the ladder resolves to nothing.
         let sources = NameSources {
             ordinal: Some(5),
             ..Default::default()
         };
-        let resolved = resolve_name(NameScope::Pane, sources).unwrap();
+        assert!(resolve_name(NameScope::Pane, sources).is_none());
+
+        // The same input is legal where an ordinal exists.
+        let resolved = resolve_name(NameScope::Tab, sources).unwrap();
         assert_eq!(resolved.text, "5");
         assert_eq!(resolved.source, NameSource::Ordinal);
     }
